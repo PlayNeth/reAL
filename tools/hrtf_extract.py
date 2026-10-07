@@ -50,7 +50,7 @@ def read_wav(path):
     return x[:n].reshape(-1, ch)[:, :2], fs
 
 
-def find_events(x, fs, thr):
+def find_events(x, fs, thr):  # (unused now; kept for recordings without a schedule)
     env = np.abs(x).max(axis=1)
     quiet = int(0.15 * fs)
     ev, last = [], -quiet
@@ -66,19 +66,23 @@ def main():
     wav, sched, out = sys.argv[1:4]
     x, fs = read_wav(wav)
     labels = [l.split(" ", 2)[2].strip() for l in open(sched) if l.startswith("SLOT")]
-    peak = np.abs(x).max()
-    if peak <= 0:
-        raise SystemExit("recording is silent")
-    ev = []
-    for rel in (1e-2, 3e-3, 1e-3, 3e-4):
-        ev = find_events(x, fs, peak * rel)
-        if len(ev) >= len(labels):
-            break
-    print(f"{len(ev)} clicks found, {len(labels)} expected (fs {fs})")
-    if len(ev) < len(labels):
-        raise SystemExit("not enough clicks found - was the whole run recorded?")
-    # align on the 3 sync clicks: take the first run of 3 events spaced ~SLOT apart
-    ev = ev[:len(labels)]
+    times = [float(re.match(r"SLOT t=([\d.]+)", l).group(1)) for l in open(sched) if l.startswith("SLOT")]
+    env = np.abs(x).max(axis=1)
+    first = int(np.flatnonzero(env > env.max() * 0.3)[0])     # first sync click
+    off = first / fs - times[0] / 1000.0
+    ev, bad = [], []
+    for t in times:                                           # schedule alignment, refine on the peak
+        c = int((t / 1000.0 + off) * fs)
+        a0, a1 = c - int(0.03 * fs), c + int(0.03 * fs)
+        i = a0 + int(np.argmax(env[a0:a1]))
+        if env[i] > env.max() * 0.005:
+            off = i / fs - t / 1000.0                         # follow clock drift between timer and audio
+        ev.append(i)
+        pre_e = (x[i - int(0.02 * fs): i - int(0.002 * fs)] ** 2).sum()
+        head = (x[i - 96: i + int(0.005 * fs)] ** 2).sum()
+        bad.append(pre_e > head * 1e-3)                       # something else was playing
+    print(f"{len(ev)} clicks aligned from the schedule (fs {fs}); {sum(bad)} contaminated: "
+          + ", ".join(l for l, b in zip(labels, bad) if b))
     pre, post = int(PRE * fs), int(POST * fs)
     irs, meta = [], []
     for i, lab in zip(ev, labels):
@@ -92,12 +96,12 @@ def main():
     meta = np.array(meta)
     ref = irs[0]                     # 2D sync click = calibration
     refgain = np.sqrt((ref ** 2).sum() / 2)
-    np.savez(out, irs=irs, meta=meta, fs=fs, labels=np.array(labels), refgain=refgain)
+    np.savez(out, irs=irs, meta=meta, fs=fs, labels=np.array(labels), refgain=refgain, bad=np.array(bad))
     print(f"saved {out}: {irs.shape}  (2D reference rms-energy {refgain:.4f})")
 
     print("\n az   ITD(us)  ILD(dB)  level(dB re 2D)   [elevation 0, distance 1]")
     for k, (az, el, d) in enumerate(meta):
-        if el != 0 or d != 1:
+        if el != 0 or d != 1 or bad[k]:
             continue
         l, r = irs[k]
         cc = np.correlate(l, r, "full")

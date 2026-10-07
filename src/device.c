@@ -158,6 +158,52 @@ static void write_out(const rl_device *dev, const wasapi_out *w, BYTE *dst, UINT
     }
 }
 
+/* ---------------------------------------------------------------- HRTF data */
+
+static BOOL read_file(const char *path, BYTE **data, DWORD *size)
+{
+    HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD sz = GetFileSize(h, NULL), got = 0;
+    BYTE *p = (sz && sz < 64 * 1024 * 1024) ? HeapAlloc(GetProcessHeap(), 0, sz) : NULL;
+    BOOL ok = p && ReadFile(h, p, sz, &got, NULL) && got == sz;
+    CloseHandle(h);
+    if (!ok) { HeapFree(GetProcessHeap(), 0, p); return FALSE; }
+    *data = p; *size = sz;
+    return TRUE;
+}
+
+static void load_hrtf(rl_device *dev, UINT32 rate)
+{
+    char cand[3][MAX_PATH + 32];
+    int n = 0;
+    if (g_cfg.hrtf_path[0]) lstrcpynA(cand[n++], g_cfg.hrtf_path, MAX_PATH);
+    else {
+        GetModuleFileNameA(g_self, cand[n], MAX_PATH);
+        char *s = strrchr(cand[n], '\\'); if (s) s[1] = 0; else cand[n][0] = 0;
+        lstrcatA(cand[n++], "reAL_hrtf.bin");
+        if (GetWindowsDirectoryA(cand[n], MAX_PATH)) { lstrcatA(cand[n++], "\\reAL_hrtf.bin"); }
+    }
+    for (int i = 0; i < n; i++) {
+        BYTE *data; DWORD size;
+        if (!read_file(cand[i], &data, &size)) continue;
+        rl_hrtf_set set;
+        int ok = rl_hrtf_load(&set, data, size, rate);
+        HeapFree(GetProcessHeap(), 0, data);
+        if (!ok) { LOG_INFO("HRTF: %s is not a valid reAL_hrtf.bin", cand[i]); continue; }
+        EnterCriticalSection(&dev->lock);
+        rl_hrtf_free(&dev->hrtf);
+        dev->hrtf = set;
+        for (rl_buffer *b = dev->all; b; b = b->next_all)
+            if (!b->is_primary) rl_buffer_update_gains(b);
+        LeaveCriticalSection(&dev->lock);
+        LOG_INFO("HRTF: %s (%lu directions, %lu taps, %lu Hz)", cand[i], (unsigned long)set.n_dirs,
+                 (unsigned long)set.taps, (unsigned long)set.rate);
+        return;
+    }
+    LOG_INFO("HRTF: no reAL_hrtf.bin found, using stereo panning for 3D sounds");
+}
+
 /* ---------------------------------------------------------------- WASAPI */
 
 static void wasapi_close(wasapi_out *w)
@@ -219,6 +265,8 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
         dev->reverb_dirty = TRUE;
         LeaveCriticalSection(&dev->lock);
     }
+    if (g_cfg.hrtf_mode && (dev->hrtf.rate != mixfmt->nSamplesPerSec || !dev->hrtf.dirs))
+        load_hrtf(dev, mixfmt->nSamplesPerSec);
     dev->out_rate = mixfmt->nSamplesPerSec;
     dev->out_channels = w->channels;
     dev->period_frames = period ? (UINT32)(period * dev->out_rate / 10000000) : dev->out_rate / 100;
@@ -375,5 +423,6 @@ void rl_device_release(rl_device *dev)
     HeapFree(GetProcessHeap(), 0, dev->mixbuf);
     HeapFree(GetProcessHeap(), 0, dev->sendbuf);
     rl_reverb_free(&dev->reverb);
+    rl_hrtf_free(&dev->hrtf);
     HeapFree(GetProcessHeap(), 0, dev);
 }

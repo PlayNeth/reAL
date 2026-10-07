@@ -86,3 +86,22 @@ void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2],
     if (gains[0] > gain) gains[0] = gain; /* keep centre at unity, sides <= unity */
     if (gains[1] > gain) gains[1] = gain;
 }
+
+void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *az, float *el)
+{
+    rl_vec3 rel;
+    if (s->mode == RL_DS3DMODE_HEADRELATIVE) {
+        rel = s->pos;
+    } else {
+        rl_vec3 front = norm(l->front, v3(0, 0, 1));
+        rl_vec3 top   = norm(l->top, v3(0, 1, 0));
+        rl_vec3 right = norm(cross(top, front), v3(1, 0, 0));
+        rl_vec3 d = sub(s->pos, l->pos);
+        rel = v3(dot(d, right), dot(d, top), dot(d, front));
+    }
+    float h = sqrtf(rel.x * rel.x + rel.z * rel.z);
+    if (h < 1e-6f && fabsf(rel.y) < 1e-6f) { *az = 0.0f; *el = 0.0f; return; }
+    *az = atan2f(rel.x, rel.z) * (180.0f / 3.14159265f);
+    if (*az < 0.0f) *az += 360.0f;
+    *el = atan2f(rel.y, h) * (180.0f / 3.14159265f);
+}

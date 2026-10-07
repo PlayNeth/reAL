@@ -19,13 +19,14 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | Volume, pan, frequency (linear resampler) | ✅ |
 | Position notifications incl. DSBPN_OFFSETSTOP | ✅ |
 | DuplicateSoundBuffer (shared data) | ✅ |
-| DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ placeholder equal-power panning |
+| DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ |
+| HRTF 3D (headphones) | ✅ from `reAL_hrtf.bin` (measured with hrtfprobe); stereo panning if absent |
 | Reports hardware-accelerated 3D voices (LOCHARDWARE), like ALchemy | ✅ |
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
 | EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's exact parameter conversion; own reverb DSP (reflections + FDN) |
 | Volume/pan/send smoothing, declicked position jumps | ✅ |
 | EAX 2–5 | ⏳ reported unsupported |
-| Doppler, HRTF, CMSS, EAX reverb + effects | ⏳ |
+| Doppler, CMSS, EAX 2+ reverb + effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 
 Tested under Wine 9.0 (32-bit prefix → winepulse → PulseAudio). `tests/dstest.c` passes and the
@@ -100,3 +101,18 @@ game dir/
 ```
 Run with `WINEDLLOVERRIDES=dsound=n,b`. Output: `dstrace.log` next to the game exe.
 `level=2` adds per-frame calls (Lock/Unlock/GetCurrentPosition/GetStatus/AddRef/Release).
+
+## HRTF data
+
+reAL renders 3D sounds through per-direction filters loaded from `reAL_hrtf.bin`
+(next to dsound.dll, or in the Windows directory; `hrtf=<path>` or `hrtf=off` in reAL.ini).
+The file is **not** in this repo: build it from a measurement of the implementation you want to
+match, e.g. your own ALchemy install:
+
+```
+hrtfprobe.exe                       # Windows: plays + records itself -> hrtfprobe.wav/.txt
+python3 tools/hrtf_extract.py hrtfprobe.wav hrtfprobe.txt measured.npz
+python3 tools/hrtf_build.py measured.npz reAL_hrtf.bin
+```
+Measured against ALchemy: median rms difference 1.1 % (−39 dB) over 133 directions, ear levels
+within 0.1 dB.

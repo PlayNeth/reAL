@@ -146,3 +146,15 @@ Then:
 * room HF (mB) = `round(k2[env] · (1/t − 1))`, clamped −10000..0 (k2 = `.rdata 0x100a7e88`)
 For generic and concert hall the default EAX1 damping reproduces the EAX3 preset exactly
 (0.829/−101 vs 0.83/−100; 0.697/−507 vs 0.70/−500).
+
+## HRTF (measured with hrtfprobe on Windows, speaker config DSSPEAKER_HEADPHONE)
+
+* Exactly left/right mirror-symmetric; compact responses (99.9 % energy within ≤ 80 samples of
+  onset at 48 kHz); interaural onset difference up to 11 samples (0.23 ms).
+* Level at 0 dB elevation: front −3.7 dB/ear, back −11.7 dB/ear; front/back difference mostly
+  above 2 kHz (+7.5 dB @ 4 kHz, +15–17 dB @ 12–16 kHz).
+* Distance: pure inverse distance (−6.0 dB per doubling from min distance), no extra filtering.
+* Each 3D response leaves a tiny constant DC offset (≈ −60 dB).
+* SetPosition on a stopped buffer is sometimes not applied before Play (8 of 146 positions came
+  out identical to the previous one even with a 100 ms lead-in).
+* With the EAX listener volume at 0 there is no reverb tail at all.

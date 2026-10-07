@@ -102,7 +102,7 @@ void rl_voice_start(rl_voice *v)
     v->playing = 1;
 }
 
-int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
+static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
 {
     uint32_t nframes = rl_voice_frames(v);
     if (!v->playing || !nframes || !out_rate) return 0;
@@ -145,8 +145,12 @@ int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t
             v->xfade_left--;
         }
 
-        out[i * 2]     += l * gl;
-        out[i * 2 + 1] += r * gr;
+        if (mono) {
+            mono[i] = 0.5f * (l + r) * gl;
+        } else {
+            out[i * 2]     += l * gl;
+            out[i * 2 + 1] += r * gr;
+        }
         if (send) send[i] += 0.5f * (l + r) * gs;
 
         v->pos += step;
@@ -170,6 +174,25 @@ int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t
         rl_fire_stop(v, signal);
     } else {
         rl_fire_notifies(v, p0, rl_voice_play_bytes(v), wraps, signal);
+    }
+    return stopped;
+}
+
+int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
+{
+    if (!v->hrtf || !v->hrtf_set || !v->hrtf_set->dirs)
+        return mix_inner(v, out, NULL, send, frames, out_rate, signal);
+
+    /* HRTF path: render the voice to mono in chunks, then convolve into the stereo output */
+    float mono[512];
+    int stopped = 0;
+    for (uint32_t done = 0; done < frames; ) {
+        uint32_t n = frames - done > 512 ? 512 : frames - done;
+        memset(mono, 0, n * sizeof(float));
+        if (!stopped && v->playing)
+            stopped = mix_inner(v, NULL, mono, send ? send + done : NULL, n, out_rate, signal);
+        rl_hrtf_render(v->hrtf, v->hrtf_set, mono, out + done * 2, n);
+        done += n;
     }
     return stopped;
 }

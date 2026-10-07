@@ -29,10 +29,24 @@ void rl_buffer_update_gains(rl_buffer *b)
     float base = rl_db100_to_gain(b->volume);
     float g[2], dist = 1.0f;
     BOOL is3d = (b->desc.dwFlags & DSBCAPS_CTRL3D) != 0;
+    BOOL use_hrtf = is3d && b->hrtf && b->dev->hrtf.dirs && b->src3d.mode != RL_DS3DMODE_DISABLE;
     if (is3d && b->src3d.mode != RL_DS3DMODE_DISABLE)
         rl_spatialize(&b->dev->listener, &b->src3d, g, &dist);
     else
         rl_pan_gains(b->pan, g);
+    if (use_hrtf) {
+        /* HRTF carries the direction; only distance/cone attenuation and volume are gains */
+        float az, el;
+        rl_hrtf_filter f;
+        rl_spatial_direction(&b->dev->listener, &b->src3d, &az, &el);
+        rl_hrtf_lookup(&b->dev->hrtf, az, el, &f);
+        rl_hrtf_voice_set(b->hrtf, &f);
+        g[0] = g[1] = dist;
+        b->voice.hrtf = b->hrtf;
+        b->voice.hrtf_set = &b->dev->hrtf;
+    } else {
+        b->voice.hrtf = NULL;
+    }
     b->voice.gain[0] = g[0] * base;
     b->voice.gain[1] = g[1] * base;
 
@@ -154,6 +168,7 @@ static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
         HeapFree(GetProcessHeap(), 0, This->shared);
     }
     HeapFree(GetProcessHeap(), 0, This->notifies);
+    HeapFree(GetProcessHeap(), 0, This->hrtf);
     HeapFree(GetProcessHeap(), 0, This);
     rl_device_release(dev);
     return 0;
@@ -1083,6 +1098,9 @@ HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out)
     b->voice.rate = b->fmt.Format.nSamplesPerSec;
     b->src3d.mute_at_max = b->src3d_pending.mute_at_max = (desc->dwFlags & DSBCAPS_MUTE3DATMAXDISTANCE) != 0;
 
+    if (desc->dwFlags & DSBCAPS_CTRL3D)
+        b->hrtf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(rl_hrtf_voice));
+
     rl_device_addref(dev);
     EnterCriticalSection(&dev->lock);
     list_add_all(dev, b);
@@ -1121,6 +1139,10 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_buffer *src, rl_buffer **out)
     b->src3d = src->src3d;
     b->src3d_pending = src->src3d_pending;
     b->eax1_mix = src->eax1_mix;
+    b->voice.hrtf = NULL;
+    if (b->desc.dwFlags & DSBCAPS_CTRL3D)
+        b->hrtf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(rl_hrtf_voice));
+    rl_buffer_update_gains(b);
     list_add_all(dev, b);
     dev->n_buffers++;
     if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;

@@ -31,5 +31,7 @@ void rl_source_defaults(rl_source3d *s);
 /* Compute stereo gains (multiplied with volume elsewhere). */
 /* dist_gain (may be NULL) receives the distance+cone attenuation without panning */
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain);
+/* direction of the source as heard by the listener: azimuth clockwise from front, elevation up (deg) */
+void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *az, float *el);
 
 #endif

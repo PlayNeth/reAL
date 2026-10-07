@@ -4,6 +4,7 @@
 #define REAL_MIXCORE_H
 
 #include <stdint.h>
+#include "hrtf.h"
 
 #define RL_NOTIFY_STOP 0xFFFFFFFFu
 #define RL_XFADE_PENDING 0xFFFFFFFFu
@@ -37,6 +38,10 @@ typedef struct rl_voice {
     float    cur_send;
     uint64_t xfade_pos;     /* old position being faded out after a jump */
     uint32_t xfade_left;    /* samples of crossfade left, or RL_XFADE_PENDING */
+
+    /* HRTF (3D voices on headphones): gain[0] is the mono gain, filter chosen per direction */
+    rl_hrtf_voice     *hrtf;
+    const rl_hrtf_set *hrtf_set;
 
     /* notifications (sorted not required) */
     const rl_notify *notifies;

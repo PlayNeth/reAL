@@ -12,6 +12,7 @@
 #include "mixcore.h"
 #include "spatial.h"
 #include "reverb.h"
+#include "hrtf.h"
 
 #define REAL_VERSION "0.1.0"
 
@@ -30,6 +31,8 @@ typedef struct rl_config {
     int  log_eax;
     char log_file[MAX_PATH];
     char real_dsound[MAX_PATH];
+    int  hrtf_mode;             /* 0 off, 1 auto (use reAL_hrtf.bin if found) */
+    char hrtf_path[MAX_PATH];   /* explicit file, overrides the search */
 } rl_config;
 
 extern rl_config g_cfg;
@@ -83,6 +86,9 @@ typedef struct rl_device {
     BOOL        reverb_dirty;
     rl_reverb   reverb;
     float      *sendbuf;
+
+    /* HRTF (loaded from reAL_hrtf.bin once the output rate is known) */
+    rl_hrtf_set hrtf;
 } rl_device;
 
 HRESULT     rl_device_acquire(rl_device **out);
@@ -136,6 +142,8 @@ struct rl_buffer {
     /* 3D: committed + deferred copies */
     rl_source3d   src3d, src3d_pending;
     BOOL          src3d_dirty;
+
+    rl_hrtf_voice *hrtf;        /* 3D buffers only */
 
     /* EAX 1.0 per-buffer */
     float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */

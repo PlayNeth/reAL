@@ -21,6 +21,7 @@ static void defaults(void)
     g_cfg.duration = 25;
     g_cfg.max_voices = 128;
     g_cfg.enabled = 1;
+    g_cfg.hrtf_mode = 1;
 }
 
 static char *trim(char *s)
@@ -63,6 +64,11 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "logeax"))     g_cfg.log_eax = is_true(val);
     else if (!_stricmp(key, "logfile"))    lstrcpynA(g_cfg.log_file, val, MAX_PATH);
     else if (!_stricmp(key, "realdsound")) lstrcpynA(g_cfg.real_dsound, val, MAX_PATH);
+    else if (!_stricmp(key, "hrtf")) {
+        if (!_stricmp(val, "off") || !_stricmp(val, "false") || !_stricmp(val, "0")) g_cfg.hrtf_mode = 0;
+        else if (!_stricmp(val, "auto") || !_stricmp(val, "on") || !_stricmp(val, "true") || !_stricmp(val, "1")) g_cfg.hrtf_mode = 1;
+        else { g_cfg.hrtf_mode = 1; lstrcpynA(g_cfg.hrtf_path, val, MAX_PATH); }
+    }
 }
 
 /* exe_section: section name that also applies ("" = only global keys).
@@ -148,6 +154,7 @@ void rl_config_load(void)
     rl_log_init();
     LOG_INFO("reAL " REAL_VERSION " loaded into %s", exe);
     for (int i = 0; i < n; i++) LOG_INFO("  config: %s", s_loaded[i]);
-    LOG_INFO("  enabled=%d latency=%dms maxvoicecount=%d disabledirectmusic=%d log=%d",
-             g_cfg.enabled, g_cfg.latency_ms, g_cfg.max_voices, g_cfg.disable_dmusic, g_cfg.log_level);
+    LOG_INFO("  enabled=%d latency=%dms maxvoicecount=%d disabledirectmusic=%d hrtf=%s log=%d",
+             g_cfg.enabled, g_cfg.latency_ms, g_cfg.max_voices, g_cfg.disable_dmusic,
+             !g_cfg.hrtf_mode ? "off" : g_cfg.hrtf_path[0] ? g_cfg.hrtf_path : "auto", g_cfg.log_level);
 }
