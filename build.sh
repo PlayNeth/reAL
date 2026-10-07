@@ -38,6 +38,8 @@ echo "built build/tracer/dsound.dll"
 # runtime smoke test (run it with: cd build && WINEDLLOVERRIDES=dsound=n wine dstest.exe)
 $CC -O1 -o build/dstest.exe tests/dstest.c -lole32 -luuid
 rm -f build/dstest.lib build/dstest.pdb
+$CC -O1 -o build/hrtfprobe.exe tests/hrtfprobe.c -lole32 -luuid
+rm -f build/hrtfprobe.lib build/hrtfprobe.pdb
 
 # native unit tests for the platform independent core
 if command -v cc >/dev/null 2>&1; then
