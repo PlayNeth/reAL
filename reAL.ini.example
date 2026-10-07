@@ -1,0 +1,35 @@
+; reAL configuration
+; Global location: C:\windows\reAL.ini  (in a Wine prefix: drive_c/windows/reAL.ini)
+; Also read, in order (later wins): <dsound.dll dir>\dsound.ini (ALchemy format), <game dir>\reAL.ini,
+; and the file named by the REAL_INI environment variable. REAL_LOG=0..3 overrides "log".
+;
+; Keys outside a section and in [default] apply to every game; a [game.exe] section overrides
+; them for that executable only (case-insensitive).
+
+[default]
+; WASAPI buffer length in ms. 0/unset = buffers*duration/2 (50 ms with ALchemy's defaults).
+latency=0
+; ALchemy-compatible keys (same meaning and limits as ALchemy's dsound.ini)
+buffers=4
+duration=25
+maxvoicecount=128
+disabledirectmusic=false
+
+; logging: 0 off, 1 info, 2 API calls, 3 everything (per Lock/Play - very verbose)
+log=0
+log3d=false
+logeax=false
+; default log file: reAL.log next to the game's exe
+;logfile=C:\reAL.log
+
+; enabled=false hands everything to the original dsound.dll named by realdsound=
+; (only useful when reAL is installed per-game, not as the system dsound.dll)
+;enabled=true
+;realdsound=C:\windows\system32\dsound_orig.dll
+
+; per-game examples
+[EverQuest2.exe]
+duration=15
+
+[SplinterCell.exe]
+buffers=6
