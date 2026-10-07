@@ -28,8 +28,9 @@ typedef struct rl_voice {
     int      playing;
     int      looping;
 
-    /* final per-output-channel gains (stereo out) */
+    /* final per-output-channel gains (stereo out) and mono reverb send gain */
     float    gain[2];
+    float    send_gain;
 
     /* notifications (sorted not required) */
     const rl_notify *notifies;
@@ -44,7 +45,8 @@ static inline uint32_t rl_voice_play_bytes(const rl_voice *v) { return (uint32_t
 /* Accumulate `frames` stereo float frames into `out` (interleaved L,R) at out_rate.
  * Advances the voice, fires notifications through `signal`.
  * Returns 1 if the voice stopped (reached end of a non-looping buffer). */
-int rl_voice_mix(rl_voice *v, float *out, uint32_t frames, uint32_t out_rate, rl_signal_fn signal);
+/* `send` (mono, may be NULL) receives the voice scaled by send_gain for the reverb bus. */
+int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal);
 
 /* Fire notifications for a cursor movement from byte p0 to p1 having wrapped `wraps` times.
  * Exposed for tests. */

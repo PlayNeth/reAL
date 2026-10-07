@@ -31,8 +31,9 @@ void rl_source_defaults(rl_source3d *s)
     s->mode = RL_DS3DMODE_NORMAL; s->mute_at_max = 0;
 }
 
-void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2])
+void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain)
 {
+    if (dist_gain) *dist_gain = 1.0f;
     if (s->mode == RL_DS3DMODE_DISABLE) { gains[0] = gains[1] = 1.0f; return; }
 
     /* DirectSound is left-handed: +x right, +y up, +z forward. right = top x front. */
@@ -74,6 +75,8 @@ void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2])
         else if (angle > in && out > in) cg = 1.0f + (og - 1.0f) * (angle - in) / (out - in);
         gain *= cg;
     }
+
+    if (dist_gain) *dist_gain = gain;
 
     /* equal power pan from azimuth */
     float x = dist > 1e-6f ? rel.x / dist : 0.0f;

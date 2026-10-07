@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include "mixcore.h"
 #include "spatial.h"
+#include "reverb.h"
 
 #define REAL_VERSION "0.1.0"
 
@@ -73,6 +74,15 @@ typedef struct rl_device {
     WAVEFORMATEX primary_fmt;
     DWORD       speaker_config;
     LONG        n_buffers;        /* live secondary buffers */
+    LONG        n_hw_buffers;     /* live non-LOCSOFTWARE secondaries (ALchemy counts these in GetCaps) */
+
+    /* EAX */
+    BOOL        eax_used;         /* game touched an EAX listener property: reverb on */
+    DWORD       eax1_env;
+    float       eax1_volume, eax1_decay, eax1_damping;
+    BOOL        reverb_dirty;
+    rl_reverb   reverb;
+    float      *sendbuf;
 } rl_device;
 
 HRESULT     rl_device_acquire(rl_device **out);
@@ -126,12 +136,16 @@ struct rl_buffer {
     /* 3D: committed + deferred copies */
     rl_source3d   src3d, src3d_pending;
     BOOL          src3d_dirty;
+
+    /* EAX 1.0 per-buffer */
+    float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */
 };
 
 HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out);
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_buffer *src, rl_buffer **out);
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */
 void    rl_signal_event(void *ev);
+void    rl_device_eax1_changed(rl_device *dev);  /* lock held */
 
 /* GUIDs not always present in import libs */
 extern const GUID RL_DEVICE_GUID;

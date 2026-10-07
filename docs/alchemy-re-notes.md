@@ -113,3 +113,16 @@ you're comparing DSOAL against — Creative's own DSP, not OpenAL. `CreateSensDi
 3. `C3DStream` + `CHspHrtfFilterState` — distance model, cone, HRTF.
 4. `CHRvbReverb` / `CHRvbDspEngine` — the reverb you actually like. Biggest job.
 5. Remaining `CPlug*` effects.
+
+## Observed behaviour (dstrace of NFS: High Stakes on ALchemy, Wine)
+
+* `GetCaps`: flags 0xf5f, hw 3D/mixing voices `maxvoicecount + 1` (129); free count drops by one per
+  live non-LOCSOFTWARE secondary buffer (the LOCSOFTWARE music stream does not count); hw memory 0;
+  sample rate range 100–192000.
+* `IKsPropertySet::QuerySupport(DSPROPSETID_VoiceManager {62a69bae-…})` → `S_OK`, support 0.
+* `QuerySupport(EAX1 listener, 0)` → `S_OK`, support 3 (GET|SET). Asked on a 128-byte LOCHARDWARE|CTRL3D
+  probe buffer.
+* EAX 1.0 preset table (environment, volume, decay, damping) at `.rdata 0x100a7ef0`, 26 entries,
+  identical to the public eax.h values; second copy in `.data 0x100cf164`.
+* NFS4 only ever sets listener ENVIRONMENT + VOLUME (1.0 in race, 0.0 in menus; envs 0, 7, 15, 16, 19)
+  and per-buffer REVERBMIX (0–0.504). Positions are unit vectors; distance is done with SetVolume.

@@ -166,7 +166,35 @@ int main(int argc, char **argv)
 
     ULONG sup = 0;
     hr = IKsPropertySet_QuerySupport(ks, &IID_IDirectSound3DBuffer, 0, &sup);
-    CHECK(FAILED(hr), "IKsPropertySet reports unsupported (EAX not yet implemented)");
+    CHECK(FAILED(hr), "IKsPropertySet: unknown set unsupported");
+    static const GUID eax1_l = { 0x4a4e6fc1, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+    static const GUID eax1_b = { 0x4a4e6fc0, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+    static const GUID vm = { 0x62a69bae, 0xdf9d, 0x11d1, { 0x99, 0xa6, 0x00, 0xc0, 0x4f, 0xc9, 0x9d, 0x46 } };
+    hr = IKsPropertySet_QuerySupport(ks, &vm, 0, &sup);
+    CHECK(hr == DS_OK && sup == 0, "VoiceManager: S_OK support 0 (like ALchemy)");
+    hr = IKsPropertySet_QuerySupport(ks, &eax1_l, 0, &sup);
+    CHECK(hr == DS_OK && sup == 3, "EAX1 listener supported (get|set)");
+    DWORD env = 15;
+    CHECK(IKsPropertySet_Set(ks, &eax1_l, 1, NULL, 0, &env, 4) == DS_OK, "EAX1 set environment forest");
+    float vol = 1.0f;
+    CHECK(IKsPropertySet_Set(ks, &eax1_l, 2, NULL, 0, &vol, 4) == DS_OK, "EAX1 set volume");
+    struct { DWORD e; float v, d, dm; } all; ULONG glen = 0;
+    hr = IKsPropertySet_Get(ks, &eax1_l, 0, NULL, 0, &all, sizeof(all), &glen);
+    CHECK(hr == DS_OK && glen == 16 && all.e == 15 && all.v == 1.0f && all.d > 3.14f && all.d < 3.15f,
+          "EAX1 get all: env %lu vol %.3f decay %.3f damp %.3f", all.e, all.v, all.d, all.dm);
+    float mix = 0.39f;
+    CHECK(IKsPropertySet_Set(ks, &eax1_b, 1, NULL, 0, &mix, 4) == DS_OK, "EAX1 buffer reverb mix");
+    env = 99;
+    CHECK(IKsPropertySet_Set(ks, &eax1_l, 1, NULL, 0, &env, 4) == DSERR_INVALIDPARAM, "EAX1 bad environment rejected");
+
+    /* reverb audible: play the 3D buffer briefly, stop, and let the tail ring (checked by recording) */
+    IDirectSoundBuffer_SetCurrentPosition(buf, 0);
+    IDirectSoundBuffer_Play(buf, 0, 0, DSBPLAY_LOOPING);
+    Sleep(500);
+    IDirectSoundBuffer_Stop(buf);
+    printf("     [reverb tail window starts now]\n");
+    fflush(stdout);
+    Sleep(1500);
 
     IDirectSoundBuffer_Release(dup);
     IDirectSoundBuffer_Release(one);

@@ -16,7 +16,7 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c"
+SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c"
 CFLAGS="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -ffast-math -msse2 -mfpmath=sse"
 
 echo "CC = $CC"
@@ -41,6 +41,6 @@ rm -f build/dstest.lib build/dstest.pdb
 
 # native unit tests for the platform independent core
 if command -v cc >/dev/null 2>&1; then
-    cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/spatial.c -lm
+    cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/spatial.c src/reverb.c -lm
     ./build/test_mixcore
 fi

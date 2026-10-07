@@ -9,7 +9,7 @@ HRTF, CMSS-3D, an "HRvb" reverb and all 12 EAX 4/5 effects. That second engine i
 is chasing, so reAL is **its own mixer outputting to WASAPI**, not another OpenAL wrapper.
 See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 
-## Status — milestone 1
+## Status — milestone 2 (in progress)
 
 | | |
 |---|---|
@@ -22,7 +22,8 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ placeholder equal-power panning |
 | Reports hardware-accelerated 3D voices (LOCHARDWARE), like ALchemy | ✅ |
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
-| IKsPropertySet / EAX 1–5 | ⏳ logged, reported unsupported |
+| EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ answers like ALchemy; **placeholder FDN reverb** |
+| EAX 2–5 | ⏳ reported unsupported |
 | Doppler, HRTF, CMSS, EAX reverb + effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 

@@ -75,8 +75,9 @@ static HRESULT WINAPI ds_GetCaps(IDirectSound8 *iface, LPDSCAPS caps)
     rl_dsound *This = impl(iface);
     if (!This->dev) return DSERR_UNINITIALIZED;
     if (!caps || caps->dwSize < sizeof(*caps)) return DSERR_INVALIDPARAM;
-    LONG used = This->dev->n_buffers;
-    DWORD maxv = (DWORD)g_cfg.max_voices;
+    /* mirrors ALchemy: maxvoicecount + 1 voices, only non-LOCSOFTWARE secondaries use one up */
+    LONG used = This->dev->n_hw_buffers;
+    DWORD maxv = (DWORD)g_cfg.max_voices + 1;
     DWORD freev = used >= (LONG)maxv ? 0 : maxv - (DWORD)used;
 
     ZeroMemory(caps, sizeof(*caps));
@@ -87,14 +88,14 @@ static HRESULT WINAPI ds_GetCaps(IDirectSound8 *iface, LPDSCAPS caps)
                     DSCAPS_CONTINUOUSRATE | DSCAPS_CERTIFIED | DSCAPS_SECONDARYMONO | DSCAPS_SECONDARYSTEREO |
                     DSCAPS_SECONDARY8BIT | DSCAPS_SECONDARY16BIT;
     caps->dwMinSecondarySampleRate = DSBFREQUENCY_MIN;
-    caps->dwMaxSecondarySampleRate = DSBFREQUENCY_MAX;
+    caps->dwMaxSecondarySampleRate = 192000;
     caps->dwPrimaryBuffers = 1;
     caps->dwMaxHwMixingAllBuffers = caps->dwMaxHwMixingStaticBuffers = caps->dwMaxHwMixingStreamingBuffers = maxv;
     caps->dwFreeHwMixingAllBuffers = caps->dwFreeHwMixingStaticBuffers = caps->dwFreeHwMixingStreamingBuffers = freev;
     caps->dwMaxHw3DAllBuffers = caps->dwMaxHw3DStaticBuffers = caps->dwMaxHw3DStreamingBuffers = maxv;
     caps->dwFreeHw3DAllBuffers = caps->dwFreeHw3DStaticBuffers = caps->dwFreeHw3DStreamingBuffers = freev;
-    caps->dwTotalHwMemBytes = caps->dwFreeHwMemBytes = 64 * 1024 * 1024;
-    caps->dwMaxContigFreeHwMemBytes = 64 * 1024 * 1024;
+    caps->dwTotalHwMemBytes = caps->dwFreeHwMemBytes = 0;
+    caps->dwMaxContigFreeHwMemBytes = 0;
     caps->dwUnlockTransferRateHwBuffers = 4096;
     caps->dwPlayCpuOverheadSwBuffers = 0;
     return DS_OK;

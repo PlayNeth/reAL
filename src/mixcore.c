@@ -63,7 +63,7 @@ void rl_fire_stop(const rl_voice *v, rl_signal_fn signal)
         if (v->notifies[i].offset == RL_NOTIFY_STOP) signal(v->notifies[i].event);
 }
 
-int rl_voice_mix(rl_voice *v, float *out, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
+int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
 {
     uint32_t nframes = rl_voice_frames(v);
     if (!v->playing || !nframes || !out_rate) return 0;
@@ -75,6 +75,8 @@ int rl_voice_mix(rl_voice *v, float *out, uint32_t frames, uint32_t out_rate, rl
     int stopped = 0;
     const int stereo = v->channels >= 2;
     const float gl = v->gain[0], gr = v->gain[1];
+    const float gs = v->send_gain;
+    if (gs <= 0.0f) send = NULL;
 
     for (uint32_t i = 0; i < frames; i++) {
         uint32_t idx  = (uint32_t)(v->pos >> 32);
@@ -94,6 +96,7 @@ int rl_voice_mix(rl_voice *v, float *out, uint32_t frames, uint32_t out_rate, rl
         }
         out[i * 2]     += l * gl;
         out[i * 2 + 1] += r * gr;
+        if (send) send[i] += (stereo ? 0.5f * (l + r) : l) * gs;
 
         v->pos += step;
         if (v->pos >= end) {

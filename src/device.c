@@ -77,23 +77,50 @@ void rl_device_commit_3d(rl_device *dev)
     }
 }
 
+void rl_device_eax1_changed(rl_device *dev)
+{
+    BOOL first = !dev->eax_used;
+    dev->eax_used = TRUE;
+    dev->reverb_dirty = TRUE;
+    if (first) {
+        LOG_INFO("EAX 1.0 in use: reverb enabled");
+        for (rl_buffer *b = dev->all; b; b = b->next_all)
+            if (!b->is_primary) rl_buffer_update_gains(b);
+    }
+}
+
 /* ---------------------------------------------------------------- mixing */
 
 static void mix(rl_device *dev, UINT32 frames)
 {
     if (frames > dev->mixbuf_frames) {
         HeapFree(GetProcessHeap(), 0, dev->mixbuf);
+        HeapFree(GetProcessHeap(), 0, dev->sendbuf);
         dev->mixbuf_frames = frames * 2;
         dev->mixbuf = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * 2 * sizeof(float));
-        if (!dev->mixbuf) { dev->mixbuf_frames = 0; return; }
+        dev->sendbuf = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * sizeof(float));
+        if (!dev->mixbuf || !dev->sendbuf) {
+            HeapFree(GetProcessHeap(), 0, dev->mixbuf);
+            HeapFree(GetProcessHeap(), 0, dev->sendbuf);
+            dev->mixbuf = dev->sendbuf = NULL;
+            dev->mixbuf_frames = 0;
+            return;
+        }
     }
     memset(dev->mixbuf, 0, frames * 2 * sizeof(float));
+    memset(dev->sendbuf, 0, frames * sizeof(float));
 
     EnterCriticalSection(&dev->lock);
+    if (dev->reverb_dirty) {
+        /* placeholder mapping: EAX1 damping used as HF decay ratio */
+        rl_reverb_set(&dev->reverb, dev->eax1_decay, dev->eax1_damping, dev->eax1_volume);
+        dev->reverb_dirty = FALSE;
+    }
+    BOOL use_reverb = dev->eax_used && dev->reverb.mem;
     rl_buffer *b = dev->playing;
     while (b) {
         rl_buffer *next = b->next_playing;
-        if (rl_voice_mix(&b->voice, dev->mixbuf, frames, dev->out_rate, rl_signal_event))
+        if (rl_voice_mix(&b->voice, dev->mixbuf, use_reverb ? dev->sendbuf : NULL, frames, dev->out_rate, rl_signal_event))
             rl_device_stop_voice(dev, b);
         else if (!b->voice.playing)
             rl_device_stop_voice(dev, b);
@@ -101,6 +128,8 @@ static void mix(rl_device *dev, UINT32 frames)
     }
     float master = rl_db100_to_gain(dev->primary_volume);
     LeaveCriticalSection(&dev->lock);
+
+    if (use_reverb) rl_reverb_process(&dev->reverb, dev->sendbuf, dev->mixbuf, frames);
 
     if (master != 1.0f)
         for (UINT32 i = 0; i < frames * 2; i++) dev->mixbuf[i] *= master;
@@ -179,6 +208,13 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     REFERENCE_TIME period = 0;
     IAudioClient_GetDevicePeriod(w->client, &period, NULL);
 
+    if (dev->out_rate != mixfmt->nSamplesPerSec || !dev->reverb.mem) {
+        EnterCriticalSection(&dev->lock);
+        rl_reverb_free(&dev->reverb);
+        rl_reverb_init(&dev->reverb, mixfmt->nSamplesPerSec);
+        dev->reverb_dirty = TRUE;
+        LeaveCriticalSection(&dev->lock);
+    }
     dev->out_rate = mixfmt->nSamplesPerSec;
     dev->out_channels = w->channels;
     dev->period_frames = period ? (UINT32)(period * dev->out_rate / 10000000) : dev->out_rate / 100;
@@ -287,6 +323,10 @@ HRESULT rl_device_acquire(rl_device **out)
     dev->primary_fmt.nBlockAlign = 2;
     dev->primary_fmt.nAvgBytesPerSec = 44100;
     dev->speaker_config = DSSPEAKER_COMBINED(DSSPEAKER_STEREO, DSSPEAKER_GEOMETRY_WIDE);
+    dev->eax1_env = 0;  /* EAX_ENVIRONMENT_GENERIC */
+    dev->eax1_volume = rl_eax1_presets[0].volume;
+    dev->eax1_decay = rl_eax1_presets[0].decay;
+    dev->eax1_damping = rl_eax1_presets[0].damping;
     dev->quit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     dev->running = 1;
 
@@ -302,6 +342,7 @@ HRESULT rl_device_acquire(rl_device **out)
         if (dev->thread) { WaitForSingleObject(dev->thread, INFINITE); CloseHandle(dev->thread); }
         CloseHandle(dev->quit_event);
         DeleteCriticalSection(&dev->lock);
+        rl_reverb_free(&dev->reverb);
         HeapFree(GetProcessHeap(), 0, dev);
         LeaveCriticalSection(&s_dev_cs);
         return DSERR_NODRIVER;
@@ -328,5 +369,7 @@ void rl_device_release(rl_device *dev)
     CloseHandle(dev->quit_event);
     DeleteCriticalSection(&dev->lock);
     HeapFree(GetProcessHeap(), 0, dev->mixbuf);
+    HeapFree(GetProcessHeap(), 0, dev->sendbuf);
+    rl_reverb_free(&dev->reverb);
     HeapFree(GetProcessHeap(), 0, dev);
 }

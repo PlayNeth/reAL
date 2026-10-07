@@ -27,13 +27,19 @@ void rl_signal_event(void *ev) { if (ev) SetEvent((HANDLE)ev); }
 void rl_buffer_update_gains(rl_buffer *b)
 {
     float base = rl_db100_to_gain(b->volume);
-    float g[2];
-    if ((b->desc.dwFlags & DSBCAPS_CTRL3D) && b->src3d.mode != RL_DS3DMODE_DISABLE)
-        rl_spatialize(&b->dev->listener, &b->src3d, g);
+    float g[2], dist = 1.0f;
+    BOOL is3d = (b->desc.dwFlags & DSBCAPS_CTRL3D) != 0;
+    if (is3d && b->src3d.mode != RL_DS3DMODE_DISABLE)
+        rl_spatialize(&b->dev->listener, &b->src3d, g, &dist);
     else
         rl_pan_gains(b->pan, g);
     b->voice.gain[0] = g[0] * base;
     b->voice.gain[1] = g[1] * base;
+
+    /* EAX reverb send: only 3D (hardware) buffers feed the environment, as on EAX hardware.
+     * EAX_REVERBMIX_USEDISTANCE (-1) currently means full send; refine from ALchemy later. */
+    float mix = b->eax1_mix < 0.0f ? 1.0f : b->eax1_mix;
+    b->voice.send_gain = (is3d && b->dev->eax_used) ? base * dist * mix : 0.0f;
 }
 
 static DWORD orig_rate(rl_buffer *b) { return b->fmt.Format.nSamplesPerSec; }
@@ -137,7 +143,10 @@ static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
     EnterCriticalSection(&dev->lock);
     if (This->in_play_list) rl_device_stop_voice(dev, This);
     list_remove_all(dev, This);
-    if (!This->is_primary) dev->n_buffers--;
+    if (!This->is_primary) {
+        dev->n_buffers--;
+        if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers--;
+    }
     LeaveCriticalSection(&dev->lock);
 
     if (This->shared && !InterlockedDecrement(&This->shared->ref)) {
@@ -830,35 +839,132 @@ static ULONG WINAPI ks_AddRef(IKsPropertySet *iface)
 static ULONG WINAPI ks_Release(IKsPropertySet *iface)
 { return dsb_Release(&PROPS(iface)->IDirectSoundBuffer8_iface); }
 
-/* Milestone 1: EAX not implemented yet. Everything is reported unsupported so games fall back
- * to plain DS3D, but every request is logged so we can see what a game wants. */
+/* EAX 1.0 property sets (what ALchemy answers, see dstrace of NFS4) */
+static const GUID RL_EAX1_LISTENER =
+    { 0x4a4e6fc1, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID RL_EAX1_BUFFER =
+    { 0x4a4e6fc0, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
+static const GUID RL_DSPROPSETID_VoiceManager =
+    { 0x62a69bae, 0xdf9d, 0x11d1, { 0x99, 0xa6, 0x00, 0xc0, 0x4f, 0xc9, 0x9d, 0x46 } };
+
+enum { EAX1_L_ALL, EAX1_L_ENVIRONMENT, EAX1_L_VOLUME, EAX1_L_DECAYTIME, EAX1_L_DAMPING, EAX1_L_COUNT };
+enum { EAX1_B_ALL, EAX1_B_REVERBMIX, EAX1_B_COUNT };
+typedef struct { DWORD environment; float volume, decay, damping; } rl_eax1_reverb;
+
 static HRESULT WINAPI ks_Get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
                              LPVOID data, ULONG data_len, PULONG ret)
 {
+    rl_buffer *This = PROPS(iface);
+    rl_device *dev = This->dev;
     char gb[64];
-    (void)inst; (void)inst_len; (void)data;
-    LOG_EAX("Buffer[%d]::KsProp Get %s id %lu len %lu", PROPS(iface)->id, rl_guid_str(set, gb),
-            (unsigned long)id, (unsigned long)data_len);
+    (void)inst; (void)inst_len;
     if (ret) *ret = 0;
-    return E_PROP_ID_UNSUPPORTED;
+    HRESULT hr = E_PROP_ID_UNSUPPORTED;
+
+    EnterCriticalSection(&dev->lock);
+    if (IsEqualGUID(set, &RL_EAX1_LISTENER)) {
+        switch (id) {
+        case EAX1_L_ALL:
+            if (data_len < sizeof(rl_eax1_reverb) || !data) { hr = DSERR_INVALIDPARAM; break; }
+            ((rl_eax1_reverb *)data)->environment = dev->eax1_env;
+            ((rl_eax1_reverb *)data)->volume = dev->eax1_volume;
+            ((rl_eax1_reverb *)data)->decay = dev->eax1_decay;
+            ((rl_eax1_reverb *)data)->damping = dev->eax1_damping;
+            if (ret) *ret = sizeof(rl_eax1_reverb);
+            hr = DS_OK; break;
+        case EAX1_L_ENVIRONMENT: case EAX1_L_VOLUME: case EAX1_L_DECAYTIME: case EAX1_L_DAMPING:
+            if (data_len < 4 || !data) { hr = DSERR_INVALIDPARAM; break; }
+            if (id == EAX1_L_ENVIRONMENT) *(DWORD *)data = dev->eax1_env;
+            else *(float *)data = id == EAX1_L_VOLUME ? dev->eax1_volume : id == EAX1_L_DECAYTIME ? dev->eax1_decay : dev->eax1_damping;
+            if (ret) *ret = 4;
+            hr = DS_OK; break;
+        }
+    } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && (This->desc.dwFlags & DSBCAPS_CTRL3D)) {
+        if (id < EAX1_B_COUNT) {
+            if (data_len < 4 || !data) hr = DSERR_INVALIDPARAM;
+            else { *(float *)data = This->eax1_mix; if (ret) *ret = 4; hr = DS_OK; }
+        }
+    }
+    LeaveCriticalSection(&dev->lock);
+    LOG_EAX("Buffer[%d]::KsProp Get %s id %lu -> %08lx", This->id, rl_guid_str(set, gb), (unsigned long)id, (unsigned long)hr);
+    return hr;
 }
 
 static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
                              LPVOID data, ULONG data_len)
 {
+    rl_buffer *This = PROPS(iface);
+    rl_device *dev = This->dev;
     char gb[64];
-    (void)inst; (void)inst_len; (void)data;
-    LOG_EAX("Buffer[%d]::KsProp Set %s id %lu len %lu", PROPS(iface)->id, rl_guid_str(set, gb),
-            (unsigned long)id, (unsigned long)data_len);
-    return E_PROP_ID_UNSUPPORTED;
+    (void)inst; (void)inst_len;
+    HRESULT hr = E_PROP_ID_UNSUPPORTED;
+
+    EnterCriticalSection(&dev->lock);
+    if (IsEqualGUID(set, &RL_EAX1_LISTENER) && id < EAX1_L_COUNT) {
+        if (!data || data_len < (id == EAX1_L_ALL ? sizeof(rl_eax1_reverb) : 4)) hr = DSERR_INVALIDPARAM;
+        else {
+            hr = DS_OK;
+            switch (id) {
+            case EAX1_L_ALL: {
+                const rl_eax1_reverb *r = data;
+                if (r->environment >= 26) { hr = DSERR_INVALIDPARAM; break; }
+                dev->eax1_env = r->environment;
+                dev->eax1_volume = r->volume;
+                dev->eax1_decay = r->decay;
+                dev->eax1_damping = r->damping;
+                break;
+            }
+            case EAX1_L_ENVIRONMENT: {
+                DWORD env = *(const DWORD *)data;
+                if (env >= 26) { hr = DSERR_INVALIDPARAM; break; }
+                dev->eax1_env = env;
+                dev->eax1_volume = rl_eax1_presets[env].volume;
+                dev->eax1_decay = rl_eax1_presets[env].decay;
+                dev->eax1_damping = rl_eax1_presets[env].damping;
+                break;
+            }
+            case EAX1_L_VOLUME:    dev->eax1_volume = *(const float *)data; break;
+            case EAX1_L_DECAYTIME: dev->eax1_decay = *(const float *)data; break;
+            case EAX1_L_DAMPING:   dev->eax1_damping = *(const float *)data; break;
+            }
+            if (hr == DS_OK) rl_device_eax1_changed(dev);
+        }
+        LOG_EAX("Buffer[%d]::KsProp Set EAX1 listener id %lu -> env %lu vol %.3f decay %.3f damp %.3f (%08lx)", This->id,
+                (unsigned long)id, (unsigned long)dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping,
+                (unsigned long)hr);
+    } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && (This->desc.dwFlags & DSBCAPS_CTRL3D) && id < EAX1_B_COUNT) {
+        if (!data || data_len < 4) hr = DSERR_INVALIDPARAM;
+        else {
+            float mix = *(const float *)data;
+            if (mix != -1.0f && (mix < 0.0f || mix > 1.0f)) hr = DSERR_INVALIDPARAM;
+            else { This->eax1_mix = mix; rl_buffer_update_gains(This); hr = DS_OK; }
+        }
+        LOG_EAX("Buffer[%d]::KsProp Set EAX1 reverb mix %.3f (%08lx)", This->id, This->eax1_mix, (unsigned long)hr);
+    } else {
+        LOG_EAX("Buffer[%d]::KsProp Set %s id %lu len %lu -> unsupported", This->id, rl_guid_str(set, gb),
+                (unsigned long)id, (unsigned long)data_len);
+    }
+    LeaveCriticalSection(&dev->lock);
+    return hr;
 }
 
 static HRESULT WINAPI ks_QuerySupport(IKsPropertySet *iface, REFGUID set, ULONG id, PULONG support)
 {
+    rl_buffer *This = PROPS(iface);
     char gb[64];
-    LOG_EAX("Buffer[%d]::KsProp QuerySupport %s id %lu", PROPS(iface)->id, rl_guid_str(set, gb), (unsigned long)id);
-    if (support) *support = 0;
-    return E_PROP_ID_UNSUPPORTED;
+    HRESULT hr = E_PROP_ID_UNSUPPORTED;
+    ULONG s = 0;
+    if (IsEqualGUID(set, &RL_DSPROPSETID_VoiceManager)) {
+        hr = DS_OK;                               /* ALchemy: S_OK, support 0 */
+    } else if (IsEqualGUID(set, &RL_EAX1_LISTENER) && id < EAX1_L_COUNT) {
+        hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
+    } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && id < EAX1_B_COUNT && (This->desc.dwFlags & DSBCAPS_CTRL3D)) {
+        hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
+    }
+    if (support) *support = s;
+    LOG_EAX("Buffer[%d]::KsProp QuerySupport %s id %lu -> %08lx support %lu", This->id, rl_guid_str(set, gb),
+            (unsigned long)id, (unsigned long)hr, (unsigned long)s);
+    return hr;
 }
 
 static IKsPropertySetVtbl ks_vtbl = {
@@ -881,6 +987,7 @@ static rl_buffer *alloc_buffer(rl_device *dev)
     b->dev = dev;
     rl_source_defaults(&b->src3d);
     b->src3d_pending = b->src3d;
+    b->eax1_mix = -1.0f;   /* EAX_REVERBMIX_USEDISTANCE */
     return b;
 }
 
@@ -973,6 +1080,7 @@ HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out)
     EnterCriticalSection(&dev->lock);
     list_add_all(dev, b);
     dev->n_buffers++;
+    if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;
     rl_buffer_update_gains(b);
     LeaveCriticalSection(&dev->lock);
 
@@ -1005,8 +1113,10 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_buffer *src, rl_buffer **out)
     b->freq = src->freq;
     b->src3d = src->src3d;
     b->src3d_pending = src->src3d_pending;
+    b->eax1_mix = src->eax1_mix;
     list_add_all(dev, b);
     dev->n_buffers++;
+    if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;
     LeaveCriticalSection(&dev->lock);
     rl_device_addref(dev);
 
