@@ -320,7 +320,7 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
             /* make sure a deferred position set before Play is not lost */
             rl_buffer_update_gains(This);
         }
-        This->voice.playing = 1;
+        rl_voice_start(&This->voice);
         if (!This->in_play_list) rl_device_start_voice(This->dev, This);
     }
     LeaveCriticalSection(&This->dev->lock);
@@ -333,7 +333,7 @@ static HRESULT WINAPI dsb_SetCurrentPosition(IDirectSoundBuffer8 *iface, DWORD p
     if (This->is_primary) return DSERR_INVALIDCALL;
     if (pos >= This->voice.size) return DSERR_INVALIDPARAM;
     EnterCriticalSection(&This->dev->lock);
-    This->voice.pos = (uint64_t)(pos / This->voice.block) << 32;
+    rl_voice_jump(&This->voice, (uint64_t)(pos / This->voice.block) << 32);
     LeaveCriticalSection(&This->dev->lock);
     return DS_OK;
 }
@@ -907,8 +907,10 @@ static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
             switch (id) {
             case EAX1_L_ALL: {
                 const rl_eax1_reverb *r = data;
-                if (r->environment >= 26) { hr = DSERR_INVALIDPARAM; break; }
-                dev->eax1_env = r->environment;
+                if (r->volume != r->volume || r->decay != r->decay || r->damping != r->damping) {
+                    hr = DSERR_INVALIDPARAM; break;   /* ALchemy rejects NaNs */
+                }
+                dev->eax1_env = r->environment > 25 ? 25 : r->environment;
                 dev->eax1_volume = r->volume;
                 dev->eax1_decay = r->decay;
                 dev->eax1_damping = r->damping;
@@ -916,14 +918,19 @@ static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
             }
             case EAX1_L_ENVIRONMENT: {
                 DWORD env = *(const DWORD *)data;
-                if (env >= 26) { hr = DSERR_INVALIDPARAM; break; }
+                if (env > 25) env = 25;               /* ALchemy clamps */
+                if (env == dev->eax1_env) break;      /* ALchemy: same env keeps tweaked values */
                 dev->eax1_env = env;
                 dev->eax1_volume = rl_eax1_presets[env].volume;
                 dev->eax1_decay = rl_eax1_presets[env].decay;
                 dev->eax1_damping = rl_eax1_presets[env].damping;
                 break;
             }
-            case EAX1_L_VOLUME:    dev->eax1_volume = *(const float *)data; break;
+            case EAX1_L_VOLUME: {
+                float v = *(const float *)data;
+                dev->eax1_volume = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+                break;
+            }
             case EAX1_L_DECAYTIME: dev->eax1_decay = *(const float *)data; break;
             case EAX1_L_DAMPING:   dev->eax1_damping = *(const float *)data; break;
             }

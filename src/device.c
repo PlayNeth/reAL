@@ -112,8 +112,12 @@ static void mix(rl_device *dev, UINT32 frames)
 
     EnterCriticalSection(&dev->lock);
     if (dev->reverb_dirty) {
-        /* placeholder mapping: EAX1 damping used as HF decay ratio */
-        rl_reverb_set(&dev->reverb, dev->eax1_decay, dev->eax1_damping, dev->eax1_volume);
+        rl_reverb_params rp;
+        rl_eax1_to_params(dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping, &rp);
+        rl_reverb_set_params(&dev->reverb, &rp);
+        LOG_EAX("reverb: env %lu room %.3f roomHF %d decay %.2f hfratio %.3f refl %d @%.3f reverb %d @%.3f size %.1f diff %.2f",
+                (unsigned long)dev->eax1_env, rp.room, rp.room_hf, rp.decay, rp.decay_hf_ratio, rp.reflections,
+                rp.reflections_delay, rp.reverb, rp.reverb_delay, rp.env_size, rp.diffusion);
         dev->reverb_dirty = FALSE;
     }
     BOOL use_reverb = dev->eax_used && dev->reverb.mem;

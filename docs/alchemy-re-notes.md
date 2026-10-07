@@ -126,3 +126,23 @@ you're comparing DSOAL against — Creative's own DSP, not OpenAL. `CreateSensDi
   identical to the public eax.h values; second copy in `.data 0x100cf164`.
 * NFS4 only ever sets listener ENVIRONMENT + VOLUME (1.0 in race, 0.0 in menus; envs 0, 7, 15, 16, 19)
   and per-buffer REVERBMIX (0–0.504). Positions are unit vectors; distance is done with SetVolume.
+
+## EAX 1.0 → reverb conversion (fn 0x1004a050, called from CFxReverb update 0x10050e90)
+
+Setters (0x10049dc0 env, 0x10049e70 volume, 0x10049f10 decay, 0x10049fb0 damping) only store and
+set dirty bits; environment ≥ 26 is clamped to 25 and volume to 0..1 (no error); NaNs are rejected.
+Setting the same environment again keeps tweaked values.
+
+On conversion, the environment indexes an EAX3-style preset table at `.rdata 0x100a8280`
+(0x70 bytes/entry: env, size, diffusion, room, roomHF, roomLF, decay, decayHFRatio, decayLFRatio,
+reflections, reflectionsDelay, reflectionsPan, reverb, reverbDelay, reverbPan, echoTime, echoDepth,
+modulationTime, modulationDepth, airAbsorptionHF, hfRef, lfRef, roomRolloff, flags). Copied: size,
+diffusion, roomLF, reflections(+300 bias in the setter call), reflections delay, reverb(+300),
+reverb delay, echo, modulation, HF/LF reference (echo depth forced to 0 for env 24).
+Then:
+* room gain = EAX1 volume (linear); decay = EAX1 decay; LF decay = decay × preset decayLFRatio
+* damping d → decay HF ratio t: `t = d` if d ≥ 1, else `t = 1 / (1 − k1[env]·(1 − 1/d))`, clamped
+  0.1..2.0 (k1 = `.rdata 0x100a7e20`)
+* room HF (mB) = `round(k2[env] · (1/t − 1))`, clamped −10000..0 (k2 = `.rdata 0x100a7e88`)
+For generic and concert hall the default EAX1 damping reproduces the EAX3 preset exactly
+(0.829/−101 vs 0.83/−100; 0.697/−507 vs 0.70/−500).

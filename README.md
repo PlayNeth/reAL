@@ -22,7 +22,8 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ placeholder equal-power panning |
 | Reports hardware-accelerated 3D voices (LOCHARDWARE), like ALchemy | ✅ |
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
-| EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ answers like ALchemy; **placeholder FDN reverb** |
+| EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's exact parameter conversion; own reverb DSP (reflections + FDN) |
+| Volume/pan/send smoothing, declicked position jumps | ✅ |
 | EAX 2–5 | ⏳ reported unsupported |
 | Doppler, HRTF, CMSS, EAX reverb + effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |

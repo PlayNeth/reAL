@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #define RL_NOTIFY_STOP 0xFFFFFFFFu
+#define RL_XFADE_PENDING 0xFFFFFFFFu
 
 typedef struct rl_notify {
     uint32_t offset;       /* byte offset in buffer, or RL_NOTIFY_STOP */
@@ -31,6 +32,11 @@ typedef struct rl_voice {
     /* final per-output-channel gains (stereo out) and mono reverb send gain */
     float    gain[2];
     float    send_gain;
+    /* smoothing state (owned by the mixer) */
+    float    cur_gain[2];
+    float    cur_send;
+    uint64_t xfade_pos;     /* old position being faded out after a jump */
+    uint32_t xfade_left;    /* samples of crossfade left, or RL_XFADE_PENDING */
 
     /* notifications (sorted not required) */
     const rl_notify *notifies;
@@ -47,6 +53,11 @@ static inline uint32_t rl_voice_play_bytes(const rl_voice *v) { return (uint32_t
  * Returns 1 if the voice stopped (reached end of a non-looping buffer). */
 /* `send` (mono, may be NULL) receives the voice scaled by send_gain for the reverb bus. */
 int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal);
+
+/* Start playing (snaps smoothed gains to target if the voice was stopped). */
+void rl_voice_start(rl_voice *v);
+/* Move the play position; a playing voice crossfades from the old position (declick). */
+void rl_voice_jump(rl_voice *v, uint64_t newpos);
 
 /* Fire notifications for a cursor movement from byte p0 to p1 having wrapped `wraps` times.
  * Exposed for tests. */

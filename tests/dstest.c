@@ -185,7 +185,11 @@ int main(int argc, char **argv)
     float mix = 0.39f;
     CHECK(IKsPropertySet_Set(ks, &eax1_b, 1, NULL, 0, &mix, 4) == DS_OK, "EAX1 buffer reverb mix");
     env = 99;
-    CHECK(IKsPropertySet_Set(ks, &eax1_l, 1, NULL, 0, &env, 4) == DSERR_INVALIDPARAM, "EAX1 bad environment rejected");
+    CHECK(IKsPropertySet_Set(ks, &eax1_l, 1, NULL, 0, &env, 4) == DS_OK, "EAX1 out-of-range environment accepted");
+    IKsPropertySet_Get(ks, &eax1_l, 1, NULL, 0, &env, 4, &glen);
+    CHECK(env == 25, "...and clamped to 25 like ALchemy (got %lu)", env);
+    env = 7;
+    IKsPropertySet_Set(ks, &eax1_l, 1, NULL, 0, &env, 4);
 
     /* reverb audible: play the 3D buffer briefly, stop, and let the tail ring (checked by recording) */
     IDirectSoundBuffer_SetCurrentPosition(buf, 0);

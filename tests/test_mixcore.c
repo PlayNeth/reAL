@@ -41,6 +41,7 @@ static rl_voice make_voice(int looping)
     v.playing = 1;
     v.looping = looping;
     v.gain[0] = v.gain[1] = 1.0f;
+    v.cur_gain[0] = v.cur_gain[1] = 1.0f;
     return v;
 }
 
@@ -108,7 +109,7 @@ static void test_u8_stereo(void)
     rl_voice v;
     memset(&v, 0, sizeof(v));
     v.data = d; v.size = 4; v.channels = 2; v.block = 2; v.sfmt = RL_U8;
-    v.rate = 1000; v.playing = 1; v.looping = 1; v.gain[0] = v.gain[1] = 1;
+    v.rate = 1000; v.playing = 1; v.looping = 1; v.gain[0] = v.gain[1] = 1; v.cur_gain[0] = v.cur_gain[1] = 1;
     float out[4] = { 0 };
     rl_voice_mix(&v, out, NULL, 2, 1000, NULL);
     CHECK(NEAR(out[0], 0) && NEAR(out[1], 127 / 128.0f));
@@ -173,11 +174,11 @@ static void test_spatial(void)
 static void test_send(void)
 {
     rl_voice v = make_voice(1);
-    v.send_gain = 0.5f;
+    v.send_gain = v.cur_send = 0.5f;
     float out[20] = { 0 }, send[10] = { 0 };
     rl_voice_mix(&v, out, send, 10, 44100, NULL);
     CHECK(NEAR(send[4], 0.5f * 400 / 32768.0f));
-    v.send_gain = 0.0f;
+    v.send_gain = v.cur_send = 0.0f;
     memset(send, 0, sizeof(send));
     rl_voice_mix(&v, out, send, 10, 44100, NULL);
     CHECK(send[3] == 0.0f);
@@ -189,7 +190,10 @@ static double tail_energy(float decay, float t)
     const uint32_t rate = 48000, frames = rate * 3;
     rl_reverb r;
     rl_reverb_init(&r, rate);
-    rl_reverb_set(&r, decay, 1.0f, 1.0f);
+    rl_reverb_params p;
+    rl_eax1_to_params(0, 1.0f, decay, 1.0f, &p);   /* damping 1.0 -> hf ratio 1.0: flat decay */
+    p.reflections = -10000; p.room_hf = 0;
+    rl_reverb_set_params(&r, &p);
     float *in = calloc(frames, sizeof(float)), *out = calloc(frames * 2, sizeof(float));
     in[0] = 1.0f;
     rl_reverb_process(&r, in, out, frames);
@@ -198,6 +202,55 @@ static double tail_energy(float decay, float t)
     for (uint32_t i = s; i < s + n; i++) e += out[i * 2] * out[i * 2] + out[i * 2 + 1] * out[i * 2 + 1];
     free(in); free(out); rl_reverb_free(&r);
     return e;
+}
+
+/* ALchemy's damping conversion must reproduce its own EAX3 presets for each environment's
+ * default EAX1 damping (that is how Creative fitted the constants). */
+static void test_eax1_conversion(void)
+{
+    struct { int env; float hfr; int roomhf; } exp[] = {
+        { 0, 0.83f, -100 }, { 7, 0.70f, -500 }, { 15, 0.54f, -3300 }, { 16, 0.67f, -800 }, { 19, 0.50f, -2000 },
+    };
+    for (unsigned i = 0; i < sizeof(exp) / sizeof(exp[0]); i++) {
+        int e = exp[i].env;
+        float t = rl_eax1_damping_to_hf_ratio(e, rl_eax1_presets[e].damping);
+        int rh = rl_eax1_room_hf(e, t);
+        printf("     env %2d: damping %.3f -> hfratio %.3f (preset %.2f), roomHF %d (preset %d)\n",
+               e, rl_eax1_presets[e].damping, t, exp[i].hfr, rh, exp[i].roomhf);
+        /* only generic and concert hall are fitted to land on the preset (verified); the rest is
+         * simply what ALchemy computes */
+        if (e == 0 || e == 7) {
+            CHECK(fabsf(t - exp[i].hfr) < 0.015f);
+            CHECK(abs(rh - exp[i].roomhf) <= 25);
+        }
+    }
+}
+
+/* a jump while playing crossfades instead of stepping */
+static void test_declick(void)
+{
+    static int16_t sq[2000];
+    for (int i = 0; i < 2000; i++) sq[i] = i < 1000 ? 16000 : -16000;
+    rl_voice v; memset(&v, 0, sizeof(v));
+    v.data = (const uint8_t *)sq; v.size = sizeof(sq); v.channels = 1; v.block = 2; v.sfmt = RL_S16;
+    v.rate = 48000; v.looping = 1; v.gain[0] = v.gain[1] = 1.0f;
+    rl_voice_start(&v);
+    float out[400] = { 0 };
+    rl_voice_mix(&v, out, NULL, 50, 48000, NULL);         /* inside the +16000 half */
+    rl_voice_jump(&v, (uint64_t)1500 << 32);               /* jump into the -16000 half */
+    rl_voice_mix(&v, out + 100, NULL, 150, 48000, NULL);
+    float maxstep = 0.0f;
+    for (int i = 1; i < 200; i++) { float d = fabsf(out[i * 2] - out[(i - 1) * 2]); if (d > maxstep) maxstep = d; }
+    printf("     declick: largest sample step %.4f (raw jump would be 0.98)\n", maxstep);
+    CHECK(maxstep < 0.05f);
+
+    /* volume change ramps */
+    rl_voice w = make_voice(1);
+    for (int i = 0; i < 100; i++) pcm[i] = 16000;
+    float o2[1000] = { 0 };
+    w.gain[0] = w.gain[1] = 0.0f;               /* drop from 1.0 to 0.0 */
+    rl_voice_mix(&w, o2, NULL, 400, 48000, NULL);
+    CHECK(o2[0] > 0.4f && o2[2 * 120] > 0.0f && o2[2 * 239] < 0.01f && o2[2 * 300] == 0.0f);
 }
 
 static void test_reverb(void)
@@ -215,6 +268,8 @@ static void test_reverb(void)
 int main(void)
 {
     test_send();
+    test_eax1_conversion();
+    test_declick();
     test_reverb();
     test_gain();
     test_basic_mix();
