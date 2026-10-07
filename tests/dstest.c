@@ -211,6 +211,26 @@ int main(int argc, char **argv)
     IDirectSoundBuffer_Release(prim);
     CHECK(IDirectSound8_Release(ds) == 0, "device refcount reaches 0");
 
+    /* game releases IDirectSound but keeps a playing buffer (Hot Pursuit 2 does this):
+     * the buffer must stop, like real DirectSound */
+    {
+        IDirectSound8 *d3 = NULL;
+        create8(NULL, &d3, NULL);
+        IDirectSound8_SetCooperativeLevel(d3, GetDesktopWindow(), DSSCL_PRIORITY);
+        WAVEFORMATEX lw = { WAVE_FORMAT_PCM, 2, 48000, 192000, 4, 16, 0 };
+        DSBUFFERDESC ld = { sizeof(ld), DSBCAPS_GLOBALFOCUS | DSBCAPS_GETCURRENTPOSITION2, 76800, 0, &lw };
+        IDirectSoundBuffer *leak = NULL;
+        IDirectSound8_CreateSoundBuffer(d3, &ld, &leak, NULL);
+        IDirectSoundBuffer_Play(leak, 0, 0, DSBPLAY_LOOPING);
+        Sleep(100);
+        CHECK(IDirectSound8_Release(d3) == 0, "release DirectSound with a buffer still held");
+        DWORD ls = 0xff;
+        IDirectSoundBuffer_GetStatus(leak, &ls);
+        CHECK(!(ls & DSBSTATUS_PLAYING), "orphaned buffer stopped (status %lx)", ls);
+        CHECK(IDirectSoundBuffer_Play(leak, 0, 0, DSBPLAY_LOOPING) == DSERR_BUFFERLOST, "orphaned buffer cannot play again");
+        CHECK(IDirectSoundBuffer_Release(leak) == 0, "orphaned buffer can still be released");
+    }
+
     /* COM path */
     CoInitialize(NULL);
     typedef HRESULT (WINAPI *gco_t)(REFCLSID, REFIID, LPVOID *);

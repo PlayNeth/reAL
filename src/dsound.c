@@ -33,6 +33,8 @@ static ULONG WINAPI ds_Release(IDirectSound8 *iface)
     ULONG ref = InterlockedDecrement(&This->ref);
     if (!ref) {
         LOG_CALL("DirectSound %p destroyed", (void *)This);
+        /* real DirectSound takes all buffers created through this object down with it */
+        if (This->dev) rl_buffers_orphan(This->dev, This);
         if (This->primary) IDirectSoundBuffer8_Release(&This->primary->IDirectSoundBuffer8_iface);
         if (This->dev) rl_device_release(This->dev);
         HeapFree(GetProcessHeap(), 0, This);
@@ -55,7 +57,7 @@ static HRESULT WINAPI ds_CreateSoundBuffer(IDirectSound8 *iface, LPCDSBUFFERDESC
         if (desc->lpwfxFormat || desc->dwBufferBytes) return DSERR_INVALIDPARAM;
         /* one primary object per device object; hand out new references */
         if (!This->primary) {
-            HRESULT hr = rl_buffer_create(This->dev, desc, &This->primary);
+            HRESULT hr = rl_buffer_create(This->dev, This, desc, &This->primary);
             if (FAILED(hr)) return hr;
         }
         IDirectSoundBuffer8_AddRef(&This->primary->IDirectSoundBuffer8_iface);
@@ -64,7 +66,7 @@ static HRESULT WINAPI ds_CreateSoundBuffer(IDirectSound8 *iface, LPCDSBUFFERDESC
     }
 
     rl_buffer *b;
-    HRESULT hr = rl_buffer_create(This->dev, desc, &b);
+    HRESULT hr = rl_buffer_create(This->dev, This, desc, &b);
     if (FAILED(hr)) return hr;
     *out = (LPDIRECTSOUNDBUFFER)&b->IDirectSoundBuffer8_iface;
     return DS_OK;
@@ -110,7 +112,7 @@ static HRESULT WINAPI ds_DuplicateSoundBuffer(IDirectSound8 *iface, LPDIRECTSOUN
     rl_buffer *s = impl_from(src, rl_buffer, IDirectSoundBuffer8_iface);
     if (s->is_primary) return DSERR_INVALIDCALL;
     rl_buffer *b;
-    HRESULT hr = rl_buffer_duplicate(This->dev, s, &b);
+    HRESULT hr = rl_buffer_duplicate(This->dev, This, s, &b);
     if (FAILED(hr)) return hr;
     *out = (LPDIRECTSOUNDBUFFER)&b->IDirectSoundBuffer8_iface;
     return DS_OK;

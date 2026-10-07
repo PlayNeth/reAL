@@ -327,6 +327,11 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
     if (res1) return DSERR_INVALIDPARAM;
     LOG_TRACE("Buffer[%d]::Play flags %lx", This->id, (unsigned long)flags);
     EnterCriticalSection(&This->dev->lock);
+    if (This->dead) {
+        LeaveCriticalSection(&This->dev->lock);
+        LOG_CALL("Buffer[%d]::Play on a buffer whose DirectSound object was released", This->id);
+        return DSERR_BUFFERLOST;
+    }
     if (This->is_primary) {
         This->dev->primary_playing = TRUE;
     } else {
@@ -1032,7 +1037,7 @@ static void flags_str(DWORD f, char *out, size_t n)
         }
 }
 
-HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out)
+HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out)
 {
     char fl[400];
     flags_str(desc->dwFlags, fl, sizeof(fl));
@@ -1040,6 +1045,7 @@ HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out)
 
     rl_buffer *b = alloc_buffer(dev);
     if (!b) return DSERR_OUTOFMEMORY;
+    b->owner = owner;
     memset(&b->desc, 0, sizeof(b->desc));
     memcpy(&b->desc, desc, desc->dwSize);
     b->desc.dwSize = sizeof(b->desc);
@@ -1115,12 +1121,13 @@ HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out)
     return DS_OK;
 }
 
-HRESULT rl_buffer_duplicate(rl_device *dev, rl_buffer *src, rl_buffer **out)
+HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out)
 {
     *out = NULL;
     if (src->desc.dwFlags & DSBCAPS_CTRLFX) return DSERR_INVALIDCALL;
     rl_buffer *b = alloc_buffer(dev);
     if (!b) return DSERR_OUTOFMEMORY;
+    b->owner = owner;
 
     EnterCriticalSection(&dev->lock);
     b->desc = src->desc;
@@ -1152,4 +1159,22 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_buffer *src, rl_buffer **out)
     LOG_CALL("DuplicateSoundBuffer[%d] from [%d]", b->id, src->id);
     *out = b;
     return DS_OK;
+}
+
+void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
+{
+    int n = 0, playing = 0;
+    EnterCriticalSection(&dev->lock);
+    for (rl_buffer *b = dev->all; b; b = b->next_all) {
+        if (b->owner != owner) continue;
+        b->owner = NULL;
+        if (b->is_primary) continue;      /* released by the owner itself */
+        b->dead = TRUE;
+        if (b->voice.playing) playing++;
+        b->voice.playing = 0;
+        if (b->in_play_list) rl_device_stop_voice(dev, b);
+        n++;
+    }
+    LeaveCriticalSection(&dev->lock);
+    if (n) LOG_CALL("DirectSound released with %d buffer(s) still referenced by the game (%d playing): stopped", n, playing);
 }

@@ -99,14 +99,15 @@ void        rl_device_commit_3d(rl_device *dev);                    /* lock held
 void        rl_device_addref(rl_device *dev);
 
 /* ---------------- IDirectSound8 ---------------- */
-typedef struct rl_dsound {
+typedef struct rl_dsound rl_dsound;
+struct rl_dsound {
     IDirectSound8 IDirectSound8_iface;
     LONG          ref;
     rl_device    *dev;
     DWORD         coop_level;
     rl_buffer    *primary;
     BOOL          is_ds8;
-} rl_dsound;
+};
 
 HRESULT rl_dsound_create(REFIID riid, void **out, BOOL ds8);
 
@@ -144,13 +145,16 @@ struct rl_buffer {
     BOOL          src3d_dirty;
 
     rl_hrtf_voice *hrtf;        /* 3D buffers only */
+    struct rl_dsound *owner;    /* IDirectSound that created it (weak); NULL once that is released */
+    BOOL          dead;         /* owner released: stopped for good, like real DirectSound */
 
     /* EAX 1.0 per-buffer */
     float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */
 };
 
-HRESULT rl_buffer_create(rl_device *dev, LPCDSBUFFERDESC desc, rl_buffer **out);
-HRESULT rl_buffer_duplicate(rl_device *dev, rl_buffer *src, rl_buffer **out);
+HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out);
+HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out);
+void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released */
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */
 void    rl_signal_event(void *ev);
 void    rl_device_eax1_changed(rl_device *dev);  /* lock held */
