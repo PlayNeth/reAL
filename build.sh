@@ -16,7 +16,7 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/hrtf.c"
+SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/alrv_params.c src/hrtf.c"
 CFLAGS="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -ffast-math -msse2 -mfpmath=sse"
 
 echo "CC = $CC"
@@ -43,6 +43,14 @@ rm -f build/hrtfprobe.lib build/hrtfprobe.pdb
 
 # native unit tests for the platform independent core
 if command -v cc >/dev/null 2>&1; then
-    cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/spatial.c src/reverb.c src/hrtf.c -lm
+    cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/alrv_params.c src/hrtf.c -lm
     ./build/test_mixcore
+    # comparison with ALchemy's own reverb (ground truth from the emulator, see docs; optional)
+    cc -O2 -std=gnu11 -Wall -o build/test_alrv tests/test_alrv.c src/alrv.c src/alrv_params.c -lm
+    cc -O2 -std=gnu11 -Wall -o build/test_alrv_params tests/test_alrv_params.c src/alrv_params.c -lm
+    GT=${REAL_GT:-../re/gt}
+    if [ -f "$GT/params.bin" ]; then
+        ./build/test_alrv_params "$GT/params.bin"
+        ./build/test_alrv -p "$GT" env00 env01 env02 env07 env12 env19 env22 env25 | tail -1
+    fi
 fi

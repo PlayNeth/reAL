@@ -158,3 +158,60 @@ For generic and concert hall the default EAX1 damping reproduces the EAX3 preset
 * SetPosition on a stopped buffer is sometimes not applied before Play (8 of 146 positions came
   out identical to the previous one even with a 100 ms lead-in).
 * With the EAX listener volume at 0 there is no reverb tail at all.
+
+## CHRvbReverb (ALchemy's software reverb) — DSP
+
+Tooling: Ghidra 11.0.3 headless project in `~/re/ghidra` (`dec.sh addr…` decompiles), Unicorn harness
+`~/re/tools/emu.py`. Engine needs **≤128-frame blocks** (internal buffers are 128 frames; 512 blows up),
+and the process call's `edx` is the sample rate. The first block after start is faded in (0→1 ramp).
+
+Call chain: CPlugReverb process 0x100537b0 → 0x1005c1b0(W=plug+0xbc) → CHRvbReverb v3 0x10060f10 →
+v5 0x1005de10(in, out, hasInput, tailLen, rate). Output channel slots (desc+0xc+4k, k = speaker bit):
+FL FR FC — BL BR … SL SR, plus an internal centre copy at slot +0x2c that the plug folds into BL/BR.
+Everything is scaled by 40.0 ([0x100b5670]) at the end.
+
+DSP kernels (HSP vtable, stdcall): #42 dst=src*g, #43 buf*=g, #62 dst+=src*g, #63 dst+=src,
+#94 one-pole HPF  s=x+(2a-1)s1, y=a(s-s1);  #99 two cascaded one-pole LPs v=v(1-a)+xa, w=va+w(1-a);
+#92 1st-order allpass t=x+a·t1, y=t1-a·t;  #91 shelf y=c1·AP(x)+c0·x;  #106 one-pole LP y=y(1-a)+xa.
+CRT math: 0x1009a770 pow(st1,st0), 0x10088af0 cos, 0x10088c20 sin, 0x100887f0 sqrt(float),
+0x100888f0 ln, 0x1009ac68 sinh.
+
+Coefficients (verified against the emulator):
+- input HPF (roomLF, P+0x0c gain, P+0x10 f/fs): G=g², c=cos2πf, A=2G+c-1, B=c-2cG-1,
+  a=½(1+(-B-√(B²-A²))/A); g==1 → a=1 (bypass).
+- input LP (roomHF, P+0x04, P+0x08): b=((1-gc)-√((1-gc)²-(1-g)²))/(1-g), a=1-b (per stage).
+- late-line LP #106 (FUN_10061cf0(g,f,r)): r clamped ≥0.1 (r>1 → w=π), p=g^(2-2/r),
+  B=(p-1)/(1-c), D=-2B-2, x=(S-D)/2B (or (-D-S)/2B if |x|>1), a=min(1-x,0.985); B==0 → 1.
+- late-line shelf #91: c0=(1+g)/2, low shelf c1=c0-1 (DC gain g) / high shelf c1=1-c0 (Nyquist gain g);
+  α=sin w·sinh(½ln2·√2·w/sin w) (×g for the high shelf), q=α/√g, a=(1-q)/(1+q).
+
+Topology (concert hall trace, 48 kHz):
+input → HPF → LP2 → ring A (early taps) and ring B (late-input taps).
+- early: 4 taps of ring A at reflDelay+{0,80,112,184}·(rate/48k) gain P+0x88 → 4 Schroeder allpasses
+  (delays P+0x9c.., read gain P+0xac.., coef P+0xbc: y=d-gx, w=x+gy) → outputs
+  FC,Cx=y0·e, SL=y1·e, SR=y2·e, FR=y3·e and FL/BR/BL = y2/y1/y3 delayed 56/24/72 ·e (e = P+0x118..).
+- late: 4 taps of ring B (P+0x78.. delays, P+0x8c.. gains) feed a 4-line FDN (delays P+0xd0..,
+  read gains P+0xf0..) : line → shelf #91 → +tap → LP #106 → 4 allpasses (delays P+0xc0..,
+  read gains P+0xe0.., coef P+0x100) with Hadamard butterflies (k=1) on the allpass feedback, second
+  butterfly stage, modulated output delay (576-sample ring, interpolated), feedback written back
+  permuted (1,3,0,2), outputs FC,Cx,BR,SL (gain P+0x13c..) and FL,FR,SR,BL via a 2-ring 32/40/48/64 delay.
+
+### Parameters, stereo output, verification
+
+- Property struct (per listener, linear units) -> 348-byte parameter block: fns 0x10060c50 and helpers
+  (0x1005f5f0 FDN lengths via a Cardano cubic + caps, 0x1005ed10 per-line dB gains / LF shelves /
+  energy normalisation, 0x1005ff30 diffusion -> rotation angle, 0x1005fcc0 delays, 0x1005f190/f330 early
+  allpasses, 0x100608a0/f0 modulation).  All float->int conversions truncate; run at 53-bit precision
+  (the emulator must set FPCW=0x27F, unicorn defaults to 0 = 24-bit).  EAX1 -> properties: fn 0x1004a050
+  (+300 mB on reflections and reverb, size^3/16 clamped to 1).
+- ALchemy quirk not reproduced: on the first, immediate parameter apply the LF-shelf allpass keeps its
+  constructor coefficient 0.5; it only picks up the real value on later (crossfaded) updates.
+- Kernels zero their output and state when an input chunk is all zero; not reproduced (inaudible).
+- Stereo endpoint: plug folds the centre copy into BL/BR (x0.707), then converter mode 3 (fn 0x10036860,
+  only at 22.05/44.1/48 kHz, else plain fold-down): side and rear pairs through sum/difference FIRs
+  (80/72 taps @48k, reversed + 1 sample delay), 3 biquads per side, crossfeed of each side through 2
+  more biquads and a 12-sample delay into the other, then FL/FR direct and FC x0.7071.  Tables in
+  src/alrv_virt_tables.h.
+- Verification: tests/test_alrv.c (8 environments incl. modulated ones: >76 dB SNR, most >100 dB),
+  tests/test_alrv_params.c (266 property sets: identical blocks), virtualizer 114 dB.
+  Ground truth: emulator scripts gen_gt.py / gen_params.py (re/gt).

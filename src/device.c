@@ -112,15 +112,14 @@ static void mix(rl_device *dev, UINT32 frames)
 
     EnterCriticalSection(&dev->lock);
     if (dev->reverb_dirty) {
-        rl_reverb_params rp;
-        rl_eax1_to_params(dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping, &rp);
-        rl_reverb_set_params(&dev->reverb, &rp);
-        LOG_EAX("reverb: env %lu room %.3f roomHF %d decay %.2f hfratio %.3f refl %d @%.3f reverb %d @%.3f size %.1f diff %.2f",
-                (unsigned long)dev->eax1_env, rp.room, rp.room_hf, rp.decay, rp.decay_hf_ratio, rp.reflections,
-                rp.reflections_delay, rp.reverb, rp.reverb_delay, rp.env_size, rp.diffusion);
+        rl_reverb_set_eax1(&dev->reverb, dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping);
+        LOG_EAX("reverb: env %lu volume %.3f decay %.2f damping %.3f -> fdn %d/%d/%d/%d refl %d late %d",
+                (unsigned long)dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping,
+                dev->reverb.target.fdn_delay[0], dev->reverb.target.fdn_delay[1], dev->reverb.target.fdn_delay[2],
+                dev->reverb.target.fdn_delay[3], dev->reverb.target.refl_delay, dev->reverb.target.late_tap_delay[0]);
         dev->reverb_dirty = FALSE;
     }
-    BOOL use_reverb = dev->eax_used && dev->reverb.mem;
+    BOOL use_reverb = dev->eax_used && dev->reverb.eng[0].mem;
     rl_buffer *b = dev->playing;
     while (b) {
         rl_buffer *next = b->next_playing;
@@ -258,7 +257,7 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     REFERENCE_TIME period = 0;
     IAudioClient_GetDevicePeriod(w->client, &period, NULL);
 
-    if (dev->out_rate != mixfmt->nSamplesPerSec || !dev->reverb.mem) {
+    if (dev->out_rate != mixfmt->nSamplesPerSec || !dev->reverb.eng[0].mem) {
         EnterCriticalSection(&dev->lock);
         rl_reverb_free(&dev->reverb);
         rl_reverb_init(&dev->reverb, mixfmt->nSamplesPerSec);

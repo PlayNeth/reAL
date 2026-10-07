@@ -190,12 +190,9 @@ static double tail_energy(float decay, float t)
     const uint32_t rate = 48000, frames = rate * 3;
     rl_reverb r;
     rl_reverb_init(&r, rate);
-    rl_reverb_params p;
-    rl_eax1_to_params(0, 1.0f, decay, 1.0f, &p);   /* damping 1.0 -> hf ratio 1.0: flat decay */
-    p.reflections = -10000; p.room_hf = 0;
-    rl_reverb_set_params(&r, &p);
+    rl_reverb_set_eax1(&r, 0, 1.0f, decay, 1.0f);   /* damping 1.0 -> hf ratio 1.0: flat decay */
     float *in = calloc(frames, sizeof(float)), *out = calloc(frames * 2, sizeof(float));
-    in[0] = 1.0f;
+    in[200] = 1.0f;          /* ALchemy fades the input in over the first 128 samples */
     rl_reverb_process(&r, in, out, frames);
     double e = 0;
     uint32_t s = (uint32_t)(t * rate), n = rate / 10;

@@ -23,7 +23,7 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | HRTF 3D (headphones) | ✅ from `reAL_hrtf.bin` (measured with hrtfprobe); stereo panning if absent |
 | Reports hardware-accelerated 3D voices (LOCHARDWARE), like ALchemy | ✅ |
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
-| EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's exact parameter conversion; own reverb DSP (reflections + FDN) |
+| EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's own reverb (CHRvbReverb) ported and verified sample-for-sample against ALchemy, incl. its stereo virtualizer |
 | Volume/pan/send smoothing, declicked position jumps | ✅ |
 | EAX 2–5 | ⏳ reported unsupported |
 | Doppler, CMSS, EAX 2+ reverb + effects | ⏳ |
@@ -68,7 +68,7 @@ environment turns on API logging to `reAL.log` next to the game's exe.
 2. EAX 1/2 via IKsPropertySet: listener reverb props + per-source direct/room/occlusion/obstruction
    (start from `CSensPropertySet` / `CSensBufferEAX1/2`)
 3. HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), doppler
-4. HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)
+4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
 5. EAX 3/4/5: FX slots, sends, the 11 remaining effects (`CPlug*`)
 6. CMSS-3D upmix, speaker configs > 2.0, better SRC
 
