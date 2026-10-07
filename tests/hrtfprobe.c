@@ -4,15 +4,18 @@
  * plain 2D sync clicks. Record the system output while it runs; tools/hrtf_extract.py turns the
  * recording into per-position left/right impulse responses.
  *
- * Usage: hrtfprobe.exe [path\to\dsound-implementation.dll]
+ * Usage: hrtfprobe.exe [path\to\dsound-implementation.dll] [--norecord]
  *   default: alchemy_dsound.dll next to the exe if present, else dsound.dll
- * Writes hrtfprobe.txt (schedule + what the implementation reports).
+ * Writes hrtfprobe.txt (schedule + what the implementation reports) and, unless --norecord,
+ * hrtfprobe.wav: a WASAPI loopback recording of the default output device made while it runs.
  */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
 #include <mmsystem.h>
 #include <dsound.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 #include <math.h>
 #include <stdarg.h>
 #include <string.h>
@@ -52,6 +55,71 @@ static const GUID EAX4_S = { 0x1b86b823, 0x22df, 0x4eae, { 0x8b, 0x3c, 0x12, 0x7
 static const GUID EAX5_C = { 0x57e13437, 0xb932, 0x4ab2, { 0xb8, 0xbd, 0x52, 0x66, 0xc1, 0xa8, 0x87, 0xee } };
 static const GUID EAX5_S = { 0x5edf82f0, 0x24a7, 0x4f38, { 0x8e, 0x64, 0x2f, 0x09, 0xca, 0x05, 0xde, 0xe1 } };
 
+/* ------------------------------------------------------------- loopback recorder */
+static const GUID R_CLSID_MMDeviceEnumerator = { 0xBCDE0395, 0xE52F, 0x467C, { 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E } };
+static const GUID R_IID_IMMDeviceEnumerator  = { 0xA95664D2, 0x9614, 0x4F35, { 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6 } };
+static const GUID R_IID_IAudioClient         = { 0x1CB9AD4C, 0xDBFA, 0x4C32, { 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2 } };
+static const GUID R_IID_IAudioCaptureClient  = { 0xC8ADBD64, 0xE71E, 0x48A0, { 0xA4, 0xDE, 0x18, 0x5C, 0x39, 0x5C, 0xD3, 0x17 } };
+
+static volatile LONG g_rec_stop, g_rec_ok;
+static HANDLE g_rec_ready;
+
+static DWORD WINAPI rec_thread(LPVOID arg)
+{
+    const char *path = arg;
+    IMMDeviceEnumerator *en = NULL; IMMDevice *dev = NULL; IAudioClient *ac = NULL; IAudioCaptureClient *cc = NULL;
+    WAVEFORMATEX *wf = NULL; FILE *f = NULL;
+    HRESULT hr;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    hr = CoCreateInstance(&R_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL, &R_IID_IMMDeviceEnumerator, (void **)&en);
+    if (SUCCEEDED(hr)) hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(en, eRender, eConsole, &dev);
+    if (SUCCEEDED(hr)) hr = IMMDevice_Activate(dev, &R_IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&ac);
+    if (SUCCEEDED(hr)) hr = IAudioClient_GetMixFormat(ac, &wf);
+    if (SUCCEEDED(hr)) hr = IAudioClient_Initialize(ac, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 10000000, 0, wf, NULL);
+    if (SUCCEEDED(hr)) hr = IAudioClient_GetService(ac, &R_IID_IAudioCaptureClient, (void **)&cc);
+    if (SUCCEEDED(hr)) f = fopen(path, "wb");
+    if (FAILED(hr) || !f) {
+        P("loopback recording unavailable (%08lx)%s\n", hr, SUCCEEDED(hr) && !f ? " - cannot create hrtfprobe.wav" : "");
+        SetEvent(g_rec_ready);
+        return 1;
+    }
+    DWORD fmtlen = sizeof(WAVEFORMATEX) + wf->cbSize, zero = 0;
+    fwrite("RIFF", 1, 4, f); fwrite(&zero, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f);
+    fwrite(&fmtlen, 4, 1, f); fwrite(wf, 1, fmtlen, f);
+    fwrite("data", 1, 4, f); long data_at = ftell(f); fwrite(&zero, 4, 1, f);
+    P("recording %s: %lu Hz, %u ch, %u bit, tag %x\n", path, wf->nSamplesPerSec, wf->nChannels, wf->wBitsPerSample, wf->wFormatTag);
+    IAudioClient_Start(ac);
+    InterlockedExchange(&g_rec_ok, 1);
+    SetEvent(g_rec_ready);
+
+    DWORD total = 0;
+    BYTE *silence = calloc(1, wf->nBlockAlign * 48000);
+    while (!g_rec_stop) {
+        Sleep(10);
+        UINT32 n = 0;
+        while (SUCCEEDED(IAudioCaptureClient_GetNextPacketSize(cc, &n)) && n) {
+            BYTE *data; UINT32 frames; DWORD flags;
+            if (FAILED(IAudioCaptureClient_GetBuffer(cc, &data, &frames, &flags, NULL, NULL))) break;
+            DWORD bytes = frames * wf->nBlockAlign;
+            if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) && frames <= 48000) fwrite(silence, 1, bytes, f);
+            else fwrite(data, 1, bytes, f);
+            total += bytes;
+            IAudioCaptureClient_ReleaseBuffer(cc, frames);
+        }
+    }
+    IAudioClient_Stop(ac);
+    DWORD riff = 4 + 8 + fmtlen + 8 + total;
+    fseek(f, data_at, SEEK_SET); fwrite(&total, 4, 1, f);
+    fseek(f, 4, SEEK_SET); fwrite(&riff, 4, 1, f);
+    fclose(f);
+    P("recorded %lu bytes\n", total);
+    free(silence);
+    CoTaskMemFree(wf);
+    IAudioCaptureClient_Release(cc); IAudioClient_Release(ac); IMMDevice_Release(dev); IMMDeviceEnumerator_Release(en);
+    CoUninitialize();
+    return 0;
+}
+
 static IDirectSoundBuffer *make_click_buffer(IDirectSound *ds, DWORD flags)
 {
     WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 1, RATE, RATE * 2, 2, 16, 0 };
@@ -81,6 +149,8 @@ static void play_slot(IDirectSoundBuffer *b, const char *label)
 int main(int argc, char **argv)
 {
     char dll[MAX_PATH];
+    int record = 1;
+    if (argc > 1 && !strcmp(argv[argc - 1], "--norecord")) { record = 0; argc--; }
     if (argc > 1) lstrcpynA(dll, argv[1], MAX_PATH);
     else {
         GetModuleFileNameA(NULL, dll, MAX_PATH);
@@ -156,6 +226,13 @@ int main(int argc, char **argv)
     }
     IDirectSound3DBuffer_SetMinDistance(b3d, 1.0f, DS3D_IMMEDIATE);
 
+    HANDLE rec = NULL;
+    if (record) {
+        g_rec_ready = CreateEventA(NULL, TRUE, FALSE, NULL);
+        rec = CreateThread(NULL, 0, rec_thread, "hrtfprobe.wav", 0, NULL);
+        WaitForSingleObject(g_rec_ready, 10000);
+    }
+
     /* warm-up so device start-up latency isn't in the first slot */
     Sleep(1000);
     P("BEGIN\n");
@@ -182,6 +259,11 @@ int main(int argc, char **argv)
         play_slot(b3, label);
     }
     P("END\n");
+    if (rec) {
+        Sleep(500);
+        InterlockedExchange(&g_rec_stop, 1);
+        WaitForSingleObject(rec, 10000);
+    }
 
     if (ks) IKsPropertySet_Release(ks);
     IDirectSound3DBuffer_Release(b3d);
@@ -191,5 +273,10 @@ int main(int argc, char **argv)
     if (prim) IDirectSoundBuffer_Release(prim);
     IDirectSound_Release(ds);
     fclose(g_out);
+    if (record && !g_rec_ok) {
+        printf("\nNo recording was made - record the output yourself while running with --norecord.\n");
+        return 2;
+    }
+    printf("\nDone. Send hrtfprobe.wav and hrtfprobe.txt.\n");
     return 0;
 }
