@@ -83,3 +83,18 @@ docs/       RE notes, vtables.json (every ALchemy class + vtable)
 ```
 
 Personal project. ALchemy is © Creative Technology. This repo contains no Creative code or binaries.
+
+## dstrace — DirectSound API tracer
+
+`build/tracer/dsound.dll` sits in front of any other dsound.dll and logs every call the game makes
+and what came back, including the raw values of every EAX property set/get. This is how we capture
+reference traces from ALchemy: its software engine has no call logging of its own.
+
+```
+game dir/
+  dsound.dll            <- build/tracer/dsound.dll
+  alchemy_dsound.dll    <- ALchemy's dsound.dll, renamed
+  (optional) dstrace.ini:  target=alchemy_dsound.dll   level=1|2
+```
+Run with `WINEDLLOVERRIDES=dsound=n,b`. Output: `dstrace.log` next to the game exe.
+`level=2` adds per-frame calls (Lock/Unlock/GetCurrentPosition/GetStatus/AddRef/Release).

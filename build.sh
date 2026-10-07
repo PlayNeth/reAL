@@ -29,6 +29,12 @@ $CC $CFLAGS -shared -o build/dsound.dll $SRCS src/dsound.def $LDFLAGS -lole32 -l
 rm -f build/dsound.lib build/dsound.pdb build/dllmain.lib
 echo "built build/dsound.dll"
 
+# dstrace: API tracer that sits in front of another dsound.dll (e.g. ALchemy's)
+mkdir -p build/tracer
+$CC $CFLAGS -shared -o build/tracer/dsound.dll tracer/trace.c tracer/dsound.def $LDFLAGS -lole32 -luuid
+rm -f build/tracer/dsound.lib build/tracer/dsound.pdb build/tracer/trace.lib
+echo "built build/tracer/dsound.dll"
+
 # runtime smoke test (run it with: cd build && WINEDLLOVERRIDES=dsound=n wine dstest.exe)
 $CC -O1 -o build/dstest.exe tests/dstest.c -lole32 -luuid
 rm -f build/dstest.lib build/dstest.pdb
