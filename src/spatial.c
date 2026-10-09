@@ -31,10 +31,14 @@ void rl_source_defaults(rl_source3d *s)
     s->mode = RL_DS3DMODE_NORMAL; s->mute_at_max = 0;
 }
 
-void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain)
+void rl_spatial_geometry(const rl_listener3d *l, const rl_source3d *s, rl_geom *g)
 {
-    if (dist_gain) *dist_gain = 1.0f;
-    if (s->mode == RL_DS3DMODE_DISABLE) { gains[0] = gains[1] = 1.0f; return; }
+    g->pan[0] = g->pan[1] = 1.0f;
+    g->dist_gain = g->cone_gain = 1.0f;
+    g->x = 0.0f;
+    g->muted = 0;
+    if (s->mode == RL_DS3DMODE_DISABLE) { g->cone_factor = 1.0f; return; }   /* as ALchemy */
+    g->cone_factor = 0.0f;
 
     /* DirectSound is left-handed: +x right, +y up, +z forward. right = top x front. */
     rl_vec3 front = norm(l->front, v3(0, 0, 1));
@@ -51,18 +55,21 @@ void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2],
     float dist = len(rel);
 
     /* distance attenuation, DS3D inverse model with rolloff */
-    float gain = 1.0f;
-    if (s->mute_at_max && dist > s->max_dist) gain = 0.0f;
-    else {
+    if (s->mute_at_max && dist > s->max_dist) {
+        g->dist_gain = 0.0f;
+        g->muted = 1;
+    } else {
         float d = dist < s->min_dist ? s->min_dist : dist;
         if (d > s->max_dist) d = s->max_dist;
         float denom = s->min_dist + l->rolloff_factor * (d - s->min_dist);
-        if (denom > 1e-6f) gain = s->min_dist / denom;
-        if (gain > 1.0f) gain = 1.0f;
+        if (denom > 1e-6f) g->dist_gain = s->min_dist / denom;
+        if (g->dist_gain > 1.0f) g->dist_gain = 1.0f;
     }
+    if (dist > s->min_dist && s->max_dist > s->min_dist && s->min_dist > 0.0f)
+        g->x = (dist < s->max_dist ? dist : s->max_dist) / s->min_dist - 1.0f;
 
-    /* sound cone */
-    if (gain > 0.0f && (s->cone_inside < 360 || s->cone_outside < 360) && dist > 1e-6f) {
+    /* sound cone: ALchemy interpolates the outside volume in millibels */
+    if ((s->cone_inside < 360 || s->cone_outside < 360) && dist > 1e-6f) {
         rl_vec3 to_listener = (s->mode == RL_DS3DMODE_HEADRELATIVE)
             ? v3(-rel.x, -rel.y, -rel.z) : sub(l->pos, s->pos);
         rl_vec3 o = norm(s->cone_orient, v3(0, 0, 1));
@@ -70,21 +77,28 @@ void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2],
         if (c > 1.0f) c = 1.0f; else if (c < -1.0f) c = -1.0f;
         float angle = acosf(c) * (360.0f / 3.14159265f); /* full cone angle equivalent */
         float in = (float)s->cone_inside, out = (float)s->cone_outside;
-        float cg = 1.0f, og = rl_db100_to_gain(s->cone_outside_volume);
-        if (angle >= out) cg = og;
-        else if (angle > in && out > in) cg = 1.0f + (og - 1.0f) * (angle - in) / (out - in);
-        gain *= cg;
+        if (angle >= out) g->cone_factor = 1.0f;
+        else if (angle > in && out > in) g->cone_factor = (angle - in) / (out - in);
+        g->cone_gain = rl_db100_to_gain((int32_t)lrintf((float)s->cone_outside_volume * g->cone_factor));
     }
-
-    if (dist_gain) *dist_gain = gain;
 
     /* equal power pan from azimuth */
     float x = dist > 1e-6f ? rel.x / dist : 0.0f;
     float a = (x + 1.0f) * 0.78539816f; /* 0..pi/2 */
-    gains[0] = cosf(a) * 1.41421356f * gain;
-    gains[1] = sinf(a) * 1.41421356f * gain;
-    if (gains[0] > gain) gains[0] = gain; /* keep centre at unity, sides <= unity */
-    if (gains[1] > gain) gains[1] = gain;
+    g->pan[0] = cosf(a) * 1.41421356f;
+    g->pan[1] = sinf(a) * 1.41421356f;
+    if (g->pan[0] > 1.0f) g->pan[0] = 1.0f; /* keep centre at unity, sides <= unity */
+    if (g->pan[1] > 1.0f) g->pan[1] = 1.0f;
+}
+
+void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain)
+{
+    rl_geom g;
+    rl_spatial_geometry(l, s, &g);
+    float gain = g.dist_gain * g.cone_gain;
+    if (dist_gain) *dist_gain = gain;
+    gains[0] = g.pan[0] * gain;
+    gains[1] = g.pan[1] * gain;
 }
 
 void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *az, float *el)

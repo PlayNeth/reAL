@@ -25,8 +25,9 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
 | EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's own reverb (CHRvbReverb) ported and verified sample-for-sample against ALchemy, incl. its stereo virtualizer |
 | Volume/pan/send smoothing, declicked position jumps | ✅ |
-| EAX 2–5 | ⏳ reported unsupported |
-| Doppler, CMSS, EAX 2+ reverb + effects | ⏳ |
+| EAX 2.0 and 3.0 (listener reverb incl. environment size scaling, per-buffer direct/room/HF, obstruction, occlusion, exclusion, roll-off, air absorption) | ✅ ALchemy's property handling and per-source model ported; verified bit-for-bit against ALchemy in the emulator |
+| EAX 4–5 | ⏳ reported unsupported (games fall back to EAX 3) |
+| Doppler, CMSS, EAX 4/5 effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 
 Tested under Wine 9.0 (32-bit prefix → winepulse → PulseAudio). `tests/dstest.c` passes and the
@@ -65,11 +66,11 @@ environment turns on API logging to `reAL.log` next to the game's exe.
 ## Roadmap
 
 1. ~~DirectSound core + WASAPI mixer~~
-2. EAX 1/2 via IKsPropertySet: listener reverb props + per-source direct/room/occlusion/obstruction
-   (start from `CSensPropertySet` / `CSensBufferEAX1/2`)
+2. ~~EAX 1/2/3 via IKsPropertySet: listener reverb props + per-source direct/room/occlusion/obstruction~~
+   done (src/eax.c)
 3. HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), doppler
 4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
-5. EAX 3/4/5: FX slots, sends, the 11 remaining effects (`CPlug*`)
+5. EAX 4/5: FX slots, sends, the 11 remaining effects (`CPlug*`); reflections/reverb panning
 6. CMSS-3D upmix, speaker configs > 2.0, better SRC
 
 ## Repo layout

@@ -77,16 +77,72 @@ void rl_device_commit_3d(rl_device *dev)
     }
 }
 
-void rl_device_eax1_changed(rl_device *dev)
+static void update_all_gains(rl_device *dev)
+{
+    for (rl_buffer *b = dev->all; b; b = b->next_all)
+        if (!b->is_primary) rl_buffer_update_gains(b);
+}
+
+/* The first EAX call of a version loads the reverb (ALchemy fn 0x10042220) and, when the game switches
+ * versions, that version's listener properties start from their defaults (fns 0x1004bb40 / 0x100456b0). */
+void rl_device_eax_use(rl_device *dev, int version)
 {
     BOOL first = !dev->eax_used;
     dev->eax_used = TRUE;
-    dev->reverb_dirty = TRUE;
-    if (first) {
-        LOG_INFO("EAX 1.0 in use: reverb enabled");
-        for (rl_buffer *b = dev->all; b; b = b->next_all)
-            if (!b->is_primary) rl_buffer_update_gains(b);
+    if (dev->eax_version == version) return;
+    LOG_INFO("EAX %d.0 in use%s", version, first ? ": reverb enabled" : "");
+    dev->eax_version = version;
+    if (version == 1) {
+        dev->eax1_env = 0;
+        dev->eax1_volume = rl_eax1_presets[0].volume;
+        dev->eax1_decay = rl_eax1_presets[0].decay;
+        dev->eax1_damping = rl_eax1_presets[0].damping;
+    } else if (version == 2) {
+        eax2l_reset(&dev->eax2l);
+    } else {
+        eax3l_reset(&dev->eax3l);
     }
+    dev->reverb_dirty = TRUE;
+    update_all_gains(dev);
+}
+
+void rl_device_eax1_changed(rl_device *dev)
+{
+    dev->reverb_dirty = TRUE;
+}
+
+void rl_device_eax_listener_changed(rl_device *dev)
+{
+    dev->reverb_dirty = TRUE;
+}
+
+static void apply_reverb(rl_device *dev)
+{
+    if (dev->eax_version == 2 || dev->eax_version == 3) {
+        int changed = dev->eax_version == 2 ? eax2l_apply(&dev->eax2l, &dev->eax_props)
+                                            : eax3l_apply(&dev->eax3l, &dev->eax_props);
+        if (!changed) return;
+        rl_reverb_set_props(&dev->reverb, &dev->eax_props);
+        update_all_gains(dev);      /* the sources' room / HF gains depend on decay, air absorption, ... */
+        if (dev->eax_version == 2)
+            LOG_EAX("reverb: EAX2 env %lu room %ld decay %.2f hf ratio %.2f -> fdn %d/%d/%d/%d refl %d late %d",
+                    (unsigned long)dev->eax2l.p.environment, (long)dev->eax2l.p.room, dev->eax2l.p.decay_time,
+                    dev->eax2l.p.decay_hf_ratio, dev->reverb.target.fdn_delay[0], dev->reverb.target.fdn_delay[1],
+                    dev->reverb.target.fdn_delay[2], dev->reverb.target.fdn_delay[3], dev->reverb.target.refl_delay,
+                    dev->reverb.target.late_tap_delay[0]);
+        else
+            LOG_EAX("reverb: EAX3 env %lu room %ld decay %.2f hf ratio %.2f -> fdn %d/%d/%d/%d refl %d late %d",
+                    (unsigned long)dev->eax3l.p.environment, (long)dev->eax3l.p.room, dev->eax3l.p.decay_time,
+                    dev->eax3l.p.decay_hf_ratio, dev->reverb.target.fdn_delay[0], dev->reverb.target.fdn_delay[1],
+                    dev->reverb.target.fdn_delay[2], dev->reverb.target.fdn_delay[3], dev->reverb.target.refl_delay,
+                    dev->reverb.target.late_tap_delay[0]);
+        return;
+    }
+    rl_reverb_set_eax1(&dev->reverb, dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping);
+    LOG_EAX("reverb: env %lu volume %.3f decay %.2f damping %.3f -> fdn %d/%d/%d/%d refl %d late %d",
+            (unsigned long)dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping,
+            dev->reverb.target.fdn_delay[0], dev->reverb.target.fdn_delay[1], dev->reverb.target.fdn_delay[2],
+            dev->reverb.target.fdn_delay[3], dev->reverb.target.refl_delay, dev->reverb.target.late_tap_delay[0]);
 }
 
 /* ---------------------------------------------------------------- mixing */
@@ -112,12 +168,8 @@ static void mix(rl_device *dev, UINT32 frames)
 
     EnterCriticalSection(&dev->lock);
     if (dev->reverb_dirty) {
-        rl_reverb_set_eax1(&dev->reverb, dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping);
-        LOG_EAX("reverb: env %lu volume %.3f decay %.2f damping %.3f -> fdn %d/%d/%d/%d refl %d late %d",
-                (unsigned long)dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping,
-                dev->reverb.target.fdn_delay[0], dev->reverb.target.fdn_delay[1], dev->reverb.target.fdn_delay[2],
-                dev->reverb.target.fdn_delay[3], dev->reverb.target.refl_delay, dev->reverb.target.late_tap_delay[0]);
         dev->reverb_dirty = FALSE;
+        apply_reverb(dev);
     }
     BOOL use_reverb = dev->eax_used && dev->reverb.eng[0].mem;
     rl_buffer *b = dev->playing;
@@ -378,6 +430,9 @@ HRESULT rl_device_acquire(rl_device **out)
     dev->eax1_volume = rl_eax1_presets[0].volume;
     dev->eax1_decay = rl_eax1_presets[0].decay;
     dev->eax1_damping = rl_eax1_presets[0].damping;
+    eax2l_reset(&dev->eax2l);
+    eax3l_reset(&dev->eax3l);
+    alrv_props_default(&dev->eax_props);
     dev->quit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     dev->running = 1;
 

@@ -28,6 +28,18 @@ typedef struct rl_source3d {
 void rl_listener_defaults(rl_listener3d *l);
 void rl_source_defaults(rl_source3d *s);
 
+/* Everything the mixer and EAX need about one source as heard by the listener. */
+typedef struct rl_geom {
+    float pan[2];         /* stereo panning gains at unit level */
+    float dist_gain;      /* DS3D distance attenuation (0 when muted at max distance) */
+    float cone_gain;      /* sound cone attenuation */
+    float x;              /* (min(dist, max) - min) / min: ALchemy's distance measure, 0 inside min */
+    float cone_factor;    /* 0 inside the inner cone .. 1 outside the outer cone (1 in DISABLE mode) */
+    int   muted;          /* beyond max distance with DSBCAPS_MUTE3DATMAXDISTANCE */
+} rl_geom;
+
+void rl_spatial_geometry(const rl_listener3d *l, const rl_source3d *s, rl_geom *g);
+
 /* Compute stereo gains (multiplied with volume elsewhere). */
 /* dist_gain (may be NULL) receives the distance+cone attenuation without panning */
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain);

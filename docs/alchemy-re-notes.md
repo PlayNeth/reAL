@@ -159,6 +159,50 @@ used EAX goes away. So **a game that never makes an EAX call gets no reverb** �
 (per-buffer defaults at `.rdata 0x100b4590`: room 0 mB, active FX slots {NULL, Primary}; slot
 reverb defaults = generic, room −1000 mB, fn 0x10043f40).
 
+## EAX 2.0 / 3.0 (ported in src/eax.c, verified in the emulator)
+
+Property sets are dispatched by GUID in `0x1001eaa0`: EAX2 listener `0x10025b30`, EAX2 buffer
+`0x100255a0`, EAX3 listener `0x10026980`, EAX3 buffer `0x10026120`.  Every Get/Set first records the
+context's EAX version (ctx+0x28) and, on the first use of a version, loads the effect slots
+(`0x10042220`); a version switch resets that version's listener block (`0x1004bb40` EAX2 defaults at
+`.rdata 0x100b46b4`, `0x100456b0` EAX3 = preset 0).
+
+**Listener.** The reverb effect keeps one block per version (effect+0x2284 EAX2, +0x22f0 EAX3): the
+EAX properties, a dirty mask, and for environment-size scaling the base value of each scalable property
+plus the size it was set at.  Setters validate (EAX ranges; failures are errors), record and set dirty
+bits; EAX3 single-property setters also set the environment to 26 (custom).  Quirks kept:
+* Environment size scales decay, reflections delay (and reflections only together with it), reverb,
+  reverb delay, echo/modulation time (EAX3) with `-2000·log10` / `-3000·log10` for the levels; when the
+  scaled decay crosses its 20 s limit the reverb is rebased at the crossing size.
+* EAX3 air absorption: a new value is stored but flagged dirty only if nonzero (`0x100453f0`).
+* Environment 23 cubes the diffusion and scales decay by 0.75; environment 24 has no echo (EAX3 path
+  uses the environment of the last preset/ALL, EAX2 the current one).
+* Decay HF with DECAYHFLIMIT: `min(ratio·decay, -17.524/airAbsorptionHF)`.
+Conversion into the reverb property block: EAX2 `0x1004bba0`, EAX3 `0x10045740` (room LF, echo,
+modulation and HF/LF reference come from the preset table for EAX2).  No +300 mB bias (that is EAX1 only).
+
+**Sources** (voice update `0x10040ee0`, switch on the EAX version): EAX2 `0x1004a8a0`, EAX3
+`0x1004c890` turn the buffer block into four gains, millibel sums truncated toward zero:
+* direct = direct + obstruction·obstructionLF + occlusion·max(ODR·occlLF, ODR+occlLF−1)
+  − (EAX3 only) 2000·log10(1 + (DS3D rolloff + EAX rolloff)·X), X = (min(d,max) − min)/min.
+  EAX2 multiplies DS3D's distance gain instead.  Both multiply the cone gain.
+* direct HF (relative): EAX2 obstruction·(1−obstructionLF) + occlusion·(1−occlusionLF); EAX3
+  obstruction + occlusion·ODR − occlusion·max(..); plus air absorption
+  (listener airHF · buffer air · distance factor · rolloff · X) and, with DIRECTHFAUTO, outside volume HF ·
+  cone factor.
+* room = room + occlusion·(room ratio mix) [+ exclusion·exclusionLF], limited by the cone's power average
+  (`0x100434c0`) with ROOMAUTO, − 2000·log10(1 + (listener + buffer room rolloff)·X), with ROOMAUTO
+  − 6000·distanceFactor·rolloff·X / (342.38·decay).  Not distance attenuated otherwise.
+* room HF the same way with the HF terms, decay HF and air absorption.
+The voice gets a one-pole low-pass for direct HF and room HF at the HF reference (EAX2: 5 kHz):
+`0x10031000`, |H(f_ref)|² = gain, coefficient quantised to Q15.  DS3DMODE_DISABLE voices have X = 0,
+cone factor 1 and still feed the reverb.
+
+Verification: `re/gen_eax_gt.py` runs ALchemy's setters, listener conversions, source conversions and the
+coefficient function on random inputs in the emulator; `tests/test_eax.c` matches all of it bit for bit
+(400+400 listener sequences, 1500+1500 source cases, 3000 coefficients).  `tests/eaxtest.c` +
+`tools/eaxtest_analyze.py` check the result end to end under Wine (room −1000 mB → tail −10.0 dB, etc.).
+
 ## HRTF (measured with hrtfprobe on Windows, speaker config DSSPEAKER_HEADPHONE)
 
 * Exactly left/right mirror-symmetric; compact responses (99.9 % energy within ≤ 80 samples of

@@ -1,6 +1,7 @@
 /* reAL - IDirectSoundBuffer8 + IDirectSound3DBuffer + IDirectSoundNotify + IKsPropertySet
  *        + IDirectSound3DListener (primary buffer) */
 #include "real.h"
+#include <stdio.h>
 #include <string.h>
 
 #ifndef E_PROP_ID_UNSUPPORTED
@@ -26,34 +27,67 @@ void rl_signal_event(void *ev) { if (ev) SetEvent((HANDLE)ev); }
 
 void rl_buffer_update_gains(rl_buffer *b)
 {
+    rl_device *dev = b->dev;
     float base = rl_db100_to_gain(b->volume);
-    float g[2], dist = 1.0f;
     BOOL is3d = (b->desc.dwFlags & DSBCAPS_CTRL3D) != 0;
-    BOOL use_hrtf = is3d && b->hrtf && b->dev->hrtf.dirs && b->src3d.mode != RL_DS3DMODE_DISABLE;
-    if (is3d && b->src3d.mode != RL_DS3DMODE_DISABLE)
-        rl_spatialize(&b->dev->listener, &b->src3d, g, &dist);
-    else
-        rl_pan_gains(b->pan, g);
+    BOOL spatial = is3d && b->src3d.mode != RL_DS3DMODE_DISABLE;
+    BOOL use_hrtf = spatial && b->hrtf && dev->hrtf.dirs;
+    rl_geom geo;
+    float pan[2];
+    rl_spatial_geometry(&dev->listener, &b->src3d, &geo);
+    if (spatial) { pan[0] = geo.pan[0]; pan[1] = geo.pan[1]; }
+    else rl_pan_gains(b->pan, pan);
+
+    /* direct path level, EAX high-frequency damping and reverb send */
+    float direct = geo.dist_gain * geo.cone_gain, send = 0.0f;
+    float lp_a = 1.0f, send_lp_a = 1.0f;
+    if (is3d && dev->eax_used && dev->eax_version >= 2) {
+        /* ALchemy's EAX 2 / 3 source model (fns 0x1004a8a0 / 0x1004c890 and the voice update 0x10040ee0) */
+        eax_geom eg = { geo.x, geo.cone_factor, b->src3d.cone_inside, b->src3d.cone_outside,
+                        b->src3d.cone_outside_volume, dev->listener.distance_factor, dev->listener.rolloff_factor };
+        eax_gains o;
+        float ref;
+        if (dev->eax_version == 2) {
+            eax2_source_gains(&b->eax2, &dev->eax2l, &eg, &o);
+            direct = geo.dist_gain * geo.cone_gain * o.direct;       /* EAX 2 keeps DS3D's distance gain */
+            ref = 5000.0f;
+        } else {
+            eax3_source_gains(&b->eax3, &dev->eax3l, &eg, &o);
+            direct = o.direct * geo.cone_gain;                       /* EAX 3 computes the roll-off itself */
+            ref = dev->eax3l.p.hf_reference;
+        }
+        if (direct > 1.0f) direct = 1.0f;
+        if (geo.muted) direct = 0.0f;
+        float rate = dev->out_rate ? (float)dev->out_rate : 48000.0f;
+        float f = ref / rate;
+        if (f > 0.5f) f = 0.5f;
+        lp_a = eax_lp_coef(o.direct_hf, f);
+        send_lp_a = eax_lp_coef(o.room_hf, f);
+        send = geo.muted ? 0.0f : base * o.room;
+    } else if (is3d && dev->eax_used) {
+        /* EAX 1.0: EAX_REVERBMIX_USEDISTANCE (-1) currently means full send */
+        float mix = b->eax1_mix < 0.0f ? 1.0f : b->eax1_mix;
+        send = base * direct * mix;
+    }
+    b->voice.lp_a = lp_a;
+    b->voice.send_lp_a = send_lp_a;
+    b->voice.send_gain = send;
+
     if (use_hrtf) {
         /* HRTF carries the direction; only distance/cone attenuation and volume are gains */
         float az, el;
         rl_hrtf_filter f;
-        rl_spatial_direction(&b->dev->listener, &b->src3d, &az, &el);
-        rl_hrtf_lookup(&b->dev->hrtf, az, el, &f);
+        rl_spatial_direction(&dev->listener, &b->src3d, &az, &el);
+        rl_hrtf_lookup(&dev->hrtf, az, el, &f);
         rl_hrtf_voice_set(b->hrtf, &f);
-        g[0] = g[1] = dist;
+        pan[0] = pan[1] = 1.0f;
         b->voice.hrtf = b->hrtf;
-        b->voice.hrtf_set = &b->dev->hrtf;
+        b->voice.hrtf_set = &dev->hrtf;
     } else {
         b->voice.hrtf = NULL;
     }
-    b->voice.gain[0] = g[0] * base;
-    b->voice.gain[1] = g[1] * base;
-
-    /* EAX reverb send: only 3D (hardware) buffers feed the environment, as on EAX hardware.
-     * EAX_REVERBMIX_USEDISTANCE (-1) currently means full send; refine from ALchemy later. */
-    float mix = b->eax1_mix < 0.0f ? 1.0f : b->eax1_mix;
-    b->voice.send_gain = (is3d && b->dev->eax_used) ? base * dist * mix : 0.0f;
+    b->voice.gain[0] = pan[0] * direct * base;
+    b->voice.gain[1] = pan[1] * direct * base;
 }
 
 static DWORD orig_rate(rl_buffer *b) { return b->fmt.Format.nSamplesPerSec; }
@@ -867,6 +901,46 @@ static const GUID RL_EAX1_BUFFER =
 static const GUID RL_DSPROPSETID_VoiceManager =
     { 0x62a69bae, 0xdf9d, 0x11d1, { 0x99, 0xa6, 0x00, 0xc0, 0x4f, 0xc9, 0x9d, 0x46 } };
 
+/* EAX 2.0 and 3.0 property sets */
+static const GUID RL_EAX2_LISTENER =
+    { 0x0306a6a8, 0xb224, 0x11d2, { 0x99, 0xe5, 0x00, 0x00, 0xe8, 0xd8, 0xc7, 0x22 } };
+static const GUID RL_EAX2_BUFFER =
+    { 0x0306a6a7, 0xb224, 0x11d2, { 0x99, 0xe5, 0x00, 0x00, 0xe8, 0xd8, 0xc7, 0x22 } };
+static const GUID RL_EAX3_LISTENER =
+    { 0xa8fa6882, 0xb476, 0x11d3, { 0xbd, 0xb9, 0x00, 0xc0, 0xf0, 0x2d, 0xdf, 0x87 } };
+static const GUID RL_EAX3_BUFFER =
+    { 0xa8fa6881, 0xb476, 0x11d3, { 0xbd, 0xb9, 0x00, 0xc0, 0xf0, 0x2d, 0xdf, 0x87 } };
+
+/* which EAX 2/3 set a GUID is: 2/3 listener -> 2/3, buffer -> 12/13, else 0 */
+static int eax23_set(REFGUID set)
+{
+    if (IsEqualGUID(set, &RL_EAX2_LISTENER)) return 2;
+    if (IsEqualGUID(set, &RL_EAX3_LISTENER)) return 3;
+    if (IsEqualGUID(set, &RL_EAX2_BUFFER)) return 12;
+    if (IsEqualGUID(set, &RL_EAX3_BUFFER)) return 13;
+    return 0;
+}
+
+static HRESULT eax_hr(int r)
+{
+    return r == EAX_OK ? DS_OK : r == EAX_BADID ? E_PROP_ID_UNSUPPORTED : DSERR_INVALIDPARAM;
+}
+
+static void log_eax23(rl_buffer *b, const char *op, int which, ULONG id, const void *data, ULONG len, HRESULT hr)
+{
+    if (!g_cfg.log_eax) return;
+    static const char *names[] = { [2] = "EAX2 listener", [3] = "EAX3 listener", [12] = "EAX2 buffer", [13] = "EAX3 buffer" };
+    char v[64] = "";
+    if (data && len >= 4) {
+        int32_t i; float f;
+        memcpy(&i, data, 4); memcpy(&f, data, 4);
+        snprintf(v, sizeof(v), " %ld / %g", (long)i, f);
+    }
+    rl_log(0, "Buffer[%d]::KsProp %s %s id %lu%s len %lu%s -> %08lx", b->id, op, names[which],
+           (unsigned long)(id & ~EAX_DEFERRED), (id & EAX_DEFERRED) ? " (deferred)" : "", (unsigned long)len, v,
+           (unsigned long)hr);
+}
+
 enum { EAX1_L_ALL, EAX1_L_ENVIRONMENT, EAX1_L_VOLUME, EAX1_L_DECAYTIME, EAX1_L_DAMPING, EAX1_L_COUNT };
 enum { EAX1_B_ALL, EAX1_B_REVERBMIX, EAX1_B_COUNT };
 typedef struct { DWORD environment; float volume, decay, damping; } rl_eax1_reverb;
@@ -881,8 +955,29 @@ static HRESULT WINAPI ks_Get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
     if (ret) *ret = 0;
     HRESULT hr = E_PROP_ID_UNSUPPORTED;
 
+    int which = eax23_set(set);
+    if (which) {
+        if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return E_PROP_ID_UNSUPPORTED;
+        uint32_t got = 0;
+        int r;
+        EnterCriticalSection(&dev->lock);
+        rl_device_eax_use(dev, which % 10);
+        switch (which) {
+        case 2:  r = eax2l_get(&dev->eax2l, id, data, data_len, &got); break;
+        case 3:  r = eax3l_get(&dev->eax3l, id, data, data_len, &got); break;
+        case 12: r = eax2b_get(&This->eax2, id, data, data_len, &got); break;
+        default: r = eax3b_get(&This->eax3, id, data, data_len, &got); break;
+        }
+        LeaveCriticalSection(&dev->lock);
+        if (ret) *ret = got;
+        hr = eax_hr(r);
+        log_eax23(This, "Get", which, id, r == EAX_OK ? data : NULL, got, hr);
+        return hr;
+    }
+
     EnterCriticalSection(&dev->lock);
     if (IsEqualGUID(set, &RL_EAX1_LISTENER)) {
+        rl_device_eax_use(dev, 1);
         switch (id) {
         case EAX1_L_ALL:
             if (data_len < sizeof(rl_eax1_reverb) || !data) { hr = DSERR_INVALIDPARAM; break; }
@@ -900,6 +995,7 @@ static HRESULT WINAPI ks_Get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
             hr = DS_OK; break;
         }
     } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && (This->desc.dwFlags & DSBCAPS_CTRL3D)) {
+        rl_device_eax_use(dev, 1);
         if (id < EAX1_B_COUNT) {
             if (data_len < 4 || !data) hr = DSERR_INVALIDPARAM;
             else { *(float *)data = This->eax1_mix; if (ret) *ret = 4; hr = DS_OK; }
@@ -919,8 +1015,33 @@ static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
     (void)inst; (void)inst_len;
     HRESULT hr = E_PROP_ID_UNSUPPORTED;
 
+    int which = eax23_set(set);
+    if (which) {
+        if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return E_PROP_ID_UNSUPPORTED;
+        int r;
+        BOOL now = !(id & EAX_DEFERRED);
+        EnterCriticalSection(&dev->lock);
+        rl_device_eax_use(dev, which % 10);
+        switch (which) {
+        case 2:  r = eax2l_set(&dev->eax2l, id, data, data_len); break;
+        case 3:  r = eax3l_set(&dev->eax3l, id, data, data_len); break;
+        case 12: r = eax2b_set(&This->eax2, id, data, data_len); break;
+        default: r = eax3b_set(&This->eax3, id, data, data_len); break;
+        }
+        /* deferred settings take effect with the next immediate one (or a commit, id 0) */
+        if (r == EAX_OK && now) {
+            if (which < 10) rl_device_eax_listener_changed(dev);
+            else rl_buffer_update_gains(This);
+        }
+        LeaveCriticalSection(&dev->lock);
+        hr = eax_hr(r);
+        log_eax23(This, "Set", which, id, data, data_len, hr);
+        return hr;
+    }
+
     EnterCriticalSection(&dev->lock);
     if (IsEqualGUID(set, &RL_EAX1_LISTENER) && id < EAX1_L_COUNT) {
+        rl_device_eax_use(dev, 1);
         if (!data || data_len < (id == EAX1_L_ALL ? sizeof(rl_eax1_reverb) : 4)) hr = DSERR_INVALIDPARAM;
         else {
             hr = DS_OK;
@@ -960,6 +1081,7 @@ static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
                 (unsigned long)id, (unsigned long)dev->eax1_env, dev->eax1_volume, dev->eax1_decay, dev->eax1_damping,
                 (unsigned long)hr);
     } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && (This->desc.dwFlags & DSBCAPS_CTRL3D) && id < EAX1_B_COUNT) {
+        rl_device_eax_use(dev, 1);
         if (!data || data_len < 4) hr = DSERR_INVALIDPARAM;
         else {
             float mix = *(const float *)data;
@@ -987,6 +1109,12 @@ static HRESULT WINAPI ks_QuerySupport(IKsPropertySet *iface, REFGUID set, ULONG 
         hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
     } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && id < EAX1_B_COUNT && (This->desc.dwFlags & DSBCAPS_CTRL3D)) {
         hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
+    } else {
+        static const ULONG count[] = { [2] = EAX2L_COUNT, [3] = EAX3L_COUNT, [12] = EAX2B_COUNT, [13] = EAX3B_COUNT };
+        int which = eax23_set(set);
+        if (which && (id & ~EAX_DEFERRED) < count[which] && (which < 12 || (This->desc.dwFlags & DSBCAPS_CTRL3D))) {
+            hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
+        }
     }
     if (support) *support = s;
     LOG_EAX("Buffer[%d]::KsProp QuerySupport %s id %lu -> %08lx support %lu", This->id, rl_guid_str(set, gb),
@@ -1015,6 +1143,8 @@ static rl_buffer *alloc_buffer(rl_device *dev)
     rl_source_defaults(&b->src3d);
     b->src3d_pending = b->src3d;
     b->eax1_mix = -1.0f;   /* EAX_REVERBMIX_USEDISTANCE */
+    eax2b_defaults(&b->eax2);
+    eax3b_defaults(&b->eax3);
     return b;
 }
 
@@ -1146,6 +1276,8 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     b->src3d = src->src3d;
     b->src3d_pending = src->src3d_pending;
     b->eax1_mix = src->eax1_mix;
+    b->eax2 = src->eax2;
+    b->eax3 = src->eax3;
     b->voice.hrtf = NULL;
     if (b->desc.dwFlags & DSBCAPS_CTRL3D)
         b->hrtf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(rl_hrtf_voice));

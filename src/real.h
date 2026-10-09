@@ -13,6 +13,7 @@
 #include "spatial.h"
 #include "reverb.h"
 #include "hrtf.h"
+#include "eax.h"
 
 #define REAL_VERSION "0.1.0"
 
@@ -80,9 +81,13 @@ typedef struct rl_device {
     LONG        n_hw_buffers;     /* live non-LOCSOFTWARE secondaries (ALchemy counts these in GetCaps) */
 
     /* EAX */
-    BOOL        eax_used;         /* game touched an EAX listener property: reverb on */
+    BOOL        eax_used;         /* game made an EAX call: reverb on (ALchemy loads no effect before) */
+    int         eax_version;      /* 1..3: the EAX version the game last used (selects the source model) */
     DWORD       eax1_env;
     float       eax1_volume, eax1_decay, eax1_damping;
+    eax2_listener eax2l;          /* EAX 2 / EAX 3 listener property blocks */
+    eax3_listener eax3l;
+    alrv_props  eax_props;        /* reverb properties they are folded into */
     BOOL        reverb_dirty;
     rl_reverb   reverb;
     float      *sendbuf;
@@ -148,8 +153,10 @@ struct rl_buffer {
     struct rl_dsound *owner;    /* IDirectSound that created it (weak); NULL once that is released */
     BOOL          dead;         /* owner released: stopped for good, like real DirectSound */
 
-    /* EAX 1.0 per-buffer */
+    /* EAX per-buffer */
     float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */
+    eax2_buffer   eax2;
+    eax3_buffer   eax3;
 };
 
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out);
@@ -158,6 +165,8 @@ void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */
 void    rl_signal_event(void *ev);
 void    rl_device_eax1_changed(rl_device *dev);  /* lock held */
+void    rl_device_eax_use(rl_device *dev, int version);   /* lock held: an EAX <version> call was made */
+void    rl_device_eax_listener_changed(rl_device *dev);   /* lock held: EAX 2/3 listener properties set */
 
 /* GUIDs not always present in import libs */
 extern const GUID RL_DEVICE_GUID;

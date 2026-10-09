@@ -33,6 +33,10 @@ typedef struct rl_voice {
     /* final per-output-channel gains (stereo out) and mono reverb send gain */
     float    gain[2];
     float    send_gain;
+    /* EAX high-frequency damping: one-pole low-passes y += a (x - y) on the direct path and on the
+     * reverb send (a = 1: off), as ALchemy applies the direct HF / room HF gains */
+    float    lp_a, send_lp_a;
+    float    lp_z[2], send_z;
     /* smoothing state (owned by the mixer) */
     float    cur_gain[2];
     float    cur_send;

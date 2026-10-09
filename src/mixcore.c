@@ -98,6 +98,7 @@ void rl_voice_start(rl_voice *v)
         v->cur_gain[1] = v->gain[1];
         v->cur_send = v->send_gain;
         v->xfade_left = 0;
+        v->lp_z[0] = v->lp_z[1] = v->send_z = 0.0f;
     }
     v->playing = 1;
 }
@@ -122,6 +123,8 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
     const float dr = (v->gain[1] - gr) / (float)ramp;
     const float ds = (v->send_gain - gs) / (float)ramp;
     if (!send || (gs <= 0.0f && v->send_gain <= 0.0f)) send = NULL;
+    const float la = v->lp_a > 0.0f && v->lp_a < 1.0f ? v->lp_a : 1.0f, sa = v->send_lp_a > 0.0f && v->send_lp_a < 1.0f ? v->send_lp_a : 1.0f;
+    float z0 = v->lp_z[0], z1 = v->lp_z[1], zs = v->send_z;
 
     /* declick a position jump: crossfade from the old position over ~5 ms */
     if (v->xfade_left == RL_XFADE_PENDING) v->xfade_left = out_rate / 200 ? out_rate / 200 : 1;
@@ -145,13 +148,18 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
             v->xfade_left--;
         }
 
+        if (send) {
+            float s = 0.5f * (l + r);
+            if (sa < 1.0f) { zs += sa * (s - zs); s = zs; }
+            send[i] += s * gs;
+        }
+        if (la < 1.0f) { z0 += la * (l - z0); z1 += la * (r - z1); l = z0; r = z1; }
         if (mono) {
             mono[i] = 0.5f * (l + r) * gl;
         } else {
             out[i * 2]     += l * gl;
             out[i * 2 + 1] += r * gr;
         }
-        if (send) send[i] += 0.5f * (l + r) * gs;
 
         v->pos += step;
         if (v->pos >= end) {
@@ -166,6 +174,7 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
         }
     }
     v->cur_gain[0] = gl; v->cur_gain[1] = gr; v->cur_send = gs;
+    v->lp_z[0] = z0; v->lp_z[1] = z1; v->send_z = zs;
     if (ramp == frames) { /* ramp finished exactly at the block end */ }
 
     if (stopped) {

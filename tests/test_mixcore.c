@@ -1,5 +1,6 @@
 /* Native unit tests for the platform independent parts of reAL. */
 #include "../src/mixcore.h"
+#include "../src/eax.h"
 #include "../src/spatial.h"
 #include "../src/reverb.h"
 #include <stdlib.h>
@@ -184,6 +185,42 @@ static void test_send(void)
     CHECK(send[3] == 0.0f);
 }
 
+/* EAX HF damping: the one-pole low-pass on the direct path and on the send.  ALchemy fits the
+ * filter so the *power* response at the reference frequency equals the HF gain. */
+static double tone_power(float lp_a, int on_send, double f, uint32_t rate)
+{
+    static int16_t sine[48000];
+    for (int i = 0; i < 48000; i++) sine[i] = (int16_t)(16000 * sin(2 * M_PI * f * i / rate));
+    rl_voice v; memset(&v, 0, sizeof(v));
+    v.data = (const uint8_t *)sine; v.size = sizeof(sine); v.channels = 1; v.block = 2; v.sfmt = RL_S16;
+    v.rate = rate; v.looping = 1;
+    v.gain[0] = v.gain[1] = 1.0f; v.send_gain = 1.0f;
+    v.lp_a = on_send ? 1.0f : lp_a; v.send_lp_a = on_send ? lp_a : 1.0f;
+    rl_voice_start(&v);
+    static float out[2 * 24000], send[24000];
+    memset(out, 0, sizeof(out)); memset(send, 0, sizeof(send));
+    rl_voice_mix(&v, out, send, 24000, rate, NULL);
+    double e = 0;
+    for (int i = 12000; i < 24000; i++) e += on_send ? (double)send[i] * send[i] : (double)out[2 * i] * out[2 * i];
+    return e;
+}
+
+static void test_eax_lowpass(void)
+{
+    const uint32_t rate = 48000;
+    float a = eax_lp_coef(0.1f, 5000.0f / rate);     /* -1000 mB at 5 kHz */
+    CHECK(a > 0.0f && a < 1.0f);
+    CHECK(eax_lp_coef(1.0f, 5000.0f / rate) == 1.0f);
+    for (int on_send = 0; on_send < 2; on_send++) {
+        double ref = tone_power(1.0f, on_send, 5000, rate), hf = tone_power(a, on_send, 5000, rate);
+        double lf = tone_power(a, on_send, 100, rate) / tone_power(1.0f, on_send, 100, rate);
+        printf("     EAX low-pass (%s): power at 5 kHz %.3f (want 0.100), at 100 Hz %.3f\n",
+               on_send ? "send" : "direct", hf / ref, lf);
+        CHECK(fabs(hf / ref - 0.1) < 0.01);
+        CHECK(lf > 0.95);
+    }
+}
+
 /* energy of the reverb tail in a window starting at t seconds */
 static double tail_energy(float decay, float t)
 {
@@ -265,6 +302,7 @@ static void test_reverb(void)
 int main(void)
 {
     test_send();
+    test_eax_lowpass();
     test_eax1_conversion();
     test_declick();
     test_reverb();
