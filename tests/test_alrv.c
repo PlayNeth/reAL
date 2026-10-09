@@ -68,6 +68,9 @@ int main(int argc, char **argv)
 
         alrv r;
         if (!alrv_init(&r, 48000)) return 3;
+        /* reAL fixes ALchemy's swapped late-reverb routing of pan slots 2 and 3 (see alrv.c); swap
+         * them here so the comparison reproduces ALchemy's output */
+        { float t = P->late_out[2]; P->late_out[2] = P->late_out[3]; P->late_out[3] = t; }
         alrv_set_params(&r, P);
         /* ALchemy quirk: on the first (immediate) parameter apply the shelf's inner allpass keeps its
          * constructor coefficient 0.5 (the new value only propagates on crossfaded updates). The

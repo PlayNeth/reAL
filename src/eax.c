@@ -54,8 +54,8 @@ static float rv_size(float s)
     return v > 1.0f ? 1.0f : v;
 }
 
-/* pan vector -> (angle, spread) (fn 0x100442f0).  The CHRvbReverb parameter code in reAL does not use
- * the pans yet (non-directional distribution only), they are converted for completeness. */
+/* pan vector -> (angle, spread) (fn 0x100442f0); used by the reverb's output panning (calc_pan in
+ * alrv_params.c) */
 static void rv_pan(float out[2], const float v[3])
 {
     float x = v[0], y = v[1], z = v[2];

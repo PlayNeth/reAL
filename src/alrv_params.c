@@ -100,6 +100,80 @@ typedef struct pu_state {      /* the CHRvbParamUpdate object's scratch fields *
 static int32_t trunc_i(double v) { return (int32_t)v; }   /* FPU in chop mode */
 static int32_t round8(double v) { return (trunc_i(v) + 7) & ~7; }
 
+/* EAX 3 reflections / reverb panning (fn 0x10060250, callers 0x10060130 / 0x100601c0).
+ * pan[0]: direction in degrees, pan[1]: 1 = all around .. 0 = fully directional.  A power mix of
+ *   - an even part (the "all around" share),
+ *   - 12 virtual sources 30 degrees apart around the direction, each fading out from 30 to 60 degrees off it,
+ *     folded onto the outputs,
+ *   - plain pairwise panning between output angles 0/30/90/150/180/210/270/330,
+ * each normalised, then out = sqrt(power) * scale.  Output slots as in the parameter block (1..8). */
+static void calc_pan(float out[9], const float pan[2], double scale)
+{
+    static const float tbl[10] = { 0, 0, 30, 90, 150, 180, 210, 270, 330, 360 };
+    float near[8] = { 0 }, far[8] = { 0 }, w[12];
+    int ang = trunc_i((double)pan[0] + 360.0) % 360;
+    float c = (float)ang;
+    float f = (float)(1.0 - (double)pan[1]);
+    float a1 = (float)(1.0 - (double)f / 0.7070000171661377);
+    if (!(a1 > 0.0f)) a1 = 0.0f;
+    double D = a1;
+    float g = (float)(1.0 - D);
+    float b = (float)((double)f - 0.7070000171661377);
+    if (!(b > 0.0f)) b = 0.0f;
+    float q = (float)((double)b / 0.2930000126361847);
+    float r = (float)(1.0 - (double)q);
+    if (!(r > 0.0f)) r = 0.0f;
+    float W1 = (float)((double)q * g), W2 = (float)((double)g * r);
+
+    int hi = 0, lo = 0;
+    for (int k = 2; k < 10; k++)
+        if (!(tbl[k] < c)) { hi = k; lo = k - 1; break; }
+
+    float sum_near = 0.0f, sum_far = 0.0f;
+    for (int i = 0; i < 12; i++) {
+        float d = fabsf((float)((double)c - (double)i * 30.0));
+        float e = (float)(360.0 - d);
+        if (!(e > d)) d = e;
+        if (d < 30.0f) w[i] = 1.0f;
+        else if (d < 60.0f) w[i] = (float)(1.0 - ((double)d - 30.0) / 30.0);
+        else w[i] = 0.0f;
+        switch (i) {      /* the 12 virtual sources onto the 8 outputs */
+        case 0:  near[0] += w[i]; break;
+        case 1:  near[1] += w[i]; break;
+        case 2:  near[1] += w[i] * 0.5f; near[2] += w[i] * 0.5f; break;
+        case 3:  near[2] += w[i]; break;
+        case 4:  near[2] += w[i] * 0.5f; near[3] += w[i] * 0.5f; break;
+        case 5:  near[3] += w[i]; break;
+        case 6:  near[4] += w[i]; break;
+        case 7:  near[5] += w[i]; break;
+        case 8:  near[5] += w[i] * 0.5f; near[6] += w[i] * 0.5f; break;
+        case 9:  near[6] += w[i]; break;
+        case 10: near[6] += w[i] * 0.5f; near[7] += w[i] * 0.5f; break;
+        default: near[7] += w[i]; break;
+        }
+        sum_near += w[i];
+    }
+    for (int m = 1; m < 9; m++) {   /* far[m-1] is the output at tbl[m] */
+        if (m == hi) far[m - 1] = (float)(((double)c - tbl[m - 1]) / ((double)tbl[m] - tbl[m - 1]));
+        else if (m == lo) far[m - 1] = (float)(((double)tbl[m + 1] - c) / ((double)tbl[m + 1] - tbl[m]));
+        sum_far += far[m - 1];
+    }
+    if (hi == 9) {                  /* between 330 and 360: the other side is the 0 degree output */
+        if (c == 0.0f) c = 360.0f;
+        far[0] = (float)(((double)c - 330.0) / 30.0);
+        sum_far += far[0];
+    }
+    if (!(sum_near > 0.0f)) sum_near = 1.0f;
+    double kn = (double)W2 / sum_near, kf = (double)W1 / sum_far;
+    double even = (double)(float)(D * 0.125);
+    out[0] = 0.0f;
+    for (int i = 0; i < 8; i++) {
+        float n = (float)(near[i] * kn), fa = (float)(far[i] * kf);
+        float pw = (float)(((double)n + even) + fa);
+        out[1 + i] = (float)((double)(float)sqrt((double)pw) * scale);
+    }
+}
+
 /* reflections delay and late-reverb feed taps (fn 0x1005fcc0) */
 static void calc_feed(alrv_params *P, const alrv_props *E, double fs)
 {
@@ -162,7 +236,7 @@ static void calc_delays(pu_state *pu, alrv_params *P, const alrv_props *E, doubl
         et = E->echo_time;
         float a = (float)(1.284000039100647 - 1.215999960899353 * et);
         float b = (float)(0.16500000655651093 - et * 1.3200000524520874);
-        float t2 = (float)(echo * a + b);
+        float t2 = (float)((double)echo * a + b);
         if (t2 > 1.0f) t2 = 1.0f; else if (t2 < 0.0f) t2 = 0.0f;
         float l2 = (float)log(0.20000000298023224), l5 = (float)log(0.5);
         float ex = l2 / l5;
@@ -175,7 +249,7 @@ static void calc_delays(pu_state *pu, alrv_params *P, const alrv_props *E, doubl
         total = fsz;
     }
     /* d0*(1 + x + x^2 + x^3) = total, solved with Cardano */
-    float t11 = (float)(1.0 - total / d[0]);
+    float t11 = (float)(1.0 - (double)total / d[0]);   /* x87: the division is not rounded to float */
     float q = (float)((t11 * 27.0 - 7.0) / 54.0);
     float s = sqrtf((float)((double)q * q - -0.010973937145149432));
     float u = (float)(s + (double)q);
@@ -299,11 +373,9 @@ void alrv_compute_params(alrv_params *P, const alrv_props *E, uint32_t rate)
         P->mod_depth = trunc_i(((float)fs * 0.012000000104308128 * 0.5 - 4.0) * k);
     }
 
-    /* panning: ALchemy's default (non-directional) distribution over its 8 outputs */
-    for (int i = 1; i < 9; i++) {
-        P->early_out[i] = (float)(0.3535533905932738 * 0.45649999380111694);
-        P->late_out[i] = (float)(0.3535533905932738 * 0.9129999876022339);
-    }
+    /* panning of the reflections and the late reverb over the 8 outputs (EAX 3 pans) */
+    calc_pan(P->early_out, E->reflections_pan, 0.45649999380111694);
+    calc_pan(P->late_out, E->reverb_pan, 0.9129999876022339);
 
     calc_delays(&pu, P, E, fs);
     calc_decay(&pu, P, E, fs);

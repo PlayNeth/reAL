@@ -65,7 +65,8 @@ if command -v cc >/dev/null 2>&1; then
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then
         ./build/test_alrv_params "$GT/params.bin"
+        [ -f "$GT/params_pan.bin" ] && ./build/test_alrv_params "$GT/params_pan.bin"
         [ -f "$GT/eax.bin" ] && ./build/test_eax "$GT/eax.bin"
-        ./build/test_alrv -p "$GT" env00 env01 env02 env07 env12 env19 env22 env25 | tail -1
+        ./build/test_alrv -p "$GT" env00 env01 env02 env07 env12 env19 env22 env25 pan_mix pan_mix2 pan_r30 pan_l60 | tail -1
     fi
 fi

@@ -25,11 +25,15 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
 | EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's own reverb (CHRvbReverb) ported and verified sample-for-sample against ALchemy, incl. its stereo virtualizer |
 | Volume/pan/send smoothing, declicked position jumps | ✅ |
-| EAX 2.0 and 3.0 (listener reverb incl. environment size scaling, per-buffer direct/room/HF, obstruction, occlusion, exclusion, roll-off, air absorption) | ✅ ALchemy's property handling and per-source model ported; verified bit-for-bit against ALchemy in the emulator |
+| EAX 2.0 and 3.0 (listener reverb incl. environment size scaling, EAX 3 reflections/reverb panning, per-buffer direct/room/HF, obstruction, occlusion, exclusion, roll-off, air absorption) | ✅ ALchemy's property handling and per-source model ported; verified bit-for-bit against ALchemy in the emulator |
 | EAX 4–5 | ⏳ reported unsupported (games fall back to EAX 3) |
 | Doppler (DS3D factor, EAX 3 per-buffer factor) | ✅ ALchemy's formula, bit-identical in the emulator |
 | CMSS, EAX 4/5 effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
+
+Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output, and EAX 3
+reverb panning routes the late reverb's right-hand 30°/90° slots to front-right/side-right like the
+reflections (ALchemy swaps those two, so a reverb panned hard right lands in the front speaker).
 
 Tested under Wine 9.0 (32-bit prefix → winepulse → PulseAudio). `tests/dstest.c` passes and the
 recorded output matches the expected 3D gains.
@@ -71,7 +75,7 @@ environment turns on API logging to `reAL.log` next to the game's exe.
    done (src/eax.c)
 3. ~~HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), doppler~~ done
 4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
-5. EAX 4/5: FX slots, sends, the 11 remaining effects (`CPlug*`); reflections/reverb panning
+5. EAX 4/5: FX slots, sends, the 11 remaining effects (`CPlug*`)
 6. CMSS-3D upmix, speaker configs > 2.0, better SRC
 7. Later, once reAL is (close to) feature complete: a DirectMusic drop-in for Wine ("reDM") that works
    alongside reAL. Start with a DirectMusic tracer to see what games use (loader, segment playback,

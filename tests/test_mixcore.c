@@ -185,6 +185,34 @@ static void test_send(void)
     CHECK(send[3] == 0.0f);
 }
 
+/* EAX 3 reverb panning: a reverb panned fully right ends up louder on the right */
+static double pan_side_ratio(float angle, float spread)
+{
+    const uint32_t rate = 48000, frames = rate;
+    rl_reverb r;
+    rl_reverb_init(&r, rate);
+    alrv_props e;
+    alrv_props_default(&e);
+    alrv_props_from_eax1(&e, 0, 1.0f, 1.5f, 1.0f);
+    e.reflections_pan[0] = e.reverb_pan[0] = angle;
+    e.reflections_pan[1] = e.reverb_pan[1] = spread;
+    rl_reverb_set_props(&r, &e);
+    float *in = calloc(frames, sizeof(float)), *out = calloc(frames * 2, sizeof(float));
+    in[200] = 1.0f;
+    rl_reverb_process(&r, in, out, frames);
+    double el = 0, er = 0;
+    for (uint32_t i = 0; i < frames; i++) { el += out[2 * i] * out[2 * i]; er += out[2 * i + 1] * out[2 * i + 1]; }
+    free(in); free(out); rl_reverb_free(&r);
+    return 10 * log10(er / el);
+}
+
+static void test_reverb_pan(void)
+{
+    double c = pan_side_ratio(0, 1), right = pan_side_ratio(90, 0), left = pan_side_ratio(-90, 0);
+    printf("     reverb pan: R/L centre %.1f dB, panned right %.1f dB, panned left %.1f dB\n", c, right, left);
+    CHECK(fabs(c) < 1.0 && right > 3.0 && left < -3.0);
+}
+
 /* Doppler (ALchemy's formula) and the voice pitch it drives */
 static void test_doppler(void)
 {
@@ -336,6 +364,7 @@ int main(void)
     test_send();
     test_eax_lowpass();
     test_doppler();
+    test_reverb_pan();
     test_eax1_conversion();
     test_declick();
     test_reverb();

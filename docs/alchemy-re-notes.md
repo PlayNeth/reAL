@@ -274,6 +274,20 @@ input → HPF → LP2 → ring A (early taps) and ring B (late-input taps).
   allpasses, 0x100608a0/f0 modulation).  All float->int conversions truncate; run at 53-bit precision
   (the emulator must set FPCW=0x27F, unicorn defaults to 0 = 24-bit).  EAX1 -> properties: fn 0x1004a050
   (+300 mB on reflections and reverb, size^3/16 clamped to 1).
+- EAX 3 panning: fn 0x10060250 fills the 9 output gains (slot 0 unused) for reflections (caller
+  0x10060130, scale 0.4565) and late reverb (0x100601c0, scale 0.913) from (angle, spread), where the
+  property conversion 0x100442f0 gives angle = atan2(x, z) in degrees and spread = 1 - |v| (1 = all
+  around).  Slot angles 1..8: 0, 30, 90, 150, 180, 210, 270, 330.  Power mix of an even part, 12 virtual
+  sources 30 degrees apart (full within 30 degrees of the direction, fading to 0 at 60, folded onto the
+  slots) and a pairwise pan between neighbouring slots; out = sqrt(sum) * scale.  Port: calc_pan in
+  src/alrv_params.c, 400/400 random property sets identical (gt/params_pan.bin).
+- ALchemy bug, fixed in reAL: the late-reverb outputs multiply the SR tap by slot 2 (30 degrees) and the FR
+  tap by slot 3 (90 degrees), mirrored against the early reflections and against the left side (verified
+  in the emulator with gt/pan_r30, pan_l60).  reAL swaps them; with no panning the two gains are equal,
+  so unpanned output is unchanged.  tests/test_alrv swaps them back to compare with ALchemy.
+- FDN lengths: `1 - total / d0` is an extended-precision division (not rounded to float before the
+  subtraction); the Cardano step after it cancels heavily, so a float division shifts delays by 8 samples
+  in rare cases.
 - ALchemy quirk not reproduced: on the first, immediate parameter apply the LF-shelf allpass keeps its
   constructor coefficient 0.5; it only picks up the real value on later (crossfaded) updates.
 - Kernels zero their output and state when an input chunk is all zero; not reproduced (inaudible).

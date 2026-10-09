@@ -302,8 +302,12 @@ void alrv_process(alrv *r, const float *in, float *const out[ALRV_NOUT], uint32_
         o[ALRV_BR] += T0 * H[4];
         o[ALRV_SL] += T1 * H[7];
         o[ALRV_FL] += ring_read(&r->lout[0], r->lout_delay[0]) * H[8];
-        o[ALRV_SR] += ring_read(&r->lout[0], r->lout_delay[1]) * H[2];
-        o[ALRV_FR] += ring_read(&r->lout[1], r->lout_delay[2]) * H[3];
+        /* ALchemy multiplies these two taps by H[2] (SR) and H[3] (FR), i.e. it routes the 30 degree
+         * pan slot to the side and the 90 degree slot to the front, mirrored against the early
+         * reflections and the left side.  reAL fixes that; with an unpanned reverb H[2] == H[3] and
+         * the output is unchanged (tests/test_alrv swaps them back to compare with ALchemy). */
+        o[ALRV_SR] += ring_read(&r->lout[0], r->lout_delay[1]) * H[3];
+        o[ALRV_FR] += ring_read(&r->lout[1], r->lout_delay[2]) * H[2];
         o[ALRV_BL] += ring_read(&r->lout[1], r->lout_delay[3]) * H[6];
         ring_write(&r->lout[0], A[1]);
         ring_write(&r->lout[1], A[2]);
