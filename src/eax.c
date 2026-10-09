@@ -99,6 +99,8 @@ void eax2l_reset(eax2_listener *l)
     l->b_reverb = l->p.reverb;
     l->b_reflections = l->p.reflections;
     l->dirty = 0x80003fff;
+    /* ALchemy converts the listener before the sources; reAL may convert a source first */
+    l->decay_hf = decay_hf(l->p.decay_hf_ratio, l->p.decay_time, l->p.air_absorption_hf, l->p.flags);
 }
 
 /* environment preset (fn 0x1004b4b0) */
@@ -464,6 +466,7 @@ void eax3l_reset(eax3_listener *l)
     l->b_echo = l->p.echo_time;
     l->b_mod = l->p.mod_time;
     l->dirty = 0x80ffffff;
+    l->decay_hf = decay_hf(l->p.decay_hf_ratio, l->p.decay_time, l->p.air_absorption_hf, l->p.flags);
 }
 
 static void eax3l_size(eax3_listener *l, float size)

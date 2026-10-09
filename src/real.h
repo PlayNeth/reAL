@@ -163,6 +163,9 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out);
 void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released */
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */
+/* a known FPU state for float work on the game's threads (and the game's own state back after) */
+unsigned int rl_fpu_enter(void);
+void    rl_fpu_leave(unsigned int cw);
 void    rl_signal_event(void *ev);
 void    rl_device_eax1_changed(rl_device *dev);  /* lock held */
 void    rl_device_eax_use(rl_device *dev, int version);   /* lock held: an EAX <version> call was made */

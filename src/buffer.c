@@ -2,6 +2,7 @@
  *        + IDirectSound3DListener (primary buffer) */
 #include "real.h"
 #include <stdio.h>
+#include <float.h>
 #include <string.h>
 
 #ifndef E_PROP_ID_UNSUPPORTED
@@ -25,7 +26,31 @@ void rl_signal_event(void *ev) { if (ev) SetEvent((HANDLE)ev); }
 
 /* ======================================================================= helpers */
 
+/* Runs on the game's threads: some games unmask FPU exceptions or drop the x87 to 24-bit precision
+ * (Direct3D does). Compute with a known FPU state and give the game its own back. */
+static void update_gains(rl_buffer *b);
+
+unsigned int rl_fpu_enter(void)
+{
+    unsigned int cw = _controlfp(0, 0);
+    _controlfp(_MCW_EM | _PC_53 | _RC_NEAR, _MCW_EM | _MCW_PC | _MCW_RC);
+    return cw;
+}
+
+void rl_fpu_leave(unsigned int cw)
+{
+    _clearfp();
+    _controlfp(cw, _MCW_EM | _MCW_PC | _MCW_RC);
+}
+
 void rl_buffer_update_gains(rl_buffer *b)
+{
+    unsigned int cw = rl_fpu_enter();
+    update_gains(b);
+    rl_fpu_leave(cw);
+}
+
+static void update_gains(rl_buffer *b)
 {
     rl_device *dev = b->dev;
     float base = rl_db100_to_gain(b->volume);
@@ -945,7 +970,7 @@ enum { EAX1_L_ALL, EAX1_L_ENVIRONMENT, EAX1_L_VOLUME, EAX1_L_DECAYTIME, EAX1_L_D
 enum { EAX1_B_ALL, EAX1_B_REVERBMIX, EAX1_B_COUNT };
 typedef struct { DWORD environment; float volume, decay, damping; } rl_eax1_reverb;
 
-static HRESULT WINAPI ks_Get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
+static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
                              LPVOID data, ULONG data_len, PULONG ret)
 {
     rl_buffer *This = PROPS(iface);
@@ -1006,7 +1031,7 @@ static HRESULT WINAPI ks_Get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
     return hr;
 }
 
-static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
+static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
                              LPVOID data, ULONG data_len)
 {
     rl_buffer *This = PROPS(iface);
@@ -1094,6 +1119,24 @@ static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
                 (unsigned long)id, (unsigned long)data_len);
     }
     LeaveCriticalSection(&dev->lock);
+    return hr;
+}
+
+static HRESULT WINAPI ks_Get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
+                             LPVOID data, ULONG data_len, PULONG ret)
+{
+    unsigned int cw = rl_fpu_enter();
+    HRESULT hr = ks_get(iface, set, id, inst, inst_len, data, data_len, ret);
+    rl_fpu_leave(cw);
+    return hr;
+}
+
+static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst, ULONG inst_len,
+                             LPVOID data, ULONG data_len)
+{
+    unsigned int cw = rl_fpu_enter();
+    HRESULT hr = ks_set(iface, set, id, inst, inst_len, data, data_len);
+    rl_fpu_leave(cw);
     return hr;
 }
 

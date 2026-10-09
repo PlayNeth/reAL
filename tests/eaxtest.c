@@ -5,7 +5,7 @@
  * voice), while recording the output with WASAPI loopback.  tools/eaxtest_analyze.py measures the
  * direct click and the reverb tail of each slot.
  *
- * Usage: eaxtest.exe [2|3] [dsound.dll]   writes eaxtest.txt and eaxtest.wav
+ * Usage: eaxtest.exe [2|3] [dsound.dll] [fpe]   writes eaxtest.txt and eaxtest.wav
  */
 #define COBJMACROS
 #define INITGUID
@@ -15,6 +15,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <math.h>
+#include <float.h>
 #include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
@@ -160,6 +161,11 @@ static void slot(IDirectSoundBuffer *b, const char *label)
 int main(int argc, char **argv)
 {
     g_ver = argc > 1 ? atoi(argv[1]) : 3;
+    if (argc > 3 && !strcmp(argv[3], "fpe")) {
+        /* behave like a game that unmasks FPU exceptions and runs the x87 at 24 bits (Direct3D) */
+        _controlfp(_PC_24, _MCW_PC);
+        _controlfp(~(_EM_INVALID | _EM_ZERODIVIDE | _EM_OVERFLOW) & _MCW_EM, _MCW_EM);
+    }
     const char *dll = argc > 2 ? argv[2] : "dsound.dll";
     g_out = fopen("eaxtest.txt", "w");
     QueryPerformanceFrequency(&g_freq); QueryPerformanceCounter(&g_t0);
