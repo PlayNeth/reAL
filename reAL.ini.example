@@ -26,6 +26,10 @@ logeax=false
 ; (only useful when reAL is installed per-game, not as the system dsound.dll)
 ;enabled=true
 ;realdsound=C:\windows\system32\dsound_orig.dll
+; DirectMusic games under Wine: Microsoft's DirectMusic (winetricks directmusic) needs two private
+; DirectSound interfaces that Wine's dsound lacks. reAL passes them to the real dsound, so point
+; realdsound= at Microsoft's dsound.dll for those games (confirmed with Midnight Club II).
+; disabledirectmusic=true refuses them, as in ALchemy.
 
 ; per-game examples
 [EverQuest2.exe]
