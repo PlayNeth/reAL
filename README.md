@@ -73,6 +73,11 @@ environment turns on API logging to `reAL.log` next to the game's exe.
 4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
 5. EAX 4/5: FX slots, sends, the 11 remaining effects (`CPlug*`); reflections/reverb panning
 6. CMSS-3D upmix, speaker configs > 2.0, better SRC
+7. Later, once reAL is (close to) feature complete: a DirectMusic drop-in for Wine ("reDM") that works
+   alongside reAL. Start with a DirectMusic tracer to see what games use (loader, segment playback,
+   DLS synth first; styles/chord maps only if needed); the synth could mix straight into reAL.
+   Motivation: Wine's dmime/dmsynth still stub parts of shutdown (Midnight Club II crashes in mc2.exe
+   right after `performance_CloseDown`), and `gm.dls` is missing without Microsoft's files.
 
 ## Repo layout
 
