@@ -600,10 +600,15 @@ int eax3l_set(eax3_listener *l, uint32_t id, const void *data, uint32_t len)
         if (fne(fv, l->p.mod_time)) { l->b_mod = l->p.mod_time = fv; l->p.environment = 26; l->dirty |= 0x20000; }
         return EAX_OK;
     case EAX3L_MODULATIONDEPTH: SET3F(mod_depth, 0.0f, 1.0f, 0x40000);
-    case EAX3L_AIRABSORPTIONHF:     /* fn 0x100453f0 stores first and only flags a nonzero value */
+    case EAX3L_AIRABSORPTIONHF: {
+        /* ALchemy (fn 0x100453f0) stores the value but only flags a nonzero one, so going back to 0
+         * leaves the reverb's HF decay limited by the old value until something else changes.  reAL
+         * also flags a change to 0 (setting 0 when it already is 0 stays a no-op). */
         if (!in_range(fv, -100.0f, 0.0f)) return EAX_BADVALUE;
+        float old = l->p.air_absorption_hf;
         l->p.air_absorption_hf = fv;
-        if (fv == 0.0f) return EAX_OK;
+        if (fv == 0.0f && old == 0.0f) return EAX_OK;
+        }
         l->p.environment = 26;
         l->dirty |= 0x80000;
         return EAX_OK;

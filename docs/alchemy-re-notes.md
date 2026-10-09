@@ -180,7 +180,8 @@ bits; EAX3 single-property setters also set the environment to 26 (custom).  Qui
 * Environment size scales decay, reflections delay (and reflections only together with it), reverb,
   reverb delay, echo/modulation time (EAX3) with `-2000·log10` / `-3000·log10` for the levels; when the
   scaled decay crosses its 20 s limit the reverb is rebased at the crossing size.
-* EAX3 air absorption: a new value is stored but flagged dirty only if nonzero (`0x100453f0`).
+* EAX3 air absorption: a new value is stored but flagged dirty only if nonzero (`0x100453f0`), so
+  going back to 0 keeps the old DECAYHFLIMIT cap on the HF decay.  **Not kept:** reAL flags a change to 0.
 * Environment 23 cubes the diffusion and scales decay by 0.75; environment 24 has no echo (EAX3 path
   uses the environment of the last preset/ALL, EAX2 the current one).
 * Decay HF with DECAYHFLIMIT: `min(ratio·decay, -17.524/airAbsorptionHF)`.

@@ -117,5 +117,23 @@ int main(int argc, char **argv)
     printf("EAX3 listener %d/%d, EAX2 listener %d/%d, EAX3 source %d/%d, EAX2 source %d/%d, lp coef %d/%d identical; "
            "%d setter results differ\n",
            n[3] - bad[3], n[3], n[2] - bad[2], n[2], n[13] - bad[13], n[13], n[12] - bad[12], n[12], n[20] - bad[20], n[20], badret);
-    return (bad[2] || bad[3] || bad[12] || bad[13] || bad[20] || badret) ? 1 : 0;
+
+    /* reAL fix: setting EAX 3 air absorption back to 0 lifts the DECAYHFLIMIT cap on the HF decay
+     * (ALchemy ignores the change until another property is set) */
+    int fixfail = 0;
+    {
+        eax3_listener l; alrv_props e;
+        eax3l_reset(&l); alrv_props_default(&e);
+        float decay = 20.0f, ratio = 2.0f, air = -100.0f, zero = 0.0f;
+        eax3l_set(&l, EAX3L_DECAYTIME, &decay, 4); eax3l_set(&l, EAX3L_DECAYHFRATIO, &ratio, 4);
+        eax3l_set(&l, EAX3L_AIRABSORPTIONHF, &air, 4);
+        eax3l_apply(&l, &e);
+        float capped = e.decay_hf;
+        eax3l_set(&l, EAX3L_AIRABSORPTIONHF, &zero, 4);
+        int changed = eax3l_apply(&l, &e);
+        printf("air absorption -> 0: decay HF %.3f s -> %.3f s (want %.3f)\n", capped, e.decay_hf, ratio * decay);
+        fixfail = !(capped < ratio * decay && changed && e.decay_hf == ratio * decay);
+        if (fixfail) printf("  FAILED\n");
+    }
+    return (bad[2] || bad[3] || bad[12] || bad[13] || bad[20] || badret || fixfail) ? 1 : 0;
 }

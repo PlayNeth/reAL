@@ -31,9 +31,10 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | CMSS, EAX 4/5 effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 
-Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output, and EAX 3
+Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; EAX 3
 reverb panning routes the late reverb's right-hand 30°/90° slots to front-right/side-right like the
-reflections (ALchemy swaps those two, so a reverb panned hard right lands in the front speaker).
+reflections (ALchemy swaps those two, so a reverb panned hard right lands in the front speaker);
+and setting EAX 3 air absorption back to 0 takes effect (ALchemy keeps the old HF-decay limit).
 
 Tested under Wine 9.0 (32-bit prefix → winepulse → PulseAudio). `tests/dstest.c` passes and the
 recorded output matches the expected 3D gains.
