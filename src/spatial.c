@@ -91,6 +91,30 @@ void rl_spatial_geometry(const rl_listener3d *l, const rl_source3d *s, rl_geom *
     if (g->pan[1] > 1.0f) g->pan[1] = 1.0f;
 }
 
+float rl_spatial_doppler(const rl_listener3d *l, const rl_source3d *s, float factor)
+{
+    if (s->mode == RL_DS3DMODE_DISABLE || factor == 0.0f) return 1.0f;
+    rl_vec3 d, lv;
+    if (s->mode == RL_DS3DMODE_HEADRELATIVE) {   /* listener at the origin, not moving */
+        d = s->pos;
+        lv = v3(0, 0, 0);
+    } else {
+        d = sub(s->pos, l->pos);
+        lv = l->vel;
+    }
+    float dist = len(d);
+    if (!(dist > 0.0f)) return 1.0f;
+    rl_vec3 u = v3(d.x / dist, d.y / dist, d.z / dist);   /* listener -> source */
+    double vs = (double)dot(s->vel, u);                   /* source moving away */
+    double vl = (double)dot(lv, u);                       /* listener moving towards the source */
+    if (vs == vl) return 1.0f;
+    float df = l->distance_factor > 0.0f ? l->distance_factor : 1.0f;
+    float c = (float)(342.3800048828125 / df);
+    float r = (float)((c + factor * vl) / (factor * vs + c));
+    if (r < 0.0f) return 0.0f;
+    return r > 10.0f ? 10.0f : r;
+}
+
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain)
 {
     rl_geom g;

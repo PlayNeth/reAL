@@ -94,6 +94,14 @@ static void update_gains(rl_buffer *b)
         float mix = b->eax1_mix < 0.0f ? 1.0f : b->eax1_mix;
         send = base * direct * mix;
     }
+    /* Doppler: EAX 3 adds the buffer's own factor to the listener's (ALchemy caps the sum at 10) */
+    float dop = dev->listener.doppler_factor;
+    if (is3d && dev->eax_used && dev->eax_version == 3) {
+        dop += b->eax3.doppler;
+        if (dop > 10.0f) dop = 10.0f;
+    }
+    b->voice.pitch = spatial ? rl_spatial_doppler(&dev->listener, &b->src3d, dop) : 1.0f;
+
     b->voice.lp_a = lp_a;
     b->voice.send_lp_a = send_lp_a;
     b->voice.send_gain = send;

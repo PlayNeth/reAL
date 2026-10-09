@@ -40,6 +40,11 @@ typedef struct rl_geom {
 
 void rl_spatial_geometry(const rl_listener3d *l, const rl_source3d *s, rl_geom *g);
 
+/* DirectSound3D Doppler as ALchemy computes it (fn 0x10043420): only the velocity components along
+ * the listener-source line count, c = 342.38 m/s scaled by the distance factor, result 0..10.
+ * factor: the listener's Doppler factor (EAX 3 adds the buffer's own). */
+float rl_spatial_doppler(const rl_listener3d *l, const rl_source3d *s, float factor);
+
 /* Compute stereo gains (multiplied with volume elsewhere). */
 /* dist_gain (may be NULL) receives the distance+cone attenuation without panning */
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain);

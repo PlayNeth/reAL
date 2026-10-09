@@ -27,6 +27,7 @@ typedef struct rl_voice {
     /* playback state */
     uint64_t pos;           /* 32.32 fixed point frame position */
     uint32_t rate;          /* current playback frequency in Hz */
+    float    pitch;         /* Doppler shift, multiplies rate (0 is taken as 1) */
     int      playing;
     int      looping;
 

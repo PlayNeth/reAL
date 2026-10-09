@@ -109,7 +109,9 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
     if (!v->playing || !nframes || !out_rate) return 0;
 
     const uint64_t end  = (uint64_t)nframes << 32;
-    const uint64_t step = ((uint64_t)v->rate << 32) / out_rate;
+    const uint64_t step = (v->pitch > 0.0f && v->pitch != 1.0f)
+        ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
+        : ((uint64_t)v->rate << 32) / out_rate;
     const uint32_t p0 = rl_voice_play_bytes(v);
     uint32_t wraps = 0;
     int stopped = 0;

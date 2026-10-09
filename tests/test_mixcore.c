@@ -185,6 +185,38 @@ static void test_send(void)
     CHECK(send[3] == 0.0f);
 }
 
+/* Doppler (ALchemy's formula) and the voice pitch it drives */
+static void test_doppler(void)
+{
+    rl_listener3d l; rl_source3d s;
+    rl_listener_defaults(&l); rl_source_defaults(&s);
+    s.pos.z = 10;
+    CHECK(rl_spatial_doppler(&l, &s, 1.0f) == 1.0f);           /* nothing moves */
+    s.vel.z = -34.238f;                                         /* approaching at c/10 */
+    float up = rl_spatial_doppler(&l, &s, 1.0f);
+    s.vel.z = 34.238f;                                          /* receding */
+    float down = rl_spatial_doppler(&l, &s, 1.0f);
+    printf("     doppler: approaching %.4f (want %.4f), receding %.4f (want %.4f)\n", up, 1 / 0.9, down, 1 / 1.1);
+    CHECK(fabsf(up - 1.0f / 0.9f) < 1e-4f && fabsf(down - 1.0f / 1.1f) < 1e-4f);
+    CHECK(rl_spatial_doppler(&l, &s, 0.0f) == 1.0f);           /* factor 0 turns it off */
+    s.vel.z = 0; s.vel.x = 50;                                  /* moving sideways: no shift */
+    CHECK(rl_spatial_doppler(&l, &s, 1.0f) == 1.0f);
+    s.vel.x = 0; l.vel.z = 34.238f;                             /* listener moving towards the source */
+    CHECK(fabsf(rl_spatial_doppler(&l, &s, 1.0f) - 1.1f) < 1e-4f);
+    s.mode = RL_DS3DMODE_DISABLE;
+    CHECK(rl_spatial_doppler(&l, &s, 1.0f) == 1.0f);
+
+    /* pitch 2 plays the data twice as fast */
+    static int16_t data[1000];
+    rl_voice v; memset(&v, 0, sizeof(v));
+    v.data = (const uint8_t *)data; v.size = sizeof(data); v.channels = 1; v.block = 2; v.sfmt = RL_S16;
+    v.rate = 22050; v.pitch = 2.0f; v.gain[0] = v.gain[1] = 1.0f;
+    rl_voice_start(&v);
+    float out[2 * 100];
+    rl_voice_mix(&v, out, NULL, 100, 44100, NULL);
+    CHECK((v.pos >> 32) == 100);
+}
+
 /* EAX HF damping: the one-pole low-pass on the direct path and on the send.  ALchemy fits the
  * filter so the *power* response at the reference frequency equals the HF gain. */
 static double tone_power(float lp_a, int on_send, double f, uint32_t rate)
@@ -303,6 +335,7 @@ int main(void)
 {
     test_send();
     test_eax_lowpass();
+    test_doppler();
     test_eax1_conversion();
     test_declick();
     test_reverb();

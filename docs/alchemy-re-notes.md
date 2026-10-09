@@ -203,6 +203,14 @@ coefficient function on random inputs in the emulator; `tests/test_eax.c` matche
 (400+400 listener sequences, 1500+1500 source cases, 3000 coefficients).  `tests/eaxtest.c` +
 `tools/eaxtest_analyze.py` check the result end to end under Wine (room −1000 mB → tail −10.0 dB, etc.).
 
+## Doppler (fn 0x10043420, inputs from the source geometry 0x10042af0)
+
+Only the radial components count: u = unit vector listener → source, vs = v_source·u, vl = v_listener·u
+(head-relative: listener at the origin, not moving; DISABLE: 1).  c = (float)(342.38 / distance factor),
+ratio = (float)((c + f·vl) / (f·vs + c)), clamped to 0..10; 1 when f = 0 or vs = vl.  f is the listener's
+Doppler factor; with EAX 3 the buffer's EAXBUFFER_DOPPLERFACTOR is added (sum capped at 10).  The ratio
+multiplies the voice's playback rate (sink method +4).  Verified against the emulator (3000/3000).
+
 ## HRTF (measured with hrtfprobe on Windows, speaker config DSSPEAKER_HEADPHONE)
 
 * Exactly left/right mirror-symmetric; compact responses (99.9 % energy within ≤ 80 samples of
