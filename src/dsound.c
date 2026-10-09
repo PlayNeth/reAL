@@ -17,6 +17,26 @@ static HRESULT WINAPI ds_QueryInterface(IDirectSound8 *iface, REFIID riid, void 
         IDirectSound8_AddRef(iface);
         return S_OK;
     }
+    /* DirectMusic's synth sink asks for two private interfaces only Microsoft's DirectSound has.
+     * Like ALchemy (0x1001b4ed), hand it a real system DirectSound for those, so DirectMusic plays
+     * through it; disabledirectmusic=true refuses them as ALchemy does. */
+    static const GUID dmusic_priv1 = { 0x2a8af120, 0xe9de, 0x4132, { 0xaa, 0xa5, 0x4b, 0xdd, 0xa5, 0xf3, 0x25, 0xb8 } };
+    static const GUID dmusic_priv2 = { 0xfa82931b, 0xde98, 0x4a68, { 0xa7, 0xfe, 0xd6, 0x83, 0xe3, 0x8a, 0x65, 0x02 } };
+    if ((IsEqualIID(riid, &dmusic_priv1) || IsEqualIID(riid, &dmusic_priv2)) && !g_cfg.disable_dmusic) {
+        HRESULT hr = E_NOINTERFACE;
+        if (!This->real_ds && rl_real_dsound()) {
+            HRESULT (WINAPI *create8)(LPCGUID, LPDIRECTSOUND8 *, LPUNKNOWN) =
+                (void *)GetProcAddress(rl_real_dsound(), "DirectSoundCreate8");
+            if (create8 && SUCCEEDED(create8(NULL, &This->real_ds, NULL)))
+                IDirectSound8_SetCooperativeLevel(This->real_ds, GetForegroundWindow(),
+                                                  This->coop_level ? This->coop_level : DSSCL_PRIORITY);
+        }
+        if (This->real_ds) hr = IDirectSound8_QueryInterface(This->real_ds, riid, out);
+        else *out = NULL;
+        LOG_INFO("DirectSound::QueryInterface %s (DirectMusic) -> system DirectSound %08lx",
+                 rl_guid_str(riid, gb), (unsigned long)hr);
+        return hr;
+    }
     LOG_CALL("DirectSound::QueryInterface unsupported %s", rl_guid_str(riid, gb));
     *out = NULL;
     return E_NOINTERFACE;
@@ -37,6 +57,7 @@ static ULONG WINAPI ds_Release(IDirectSound8 *iface)
         if (This->dev) rl_buffers_orphan(This->dev, This);
         if (This->primary) IDirectSoundBuffer8_Release(&This->primary->IDirectSoundBuffer8_iface);
         if (This->dev) rl_device_release(This->dev);
+        if (This->real_ds) IDirectSound8_Release(This->real_ds);
         HeapFree(GetProcessHeap(), 0, This);
     }
     return ref;

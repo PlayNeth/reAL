@@ -47,6 +47,12 @@ key lower-cased, exact compare. **No sections.** Booleans must be the literal `t
 | logdirectsoundtiminginfo | `0x100d3517` | false | | profiling table |
 | logstarvation | `0x100d3518` | false | | |
 | disabledirectmusic | `0x100d3519` | false | | refuses the DMusic private QI |
+
+DirectMusic private QI (`IDirectSound::QueryInterface`, 0x1001b4ed): for {2a8af120-e9de-4132-aaa5-4bdda5f325b8}
+and {fa82931b-de98-4a68-a7fe-d683e38a6502} (asked by Microsoft's DirectMusic synth sink) ALchemy loads the
+system dsound.dll, calls `DirectSoundCreate8`, `SetCooperativeLevel(GetForegroundWindow(), level)` and
+returns that object's interface, so DirectMusic plays through the real DirectSound.  reAL does the same.
+Wine's builtin dsound does not implement these interfaces either (E_NOINTERFACE).
 | disablenativeal | `0x100d351a` | false | | **forces software engine** even on Creative HW |
 
 Log file: `dsoundlog.txt` beside the DLL (only created if any `log*` flag is set).

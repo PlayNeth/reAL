@@ -112,6 +112,7 @@ struct rl_dsound {
     DWORD         coop_level;
     rl_buffer    *primary;
     BOOL          is_ds8;
+    IDirectSound8 *real_ds;     /* the system's DirectSound, for DirectMusic's private interfaces */
 };
 
 HRESULT rl_dsound_create(REFIID riid, void **out, BOOL ds8);
