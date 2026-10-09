@@ -147,6 +147,18 @@ Then:
 For generic and concert hall the default EAX1 damping reproduces the EAX3 preset exactly
 (0.829/−101 vs 0.83/−100; 0.697/−507 vs 0.70/−500).
 
+## When the reverb exists at all (FX slots, fn 0x10042220)
+
+The Sens engine has 4 FX slots (CFxSlot, ctor 0x1004fe80); each starts with **no effect loaded**
+(slot+0x14 = NULL). `0x10042220(mode)` loads effects by EAX version: 0 → all slots emptied,
+1–3 → slot 0 = reverb (type 10), 4–5 → slot 0 = reverb + slot 1 = chorus (type 3). It is called
+only from the EAX 1–5 property handlers (0x10021687 … 0x1002861f), the first time a context uses
+that EAX version (bit in ctx+0x2c), and with mode 0 from 0x10041ce0 when the last context that
+used EAX goes away. So **a game that never makes an EAX call gets no reverb** — no default
+"generic room" like hardware EAX. Once EAX is used, every buffer sends to it by default
+(per-buffer defaults at `.rdata 0x100b4590`: room 0 mB, active FX slots {NULL, Primary}; slot
+reverb defaults = generic, room −1000 mB, fn 0x10043f40).
+
 ## HRTF (measured with hrtfprobe on Windows, speaker config DSSPEAKER_HEADPHONE)
 
 * Exactly left/right mirror-symmetric; compact responses (99.9 % energy within ≤ 80 samples of
