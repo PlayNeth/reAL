@@ -46,6 +46,7 @@ void rl_config_load(void);
 
 /* ---------------- logging ---------------- */
 void rl_log_init(void);
+void rl_crash_logger(void);
 void rl_log(int level, const char *fmt, ...);
 #define LOG_INFO(...)  rl_log(1, __VA_ARGS__)
 #define LOG_CALL(...)  do { if (g_cfg.log_level >= 2) rl_log(2, __VA_ARGS__); } while (0)

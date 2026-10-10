@@ -2,6 +2,7 @@
 #include "real.h"
 #include "music/dmcom.h"
 #include <string.h>
+#include <stdio.h>
 
 HMODULE g_self;
 static HMODULE s_real;
@@ -211,6 +212,19 @@ void rl_music_hook(int can_load)
 {
     static LONG done, reported;
     if (!g_cfg.enabled || !g_cfg.music || done) return;
+    static HANDLE mine;
+    if (!mine) {   /* only one copy of reAL in a process hooks COM */
+        char name[64];
+        snprintf(name, sizeof(name), "Local\\reAL.music.%lu", (unsigned long)GetCurrentProcessId());
+        HANDLE m = CreateMutexA(NULL, FALSE, name);
+        if (m && GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(m);
+            done = 1;
+            LOG_INFO("music: another reAL in this process already serves DirectMusic");
+            return;
+        }
+        mine = m;
+    }
     HMODULE ole = GetModuleHandleA("ole32.dll");
     if (!ole && can_load) ole = LoadLibraryA("ole32.dll");
     if (!ole) {
