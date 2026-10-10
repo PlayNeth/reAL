@@ -1178,6 +1178,34 @@ static HRESULT WINAPI ks_Set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOI
     return hr;
 }
 
+/* EAX 4.0 / 5.0 property sets (GUIDs as in ALchemy's dsound.dll); not implemented yet, but named in
+ * the log so a game asking for them is easy to spot */
+static const struct { GUID g; const char *name; int ver; } k_eax45_sets[] = {
+    { { 0x1d4870ad, 0x0def, 0x43c0, { 0xa4, 0x0c, 0x52, 0x36, 0x32, 0x29, 0x63, 0x42 } }, "EAX 4.0 context", 4 },
+    { { 0xc4d79f1e, 0xf1ac, 0x436b, { 0xa8, 0x1d, 0xa7, 0x38, 0xe7, 0x04, 0x54, 0x69 } }, "EAX 4.0 FX slot 0", 4 },
+    { { 0x1b86b823, 0x22df, 0x4eae, { 0x8b, 0x3c, 0x12, 0x78, 0xce, 0x54, 0x42, 0x27 } }, "EAX 4.0 source", 4 },
+    { { 0x57e13437, 0xb932, 0x4ab2, { 0xb8, 0xbd, 0x52, 0x66, 0xc1, 0xa8, 0x87, 0xee } }, "EAX 5.0 context", 5 },
+    { { 0x91f9590f, 0xc388, 0x407a, { 0x84, 0xb0, 0x1b, 0xae, 0x0e, 0xf7, 0x1a, 0xbc } }, "EAX 5.0 FX slot 0", 5 },
+    { { 0x5edf82f0, 0x24a7, 0x4f38, { 0x8e, 0x64, 0x2f, 0x09, 0xca, 0x05, 0xde, 0xe1 } }, "EAX 5.0 source", 5 },
+};
+
+static const char *eax_set_name(REFGUID set)
+{
+    static const char *n23[] = { [2] = "EAX 2.0 listener", [3] = "EAX 3.0 listener", [12] = "EAX 2.0 buffer", [13] = "EAX 3.0 buffer" };
+    if (IsEqualGUID(set, &RL_EAX1_LISTENER)) return "EAX 1.0 listener";
+    if (IsEqualGUID(set, &RL_EAX1_BUFFER)) return "EAX 1.0 buffer";
+    int w = eax23_set(set);
+    if (w) return n23[w];
+    for (size_t i = 0; i < sizeof(k_eax45_sets) / sizeof(k_eax45_sets[0]); i++)
+        if (IsEqualGUID(set, &k_eax45_sets[i].g)) {
+            static LONG said[6];
+            if (!InterlockedExchange(&said[k_eax45_sets[i].ver], 1))
+                LOG_INFO("game asked for EAX %d.0 (not supported yet; it should fall back to EAX 3.0)", k_eax45_sets[i].ver);
+            return k_eax45_sets[i].name;
+        }
+    return NULL;
+}
+
 static HRESULT WINAPI ks_QuerySupport(IKsPropertySet *iface, REFGUID set, ULONG id, PULONG support)
 {
     rl_buffer *This = PROPS(iface);
@@ -1198,8 +1226,9 @@ static HRESULT WINAPI ks_QuerySupport(IKsPropertySet *iface, REFGUID set, ULONG 
         }
     }
     if (support) *support = s;
-    LOG_EAX("Buffer[%d]::KsProp QuerySupport %s id %lu -> %08lx support %lu", This->id, rl_guid_str(set, gb),
-            (unsigned long)id, (unsigned long)hr, (unsigned long)s);
+    const char *sn = eax_set_name(set);
+    LOG_EAX("Buffer[%d]::KsProp QuerySupport %s%s%s id %lu -> %08lx support %lu", This->id, rl_guid_str(set, gb),
+            sn ? " = " : "", sn ? sn : "", (unsigned long)id, (unsigned long)hr, (unsigned long)s);
     return hr;
 }
 
