@@ -378,7 +378,8 @@ void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpa
     if (r < 0) {
         d->h = NULL;
         dls_port_unload(p, d);
-        *hr = DM_E_FAIL;
+        /* dmsynth's codes: -3 = regions without articulation and no instrument articulation */
+        *hr = r == -3 ? (int32_t)0x88781129 /* DMUS_E_NOARTICULATION */ : DM_E_FAIL;
         return NULL;
     }
     *hr = DM_OK;

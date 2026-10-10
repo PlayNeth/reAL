@@ -84,7 +84,8 @@ static void port_priority(void *ctx, uint32_t g, uint32_t ch, uint32_t prio) { m
 static void *port_download(void *ctx, dm_collection *c, uint32_t patch, int sp, uint32_t np, const uint32_t *r, int nr, int *hr)
 {
     void *d = dls_port_download(((dm_host *)ctx)->dls, c, patch, sp, np, r, nr, hr);
-    if (!d) LOG_INFO("music: download of instrument %08x failed (%08x)", patch, *hr);
+    if (!d) LOG_INFO("music: download of instrument %08x failed (%08x%s)", patch, *hr,
+                     *hr == (int)0x88781129 ? ": it has no articulation, Microsoft's synth refuses it too" : "");
     return d;
 }
 static void port_unload(void *ctx, void *handle) { dls_port_unload(((dm_host *)ctx)->dls, handle); }
