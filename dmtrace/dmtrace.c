@@ -451,7 +451,7 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void **ppv)
 HRESULT WINAPI DllCanUnloadNow(void) { return S_FALSE; }
 
 static const char *const g_servers[] = { "dmusic.dll", "dmime.dll", "dmloader.dll", "dmsynth.dll", "dmstyle.dll",
-                                         "dmcompos.dll", "dmband.dll", "dmscript.dll", "dswave.dll", NULL };
+                                         "dmcompos.dll", "dmband.dll", "dmscript.dll", "dswave.dll", "dsdmo.dll", NULL };
 
 static BOOL is_dm_server(const char *path)
 {
