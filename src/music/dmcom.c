@@ -234,6 +234,7 @@ static ULONG WINAPI col_addref(IDirectMusicCollection *i) { return InterlockedIn
 static ULONG WINAPI col_release(IDirectMusicCollection *i)
 {
     LONG r = InterlockedDecrement(&col(i)->ref);
+    LOG_CALL("music: Collection::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) free(col(i));       /* the collection data stays in the process-wide cache */
     return r;
 }
@@ -307,6 +308,7 @@ static ULONG WINAPI seg_release(IDirectMusicSegment8 *i)
 {
     rm_segment *s = sgm(i);
     LONG r = InterlockedDecrement(&s->ref);
+    LOG_CALL("music: Segment::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) { dm_segment_release(s->seg); free(s); }
     return r;
 }
@@ -459,6 +461,7 @@ static ULONG WINAPI st_release(IDirectMusicSegmentState8 *i)
 {
     rm_state *s = sst(i);
     LONG r = InterlockedDecrement(&s->ref);
+    LOG_CALL("music: SegmentState::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
         if (s->perf->host) { dm_host_lock(s->perf->host); dm_segstate_release(s->ss); dm_host_unlock(s->perf->host); }
         IDirectMusicSegment8_Release(&s->seg->IDirectMusicSegment8_iface);
@@ -516,6 +519,7 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
 {
     rm_path *a = apt(i);
     LONG r = InterlockedDecrement(&a->ref);
+    LOG_CALL("music: AudioPath::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
         if (a->perf->host) { dm_host_lock(a->perf->host); dm_audiopath_release(a->ap); dm_host_unlock(a->perf->host); }
         IDirectMusicPerformance8_Release(&a->perf->IDirectMusicPerformance8_iface);
@@ -621,6 +625,7 @@ static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
 {
     rm_perf *p = prf(i);
     LONG r = InterlockedDecrement(&p->ref);
+    LOG_CALL("music: Performance::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
         p->ref = 1;     /* guard against re-entry from children */
         pf_closedown(p);
@@ -765,7 +770,8 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
                                    DWORD flags, DMUS_AUDIOPARAMS *params)
 {
     rm_perf *p = prf(i);
-    LOG_CALL("music: Performance::InitAudio(type %lu, %lu pchannels, flags %lx)", (unsigned long)type, (unsigned long)npch, (unsigned long)flags);
+    LOG_CALL("music: Performance::InitAudio(dm %p/%p, ds %p/%p, type %lu, %lu pchannels, flags %lx)", (void *)pdm, pdm ? (void *)*pdm : NULL,
+             (void *)pds, pds ? (void *)*pds : NULL, (unsigned long)type, (unsigned long)npch, (unsigned long)flags);
     if (p->host) return DMUS_E_ALREADY_INITED;
     uint32_t rate = 22050, voices = 64;
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {
@@ -924,6 +930,7 @@ static ULONG WINAPI ld_release(IDirectMusicLoader8 *i)
 {
     rm_loader *l = ldr(i);
     LONG r = InterlockedDecrement(&l->ref);
+    LOG_CALL("music: Loader::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) { ld_clear(l); free(l); }
     return r;
 }
