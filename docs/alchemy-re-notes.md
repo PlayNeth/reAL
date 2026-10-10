@@ -388,3 +388,16 @@ Effects that take one input (echo, chorus, pitch shifter) read channel 0 only.
 
 Slot activation (the plug state machine, e.g. 0x10055580 for the echo) snaps parameters to their targets
 and clears the delay lines; reAL does the same when an effect is loaded.
+
+## DirectMusic content survey: Midnight Club II (AUDIO\DirectMusic\PC)
+
+48 segments + 26 DLS collections, no styles/bands/chordmaps as separate files (tools/dmdump.py).
+- 47 segments: Tempo, TimeSig, Chord, Seq, Band tracks; 1 (p_cafe? / t_temple) TimeSig, Seq, Band. No Style/Pattern/Motif tracks:
+  the music is sequence-based (MIDI-like seqt + curves); the Chord track is there because Producer adds one by default.
+  (dmstyle.dll gets loaded only because the Chord track class lives there.)
+- Bands reference one game DLS each via DMRF (e.g. fe_hard_0x.sgt -> fe_hard.dls, bank LSB 1, programs 0..15).
+  t_temple.sgt's band has no reference (patches 0x100..0x105) -> resolved against already-loaded collections / gm.dls.
+- DLS: Level 1 and Level 2 (rgn2/art2) regions, all mono 16-bit PCM at 8..36 kHz.
+- Runtime (dmtrace): InitAudio(DMUS_APATH_SHARED_STEREOPLUSREVERB, 128 pchannels, DMUS_AUDIOF_BUFFERS), 4 extra
+  standard audiopaths of type 1, segments played as SECONDARY|CONTROL (0x280) on their own path, faded with
+  IDirectMusicAudioPath::SetVolume, polled with IsPlaying. The reverb path uses dsdmo's Waves reverb (IMediaObject).
