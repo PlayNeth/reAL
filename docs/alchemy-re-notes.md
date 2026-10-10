@@ -363,3 +363,28 @@ Source conversion details (`0x1004e7e0`, EBX = source block, [0] context props, 
 Verification: re/gen_eax4_gt.py runs the context and source handlers (whole request path) on random
 sequences and the conversion on random states; re/gen_eax4fx_gt.py the slot handler's effect properties.
 tests/test_eax4.c: 1800 + 6000 + 3000 + 7920 cases identical.
+
+## EAX 4 effect DSP (`CPlug*`, ported in src/eax4dsp.c; verified with re/gen_fx_gt.py + tests/test_fx.c)
+
+Every `CFx*` object holds its `CPlug*` at +0x10 (distortion / ring modulator: +8); the CFx update (vtable at
++8) takes `this = obj + 8`, swaps the dirty word with `InterlockedExchange` and calls the plug's setters.
+Plugs process a descriptor {+4 frames, +8.. channel buffers}; channels are picked with the mask at plug
++0x14 / +0x30 and the bit table 0x100aeab4.  Ramps / glides are per sample (or per 8 samples for kernels).
+Effects that take one input (echo, chorus, pitch shifter) read channel 0 only.
+
+| effect | update | process | notes |
+|---|---|---|---|
+| distortion | 0x10051100 | 0x100543e0 | LP, `sign*log10(1+shape|x|)`, lattice EQ, ramped |
+| ring modulator | 0x10051480 | 0x10054ea0 | HPF kernel #97 gliding ×1.01/8 samples, sine/saw/square; **bug**: every channel loop re-tests the channel it just found → left processed twice, right dry |
+| frequency shifter | 0x10052460 | 0x10059010 | mono sum ×0.25, two 3-stage all-pass chains (90° pair), sin/cos; **bug**: increment 4πf/fs (shift ×2) |
+| AGC compressor | 0x10052620 | 0x10059690 | DC-blocked detector power, log10, threshold −6.2, ratio 0.4, 20 ms look-ahead with two cross-faded taps; **bug**: off→on fades to the wrong tap (look-ahead stays 30 samples) |
+| equalizer | 0x10052d60 | 0x1005b710 | `CParamEqFilter` low shelf / 2 peaks / high shelf (0x1006fce0 / 0x1006f8a0 / 0x10070120), biquad kernel #88; gain ×1.02, f and Q ×1.001 glides per 8 samples |
+| autowah | 0x10052800 | 0x1005a3b0 | log10 envelope (attack/release coefs 10^(−1/(t·fs))), all-pass resonator; rate change re-multiplies the stored times by 0.3 (avoided by rebuilding) |
+| echo | 0x10051730 | 0x10055f80 | two taps (delay, delay+LR), feedback from tap 2 through a one-pole (coef √damping ≤ 0.99), 200 ms tap cross-fades; spread mixes the taps |
+| chorus | 0x10051db0 | 0x100571c0 | mono delay line 3097, sine/triangle LFO (right channel offset by phase), centre floor(delay·fs+0.5) ≥ 25, depth ≤ centre−25, 20 ms cross-fades for delay/depth/phase |
+| flanger | 0x10052120 | 0x100581e0 | as chorus but stereo, a 778-sample line per channel, minimum 10 / margin 8 |
+| pitch shifter | 0x10052ba0 | 0x1005a900 | two taps sweeping ±1024 around 1026 samples, sin/cos windows; **bug**: taps move by 2^(p/12)+1 per sample → grains play backwards |
+| vocal morpher | 0x10051a50 | 0x10056740 | 4 Chamberlin SVF band-passes per channel, formants (table 0x100a70f0: 4 f, 4 Q per phoneme) interpolated by a sine (rotation) / triangle / saw LFO; **bug**: reset 0x10056690 zeroes phoneme A's first formant coefficient |
+
+Slot activation (the plug state machine, e.g. 0x10055580 for the echo) snaps parameters to their targets
+and clears the delay lines; reAL does the same when an effect is loaded.

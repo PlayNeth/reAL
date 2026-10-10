@@ -2,6 +2,7 @@
  * Same output strategy ALchemy's software path uses (CWASAPIRender), which under Wine goes
  * through mmdevapi -> winepulse/winealsa -> PipeWire/PulseAudio/ALSA. */
 #include "real.h"
+#include "eax4dsp.h"
 #include <math.h>
 #include <initguid.h>
 #include <mmdeviceapi.h>
@@ -130,7 +131,22 @@ static void apply_eax4(rl_device *dev)
     for (int k = 0; k < 4; k++) {
         eax4_slot *s = &dev->eax4s[k];
         dev->fx_gain[k] = slot_gain(s->volume);
-        if (s->type != EAX4FX_REVERB) continue;
+        if (s->type != EAX4FX_REVERB) {
+            /* any other effect: (re)create its unit when the type or the output rate changed */
+            eax4fx_unit *u = dev->fxunit[k];
+            uint32_t rate = dev->out_rate ? dev->out_rate : 48000;
+            if (u && (eax4fx_unit_type(u) != s->type || eax4fx_unit_rate(u) != rate)) {
+                eax4fx_unit_free(u);
+                dev->fxunit[k] = u = NULL;
+            }
+            if (!u && s->type != EAX4FX_NONE) {
+                dev->fxunit[k] = u = eax4fx_unit_new(s->type, rate);
+                if (u) LOG_EAX("fx: EAX4 slot %d loads effect type %d", k, s->type);
+            }
+            if (u) eax4fx_unit_props(u, s->fx);
+            continue;
+        }
+        if (dev->fxunit[k]) { eax4fx_unit_free(dev->fxunit[k]); dev->fxunit[k] = NULL; }
         rl_reverb *rv = &dev->reverb;
         alrv_props *props = &dev->eax_props;
         if (k) {
@@ -212,15 +228,21 @@ static void mix(rl_device *dev, UINT32 frames)
         dev->eax_commit = FALSE;
         update_all_gains(dev);
     }
-    /* the effect buses this period: slot 0 for EAX 1-3, every slot running a reverb for EAX 4 */
+    /* the effect buses this period: slot 0 for EAX 1-3, every slot running an effect for EAX 4 */
     float *bus[RL_SENDS] = { NULL };
     rl_reverb *fxr[RL_SENDS] = { NULL };
+    eax4fx_unit *fxu[RL_SENDS] = { NULL };
     float fxg[RL_SENDS] = { 1.0f, 1.0f, 1.0f, 1.0f };
     int nbus = 0;
     if (dev->eax_used && dev->reverb.eng[0].mem) {
         if (dev->eax_version == 4) {
             for (int k = 0; k < 4; k++) {
-                if (dev->eax4s[k].type != EAX4FX_REVERB) continue;
+                if (dev->eax4s[k].type != EAX4FX_REVERB) {
+                    if (!dev->fxunit[k]) continue;
+                    bus[k] = dev->sendbuf + (size_t)k * dev->mixbuf_frames;
+                    fxu[k] = dev->fxunit[k]; fxg[k] = dev->fx_gain[k]; nbus++;
+                    continue;
+                }
                 rl_reverb *rv = k ? dev->xreverb[k - 1] : &dev->reverb;
                 if (!rv || !rv->eng[0].mem) continue;
                 bus[k] = dev->sendbuf + (size_t)k * dev->mixbuf_frames;
@@ -245,6 +267,7 @@ static void mix(rl_device *dev, UINT32 frames)
 
     for (int k = 0; k < RL_SENDS; k++) {
         if (!bus[k]) continue;
+        if (fxu[k]) { eax4fx_unit_process(fxu[k], bus[k], dev->mixbuf, fxg[k], frames); continue; }  /* volume on the output */
         if (fxg[k] != 1.0f) for (UINT32 i = 0; i < frames; i++) bus[k][i] *= fxg[k];   /* slot volume */
         rl_reverb_process(fxr[k], bus[k], dev->mixbuf, frames);
     }
@@ -544,6 +567,7 @@ void rl_device_release(rl_device *dev)
     HeapFree(GetProcessHeap(), 0, dev->sendbuf);
     rl_reverb_free(&dev->reverb);
     for (int k = 0; k < 3; k++) if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); }
+    for (int k = 0; k < 4; k++) eax4fx_unit_free(dev->fxunit[k]);
     rl_hrtf_free(&dev->hrtf);
     HeapFree(GetProcessHeap(), 0, dev);
 }

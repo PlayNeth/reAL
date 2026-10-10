@@ -18,7 +18,7 @@ fi
 
 SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
-EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c"
+EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
 CFLAGS="$CFLAGS_EXACT -ffast-math"
 
@@ -63,12 +63,16 @@ if command -v cc >/dev/null 2>&1; then
     cc -O2 -std=gnu11 -Wall -o build/test_alrv_params tests/test_alrv_params.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_eax tests/test_eax.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_eax4 tests/test_eax4.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
+    cc -O2 -std=gnu11 -Wall -o build/test_fx tests/test_fx.c src/eax4dsp.c -lm
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then
         ./build/test_alrv_params "$GT/params.bin"
         [ -f "$GT/params_pan.bin" ] && ./build/test_alrv_params "$GT/params_pan.bin"
         [ -f "$GT/eax.bin" ] && ./build/test_eax "$GT/eax.bin"
         [ -f "$GT/eax4.bin" ] && ./build/test_eax4 "$GT/eax4.bin" "$GT/eax4fx.bin"
+        for fx in distortion ringmod fshift agc eq autowah echo chorus flanger pshift vmorph; do
+            [ -f "$GT/fx_$fx.bin" ] && ./build/test_fx $fx "$GT/fx_$fx.bin"
+        done
         ./build/test_alrv -p "$GT" env00 env01 env02 env07 env12 env19 env22 env25 pan_mix pan_mix2 pan_r30 pan_l60 | tail -1
     fi
 fi

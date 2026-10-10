@@ -100,6 +100,7 @@ typedef struct rl_device {
     rl_reverb  *xreverb[3];
     alrv_props  xprops[3];
     float       fx_gain[4];       /* slot volume, linear */
+    struct eax4fx_unit *fxunit[4];/* the other effects (eax4dsp.c), created by the mixer thread */
 
     /* HRTF (loaded from reAL_hrtf.bin once the output rate is known) */
     rl_hrtf_set hrtf;

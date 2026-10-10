@@ -58,6 +58,9 @@ static const GUID EAX4_SLOT[4] = {
     { 0xefff08ea, 0xc7d8, 0x44ab, { 0x93, 0xad, 0x6d, 0xbd, 0x5f, 0x91, 0x00, 0x64 } } };
 static const GUID EAX4_PRIMARY = { 0xf317866d, 0x924c, 0x450c, { 0x86, 0x1b, 0xe6, 0xda, 0xa2, 0x5e, 0x7c, 0x20 } };
 static const GUID EAX_REVERB_EFFECT = { 0x0cf95c8f, 0xa3cc, 0x4849, { 0xb0, 0xb6, 0x83, 0x2e, 0xcc, 0x18, 0x22, 0xdf } };
+static const GUID EAX_ECHO_EFFECT = { 0x0e9f1bc0, 0xac82, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } };
+static const GUID EAX_DISTORTION_EFFECT = { 0x975a4ce0, 0xac7e, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } };
+static const GUID EAX_PITCH_EFFECT = { 0xe7905100, 0xafb2, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } };
 static const GUID EAX5_C = { 0x57e13437, 0xb932, 0x4ab2, { 0xb8, 0xbd, 0x52, 0x66, 0xc1, 0xa8, 0x87, 0xee } };
 static const GUID EAX5_S = { 0x5edf82f0, 0x24a7, 0x4f38, { 0x8e, 0x64, 0x2f, 0x09, 0xca, 0x05, 0xde, 0xe1 } };
 
@@ -295,6 +298,19 @@ int main(int argc, char **argv)
         seti(ks, &EAX4_S, 7 | 0x80000000u, -10000);
         kset(ks, &EAX4_SLOT[1], 0, NULL, 0);
         slot(b, "deferred room -10000 committed");
+        seti(ks, &EAX4_S, 7, 0);
+        /* the other effects: echo, distortion and pitch shifter in slot 3, the source sends only there */
+        act[0] = EAX4_SLOT[3]; act[1] = (GUID){ 0 };
+        kset(ks, &EAX4_S, 27, act, sizeof(act));
+        kset(ks, &EAX4_SLOT[3], 0x10002, (void *)&EAX_ECHO_EFFECT, sizeof(GUID));
+        float dl = 0.15f, lr = 0.1f, fb = 0.5f;
+        kset(ks, &EAX4_SLOT[3], 2, &dl, 4); kset(ks, &EAX4_SLOT[3], 3, &lr, 4); kset(ks, &EAX4_SLOT[3], 5, &fb, 4);
+        slot(b, "slot 3 echo 150/250 ms feedback 0.5");
+        kset(ks, &EAX4_SLOT[3], 0x10002, (void *)&EAX_DISTORTION_EFFECT, sizeof(GUID));
+        slot(b, "slot 3 distortion");
+        kset(ks, &EAX4_SLOT[3], 0x10002, (void *)&EAX_PITCH_EFFECT, sizeof(GUID));
+        seti(ks, &EAX4_SLOT[3], 2, -12);    /* down an octave (a one-sample click is skipped when pitched up) */
+        slot(b, "slot 3 pitch shifter -12");
         LONG err = 0; IKsPropertySet_Get(ks, &EAX4_C, 6, NULL, 0, &err, 4, &got);
         P("last error %ld\n", err);
     }
