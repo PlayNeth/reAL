@@ -102,7 +102,7 @@ int main(int argc, char **argv)
     dm_perf_assign_block(pf, 0, port, 1);
     if (dm_segment_download(pf, seg) < 0) fprintf(stderr, "download failed\n");
     dm_segstate *ss;
-    if (dm_perf_play(pf, seg, flags, 0, &ss) < 0) { fprintf(stderr, "play failed\n"); return 1; }
+    if (dm_perf_play(pf, seg, flags, 0, NULL, &ss) < 0) { fprintf(stderr, "play failed\n"); return 1; }
 
     int64_t total = (int64_t)(secs * RATE);
     int16_t *pcm = calloc((size_t)total * 2 + 4096, sizeof(int16_t));

@@ -15,20 +15,40 @@ typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } dm_guid;
 /* HRESULTs */
 #define DM_OK               0
 #define DM_FALSE            1
+#ifndef DMUS_S_REQUEUE
 #define DMUS_S_REQUEUE      0x08781200
+#endif
+#ifndef DMUS_S_FREE
 #define DMUS_S_FREE         0x08781201
+#endif
+#ifndef DMUS_S_END
 #define DMUS_S_END          0x08781202
+#endif
 #define DM_E_FAIL           ((int32_t)0x80004005)
 #define DM_E_POINTER        ((int32_t)0x80004003)
 #define DM_E_INVALIDARG     ((int32_t)0x80070057)
 #define DM_E_OUTOFMEMORY    ((int32_t)0x8007000e)
+#ifndef DMUS_E_NOT_FOUND
 #define DMUS_E_NOT_FOUND    ((int32_t)0x88781161)
+#endif
+#ifndef DMUS_E_NOT_INIT
 #define DMUS_E_NOT_INIT     ((int32_t)0x88781162)
+#endif
+#ifndef DMUS_E_TYPE_DISABLED
 #define DMUS_E_TYPE_DISABLED ((int32_t)0x88781163)
-#define DMUS_E_GET_UNSUPPORTED ((int32_t)0x88781166)
+#endif
+#ifndef DMUS_E_TRACK_NOT_FOUND
+#define DMUS_E_TRACK_NOT_FOUND ((int32_t)0x88781166)
+#endif
+#ifndef DMUS_E_NOT_FOUND_PCH
 #define DMUS_E_NOT_FOUND_PCH ((int32_t)0x8878122b)
+#endif
+#ifndef DMUS_E_ALREADY_SENT
 #define DMUS_E_ALREADY_SENT ((int32_t)0x88781204)
+#endif
+#ifndef DMUS_E_CANNOT_FREE
 #define DMUS_E_CANNOT_FREE  ((int32_t)0x88781205)
+#endif
 
 /* pmsg types and flags */
 enum { PT_MIDI = 0, PT_NOTE, PT_SYSEX, PT_NOTIFICATION, PT_TEMPO, PT_CURVE, PT_TIMESIG, PT_PATCH, PT_TRANSPOSE,

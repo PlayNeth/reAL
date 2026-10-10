@@ -19,6 +19,8 @@ fi
 SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
+# reAL-Music: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
+MUSIC_SRCS="src/music/dmperf.c src/music/dmseg.c src/music/dmdls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
 CFLAGS="$CFLAGS_EXACT -ffast-math"
 
@@ -35,8 +37,13 @@ for f in $EXACT_SRCS; do
     $CC $CFLAGS_EXACT -c -o "$o" "$f"
     OBJS="$OBJS $o"
 done
+for f in $MUSIC_SRCS; do
+    o=build/obj/music_$(basename "$f" .c).o
+    $CC $CFLAGS_EXACT -ffp-contract=off -DDM_FPU_NATIVE -Isrc -c -o "$o" "$f"
+    OBJS="$OBJS $o"
+done
 # shellcheck disable=SC2086
-$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm
+$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid
 rm -f build/dsound.lib build/dsound.pdb build/dllmain.lib
 echo "built build/dsound.dll"
 
@@ -67,6 +74,8 @@ $CC -O1 -o build/hrtfprobe.exe tests/hrtfprobe.c -lole32 -luuid
 rm -f build/hrtfprobe.lib build/hrtfprobe.pdb
 $CC -O1 -o build/eaxtest.exe tests/eaxtest.c -lole32 -luuid
 rm -f build/eaxtest.lib build/eaxtest.pdb
+$CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
+rm -f build/mc2sim.lib build/mc2sim.pdb
 
 # native unit tests for the platform independent core
 if command -v cc >/dev/null 2>&1; then

@@ -54,7 +54,7 @@ int main(int argc, char **argv)
     dm_perf_assign_block(pf, 0, port, 1);
     g_sig[0] = g_sig[1] = 0;
     dm_segstate *ss;
-    int hr = dm_perf_play(pf, seg, flags, 0, &ss);
+    int hr = dm_perf_play(pf, seg, flags, 0, NULL, &ss);
     if (hr < 0) { fprintf(stderr, "play %08x\n", hr); return 1; }
     /* TP_STOP=<ms>: stop the segment (as dmgt DMGT_STOP); TP_NEXT=<ms>:<segment>: play a second segment */
     int stop_ms = getenv("TP_STOP") ? atoi(getenv("TP_STOP")) : -1, next_ms = -1;
@@ -77,7 +77,7 @@ int main(int argc, char **argv)
                 if (t == stop_ms) {      /* as MC2: Stop(segment, state), StopEx(segment), StopEx(state) */
                     dm_perf_stop(pf, seg, ss, 0, 0); dm_perf_stop(pf, seg, NULL, 0, 0); dm_perf_stop(pf, NULL, ss, 0, 0);
                 }
-                if (t == next_ms && seg2) { dm_segstate *s2; dm_perf_play(pf, seg2, flags, 0, &s2); }
+                if (t == next_ms && seg2) { dm_segstate *s2; dm_perf_play(pf, seg2, flags, 0, NULL, &s2); }
             }
             for (int pass = 0; pass < 8; pass++) {
                 int ran = 0;

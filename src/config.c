@@ -65,6 +65,8 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "logeax"))     g_cfg.log_eax = is_true(val);
     else if (!_stricmp(key, "logfile"))    lstrcpynA(g_cfg.log_file, val, MAX_PATH);
     else if (!_stricmp(key, "realdsound")) lstrcpynA(g_cfg.real_dsound, val, MAX_PATH);
+    else if (!_stricmp(key, "music"))      g_cfg.music = is_true(val);
+    else if (!_stricmp(key, "gmdls"))      lstrcpynA(g_cfg.gm_dls, val, MAX_PATH);
     else if (!_stricmp(key, "resampler"))
         g_cfg.resampler = (!_stricmp(val, "linear") || !_stricmp(val, "alchemy")) ? RL_INTERP_LINEAR : RL_INTERP_SINC;
     else if (!_stricmp(key, "hrtf")) {

@@ -582,6 +582,25 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     pp.dwValidParams = DMUS_PORTPARAMS_VOICES | DMUS_PORTPARAMS_CHANNELGROUPS | DMUS_PORTPARAMS_SAMPLERATE | DMUS_PORTPARAMS_EFFECTS;
     pp.dwVoices = 64; pp.dwChannelGroups = 1; pp.dwSampleRate = 44100; pp.dwEffectFlags = 0;
     IDirectMusicPort *port;
+    /* DMGT_APATH=1: set up like Midnight Club II: InitAudio(shared stereo+reverb, 128), four standard audiopaths of
+     * 64 PChannels, the segment played on the first; DMGT_VOL="<ms>:<vol>,...": AudioPath::SetVolume calls */
+    IDirectMusicAudioPath *apath = NULL;
+    if (getenv("DMGT_APATH")) {
+        if (FAILED(hr = my_cocreate(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&perf))) die("performance", hr);
+        IDirectMusic *dmi = (IDirectMusic *)dm;
+        IDirectSound *dsi = (IDirectSound *)ds;
+        if (FAILED(hr = IDirectMusicPerformance8_InitAudio(perf, &dmi, &dsi, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 128, DMUS_AUDIOF_ALL, NULL)))
+            die("InitAudio", hr);
+        IDirectMusicAudioPath *aps[4];
+        for (int i = 0; i < 4; i++)
+            if (FAILED(hr = IDirectMusicPerformance8_CreateStandardAudioPath(perf, DMUS_APATH_SHARED_STEREOPLUSREVERB, 64, TRUE, &aps[i]))) die("CreateStandardAudioPath", hr);
+        apath = aps[0];
+        if (FAILED(hr = IDirectMusicAudioPath_GetObjectInPath(apath, DMUS_PCHANNEL_ALL, DMUS_PATH_PORT, 0, &GUID_AllZeros, 0, &IID_IDirectMusicPort, (void **)&port)))
+            die("GetObjectInPath(port)", hr);
+        patch_vt(port, 3, my_playbuffer, NULL);
+        patch_vt(port, 8, my_latclock, NULL);
+        patch_vt(port, 15, my_activate, NULL);
+    } else {
     if (FAILED(hr = IDirectMusic8_CreatePort(dm, &CLSID_DirectMusicSynth, (DMUS_PORTPARAMS *)&pp, &port, NULL))) die("CreatePort", hr);
     patch_vt(port, 3, my_playbuffer, NULL);
     patch_vt(port, 8, my_latclock, NULL);
@@ -591,6 +610,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     if (FAILED(hr = IDirectMusicPerformance8_Init(perf, &dmi, NULL, NULL))) die("Init", hr);
     if (FAILED(hr = IDirectMusicPerformance8_AddPort(perf, port))) die("AddPort", hr);
     if (FAILED(hr = IDirectMusicPerformance8_AssignPChannelBlock(perf, 0, port, 1))) die("AssignPChannelBlock", hr);
+    }
     char dir[MAX_PATH];
     strcpy(dir, seg);
     char *sl = strrchr(dir, '\\');
@@ -617,7 +637,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     }
     g_ev = fopen(out, "w");
     IDirectMusicSegmentState *st;
-    if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg, NULL, NULL, flags, 0, &st, NULL, NULL)))
+    if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg, NULL, NULL, flags, 0, &st, NULL, (IUnknown *)apath)))
         die("PlaySegmentEx", hr);
     /* DMGT_STOP=<ms>: Stop(segment, state, 0, 0) then StopEx both, as MC2 does; DMGT_NEXT=<ms>:<segment>: then play
      * another segment with the same flags */
@@ -631,7 +651,15 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
             die("load segment 2", hr);
         IDirectMusicSegment8_Download(sg2, (IUnknown *)perf);
     }
+    const char *vols = getenv("DMGT_VOL");
     for (DWORD t = 0; t < ms + 1500; t++) {
+        for (const char *v = vols; apath && v && *v;) {
+            char *e;
+            DWORD at = strtoul(v, &e, 0);
+            long vol = *e == ':' ? strtol(e + 1, &e, 0) : 0;
+            if (at == t) IDirectMusicAudioPath_SetVolume(apath, vol, 0);
+            v = *e == ',' ? e + 1 : NULL;
+        }
         if (stop_ms && t == stop_ms) {
             dump_tmap(perf, "prestop");
             IDirectMusicPerformance8_Stop(perf, (IDirectMusicSegment *)sg, st, 0, 0);
@@ -641,7 +669,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         }
         if (sg2 && t == next_ms) {
             IDirectMusicSegmentState *st2;
-            if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg2, NULL, NULL, flags, 0, &st2, NULL, NULL)))
+            if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg2, NULL, NULL, flags, 0, &st2, NULL, (IUnknown *)apath)))
                 die("PlaySegmentEx 2", hr);
             dump_tmap(perf, "next");
         }

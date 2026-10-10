@@ -1,5 +1,6 @@
 /* reAL - DLL entry points / exports */
 #include "real.h"
+#include "music/dmcom.h"
 #include <string.h>
 
 HMODULE g_self;
@@ -44,6 +45,63 @@ HMODULE rl_real_dsound(void)
 
 #define REAL_PROC(name) (rl_real_dsound() ? (void *)GetProcAddress(rl_real_dsound(), name) : NULL)
 
+/* ---------------------------------------------------------------- reAL-Music: CoCreateInstance hook
+ * DirectMusic is a set of COM servers, so the game gets it through CoCreateInstance.  With music enabled the game
+ * executable's import of CoCreateInstance is redirected here and the DirectMusic classes reAL implements (loader,
+ * performance, segment, DirectMusic) are created in place; everything else goes to ole32. */
+static HRESULT (WINAPI *s_cocreate)(REFCLSID, LPUNKNOWN, DWORD, REFIID, LPVOID *);
+
+static HRESULT WINAPI hook_cocreate(REFCLSID clsid, LPUNKNOWN outer, DWORD ctx, REFIID riid, LPVOID *out)
+{
+    if (clsid && rm_handles(clsid)) {
+        char gb[64];
+        LOG_CALL("CoCreateInstance(%s): reAL-Music", rl_guid_str(clsid, gb));
+        if (!out) return E_POINTER;
+        *out = NULL;
+        if (outer) return CLASS_E_NOAGGREGATION;
+        return rm_create(clsid, riid, out);
+    }
+    return s_cocreate(clsid, outer, ctx, riid, out);
+}
+
+static int patch_iat(HMODULE mod, void *target, void *repl)
+{
+    BYTE *base = (BYTE *)mod;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    IMAGE_DATA_DIRECTORY *dir = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir->VirtualAddress) return 0;
+    int n = 0;
+    for (IMAGE_IMPORT_DESCRIPTOR *d = (IMAGE_IMPORT_DESCRIPTOR *)(base + dir->VirtualAddress); d->Name; d++) {
+        IMAGE_THUNK_DATA *t = (IMAGE_THUNK_DATA *)(base + d->FirstThunk);
+        for (; t->u1.Function; t++) {
+            if ((void *)t->u1.Function != target) continue;
+            DWORD old;
+            if (VirtualProtect(&t->u1.Function, sizeof(t->u1.Function), PAGE_READWRITE, &old)) {
+                t->u1.Function = (ULONG_PTR)repl;
+                VirtualProtect(&t->u1.Function, sizeof(t->u1.Function), old, &old);
+                n++;
+            }
+        }
+    }
+    return n;
+}
+
+/* called at load and again from DirectSoundCreate (in case ole32 was not loaded yet) */
+void rl_music_hook(void)
+{
+    static LONG done;
+    if (!g_cfg.enabled || !g_cfg.music || done) return;
+    HMODULE ole = GetModuleHandleA("ole32.dll");
+    if (!ole) return;
+    void *fn = (void *)GetProcAddress(ole, "CoCreateInstance");
+    if (!fn) return;
+    s_cocreate = fn;
+    int n = patch_iat(GetModuleHandleA(NULL), fn, (void *)hook_cocreate);
+    if (n) { done = 1; LOG_INFO("music: CoCreateInstance hooked (%d)", n); }
+}
+
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
 {
     (void)reserved;
@@ -51,6 +109,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         g_self = inst;
         DisableThreadLibraryCalls(inst);
         rl_config_load();
+        rl_music_hook();
     }
     return TRUE;
 }
@@ -62,6 +121,7 @@ HRESULT WINAPI DirectSoundCreate(LPCGUID guid, LPDIRECTSOUND *out, LPUNKNOWN out
 {
     char gb[64];
     LOG_CALL("DirectSoundCreate(%s)", rl_guid_str(guid, gb));
+    rl_music_hook();
     if (!g_cfg.enabled) {
         HRESULT (WINAPI *fn)(LPCGUID, LPDIRECTSOUND *, LPUNKNOWN) = REAL_PROC("DirectSoundCreate");
         return fn ? fn(guid, out, outer) : DSERR_NODRIVER;
@@ -82,6 +142,7 @@ HRESULT WINAPI DirectSoundCreate8(LPCGUID guid, LPDIRECTSOUND8 *out, LPUNKNOWN o
 {
     char gb[64];
     LOG_CALL("DirectSoundCreate8(%s)", rl_guid_str(guid, gb));
+    rl_music_hook();
     if (!g_cfg.enabled) {
         HRESULT (WINAPI *fn)(LPCGUID, LPDIRECTSOUND8 *, LPUNKNOWN) = REAL_PROC("DirectSoundCreate8");
         return fn ? fn(guid, out, outer) : DSERR_NODRIVER;

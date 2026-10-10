@@ -49,7 +49,7 @@ struct dm_segstate {
     dm_segstate *lnext;
     dm_perf *perf;          /* +0x28 */
     dm_segment *seg;        /* +0x2c */
-    void *audiopath;        /* +0x30 */
+    dm_audiopath *audiopath;    /* +0x30 */
     sstrack *tr; int ntr;   /* +0x38 */
     mtime_t loopstart, loopend;                 /* +0x3c +0x40 */
     uint32_t repeats;                           /* +0x44 */
@@ -67,6 +67,16 @@ struct dm_segstate {
     int canstop;                                /* +0x100 */
     int inplay, retire;                         /* +0x104 +0x108 */
     int released;                               /* the application's reference is gone */
+};
+
+struct dm_audiopath {
+    int refs;
+    dm_perf *pf;
+    uint32_t vid;                               /* +0x0c virtual track id */
+    int active;                                 /* +0x30 */
+    uint32_t *virt, *real; uint32_t n;          /* +0x38 +0x3c +0x40 */
+    rtime_t volend;                             /* +0x10 end of the last volume ramp */
+    dm_audiopath *next;
 };
 
 #define NLISTS 10
@@ -93,6 +103,8 @@ struct dm_perf {
     uint32_t dxver;                             /* +0x370 */
     dm_segstate *ssplaying; uint32_t cfgplaying;   /* +0x374 +0x378 */
     int autodl;
+    dm_audiopath *paths, *defpath;
+    uint32_t nextpch;
     int xprec, appxprec;        /* extended precision now / in application threads */
     dm_pmsg *pool;
 };
@@ -408,7 +420,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
         if (next) *next = i < ts->n ? ts->items[i].mt - mt : 0;
         return DM_OK;
     }
-    return DMUS_E_GET_UNSUPPORTED;
+    return DMUS_E_TRACK_NOT_FOUND;
 }
 
 /* the segment's GetParam (7731215a): first track in group that supports it; IDirectMusicTrack-only tracks (time
@@ -439,8 +451,7 @@ static int ss_fold(dm_segstate *ss, mtime_t *t, mtime_t *off, uint32_t *loops)
 /* 77315b54: a segment state's GetParam (tracks with CONTROL_ENABLED); *next clamped to the segment end */
 static int ss_getparam(dm_segstate *ss, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
 {
-    int hr = DMUS_E_NOT_FOUND - 5;  /* 0x88781166 GET_UNSUPPORTED is the original's initial value */
-    hr = DMUS_E_GET_UNSUPPORTED;
+    int hr = DMUS_E_TRACK_NOT_FOUND;    /* the original's initial value */
     for (int i = 0; i < ss->ntr; i++) {
         sstrack *e = &ss->tr[i];
         if (!(e->group & group) || !(e->cfg & 8) || !track_supports(e->t, prm)) continue;
@@ -692,11 +703,41 @@ static int send_pmsg(dm_perf *pf, dm_pmsg *p)
 }
 
 /* the graph chain ends in the performance's StampPMsg 77307925: no tools, so the output tool from the near queue */
-static void stamp_pmsg(dm_perf *pf, dm_segstate *ss, dm_pmsg *p)
+static void perf_stamp(dm_perf *pf, dm_pmsg *p)
 {
-    (void)ss;
     p->flags = (p->flags & ~0x14u) | PF_TOOL_QUEUE;
     p->tool = 1;
+}
+
+/* 7731efc2: the audiopath's StampPMsg: virtual to performance PChannels; a broadcast to the audiopath is cloned to
+ * every PChannel of the path (the original takes the first); notes on an inactive path are killed */
+static int ap_stamp(dm_perf *pf, dm_audiopath *ap, dm_pmsg *p)
+{
+    if (!ap->active && (p->type == PT_NOTE || p->type == PT_WAVE)) { p->pch = PCH_KILL_ME; return -1; }
+    if (p->pch == PCH_BROADCAST_AUDIOPATH) {
+        for (uint32_t i = 1; i < ap->n; i++) {
+            uint32_t r = ap->real[i];
+            if (r >= 0xfffffffcu || (p->type == PT_TRANSPOSE && (r & 0xf) == 9)) continue;
+            dm_pmsg *c = pm_clone(pf, p);
+            if (!c) continue;
+            c->pch = r;
+            perf_stamp(pf, c);
+            if (send_pmsg(pf, c) < 0) pm_free(pf, c);
+        }
+        p->pch = (ap->n && ap->real[0] < 0xfffffffcu) ? ap->real[0] : PCH_KILL_ME;
+    } else {
+        uint32_t i;
+        for (i = 0; i < ap->n; i++) if (ap->virt[i] == p->pch) { p->pch = ap->real[i]; break; }
+        if (i == ap->n && p->type != PT_NOTIFICATION && p->pch < 0xfffffffcu) p->pch = PCH_KILL_ME;
+    }
+    perf_stamp(pf, p);
+    return 0;
+}
+
+static void stamp_pmsg(dm_perf *pf, dm_segstate *ss, dm_pmsg *p)
+{
+    if (ss && ss->audiopath) ap_stamp(pf, ss->audiopath, p);
+    else perf_stamp(pf, p);
 }
 
 static void stamp_send(dm_perf *pf, dm_segstate *ss, dm_pmsg *p)
@@ -1414,6 +1455,90 @@ static void run_early(dm_perf *pf)
 #include "dmtrack.c"
 #include "dmstate.c"
 
+
+/* ------------------------------------------------------------------ audiopaths */
+/* a standard audiopath: npch virtual PChannels 0..npch-1 on new performance PChannels of port 0 */
+dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate)
+{
+    if (!pf->nports) return NULL;
+    dm_audiopath *ap = calloc(1, sizeof(*ap));
+    if (!ap) return NULL;
+    ap->refs = 1; ap->pf = pf; ap->vid = ++g_trackid; ap->active = activate;
+    ap->virt = malloc((npch + 1) * sizeof(uint32_t)); ap->real = malloc((npch + 1) * sizeof(uint32_t));
+    ap->n = npch;
+    for (uint32_t i = 0; i < npch; i++) {
+        uint32_t r = pf->nextpch++;
+        ap->virt[i] = i; ap->real[i] = r;
+        dm_perf_assign_pchannel(pf, r, 0, r / 16 + 1, r % 16);
+    }
+    ap->next = pf->paths; pf->paths = ap;
+    return ap;
+}
+
+void dm_audiopath_addref(dm_audiopath *ap) { ap->refs++; }
+void dm_audiopath_release(dm_audiopath *ap)
+{
+    if (--ap->refs > 0) return;
+    dm_perf *pf = ap->pf;
+    for (dm_audiopath **pp = &pf->paths; *pp; pp = &(*pp)->next) if (*pp == ap) { *pp = ap->next; break; }
+    if (pf->defpath == ap) pf->defpath = NULL;
+    free(ap->virt); free(ap->real); free(ap);
+}
+
+void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap) { pf->defpath = ap; }
+dm_audiopath *dm_perf_get_default_audiopath(dm_perf *pf) { return pf->defpath; }
+uint32_t dm_perf_pchannels(dm_perf *pf) { return pf->nextpch; }
+
+int dm_audiopath_convert(dm_audiopath *ap, uint32_t pch, uint32_t *out)
+{
+    for (uint32_t i = 0; i < ap->n; i++) if (ap->virt[i] == pch) { *out = ap->real[i]; return DM_OK; }
+    return DM_E_INVALIDARG;
+}
+
+/* 7731ee26 */
+int dm_audiopath_activate(dm_audiopath *ap, int on)
+{
+    if (!!on == ap->active) return DM_FALSE;
+    ap->active = !!on;
+    if (!on) {
+        dm_perf *pf = ap->pf;
+        pf->xprec = pf->appxprec;
+        for (int k = 0; k < 9; k++)
+            for (dm_segstate *s = pf->lists[k], *nx; s; s = nx) {
+                nx = s->lnext;
+                if (s->audiopath == ap && s->canstop) dm_perf_stop(pf, NULL, s, 0, 0);
+            }
+    }
+    return DM_OK;
+}
+
+/* 7731ec?? AudioPath::SetVolume: a CC7 curve to every PChannel of the path, merge index 0xffff */
+int dm_audiopath_set_volume(dm_audiopath *ap, int32_t vol, uint32_t dur)
+{
+    if (vol < -10000 || vol > 0) return DM_E_INVALIDARG;
+    dm_perf *pf = ap->pf;
+    pf->xprec = pf->appxprec;
+    int32_t v = vol < -9600 ? -9600 : vol;
+    int32_t i = -v / 100, t0 = db2vol[i], t1 = db2vol[i + 1];
+    uint8_t mv = (uint8_t)((int8_t)(((t1 - t0) * (-v % 100)) / 100) + (int8_t)t0);
+    if (dur > 3600000) dur = 3600000;
+    dm_pmsg *p = pm_alloc(pf, 0x58);
+    if (!p) return DM_E_OUTOFMEMORY;
+    rtime_t q = dm_perf_queue_time(pf);
+    mtime_t mq = R2M(pf, q);
+    if (q < ap->volend) flush_from(pf, ap->vid, mq, mq, 0);
+    rtime_t e = (rtime_t)dur * 10000 + q;
+    if (ap->volend < e) ap->volend = e;
+    p->vpch = ap->vid; p->rt = q; p->mt = mq; p->flags = 0xc3; p->pch = PCH_BROADCAST_AUDIOPATH;
+    p->type = PT_CURVE; p->group = 0xffffffff; p->c_dur = (mtime_t)dur; p->c_start = 0x7f; p->c_end = mv;
+    p->c_type = CURVET_CC; p->c_shape = dur == 0 ? CURVES_INSTANT : CURVES_LINEAR; p->c_cc = 7;
+    p->c_flags = CURVEF_START_FROM_CURRENT; p->c_merge = 0xffff;
+    ap_stamp(pf, ap, p);
+    int hr = send_pmsg(pf, p);
+    if (hr < 0) pm_free(pf, p);
+    return hr;
+}
+
 /* ------------------------------------------------------------------ construction */
 dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx)
 {
@@ -1437,6 +1562,11 @@ int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx)
 }
 
 void dm_perf_set_auto_download(dm_perf *pf, int on) { pf->autodl = on; }
+int dm_perf_get_auto_download(dm_perf *pf) { return pf->autodl; }
+void dm_perf_set_prepare_time(dm_perf *pf, uint32_t ms) { pf->prepare_ms = ms; }
+uint32_t dm_perf_get_prepare_time(dm_perf *pf) { return pf->prepare_ms; }
+void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms) { pf->bumper_ms = ms; pf->bumper = (rtime_t)ms * 10000; }
+uint32_t dm_perf_get_bumper_length(dm_perf *pf) { return pf->bumper_ms; }
 void dm_perf_set_app_precision(dm_perf *pf, int extended) { pf->appxprec = extended; }
 
 static void free_queue(dm_perf *pf, dm_queue *q)
@@ -1450,6 +1580,7 @@ void dm_perf_free(dm_perf *pf)
     if (!pf) return;
     for (int k = 0; k < NLISTS; k++)
         while (pf->lists[k]) { dm_segstate *s = pf->lists[k]; pf->lists[k] = s->lnext; ss_destroy(s); }
+    while (pf->paths) { dm_audiopath *ap = pf->paths; pf->paths = ap->next; free(ap->virt); free(ap->real); free(ap); }
     free_queue(pf, &pf->early); free_queue(pf, &pf->nearq); free_queue(pf, &pf->ontime); free_queue(pf, &pf->tmap);
     free_queue(pf, &pf->thist); free_queue(pf, &pf->notif); free_queue(pf, &pf->tsq);
     while (pf->pool) { dm_pmsg *p = pf->pool; pf->pool = p->next; free(p); }

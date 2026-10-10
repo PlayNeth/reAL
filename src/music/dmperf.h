@@ -10,6 +10,7 @@
 
 typedef struct dm_perf dm_perf;
 typedef struct dm_segstate dm_segstate;
+typedef struct dm_audiopath dm_audiopath;
 
 enum { DM_THREAD_TRANSPORT = 0, DM_THREAD_REALTIME = 1 };
 
@@ -60,9 +61,21 @@ uint32_t dm_perf_realtime(dm_perf *pf);
 #define SEGF_MARKER           0x1000000
 #define SEGF_TIMESIG_ALWAYS   0x2000000
 
-int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_segstate **out);
+int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out);
+
+/* audiopaths: standard ones only (virtual PChannels 0..n-1 on new performance PChannels of port 0) */
+dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate);
+void dm_audiopath_addref(dm_audiopath *ap);
+void dm_audiopath_release(dm_audiopath *ap);
+int dm_audiopath_activate(dm_audiopath *ap, int on);
+int dm_audiopath_set_volume(dm_audiopath *ap, int32_t vol, uint32_t dur);     /* AudioPath::SetVolume */
+int dm_audiopath_convert(dm_audiopath *ap, uint32_t pch, uint32_t *out);
+void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap);
+dm_audiopath *dm_perf_get_default_audiopath(dm_perf *pf);
+uint32_t dm_perf_pchannels(dm_perf *pf);
 int dm_perf_stop(dm_perf *pf, dm_segment *seg, dm_segstate *ss, mtime_t mt, uint32_t flags);
 int dm_perf_is_playing(dm_perf *pf, dm_segment *seg, dm_segstate *ss);
+void dm_perf_get_time(dm_perf *pf, rtime_t *rt, mtime_t *mt);
 void dm_segstate_release(dm_segstate *ss);
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);
 /* instrument download for a segment's band tracks (IDirectMusicSegment::Download / Unload) */
@@ -74,6 +87,13 @@ int dm_perf_r2m(dm_perf *pf, rtime_t rt, mtime_t *mt);
 rtime_t dm_perf_latency_time(dm_perf *pf);
 rtime_t dm_perf_queue_time(dm_perf *pf);
 void dm_perf_set_auto_download(dm_perf *pf, int on);
+int dm_perf_get_auto_download(dm_perf *pf);
+void dm_perf_set_prepare_time(dm_perf *pf, uint32_t ms);
+uint32_t dm_perf_get_prepare_time(dm_perf *pf);
+void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms);
+uint32_t dm_perf_get_bumper_length(dm_perf *pf);
+void dm_perf_invalidate(dm_perf *pf, mtime_t mt, uint32_t flags);
+int dm_perf_stop_audiopath(dm_perf *pf, dm_audiopath *ap, mtime_t mt, uint32_t flags);
 /* x87 precision of application threads when not built with DM_FPU_NATIVE (1 = 64-bit mantissa, as under Wine) */
 void dm_perf_set_app_precision(dm_perf *pf, int extended);
 

@@ -40,6 +40,7 @@ static void ss_destroy(dm_segstate *ss)
     for (int i = 0; i < ss->ntr; i++) track_endplay(ss->perf, &ss->tr[i]);
     free(ss->tr);
     dm_segment_release(ss->seg);
+    if (ss->audiopath) dm_audiopath_release(ss->audiopath);
     free(ss);
 }
 
@@ -372,7 +373,7 @@ static void start_primary(dm_perf *pf, dm_segstate *ss)
 }
 
 /* PlaySegmentEx 7730d51c / 7730d2ee */
-int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_segstate **out)
+int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out)
 {
     if (!pf->nports) return DMUS_E_NOT_INIT;
     pf->xprec = pf->appxprec;
@@ -384,8 +385,12 @@ int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm
         if (!(flags & SEGF_REFTIME)) { if ((mtime_t)start < R2M(pf, lat - 1000000)) return (int32_t)0x88781212; }
         else if (start < lat - 1000000) return (int32_t)0x88781212;
     }
+    if (!ap) ap = pf->defpath;
+    if (ap && !ap->active) return DMUS_E_NOT_INIT;
     dm_segstate *ss = ss_create(pf, seg, flags);
     if (!ss) return DM_E_OUTOFMEMORY;
+    ss->audiopath = ap;
+    if (ap) dm_audiopath_addref(ap);
     ss->i64start = start; ss->flags = flags;
     pf->played = 1;
     if (flags & SEGF_AFTERPREPARETIME) {
@@ -477,13 +482,26 @@ int dm_perf_stop(dm_perf *pf, dm_segment *seg, dm_segstate *ss, mtime_t mt, uint
     return DM_OK;
 }
 
+/* 773053ec IsPlaying: S_OK while a started state of the segment (or the state itself) has played past now */
 int dm_perf_is_playing(dm_perf *pf, dm_segment *seg, dm_segstate *ss)
 {
-    mtime_t now = R2M(pf, dm_perf_latency_time(pf));
-    for (int k = 3; k < 6; k++)
-        for (dm_segstate *s = pf->lists[k]; s; s = s->lnext)
-            if ((s == ss || (seg && s->seg == seg)) && s->mtstart <= now && now < s->mtend) return DM_OK;
+    if (!seg && !ss) return DM_E_POINTER;
+    mtime_t now = R2M(pf, clock_now(pf));
+    for (int k = 0; k < 9; k++)
+        for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) {
+            if (!s->started) continue;
+            if (now < s->mtstart) break;
+            if (now < s->mtlast && (s == ss || (seg && s->seg == seg))) return DM_OK;
+        }
     return DM_FALSE;
+}
+
+/* GetTime */
+void dm_perf_get_time(dm_perf *pf, rtime_t *rt, mtime_t *mt)
+{
+    rtime_t t = clock_now(pf);
+    if (rt) *rt = t;
+    if (mt) *mt = R2M(pf, t);
 }
 
 /* ------------------------------------------------------------------ the transport thread (7730eb7f) */
@@ -546,4 +564,23 @@ uint32_t dm_perf_transport(dm_perf *pf)
     dm_pmsg *n;
     while ((n = pf->notif.head) && n->rt < now - 20000000) { q_pop(&pf->notif); pm_free(pf, n); }
     return 100;
+}
+
+/* Invalidate (7730e396) from the application */
+void dm_perf_invalidate(dm_perf *pf, mtime_t mt, uint32_t flags)
+{
+    pf->xprec = pf->appxprec;
+    invalidate(pf, mt, flags);
+}
+
+/* StopEx with an audiopath: every state playing on it */
+int dm_perf_stop_audiopath(dm_perf *pf, dm_audiopath *ap, mtime_t mt, uint32_t flags)
+{
+    dm_segstate *v[256];
+    int n = 0;
+    for (int k = 0; k < 9; k++)
+        for (dm_segstate *s = pf->lists[k]; s && n < 256; s = s->lnext)
+            if (s->audiopath == ap) v[n++] = s;
+    for (int i = 0; i < n; i++) dm_perf_stop(pf, NULL, v[i], mt, flags);
+    return DM_OK;
 }

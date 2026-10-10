@@ -159,7 +159,14 @@ typedef struct ms_wave {
     uint8_t fmt;            /* 1: 16 bit, 2: 8 bit */
     int refs;
     void *block;            /* download buffer copy owning data */
+    int dead;               /* unloaded while still in use: freed when the last reference goes */
 } ms_wave;
+
+static void wave_unref(ms_wave *w, int n)
+{
+    w->refs -= n;
+    if (w->dead && w->refs <= 0) { free(w->block); free(w); }
+}
 
 typedef struct ms_eg {      /* artic EG block (0x38 bytes in the original) */
     int64_t attack, decay, release;
@@ -607,7 +614,7 @@ static void instr_free(ms_instr *in)
         ms_region *r = in->regions;
         in->regions = r->next;
         artic_unref(r->artic);
-        if (r->wave) r->wave->refs--;
+        if (r->wave) wave_unref(r->wave, 1);
         free(r);
     }
     free(in);
@@ -746,7 +753,15 @@ int msynth_unload(msynth *s, void *handle)
         for (ms_instr **p = &s->instr[b]; *p; p = &(*p)->next)
             if (*p == handle) { ms_instr *in = *p; *p = in->next; instr_free(in); return 0; }
         for (ms_wave **p = &s->waves[b]; *p; p = &(*p)->next)
-            if (*p == handle) { ms_wave *w = *p; *p = w->next; free(w->block); free(w); return 0; }
+            if (*p == handle) {
+                /* 774881d0: the download's reference goes; a wave still used by regions or playing voices stays
+                 * alive (unlinked) until they let go */
+                ms_wave *w = *p;
+                *p = w->next;
+                w->dead = 1;
+                wave_unref(w, 1);
+                return 0;
+            }
     }
     return -1;
 }
@@ -1288,7 +1303,7 @@ static int find_bus(msynth *s, uint32_t id, uint32_t *func, int32_t *pitch, uint
 static void voice_free_wave(ms_voice *v)    /* 7748b160 */
 {
     v->active = 0;
-    if (v->da.src.wave) { v->da.src.wave->refs -= 2; v->da.src.wave = NULL; }
+    if (v->da.src.wave) { wave_unref(v->da.src.wave, 2); v->da.src.wave = NULL; }
 }
 
 /* 7748b380: pitch modulation (cents) at t */
@@ -1542,7 +1557,7 @@ out:
     v->active = alive;
     if (!alive) {
         v->active = 0;
-        if (v->da.src.wave) { v->da.src.wave->refs -= 2; v->da.src.wave = NULL; }
+        if (v->da.src.wave) { wave_unref(v->da.src.wave, 2); v->da.src.wave = NULL; }
         v->stop = chunk;
     }
     v->lastmix = chunk;
