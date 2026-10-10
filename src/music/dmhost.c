@@ -92,6 +92,12 @@ static void port_unload(void *ctx, void *handle) { dls_port_unload(((dm_host *)c
 static int sink_dl(void *ctx, const void *buf, uint32_t size, void **handle)
 {
     int r = msynth_download(((dm_host *)ctx)->syn, buf, size, handle);
+    if (r == 1) {
+        const uint32_t *h = buf;    /* DMUS_DOWNLOADINFO + offset table; offset 0 is the DMUS_INSTRUMENT (patch first) */
+        uint32_t patch = size >= 20 && h[4] + 4 <= size ? *(const uint32_t *)((const uint8_t *)buf + h[4]) : 0;
+        LOG_INFO("music: instrument %08x has regions without articulation (Microsoft's synth refuses it): "
+                 "playing them with the DLS default articulation", patch);
+    }
     if (r < 0) LOG_INFO("music: synth refused a %s download (%d, %u bytes)", size >= 4 && *(const uint32_t *)buf == 2 ? "wave" : "instrument", r, size);
     return r;
 }

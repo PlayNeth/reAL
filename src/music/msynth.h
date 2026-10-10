@@ -12,7 +12,8 @@ typedef struct msynth msynth;
 msynth *msynth_new(uint32_t rate, int voices, int groups, int stereo);
 void msynth_free(msynth *s);
 
-/* DMUS_DOWNLOADINFO buffer; returns 0 or an HRESULT-style negative code. *handle identifies it for unload */
+/* DMUS_DOWNLOADINFO buffer; returns 0, 1 (instrument accepted with default articulation where dmsynth refuses it)
+ * or a negative code. *handle identifies it for unload */
 int msynth_download(msynth *s, const void *buf, uint32_t size, void **handle);
 int msynth_unload(msynth *s, void *handle);
 

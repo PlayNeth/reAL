@@ -669,9 +669,24 @@ static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32
         if (w) { r->wave = w; w->refs++; region_link(r); }
     }
     uint32_t gi = U32(di, 8);
+    int fixed = 0;
     if (gi == 0) {
+        /* dmsynth refuses an instrument with a region that has no articulation (DMUS_E_NOARTICULATION), so the
+         * instrument goes silent.  reAL fixes it: such regions get the DLS default articulation, what an empty
+         * connection list gives (no envelope times, full sustain, no modulation) */
+        ms_artic *a = NULL;
         for (ms_region *r = in->regions; r; r = r->next)
-            if (!r->artic) { instr_free(in); return -3; }
+            if (!r->artic) {
+                if (!a) {
+                    a = malloc(sizeof(*a));
+                    artic_init(a, s->imrate);
+                    lfo_clamp(&a->lfo); eg_clamp(&a->peg); eg_clamp(&a->veg); lfo_clamp(&a->vib); flt_clamp(&a->flt);
+                    a->refs = 0;
+                }
+                r->artic = a;
+                a->refs++;
+                fixed = 1;
+            }
     } else {
         if (gi >= nofs) { instr_free(in); return -1; }
         ms_artic *a = malloc(sizeof(*a));
@@ -691,7 +706,7 @@ static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32
         *b = in;
     }
     *handle = in;
-    return 0;
+    return fixed;       /* 1: downloaded with default articulation where the original refuses */
 }
 
 /* 77487250 */
