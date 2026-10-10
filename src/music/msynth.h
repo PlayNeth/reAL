@@ -23,6 +23,14 @@ void msynth_midi(msynth *s, int64_t t, const uint8_t *msg, uint32_t len, uint32_
 /* IDirectMusicSynth::Render: interleaved 16-bit stereo (or mono) frames starting at sample position pos */
 void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos);
 
+/* DirectX 8 sink interface (IDirectSoundSource::Read): nbuf mono 16-bit buffers, one per bus; busids are the ids
+ * channels are assigned to (msynth_assign_buses; by default 0 left, 1 right, 0x40 reverb, 0x41 chorus), funcs their
+ * functions (DSBUSID_*), pitch a per-bus pitch offset in cents.  Reads continue from msynth_seek's position. */
+void msynth_read(msynth *s, int16_t **bufs, const uint32_t *busids, const uint32_t *funcs, const int32_t *pitch,
+                 uint32_t nbuf, uint32_t frames);
+void msynth_seek(msynth *s, int64_t pos);
+int msynth_assign_buses(msynth *s, uint32_t group, uint32_t channel, const uint32_t *buses, uint32_t n);
+
 /* options matching the synth's environment: MMX mixing paths (default on, as on any CPU with MMX) */
 void msynth_set_mmx(msynth *s, int on);
 /* overall gain in millibels (GUID_DMUS_PROP_Volume; the synth's own default is +600, DirectMusic's port sets 0) */

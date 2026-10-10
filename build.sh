@@ -55,6 +55,11 @@ cp dmtrace/test.mid build/dmtrace/
 rm -f build/dmtrace/*.lib build/dmtrace/*.pdb
 echo "built build/dmtrace/dmtrace.dll"
 
+# dmgt: reference renders from Microsoft's DirectMusic (run under Wine, see tools/dmgt/dmgt.c)
+mkdir -p build/dmgt
+$CC -O1 -o build/dmgt/dmgt.exe tools/dmgt/dmgt.c -lole32 -luuid -ldxguid -ldsound
+rm -f build/dmgt/*.lib build/dmgt/*.pdb
+
 # runtime smoke test (run it with: cd build && WINEDLLOVERRIDES=dsound=n wine dstest.exe)
 $CC -O1 -o build/dstest.exe tests/dstest.c -lole32 -luuid
 rm -f build/dstest.lib build/dstest.pdb
@@ -73,6 +78,7 @@ if command -v cc >/dev/null 2>&1; then
     cc -O2 -std=gnu11 -Wall -o build/test_eax tests/test_eax.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_eax4 tests/test_eax4.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_fx tests/test_fx.c src/eax4dsp.c -lm
+    cc -O2 -std=gnu11 -Wall -o build/test_msynth tests/test_msynth.c src/music/msynth.c -lm
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then
         ./build/test_alrv_params "$GT/params.bin"

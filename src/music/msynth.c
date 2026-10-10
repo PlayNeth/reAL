@@ -350,6 +350,7 @@ struct msynth {
     ms_instr *instr[NBUCKET];
     ms_wave *waves[NBUCKET];
     uint32_t imrate;        /* +a8+fc */
+    int64_t readpos;        /* IDirectSoundSource position */
 };
 
 /* ================================================================== downloads (CInstManager) */
@@ -990,7 +991,7 @@ static void da_rebase(v_da *d)
 
 typedef struct {
     int32_t nsamples, step, dpitch, end, looplen;
-    int32_t dgain[2];
+    int32_t dgain[32];
     int32_t *old;
     int32_t db0, da1, da2;
 } mixargs;
@@ -1123,6 +1124,69 @@ static uint32_t mix_stereo_flt(v_da *d, int16_t *out, const mixargs *m, int bits
     return k;
 }
 
+/* 774915e0 / 774907b0 / 77491c20 / 77490e00: mono buffers (DirectX 8 sinks: one per bus), optionally filtered.
+ * Mirrors the original's batching: spans without wrap or ramp step; with MMX and two buffers the span is mixed in
+ * pairs, where the filtered path saturates the scaled sample before adding (the scalar path truncates it). */
+static uint32_t mix_multi(v_da *d, int16_t **bufs, uint32_t nb, const mixargs *m, int bits8, int filter, int mmx)
+{
+    int32_t pos = d->pos, inc = d->inc, accI = inc << 8, cnt = m->step;
+    int32_t g[32], acc[32];
+    int32_t b0 = d->b0, a1 = d->a1, a2 = d->a2, y1 = d->y1, y2 = d->y2;
+    uint32_t k = 0, n = (uint32_t)m->nsamples;
+    int sh = bits8 ? 5 : 13;
+    for (uint32_t i = 0; i < nb; i++) { g[i] = m->old[i]; acc[i] = g[i] << 8; }
+#define SAMPLE(p) (bits8 ? (int32_t)((int8_t *)d->data)[(p) >> 12] + \
+        ((int32_t)((uint32_t)(((int8_t *)d->data)[((p) >> 12) + 1] - ((int8_t *)d->data)[(p) >> 12]) * (uint32_t)((p) & 0xfff)) >> 12) \
+      : (int32_t)((int16_t *)d->data)[(p) >> 12] + \
+        ((int32_t)((uint32_t)(((int16_t *)d->data)[((p) >> 12) + 1] - ((int16_t *)d->data)[(p) >> 12]) * (uint32_t)((p) & 0xfff)) >> 12))
+#define FILTER(x) do { int64_t acc_ = (int64_t)(x) * b0 - (int64_t)y2 * a2; y2 = y1; acc_ += (int64_t)y1 * a1; \
+                       y1 = (int32_t)(acc_ >> 30); } while (0)
+    while (k < n) {
+        if (m->end <= pos) {
+            if (!m->looplen) break;
+            pos -= m->looplen;
+        }
+        if (--cnt == 0) {
+            cnt = m->step;
+            accI += m->dpitch; inc = accI >> 8;
+            for (int i = (int)nb - 1; i >= 0; i--) { acc[i] += m->dgain[i]; g[i] = acc[i] >> 8; }
+            if (filter) { b0 += m->db0; a1 += m->da1; a2 += m->da2; }
+        }
+        int32_t batch = (m->end - pos + inc - 1) / inc;
+        if (n - k < (uint32_t)batch) batch = (int32_t)(n - k);
+        if ((uint32_t)cnt < (uint32_t)batch) batch = cnt;
+        cnt = cnt + 1 - batch;
+        uint32_t bend = (uint32_t)batch + k;
+        if (k >= bend) continue;
+        if (mmx && nb == 2 && (int32_t)k < (int32_t)(bend - 3)) {
+            do {
+                int32_t s0 = SAMPLE(pos), s1 = SAMPLE(pos + inc);
+                pos += 2 * inc;
+                if (filter) { FILTER(s0); s0 = y1; FILTER(s1); s1 = y1; }
+                for (int c = 0; c < 2; c++) {
+                    bufs[c][k] = sat16add(bufs[c][k], packss(g[c] * s0 >> sh));
+                    bufs[c][k + 1] = sat16add(bufs[c][k + 1], packss(g[c] * s1 >> sh));
+                }
+                k += 2;
+            } while (k < bend - 3);
+        }
+        while (k < bend) {
+            int32_t x = SAMPLE(pos);
+            pos += inc;
+            if (filter) { FILTER(x); x = y1; }
+            for (int i = (int)nb - 1; i >= 0; i--)
+                bufs[i][k] = sat16add(bufs[i][k], (int16_t)((int32_t)((uint32_t)g[i] * (uint32_t)x) >> sh));
+            k++;
+        }
+    }
+#undef SAMPLE
+#undef FILTER
+    d->inc = inc; d->pos = pos;
+    if (filter) { d->y2 = y2; d->y1 = y1; d->b0 = b0; d->a1 = a1; d->a2 = a2; }
+    for (uint32_t i = 0; i < nb; i++) m->old[i] = g[i];
+    return k;
+}
+
 /* 7748a720: mix nsamples of this voice; returns 0 when the voice has ended */
 static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n, uint32_t maxdelta,
                   const int32_t *newg, int32_t *oldg, int32_t pitch, int filter, int32_t b0, int32_t a1, int32_t a2)
@@ -1153,7 +1217,7 @@ static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n
         m.dgain[1] = muldiv(newg[1] - oldg[1], (int32_t)(step << 8), (int32_t)n);
         flags = 0x40;
     } else {
-        for (uint32_t i = 0; i < nbuf && i < 2; i++) m.dgain[i] = muldiv(newg[i] - oldg[i], (int32_t)(step << 8), (int32_t)n);
+        for (uint32_t i = 0; i < nbuf && i < 32; i++) m.dgain[i] = muldiv(newg[i] - oldg[i], (int32_t)(step << 8), (int32_t)n);
     }
     if (s->mmx && n > 8) flags |= 0x10;
     flags |= d->src.fmt;
@@ -1186,7 +1250,11 @@ static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n
         case 0x41: case 0x42: mixed = mix_stereo(d, out, &m, flags & 2); break;
         case 0x51: case 0x52: mixed = mix_stereo_mmx(d, out, &m, flags & 2); break;
         case 0xc1: case 0xc2: case 0xd1: case 0xd2: mixed = mix_stereo_flt(d, out, &m, flags & 2); break;
-        default: return 0;  /* multi-buffer paths: not yet */
+        case 0x01: case 0x11: case 0x02: case 0x12:
+            mixed = mix_multi(d, bufs, nbuf, &m, flags & 2, 0, s->mmx); break;
+        case 0x81: case 0x91: case 0x82: case 0x92:
+            mixed = mix_multi(d, bufs, nbuf, &m, flags & 2, 1, s->mmx); break;
+        default: return 0;
         }
         if (d->big) {
             d->pos64 = d->pos;
@@ -1433,8 +1501,31 @@ static void voice_mix(ms_voice *v, int16_t **bufs, uint32_t flags, int64_t start
                     bp[0] = bufs[0] + (cur - start) * 2;
                 }
             } else {
-                ok = 0;     /* audiopath (multi-buffer) mixing: not yet */
-                continue;
+                int dyn = 0;
+                for (uint32_t i = 0; i < v->buses[0] && i < 32; i++) {
+                    uint32_t func, idx;
+                    int32_t bpitch;
+                    if (!find_bus(s, v->buses[1 + i], &func, &bpitch, &idx)) continue;
+                    if (!dyn) pofs = bpitch;
+                    if (func == 0xffffffff) continue;
+                    int32_t vol;
+                    if (func == 0) vol = L;
+                    else if (func == 1) vol = R;
+                    else if (func == 0x40) vol = rev;
+                    else if (func == 0x41) vol = cho;
+                    else { vol = base; if (func == 0x200) dyn = 1; }
+                    uint32_t d = (uint32_t)abs(vol - v->lastvol[i]);
+                    if ((int32_t)maxd <= (int32_t)d) maxd = d;
+                    int32_t gi = (v->busofs[i] + vol) / 10;
+                    v->lastvol[i] = vol;
+                    if (gi < -1000) gi = -1000; else if (gi >= 0) gi = 0;
+                    newg[n] = DB2LIN(gi);
+                    oldg[n] = v->lastgain[i];
+                    v->lastgain[i] = newg[n];
+                    bp[n] = bufs[idx] + (cur - start);
+                    n++;
+                }
+                if (!n) { ok = 0; continue; }
             }
             int fon = v->flt.p.cutoff != 0x7fff;
             if (fon) {
@@ -1922,6 +2013,34 @@ msynth *msynth_new(uint32_t rate, int voices, int groups, int stereo)
     return s;
 }
 
+/* 77485330/77484350: IDirectMusicSynth8::AssignChannelToBuses */
+int msynth_assign_buses(msynth *s, uint32_t group, uint32_t channel, const uint32_t *buses, uint32_t n)
+{
+    if (group - 1 >= s->ncl || channel >= 16) return -1;
+    ms_cl *c = s->cl[group - 1];
+    for (int slot = 0; slot < 16; slot++)
+        if (c->chan[slot] == channel && buses && n) {
+            uint32_t k = n > 32 ? 32 : n;
+            memcpy(&c->buses[slot][1], buses, k * sizeof(uint32_t));
+            c->buses[slot][0] = k;
+        }
+    return 0;
+}
+
+void msynth_seek(msynth *s, int64_t pos) { s->readpos = pos; }
+
+static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, uint32_t frames, int64_t pos);
+
+/* IDirectSoundSource::Read (90470): one mono 16-bit buffer per bus */
+void msynth_read(msynth *s, int16_t **bufs, const uint32_t *busids, const uint32_t *funcs, const int32_t *pitch,
+                 uint32_t nbuf, uint32_t frames)
+{
+    g_bus.ids = busids; g_bus.funcs = funcs; g_bus.pitch = pitch; g_bus.n = nbuf;
+    synth_mix(s, bufs, nbuf, 2, frames, s->readpos);
+    s->readpos += frames;
+    g_bus.n = 0;
+}
+
 void msynth_set_mmx(msynth *s, int on) { s->mmx = on; }
 
 void msynth_set_gain(msynth *s, int32_t mb)    /* GUID_DMUS_PROP_Volume: 774846d0 */
@@ -1972,17 +2091,16 @@ static void twice(msynth *s, int16_t *b, uint32_t n)
     }
 }
 
-void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos)
+/* 77485a00 */
+static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, uint32_t frames, int64_t pos)
 {
-    static const uint32_t ids[2] = { 0, 1 }, funcs[2] = { 0, 1 };
-    static const int32_t pitch[2] = { 0, 0 };
-    uint32_t flags = (uint32_t)s->stereo;
     int64_t end = pos + frames;
-    g_bus.ids = ids; g_bus.funcs = funcs; g_bus.pitch = pitch; g_bus.n = s->stereo ? 2 : 1;
     synth_prealloc(s, end);
-    halve(s, buf, frames << s->stereo);
+    for (uint32_t i = 0; i < nbuf; i++) {
+        if ((flags & 1) && i) break;
+        halve(s, bufs[i], frames << (flags & 1));
+    }
     for (uint32_t i = 0; i < s->ncl; i++) cl_process(s->cl[i], pos, end);
-    int16_t *bufs[1] = { buf };
     for (ms_voice *v = s->active, *next; v; v = next) {
         next = v->next;
         if (v->x1e0 && v->x1e0 < end) voice_noteoff(v, v->x1e0);
@@ -1993,7 +2111,19 @@ void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos)
         }
     }
     for (uint32_t i = 0; i < s->ncl; i++) cl_retire(s->cl[i], end);
-    twice(s, buf, frames << s->stereo);
+    for (uint32_t i = 0; i < nbuf; i++) {
+        if ((flags & 1) && i) break;
+        twice(s, bufs[i], frames << (flags & 1));
+    }
     if (s->lastrender < end) s->lastrender = end;
+}
+
+void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos)
+{
+    static const uint32_t ids[2] = { 0, 1 }, funcs[2] = { 0, 1 };
+    static const int32_t pitch[2] = { 0, 0 };
+    int16_t *bufs[1] = { buf };
+    g_bus.ids = ids; g_bus.funcs = funcs; g_bus.pitch = pitch; g_bus.n = s->stereo ? 2 : 1;
+    synth_mix(s, bufs, s->stereo ? 2 : 1, (uint32_t)s->stereo, frames, pos);
     g_bus.n = 0;
 }

@@ -27,7 +27,8 @@ int main(int argc, char **argv)
     uint8_t *w = readall(argv[3], &wn);
     uint32_t rate = *(uint32_t *)(w + 24);
     int16_t *ref = (int16_t *)(w + 44);
-    uint32_t frames = *(uint32_t *)(w + 40) / 4;
+    uint32_t nch = *(uint16_t *)(w + 22);
+    uint32_t frames = *(uint32_t *)(w + 40) / (2 * nch);
     int voices = getenv("MS_VOICES") ? atoi(getenv("MS_VOICES")) : 64;
     msynth *s = msynth_new(rate, voices, 1, 1);
     if (getenv("MS_NOMMX")) msynth_set_mmx(s, 0);
@@ -51,22 +52,50 @@ int main(int argc, char **argv)
         msynth_midi(s, rt * rate / 10000000, m, ((st & 0xf0) == 0xc0 || (st & 0xf0) == 0xd0) ? 2 : 3, 1);
     }
     fclose(f);
-    int16_t *out = calloc(frames + 256, 4);
-    for (uint32_t pos = 0; pos < frames; pos += 256) msynth_render(s, out + pos * 2, 256, pos);
+    int16_t *out = calloc(frames + 256, 2 * nch);
+    const char *bl = getenv("MS_BUSES");
+    if (bl) {   /* DirectX 8 sink: one mono buffer per bus (dmgt DMGT_BUSES) */
+        uint32_t ids[32], fn[32], nb = 0;
+        int32_t pitch[32] = { 0 };
+        for (char *p = (char *)bl; *p && nb < 32;) {
+            ids[nb] = strtoul(p, &p, 0);
+            fn[nb] = *p == ':' ? strtoul(p + 1, &p, 0) : ids[nb];
+            nb++;
+            if (*p == ',') p++; else break;
+        }
+        if (getenv("MS_ASSIGN") && *getenv("MS_ASSIGN"))
+            for (char *p = getenv("MS_ASSIGN"); *p;) {
+                uint32_t ch = strtoul(p, &p, 0), bi[32], n = 0;
+                if (*p == ':') p++;
+                while (n < 32) { bi[n++] = strtoul(p, &p, 0); if (*p == ',') p++; else break; }
+                msynth_assign_buses(s, 1, ch, bi, n);
+                if (*p == ';') p++; else break;
+            }
+        int16_t *b[32];
+        for (uint32_t i = 0; i < nb; i++) b[i] = calloc(256, 2);
+        msynth_seek(s, 0);
+        for (uint32_t pos = 0; pos < frames; pos += 256) {
+            for (uint32_t i = 0; i < nb; i++) memset(b[i], 0, 512);
+            msynth_read(s, b, ids, fn, pitch, nb, 256);
+            for (uint32_t k = 0; k < 256 && pos + k < frames; k++)
+                for (uint32_t i = 0; i < nb; i++) out[(pos + k) * nch + i] = b[i][k];
+        }
+    } else
+        for (uint32_t pos = 0; pos < frames; pos += 256) msynth_render(s, out + pos * 2, 256, pos);
     long bad = 0, first = -1, maxd = 0;
     double se = 0, sr = 0;
-    for (uint32_t i = 0; i < frames * 2; i++) {
+    for (uint32_t i = 0; i < frames * nch; i++) {
         long d = labs((long)out[i] - ref[i]);
         if (d) { bad++; if (first < 0) first = i; }
         if (d > maxd) maxd = d;
         se += (double)d * d; sr += (double)ref[i] * ref[i];
     }
     printf("%u frames, %d downloads: %ld samples differ (first at frame %ld), max diff %ld, ref rms %.1f, err rms %.3f\n",
-           frames, ndl, bad, first >= 0 ? first / 2 : -1, maxd, sqrt(sr / (frames * 2.0)), sqrt(se / (frames * 2.0)));
+           frames, ndl, bad, first >= 0 ? first / (long)nch : -1, maxd, sqrt(sr / (frames * (double)nch)), sqrt(se / (frames * (double)nch)));
     if (argc > 4) {
         FILE *o = fopen(argv[4], "wb");
         fwrite(w, 1, 44, o);
-        fwrite(out, 4, frames, o);
+        fwrite(out, 2 * nch, frames, o);
         fclose(o);
     }
     msynth_free(s);

@@ -150,19 +150,49 @@ static HRESULT WINAPI sk_bufsize(IDirectMusicSynthSink *i, LPDWORD n) { *n = imp
 static IDirectMusicSynthSinkVtbl sink_vtbl = { sk_qi, sk_addref, sk_release, sk_init, sk_setclock, sk_latclock, sk_activate,
                                                sk_s2r, sk_r2s, sk_setds, sk_bufsize };
 
+/* ------------------------------------------------------------------ DirectX 8 sink (dsound's private IDirectSoundSynthSink, as far as dmsynth uses it) */
+static const GUID IID_DSSynthSink = { 0x73a6a85a, 0x493e, 0x4c87, { 0xb4, 0xa5, 0xbe, 0x53, 0xeb, 0x92, 0x74, 0x4b } };
+typedef struct { void **vtbl; DWORD rate; } dssink;
+static HRESULT WINAPI ds_qi(dssink *t, REFIID riid, void **ppv)
+{
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_DSSynthSink)) { *ppv = t; return S_OK; }
+    *ppv = NULL; return E_NOINTERFACE;
+}
+static ULONG WINAPI ds_addref(dssink *t) { return 2; }
+static ULONG WINAPI ds_release(dssink *t) { return 1; }
+static HRESULT WINAPI ds_activate(dssink *t, BOOL on) { return S_OK; }
+static HRESULT WINAPI ds_r2s(dssink *t, REFERENCE_TIME rt, LONGLONG *st)
+{
+    *st = rt * t->rate / 10000000LL;
+    if (getenv("DMGT_R2S_LOG")) fprintf(stderr, "RefToSample(%lld) -> %lld\n", rt, *st);
+    return S_OK;
+}
+static HRESULT WINAPI ds_fmt(dssink *t, WAVEFORMATEX *w, DWORD size, DWORD *written)
+{
+    WAVEFORMATEX f = { WAVE_FORMAT_PCM, 1, t->rate, t->rate * 2, 2, 16, 0 };
+    memcpy(w, &f, size < sizeof(f) ? size : sizeof(f));
+    if (written) *written = sizeof(f);
+    return S_OK;
+}
+#define DSSTUB(n) static HRESULT WINAPI ds_stub##n(void *t) { fprintf(stderr, "sink method %d called\n", n); return E_NOTIMPL; }
+DSSTUB(3) DSSTUB(5) DSSTUB(8) DSSTUB(9) DSSTUB(10) DSSTUB(11) DSSTUB(12) DSSTUB(13) DSSTUB(14) DSSTUB(15)
+static void *dssink_vtbl[] = { ds_qi, ds_addref, ds_release, ds_stub3, ds_activate, ds_stub5, ds_r2s, ds_fmt, ds_stub8,
+                               ds_stub9, ds_stub10, ds_stub11, ds_stub12, ds_stub13, ds_stub14, ds_stub15 };
+
 /* ------------------------------------------------------------------ wav */
-static void write_wav(const char *path, const short *pcm, DWORD frames, DWORD rate)
+static void write_wav_n(const char *path, const short *pcm, DWORD frames, DWORD rate, WORD ch)
 {
     FILE *f = fopen(path, "wb");
     if (!f) die("open output", E_FAIL);
-    DWORD data = frames * 4, riff = 36 + data, fmtsz = 16, byterate = rate * 4;
-    WORD tag = 1, ch = 2, align = 4, bits = 16;
+    DWORD data = frames * 2 * ch, riff = 36 + data, fmtsz = 16, byterate = rate * 2 * ch;
+    WORD tag = 1, align = 2 * ch, bits = 16;
     fwrite("RIFF", 1, 4, f); fwrite(&riff, 4, 1, f); fwrite("WAVEfmt ", 1, 8, f); fwrite(&fmtsz, 4, 1, f);
     fwrite(&tag, 2, 1, f); fwrite(&ch, 2, 1, f); fwrite(&rate, 4, 1, f); fwrite(&byterate, 4, 1, f);
     fwrite(&align, 2, 1, f); fwrite(&bits, 2, 1, f); fwrite("data", 1, 4, f); fwrite(&data, 4, 1, f);
-    fwrite(pcm, 4, frames, f);
+    fwrite(pcm, 2 * ch, frames, f);
     fclose(f);
 }
+static void write_wav(const char *path, const short *pcm, DWORD frames, DWORD rate) { write_wav_n(path, pcm, frames, rate, 2); }
 
 /* ------------------------------------------------------------------ synth command */
 typedef struct { DWORD ms; BYTE msg[3]; } ev;
@@ -220,8 +250,39 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
         fclose(df);
     }
     sink s = { { &sink_vtbl }, 1, NULL, rate };
-    if (FAILED(hr = IDirectMusicSynth8_SetSynthSink(g_synth, &s.iface))) die("SetSynthSink", hr);
-    if (FAILED(hr = IDirectMusicSynth8_Activate(g_synth, TRUE))) die("Activate", hr);
+    dssink dsk = { dssink_vtbl, rate };
+    void **src = (void **)((BYTE *)g_synth + 4);     /* the synth's IDirectSoundSource */
+    void **svt = *(void ***)src;
+    int dx8 = getenv("DMGT_BUSES") != NULL;
+    DWORD busid[32], busfn[32], nbus = 0;
+    LONG buspitch[32] = { 0 };
+    if (dx8) {
+        for (char *p = getenv("DMGT_BUSES"); *p && nbus < 32;) {
+            busid[nbus] = strtoul(p, &p, 0);
+            busfn[nbus] = *p == ':' ? strtoul(p + 1, &p, 0) : busid[nbus];
+            nbus++;
+            if (*p == ',') p++; else break;
+        }
+        /* the port gave the synth its own (legacy) sink; a DirectX 8 synth has only the DirectSound one */
+        IDirectMusicSynth8_SetSynthSink(g_synth, NULL);
+        hr = ((HRESULT (WINAPI *)(void *, void *))svt[3])(src, &dsk);
+        if (FAILED(hr)) die("SetSink (DX8)", hr);
+        if (FAILED(hr = IDirectMusicSynth8_Activate(g_synth, TRUE))) die("Activate", hr);
+        if (getenv("DMGT_ASSIGN") && *getenv("DMGT_ASSIGN")) {     /* "channel:id,id,...;channel:..." for group 1 */
+            for (char *p = getenv("DMGT_ASSIGN"); *p;) {
+                DWORD ch = strtoul(p, &p, 0), ids[32], n = 0;
+                if (*p == ':') p++;
+                while (n < 32) { ids[n++] = strtoul(p, &p, 0); if (*p == ',') p++; else break; }
+                hr = IDirectMusicSynth8_AssignChannelToBuses(g_synth, 1, ch, ids, n);
+                fprintf(stderr, "AssignChannelToBuses(%lu, %lu ids) -> %08lx\n", ch, n, (unsigned long)hr);
+                if (*p == ';') p++; else break;
+            }
+        }
+        ((HRESULT (WINAPI *)(void *, ULONGLONG))svt[5])(src, 0);
+    } else {
+        if (FAILED(hr = IDirectMusicSynth8_SetSynthSink(g_synth, &s.iface))) die("SetSynthSink", hr);
+        if (FAILED(hr = IDirectMusicSynth8_Activate(g_synth, TRUE))) die("Activate", hr);
+    }
 
     /* script */
     FILE *f = fopen(script, "r");
@@ -248,6 +309,31 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
     }
 
     DWORD frames = (DWORD)((ULONGLONG)end_ms * rate / 1000), block = 256;
+    if (dx8) {
+        short *pcm = calloc(frames + block, 2 * nbus), *bufs[32];
+        for (DWORD i = 0; i < nbus; i++) bufs[i] = calloc(block * 4, 2);
+        for (DWORD pos = 0; pos < frames; pos += block) {
+            ULONGLONG bytes = block * 2;
+            for (DWORD i = 0; i < nbus; i++) { memset(bufs[i], 0, block * 2); for (DWORD k = block; k < block * 4; k++) bufs[i][k] = 0x5555; }
+            /* Read(buffers, bus ids, functions, pitch offsets, (unused), count, &length in bytes) */
+            hr = ((HRESULT (WINAPI *)(void *, short **, DWORD *, DWORD *, LONG *, DWORD, DWORD, ULONGLONG *))svt[6])(
+                src, bufs, busid, busfn, buspitch, nbus, nbus, &bytes);
+            if (FAILED(hr)) die("Read", hr);
+            if (pos == 0) {
+                for (DWORD k = block; k < block * 4; k++) if (bufs[0][k] != 0x5555) { fprintf(stderr, "Read wrote past %lu samples (to %lu at least)\n", block, k + 1); }
+                fprintf(stderr, "first Read ok\n");
+            }
+            if (pos < 256 * 4) {
+                ULONGLONG sp = *(ULONGLONG *)((BYTE *)src + 0xc);
+                fprintf(stderr, "after Read at %lu: source position %llu\n", pos, sp);
+            }
+            for (DWORD k = 0; k < block; k++)
+                for (DWORD i = 0; i < nbus; i++) pcm[(pos + k) * nbus + i] = bufs[i][k];
+        }
+        write_wav_n(out, pcm, frames, rate, (WORD)nbus);
+        fprintf(stderr, "wrote %s: %lu frames, %lu buses\n", out, frames, nbus);
+        return 0;
+    }
     short *pcm = calloc(frames + block, 4);
     for (DWORD pos = 0; pos < frames; pos += block)
         IDirectMusicSynth8_Render(g_synth, pcm + pos * 2, block, pos);
@@ -260,6 +346,7 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: dmgt <dmdir> synth <dls> <out.wav> <script>\n"); return 2; }
+    setvbuf(stderr, NULL, _IONBF, 0);
     CoInitialize(NULL);
     if (getenv("DMGT_DLDUMP")) g_dl = fopen(getenv("DMGT_DLDUMP"), "wb");
     load_dm(argv[1]);
