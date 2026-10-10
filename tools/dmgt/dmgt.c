@@ -58,6 +58,101 @@ static void hook_synth(IDirectMusicSynth8 *s)
     VirtualProtect(&vt[6], sizeof(void *), old, &old);
 }
 
+
+/* ------------------------------------------------------------------ virtual time for the DirectMusic threads
+ * timeGetTime, Sleep, timed waits and SetEvent are redirected in the DirectMusic DLLs.  A thread in a timed wait is
+ * "parked" until the virtual clock reaches its deadline or its event is set; the main thread advances the clock
+ * only when no DirectMusic thread is running, so the threads' schedule depends on virtual time alone. */
+static volatile LONGLONG g_now = 100000000;     /* 10 s, in 100 ns */
+static CRITICAL_SECTION g_vcs;
+static volatile LONG g_running;                 /* DirectMusic threads not parked */
+static int g_vtime;
+typedef struct { HANDLE h, wake; LONGLONG deadline; int state; DWORD tid; } parked;   /* state 0 free 1 parked 2 woken */
+static parked g_park[16];
+
+static void patch_import(HMODULE m, const char *dll, const char *name, void *fn);
+static DWORD WINAPI v_timegettime(void) { return (DWORD)(g_now / 10000); }
+
+static parked *park_slot(void)
+{
+    DWORD tid = GetCurrentThreadId();
+    for (int i = 0; i < 16; i++) if (g_park[i].tid == tid) return &g_park[i];
+    for (int i = 0; i < 16; i++) if (!g_park[i].tid) {
+        g_park[i].tid = tid;
+        g_park[i].wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+        InterlockedIncrement(&g_running);          /* a new thread counts as running */
+        return &g_park[i];
+    }
+    return NULL;
+}
+
+static DWORD v_wait(HANDLE h, DWORD ms)
+{
+    EnterCriticalSection(&g_vcs);
+    parked *p = park_slot();
+    p->h = h;
+    p->deadline = g_now + (LONGLONG)ms * 10000;
+    p->state = 1;
+    InterlockedDecrement(&g_running);
+    LeaveCriticalSection(&g_vcs);
+    HANDLE hs[2] = { p->wake, h };
+    DWORD r = WaitForMultipleObjects(h ? 2 : 1, hs, FALSE, INFINITE);
+    EnterCriticalSection(&g_vcs);
+    if (p->state == 1) InterlockedIncrement(&g_running);    /* woken by its own event, unannounced */
+    p->state = 0;
+    p->h = NULL;
+    LeaveCriticalSection(&g_vcs);
+    return r == WAIT_OBJECT_0 ? WAIT_TIMEOUT : WAIT_OBJECT_0;
+}
+
+static void WINAPI v_sleep(DWORD ms)
+{
+    if (!g_vtime || ms == 0) { Sleep(ms); return; }
+    v_wait(NULL, ms);
+}
+
+static DWORD WINAPI v_waitsingle(HANDLE h, DWORD ms)
+{
+    if (!g_vtime || ms == 0 || ms == INFINITE) return WaitForSingleObject(h, ms);
+    return v_wait(h, ms);
+}
+
+static BOOL WINAPI v_setevent(HANDLE h)
+{
+    EnterCriticalSection(&g_vcs);
+    for (int i = 0; i < 16; i++)
+        if (g_park[i].tid && g_park[i].state == 1 && g_park[i].h == h) {
+            g_park[i].state = 2;
+            InterlockedIncrement(&g_running);
+        }
+    LeaveCriticalSection(&g_vcs);
+    return SetEvent(h);
+}
+
+/* advance virtual time by one step once every DirectMusic thread is parked; returns after the woken ones park again */
+static void v_step(LONGLONG step)
+{
+    while (g_running > 0) Sleep(0);
+    EnterCriticalSection(&g_vcs);
+    g_now += step;
+    for (int i = 0; i < 16; i++)
+        if (g_park[i].tid && g_park[i].state == 1 && g_park[i].deadline <= g_now) {
+            g_park[i].state = 2;
+            InterlockedIncrement(&g_running);
+            SetEvent(g_park[i].wake);
+        }
+    LeaveCriticalSection(&g_vcs);
+    while (g_running > 0) Sleep(0);
+}
+
+static void v_hook(HMODULE m)
+{
+    patch_import(m, "winmm.dll", "timeGetTime", v_timegettime);
+    patch_import(m, "kernel32.dll", "Sleep", v_sleep);
+    patch_import(m, "kernel32.dll", "WaitForSingleObject", v_waitsingle);
+    patch_import(m, "kernel32.dll", "SetEvent", v_setevent);
+}
+
 /* ------------------------------------------------------------------ class objects straight from the DLLs */
 static HRESULT get_class(REFCLSID clsid, REFIID iid, void **ppv)
 {
@@ -85,6 +180,24 @@ static HRESULT WINAPI my_cocreate(REFCLSID clsid, LPUNKNOWN outer, DWORD ctx, RE
     return hr;
 }
 
+static void patch_import(HMODULE m, const char *dll, const char *name, void *fn)
+{
+    BYTE *base = (BYTE *)m;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY *dd = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dd->VirtualAddress) return;
+    void *target = (void *)GetProcAddress(GetModuleHandleA(dll), name);
+    for (IMAGE_IMPORT_DESCRIPTOR *d = (void *)(base + dd->VirtualAddress); d->Name; d++) {
+        for (void **slot = (void **)(base + d->FirstThunk); *slot; slot++) {
+            if (*slot != target) continue;
+            DWORD old;
+            VirtualProtect(slot, sizeof(void *), PAGE_READWRITE, &old);
+            *slot = fn;
+            VirtualProtect(slot, sizeof(void *), old, &old);
+        }
+    }
+}
+
 static void patch_iat(HMODULE m)
 {
     BYTE *base = (BYTE *)m;
@@ -107,6 +220,8 @@ static void patch_iat(HMODULE m)
 static void load_dm(const char *dir)
 {
     strcpy(g_dir, dir);
+    InitializeCriticalSection(&g_vcs);
+    g_vtime = getenv("DMGT_VTIME") != NULL;
     int n = 0;
     LoadLibraryA("ole32.dll");
     for (int i = 0; g_dlls[i]; i++) {
@@ -115,6 +230,7 @@ static void load_dm(const char *dir)
         HMODULE m = LoadLibraryA(p);
         if (!m) { fprintf(stderr, "cannot load %s (%lu)\n", p, GetLastError()); continue; }
         patch_iat(m);
+        if (getenv("DMGT_VTIME")) { LoadLibraryA("winmm.dll"); v_hook(m); }
         g_mods[n++] = m;
     }
 }
@@ -343,6 +459,127 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
     return 0;
 }
 
+
+/* ------------------------------------------------------------------ perf: the event stream of Microsoft's performance
+ * dmgt <dmdir> perf <segment> <out.log> <ms> [flags]
+ * Plays a segment through dmime's performance with the master clock under our control (time advances in 1 ms steps)
+ * and logs every buffer the performance hands the port: "<rt - segment start rt> <group> <bytes...>".
+ * Instrument downloads go to the real port and synth (DMGT_DLDUMP captures them). */
+static const GUID GUID_AllZeros = { 0 };
+static IReferenceClock *g_clock;
+static FILE *g_ev;
+static REFERENCE_TIME g_base;
+static CRITICAL_SECTION g_evcs;
+
+static void patch_vt(void *obj, int idx, void *fn, void **orig)
+{
+    void **vt = *(void ***)obj;
+    DWORD old;
+    VirtualProtect(&vt[idx], sizeof(void *), PAGE_EXECUTE_READWRITE, &old);
+    if (orig) *orig = vt[idx];
+    vt[idx] = fn;
+    VirtualProtect(&vt[idx], sizeof(void *), old, &old);
+}
+
+static HRESULT WINAPI my_gettime(IReferenceClock *c, REFERENCE_TIME *t) { *t = g_now; return S_OK; }
+static HRESULT WINAPI my_latclock(IDirectMusicPort *p, IReferenceClock **c)
+{
+    IReferenceClock_AddRef(g_clock);
+    *c = g_clock;
+    return S_OK;
+}
+static HRESULT WINAPI my_playbuffer(IDirectMusicPort *p, IDirectMusicBuffer *b)
+{
+    REFERENCE_TIME rt;
+    DWORD grp, cb;
+    BYTE *data;
+    EnterCriticalSection(&g_evcs);
+    IDirectMusicBuffer_ResetReadPtr(b);
+    while (IDirectMusicBuffer_GetNextEvent(b, &rt, &grp, &cb, &data) == S_OK) {
+        fprintf(g_ev, "%lld %lu", rt, grp);
+        for (DWORD i = 0; i < cb; i++) fprintf(g_ev, " %02x", data[i]);
+        fprintf(g_ev, "\n");
+    }
+    LeaveCriticalSection(&g_evcs);
+    return S_OK;
+}
+static HRESULT WINAPI my_activate(IDirectMusicPort *p, BOOL on) { return S_OK; }
+
+static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
+{
+    IDirectMusicLoader8 *loader;
+    IDirectMusic8 *dm;
+    IDirectMusicPerformance8 *perf;
+    HRESULT hr;
+    InitializeCriticalSection(&g_evcs);
+    if (FAILED(hr = my_cocreate(&CLSID_DirectMusicLoader, NULL, CLSCTX_INPROC, &IID_IDirectMusicLoader8, (void **)&loader))) die("loader", hr);
+    if (FAILED(hr = my_cocreate(&CLSID_DirectMusic, NULL, CLSCTX_INPROC, &IID_IDirectMusic8, (void **)&dm))) die("DirectMusic", hr);
+    IDirectSound8 *ds;
+    if (FAILED(hr = DirectSoundCreate8(NULL, &ds, NULL))) die("DirectSoundCreate8", hr);
+    IDirectSound8_SetCooperativeLevel(ds, GetDesktopWindow(), DSSCL_PRIORITY);
+    if (FAILED(hr = IDirectMusic8_SetDirectSound(dm, (IDirectSound *)ds, NULL))) die("SetDirectSound", hr);
+    if (FAILED(hr = IDirectMusic8_GetMasterClock(dm, NULL, &g_clock))) die("GetMasterClock", hr);
+    patch_vt(g_clock, 3, my_gettime, NULL);
+    DMUS_PORTPARAMS8 pp = { sizeof(pp) };
+    pp.dwValidParams = DMUS_PORTPARAMS_VOICES | DMUS_PORTPARAMS_CHANNELGROUPS | DMUS_PORTPARAMS_SAMPLERATE | DMUS_PORTPARAMS_EFFECTS;
+    pp.dwVoices = 64; pp.dwChannelGroups = 1; pp.dwSampleRate = 44100; pp.dwEffectFlags = 0;
+    IDirectMusicPort *port;
+    if (FAILED(hr = IDirectMusic8_CreatePort(dm, &CLSID_DirectMusicSynth, (DMUS_PORTPARAMS *)&pp, &port, NULL))) die("CreatePort", hr);
+    patch_vt(port, 3, my_playbuffer, NULL);
+    patch_vt(port, 8, my_latclock, NULL);
+    patch_vt(port, 15, my_activate, NULL);
+    if (FAILED(hr = my_cocreate(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&perf))) die("performance", hr);
+    IDirectMusic *dmi = (IDirectMusic *)dm;
+    if (FAILED(hr = IDirectMusicPerformance8_Init(perf, &dmi, NULL, NULL))) die("Init", hr);
+    if (FAILED(hr = IDirectMusicPerformance8_AddPort(perf, port))) die("AddPort", hr);
+    if (FAILED(hr = IDirectMusicPerformance8_AssignPChannelBlock(perf, 0, port, 1))) die("AssignPChannelBlock", hr);
+    char dir[MAX_PATH];
+    strcpy(dir, seg);
+    char *sl = strrchr(dir, '\\');
+    if (sl) *sl = 0;
+    WCHAR w[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, dir, -1, w, MAX_PATH);
+    IDirectMusicLoader8_SetSearchDirectory(loader, &GUID_DirectMusicAllTypes, w, FALSE);
+    MultiByteToWideChar(CP_ACP, 0, seg, -1, w, MAX_PATH);
+    IDirectMusicSegment8 *sg;
+    if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&sg)))
+        die("load segment", hr);
+    if (FAILED(hr = IDirectMusicSegment8_Download(sg, (IUnknown *)perf))) fprintf(stderr, "Download: %08lx\n", (unsigned long)hr);
+    if (getenv("DMGT_VTBL")) {
+        fprintf(stderr, "vtbl performance %p segment %p\n", *(void **)perf, *(void **)sg);
+        IDirectMusicTrack *tr;
+        for (DWORD i = 0; IDirectMusicSegment8_GetTrack(sg, &GUID_AllZeros, 0xffffffff, i, &tr) == S_OK; i++) {
+            IPersistStream *ps;
+            CLSID c = { 0 };
+            if (SUCCEEDED(IDirectMusicTrack_QueryInterface(tr, &IID_IPersistStream, (void **)&ps))) {
+                IPersistStream_GetClassID(ps, &c); IPersistStream_Release(ps);
+            }
+            fprintf(stderr, "vtbl track %lu %p class %08lx\n", i, *(void **)tr, c.Data1);
+        }
+    }
+    g_ev = fopen(out, "w");
+    IDirectMusicSegmentState *st;
+    if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg, NULL, NULL, flags, 0, &st, NULL, NULL)))
+        die("PlaySegmentEx", hr);
+    for (DWORD t = 0; t < ms + 1500; t++) {
+        if (g_vtime) { v_step(10000); continue; }
+        g_now += 10000;
+        Sleep(t < 50 ? 5 : (getenv("DMGT_SLEEP") ? atoi(getenv("DMGT_SLEEP")) : 1));
+    }
+    if (getenv("DMGT_VTBL")) fprintf(stderr, "vtbl segstate %p\n", *(void **)st);
+    MUSIC_TIME mt;
+    REFERENCE_TIME rt;
+    IDirectMusicSegmentState_GetStartTime(st, &mt);
+    IDirectMusicPerformance8_MusicToReferenceTime(perf, mt, &rt);
+    EnterCriticalSection(&g_evcs);
+    fprintf(g_ev, "# start mt %ld rt %lld\n", mt, rt);
+    fclose(g_ev); g_ev = NULL;
+    LeaveCriticalSection(&g_evcs);
+    fprintf(stderr, "segment start mt %ld rt %lld\n", mt, rt);
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    ExitProcess(0);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: dmgt <dmdir> synth <dls> <out.wav> <script>\n"); return 2; }
@@ -351,6 +588,7 @@ int main(int argc, char **argv)
     if (getenv("DMGT_DLDUMP")) g_dl = fopen(getenv("DMGT_DLDUMP"), "wb");
     load_dm(argv[1]);
     if (!strcmp(argv[2], "synth") && argc >= 6) return cmd_synth(argv[3], argv[4], argv[5]);
+    if (!strcmp(argv[2], "perf") && argc >= 6) return cmd_perf(argv[3], argv[4], atoi(argv[5]), argc > 6 ? strtoul(argv[6], NULL, 0) : 0);
     fprintf(stderr, "unknown command\n");
     return 2;
 }
