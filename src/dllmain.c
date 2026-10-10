@@ -224,6 +224,11 @@ void rl_music_hook(int can_load)
             return;
         }
         mine = m;
+        /* reAL-Music's threads, objects and COM hooks live in this module: games that FreeLibrary dsound.dll when
+         * they release DirectSound (Midnight Club II does) must not unload it under them */
+        HMODULE pin;
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_music_hook, &pin))
+            LOG_INFO("music: cannot pin reAL in memory (%lu)", GetLastError());
     }
     HMODULE ole = GetModuleHandleA("ole32.dll");
     if (!ole && can_load) ole = LoadLibraryA("ole32.dll");

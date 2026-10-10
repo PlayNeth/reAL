@@ -74,6 +74,7 @@ $CC -O1 -o build/hrtfprobe.exe tests/hrtfprobe.c -lole32 -luuid
 rm -f build/hrtfprobe.lib build/hrtfprobe.pdb
 $CC -O1 -o build/eaxtest.exe tests/eaxtest.c -lole32 -luuid
 rm -f build/eaxtest.lib build/eaxtest.pdb
+$CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
 rm -f build/mc2sim.lib build/mc2sim.pdb
 
