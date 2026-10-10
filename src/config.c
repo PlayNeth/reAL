@@ -163,4 +163,5 @@ void rl_config_load(void)
              g_cfg.enabled, g_cfg.latency_ms, g_cfg.max_voices, g_cfg.disable_dmusic,
              !g_cfg.hrtf_mode ? "off" : g_cfg.hrtf_path[0] ? g_cfg.hrtf_path : "auto",
              g_cfg.resampler == RL_INTERP_SINC ? "sinc" : "linear", g_cfg.log_level);
+    LOG_INFO("  music=%d gmdls=%s", g_cfg.music, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
 }
