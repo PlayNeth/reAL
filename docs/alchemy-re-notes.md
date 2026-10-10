@@ -392,7 +392,7 @@ and clears the delay lines; reAL does the same when an effect is loaded.
 ## DirectMusic content survey: Midnight Club II (AUDIO\DirectMusic\PC)
 
 48 segments + 26 DLS collections, no styles/bands/chordmaps as separate files (tools/dmdump.py).
-- 47 segments: Tempo, TimeSig, Chord, Seq, Band tracks; 1 (p_cafe? / t_temple) TimeSig, Seq, Band. No Style/Pattern/Motif tracks:
+- 47 segments: Tempo, TimeSig, Chord, Seq, Band tracks; 1 (p_cafe) TimeSig, Seq, Band. No Style/Pattern/Motif tracks:
   the music is sequence-based (MIDI-like seqt + curves); the Chord track is there because Producer adds one by default.
   (dmstyle.dll gets loaded only because the Chord track class lives there.)
 - Bands reference one game DLS each via DMRF (e.g. fe_hard_0x.sgt -> fe_hard.dls, bank LSB 1, programs 0..15).
