@@ -16,7 +16,7 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
+SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reAL-Music: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
@@ -74,6 +74,7 @@ $CC -O1 -o build/hrtfprobe.exe tests/hrtfprobe.c -lole32 -luuid
 rm -f build/hrtfprobe.lib build/hrtfprobe.pdb
 $CC -O1 -o build/eaxtest.exe tests/eaxtest.c -lole32 -luuid
 rm -f build/eaxtest.lib build/eaxtest.pdb
+$CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
 rm -f build/mc2sim.lib build/mc2sim.pdb

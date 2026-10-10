@@ -167,7 +167,7 @@ static int insn_len(const BYTE *p)
 }
 
 /* patch fn so that it jumps to repl; returns a pointer that runs the original */
-static void *hotpatch(void *fn, void *repl, const char *name)
+void *rl_hotpatch(void *fn, void *repl, const char *name)
 {
     BYTE *p = resolve_code(fn);
     DWORD old;
@@ -181,7 +181,7 @@ static void *hotpatch(void *fn, void *repl, const char *name)
             *(volatile WORD *)p = 0xF9EB;           /* jmp short -7 */
             VirtualProtect(p - 5, 7, old, &old);
             FlushInstructionCache(GetCurrentProcess(), p - 5, 7);
-            LOG_INFO("music: hooked %s (hot-patch at %p)", name, (void *)p);
+            LOG_INFO("hooked %s (hot-patch at %p)", name, (void *)p);
             return p + 2;
         }
     }
@@ -189,7 +189,7 @@ static void *hotpatch(void *fn, void *repl, const char *name)
     int len = 0;
     while (len < 5) { int n = insn_len(p + len); if (!n) break; len += n; }
     if (len < 5) {
-        LOG_INFO("music: cannot hook %s: unknown prologue %02x %02x %02x %02x %02x %02x", name, p[0], p[1], p[2], p[3], p[4], p[5]);
+        LOG_INFO("cannot hook %s: unknown prologue %02x %02x %02x %02x %02x %02x", name, p[0], p[1], p[2], p[3], p[4], p[5]);
         return NULL;
     }
     BYTE *t = VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -203,7 +203,7 @@ static void *hotpatch(void *fn, void *repl, const char *name)
     for (int i = 5; i < len; i++) p[i] = 0x90;
     VirtualProtect(p, len, old, &old);
     FlushInstructionCache(GetCurrentProcess(), p, len);
-    LOG_INFO("music: hooked %s (trampoline, %d bytes)", name, len);
+    LOG_INFO("hooked %s (trampoline, %d bytes)", name, len);
     return t;
 }
 
@@ -240,9 +240,9 @@ void rl_music_hook(int can_load)
     void *a = (void *)GetProcAddress(ole, "CoCreateInstance");
     void *b = (void *)GetProcAddress(ole, "CoCreateInstanceEx");
     void *c = (void *)GetProcAddress(ole, "CoGetClassObject");
-    if (a) s_cocreate = (cocreate_fn)hotpatch(a, (void *)hook_cocreate, "CoCreateInstance");
-    if (b) s_cocreateex = (cocreateex_fn)hotpatch(b, (void *)hook_cocreateex, "CoCreateInstanceEx");
-    if (c) s_cogetclass = (cogetclass_fn)hotpatch(c, (void *)hook_cogetclass, "CoGetClassObject");
+    if (a) s_cocreate = (cocreate_fn)rl_hotpatch(a, (void *)hook_cocreate, "CoCreateInstance");
+    if (b) s_cocreateex = (cocreateex_fn)rl_hotpatch(b, (void *)hook_cocreateex, "CoCreateInstanceEx");
+    if (c) s_cogetclass = (cogetclass_fn)rl_hotpatch(c, (void *)hook_cogetclass, "CoGetClassObject");
     if (!s_cocreate) LOG_INFO("music: CoCreateInstance not hooked; DirectMusic stays with Windows");
 }
 
@@ -254,6 +254,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         DisableThreadLibraryCalls(inst);
         rl_config_load();
         rl_music_hook(0);
+        rl_midi_hook(0);
     }
     return TRUE;
 }
@@ -266,6 +267,7 @@ HRESULT WINAPI DirectSoundCreate(LPCGUID guid, LPDIRECTSOUND *out, LPUNKNOWN out
     char gb[64];
     LOG_CALL("DirectSoundCreate(%s)", rl_guid_str(guid, gb));
     rl_music_hook(1);
+    rl_midi_hook(1);
     if (!g_cfg.enabled) {
         HRESULT (WINAPI *fn)(LPCGUID, LPDIRECTSOUND *, LPUNKNOWN) = REAL_PROC("DirectSoundCreate");
         return fn ? fn(guid, out, outer) : DSERR_NODRIVER;
@@ -287,6 +289,7 @@ HRESULT WINAPI DirectSoundCreate8(LPCGUID guid, LPDIRECTSOUND8 *out, LPUNKNOWN o
     char gb[64];
     LOG_CALL("DirectSoundCreate8(%s)", rl_guid_str(guid, gb));
     rl_music_hook(1);
+    rl_midi_hook(1);
     if (!g_cfg.enabled) {
         HRESULT (WINAPI *fn)(LPCGUID, LPDIRECTSOUND8 *, LPUNKNOWN) = REAL_PROC("DirectSoundCreate8");
         return fn ? fn(guid, out, outer) : DSERR_NODRIVER;

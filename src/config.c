@@ -40,6 +40,9 @@ static int is_true(const char *v)
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
 
+static const char *s_cur_file, *s_cur_section;
+static char s_music_from[MAX_PATH + 64] = "default";
+
 static void apply(const char *key, const char *val)
 {
     /* ALchemy keys (same names & clamps as the original dsound.dll) */
@@ -65,7 +68,13 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "logeax"))     g_cfg.log_eax = is_true(val);
     else if (!_stricmp(key, "logfile"))    lstrcpynA(g_cfg.log_file, val, MAX_PATH);
     else if (!_stricmp(key, "realdsound")) lstrcpynA(g_cfg.real_dsound, val, MAX_PATH);
-    else if (!_stricmp(key, "music"))      g_cfg.music = is_true(val);
+    else if (!_stricmp(key, "music")) {
+        g_cfg.music = is_true(val);
+        if (s_cur_file) snprintf(s_music_from, sizeof(s_music_from), "%s%s%s%s", s_cur_file,
+                                 s_cur_section && s_cur_section[0] ? " [" : "", s_cur_section ? s_cur_section : "",
+                                 s_cur_section && s_cur_section[0] ? "]" : "");
+    }
+    else if (!_stricmp(key, "miditrace"))  g_cfg.midi_trace = is_true(val);
     else if (!_stricmp(key, "gmdls"))      lstrcpynA(g_cfg.gm_dls, val, MAX_PATH);
     else if (!_stricmp(key, "resampler"))
         g_cfg.resampler = (!_stricmp(val, "linear") || !_stricmp(val, "alchemy")) ? RL_INTERP_LINEAR : RL_INTERP_SINC;
@@ -80,6 +89,9 @@ static void apply(const char *key, const char *val)
  * Keys outside any section and in [default] always apply. */
 static int load_file(const char *path, const char *exe_section)
 {
+    char section[128] = "";
+    s_cur_file = path;
+    s_cur_section = section;
     FILE *f = fopen(path, "r");
     if (!f) return 0;
     char line[1024];
@@ -91,6 +103,7 @@ static int load_file(const char *path, const char *exe_section)
             char *e = strchr(s, ']');
             if (e) *e = 0;
             const char *name = s + 1;
+            lstrcpynA(section, name, sizeof(section));
             active = !_stricmp(name, "default") || (exe_section[0] && !_stricmp(name, exe_section));
             continue;
         }
@@ -101,6 +114,7 @@ static int load_file(const char *path, const char *exe_section)
         apply(trim(s), trim(eq + 1));
     }
     fclose(f);
+    s_cur_file = s_cur_section = NULL;
     return 1;
 }
 
@@ -169,5 +183,6 @@ void rl_config_load(void)
         LOG_INFO("  module: %s (pid %lu)", self, (unsigned long)GetCurrentProcessId());
     }
     if (g_cfg.log_level > 0) rl_crash_logger();
-    LOG_INFO("  music=%d gmdls=%s", g_cfg.music, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
+    LOG_INFO("  music=%d (set by %s) gmdls=%s", g_cfg.music, s_music_from, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
+    if (g_cfg.midi_trace) LOG_INFO("  miditrace=1");
 }

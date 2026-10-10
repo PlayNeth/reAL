@@ -37,6 +37,7 @@ typedef struct rl_config {
     int  resampler;             /* RL_INTERP_* (default sinc) */
     int  music;                 /* reAL-Music: serve DirectMusic (loader/performance) ourselves */
     char gm_dls[MAX_PATH];      /* custom GM collection; "" = the system's gm.dls */
+    int  midi_trace;            /* log the game's winmm MIDI / MCI calls */
 } rl_config;
 
 extern rl_config g_cfg;
@@ -47,6 +48,8 @@ void rl_config_load(void);
 /* ---------------- logging ---------------- */
 void rl_log_init(void);
 void rl_crash_logger(void);
+void *rl_hotpatch(void *fn, void *repl, const char *name);   /* returns a pointer that runs the original */
+void rl_midi_hook(int can_load);
 void rl_log(int level, const char *fmt, ...);
 #define LOG_INFO(...)  rl_log(1, __VA_ARGS__)
 #define LOG_CALL(...)  do { if (g_cfg.log_level >= 2) rl_log(2, __VA_ARGS__); } while (0)
