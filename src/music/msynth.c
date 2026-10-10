@@ -2064,6 +2064,15 @@ void msynth_free(msynth *s)
     free(s);
 }
 
+/* 77484f80 / 77483d40: SetChannelPriority, for every slot mapped to the channel; takes effect at once */
+int msynth_set_priority(msynth *s, uint32_t group, uint32_t channel, uint32_t prio)
+{
+    if (group - 1u >= s->ncl || channel >= 16) return -1;
+    ms_cl *c = s->cl[group - 1];
+    for (int i = 0; i < 16; i++) if (c->chan[i] == channel) c->prio[i] = prio;
+    return 0;
+}
+
 void msynth_midi(msynth *s, int64_t t, const uint8_t *msg, uint32_t len, uint32_t group)
 {
     if (group > s->ncl) return;

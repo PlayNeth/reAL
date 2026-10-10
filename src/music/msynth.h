@@ -20,6 +20,9 @@ int msynth_unload(msynth *s, void *handle);
  * sample time t (the time IDirectMusicSynthSink::RefTimeToSample gives for the event's reference time) */
 void msynth_midi(msynth *s, int64_t t, const uint8_t *msg, uint32_t len, uint32_t group);
 
+/* IDirectMusicSynth::SetChannelPriority (group 1-based); immediate */
+int msynth_set_priority(msynth *s, uint32_t group, uint32_t channel, uint32_t prio);
+
 /* IDirectMusicSynth::Render: interleaved 16-bit stereo (or mono) frames starting at sample position pos */
 void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos);
 
