@@ -55,11 +55,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
-static BOOL is_playback_guid(LPCGUID g)
-{
-    return !g || IsEqualGUID(g, &GUID_NULL) || IsEqualGUID(g, &DSDEVID_DefaultPlayback) ||
-           IsEqualGUID(g, &DSDEVID_DefaultVoicePlayback) || IsEqualGUID(g, &RL_DEVICE_GUID);
-}
 
 /* ---------------------------------------------------------------- playback */
 
@@ -173,7 +168,11 @@ HRESULT WINAPI DirectSoundFullDuplexCreate(LPCGUID cap_dev, LPCGUID ren_dev, LPC
 HRESULT WINAPI GetDeviceID(LPCGUID src, LPGUID dst)
 {
     if (!dst) return DSERR_INVALIDPARAM;
-    if (g_cfg.enabled && is_playback_guid(src)) { *dst = RL_DEVICE_GUID; return DS_OK; }
+    /* only the default playback aliases and reAL's own GUID map here; other GUIDs may be capture devices */
+    if (g_cfg.enabled && (!src || IsEqualGUID(src, &GUID_NULL) || IsEqualGUID(src, &DSDEVID_DefaultPlayback) ||
+                          IsEqualGUID(src, &DSDEVID_DefaultVoicePlayback) || IsEqualGUID(src, &RL_DEVICE_GUID))) {
+        *dst = RL_DEVICE_GUID; return DS_OK;
+    }
     HRESULT (WINAPI *fn)(LPCGUID, LPGUID) = REAL_PROC("GetDeviceID");
     return fn ? fn(src, dst) : DSERR_NODRIVER;
 }
@@ -211,6 +210,13 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID *out)
 {
     char gb[64];
     LOG_CALL("DllGetClassObject(%s)", rl_guid_str(clsid, gb));
+    /* DirectSound's private device-enumeration class: ALchemy does not offer it (CLASS_E_CLASSNOTAVAILABLE).
+     * Forwarding it hands games the real dsound's device GUIDs instead of reAL's */
+    static const CLSID clsid_private = { 0x11ab3ec0, 0x25ec, 0x11d1, { 0xa4, 0xd8, 0x00, 0xc0, 0x4f, 0xc2, 0x8a, 0xca } };
+    if (g_cfg.enabled && IsEqualCLSID(clsid, &clsid_private)) {
+        if (out) *out = NULL;
+        return CLASS_E_CLASSNOTAVAILABLE;
+    }
     if (!g_cfg.enabled || (!IsEqualCLSID(clsid, &CLSID_DirectSound) && !IsEqualCLSID(clsid, &CLSID_DirectSound8))) {
         HRESULT (WINAPI *fn)(REFCLSID, REFIID, LPVOID *) = REAL_PROC("DllGetClassObject");
         if (out) *out = NULL;

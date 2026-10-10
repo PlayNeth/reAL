@@ -178,8 +178,8 @@ static HRESULT WINAPI ds_Initialize(IDirectSound8 *iface, LPCGUID guid)
     char gb[64];
     LOG_CALL("DirectSound::Initialize(%s)", rl_guid_str(guid, gb));
     if (This->dev) return DSERR_ALREADYINITIALIZED;
-    if (guid && !IsEqualGUID(guid, &GUID_NULL) && !IsEqualGUID(guid, &DSDEVID_DefaultPlayback) &&
-        !IsEqualGUID(guid, &DSDEVID_DefaultVoicePlayback) && !IsEqualGUID(guid, &RL_DEVICE_GUID))
+    /* any playback device GUID is reAL's device (see is_playback_guid in dllmain.c) */
+    if (guid && (IsEqualGUID(guid, &DSDEVID_DefaultCapture) || IsEqualGUID(guid, &DSDEVID_DefaultVoiceCapture)))
         return DSERR_NODRIVER;
     return rl_device_acquire(&This->dev);
 }
