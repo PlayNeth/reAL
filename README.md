@@ -105,7 +105,8 @@ src/        the DLL (C11, Win32 COM by hand)
   device.c  WASAPI render thread
   buffer.c  DSB8 / 3DBuffer / Notify / KsPropertySet / 3DListener
 tests/      test_mixcore.c (native), dstest.c (runs under Wine)
-tools/      pe.py, rtti.py — RE helpers (pefile + capstone)
+tools/      pe.py, rtti.py — RE helpers (pefile + capstone); mkdls.py — tiny test DLS collection
+dmtrace/    DirectMusic API tracer (gen.py generates the logging wrappers from the MinGW headers)
 docs/       RE notes, vtables.json (every ALchemy class + vtable)
 ```
 
@@ -125,6 +126,28 @@ game dir/
 ```
 Run with `WINEDLLOVERRIDES=dsound=n,b`. Output: `dstrace.log` next to the game exe.
 `level=2` adds per-frame calls (Lock/Unlock/GetCurrentPosition/GetStatus/AddRef/Release).
+
+## dmtrace — DirectMusic API tracer
+
+First step towards reAL-Music (a DirectMusic replacement): logs what a game asks DirectMusic to do.
+DirectMusic is a set of COM classes, so dmtrace is installed as their server for the current user instead of
+being dropped into the game folder:
+
+1. Put `dmtrace.dll` somewhere permanent, e.g. `C:\dmtrace\`.
+2. `regsvr32 C:\dmtrace\dmtrace.dll` — no admin needed: it only writes `HKCU\Software\Classes\CLSID`, so
+   Windows' own registration is untouched. (Under Wine, whose COM ignores HKCU classes, it also redirects
+   the machine-wide entries and keeps the originals to restore.)
+3. Run the game (not as administrator: elevated programs ignore per-user COM registrations). The log is
+   `dmtrace.log` next to the game's exe.
+4. `regsvr32 /u C:\dmtrace\dmtrace.dll` to uninstall.
+
+`dmtrace.ini` next to the dll: `level=1` (calls the game makes), `2` (also AddRef/Release, GetTime,
+GetParam, ...), `3` (also DirectMusic's internal calls); `target_dir=` to load the DirectMusic DLLs from
+another folder. `dmtest.exe` plays `test.mid` through DirectMusic as a smoke test.
+
+Under Wine, Microsoft's DirectMusic DLLs need DirectSound's private DirectMusic interfaces, which Wine's
+dsound does not have (reAL forwards them to the system dsound, as ALchemy does) — another reason for an own
+DirectMusic implementation rather than Wine's or Microsoft's.
 
 ## HRTF data
 

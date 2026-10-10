@@ -1,0 +1,6 @@
+LIBRARY dmtrace.dll
+EXPORTS
+    DllGetClassObject
+    DllCanUnloadNow
+    DllRegisterServer
+    DllUnregisterServer

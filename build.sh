@@ -46,6 +46,15 @@ $CC $CFLAGS -shared -o build/tracer/dsound.dll tracer/trace.c tracer/dsound.def 
 rm -f build/tracer/dsound.lib build/tracer/dsound.pdb build/tracer/trace.lib
 echo "built build/tracer/dsound.dll"
 
+# dmtrace: DirectMusic API tracer (COM server; dmtrace/gen.py regenerates dmtrace_gen.c from the MinGW headers)
+mkdir -p build/dmtrace
+$CC -O2 -std=gnu11 -Wall -Wno-unused-parameter -shared -o build/dmtrace/dmtrace.dll dmtrace/dmtrace.c dmtrace/dmtrace_gen.c \
+    dmtrace/dmtrace.def $LDFLAGS -lole32 -luuid -ladvapi32 -ldxguid -loleaut32
+$CC -O1 -o build/dmtrace/dmtest.exe dmtrace/dmtest.c -lole32 -luuid -ldxguid
+cp dmtrace/test.mid build/dmtrace/
+rm -f build/dmtrace/*.lib build/dmtrace/*.pdb
+echo "built build/dmtrace/dmtrace.dll"
+
 # runtime smoke test (run it with: cd build && WINEDLLOVERRIDES=dsound=n wine dstest.exe)
 $CC -O1 -o build/dstest.exe tests/dstest.c -lole32 -luuid
 rm -f build/dstest.lib build/dstest.pdb
