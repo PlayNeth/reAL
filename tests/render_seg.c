@@ -1,8 +1,11 @@
 /* render_seg <segment.sgt> <out.wav> <seconds> [flags]: play a segment through reAL-Music offline (performance,
- * DLS downloads, msynth) and write the synth's output.  DLS files are looked up next to the segment.  No reverb yet. */
+ * DLS downloads, msynth) and write what DirectMusic's shared stereo+reverb audiopath plays: the dry stereo buses plus
+ * the reverb send through the Waves reverb (default parameters).  DLS files are looked up next to the segment.
+ * RS_DRY=1: dry only. */
 #include "../src/music/dmperf.h"
 #include "../src/music/dmdls.h"
 #include "../src/music/msynth.h"
+#include "../src/music/wavesrev.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,6 +89,7 @@ int main(int argc, char **argv)
 
     g_syn = msynth_new(RATE, 64, 1, 1);
     msynth_set_gain(g_syn, 0);
+    msynth_set_mmx(g_syn, 1);
     dls_sink sk = { s_dl, s_ul };
     g_dls = dls_port_new(&sk, NULL);
     dm_hostops ho = { h_clock, h_msec, h_signal };
@@ -102,10 +106,29 @@ int main(int argc, char **argv)
 
     int64_t total = (int64_t)(secs * RATE);
     int16_t *pcm = calloc((size_t)total * 2 + 4096, sizeof(int16_t));
+    wavesrev *rev = wavesrev_new(RATE);
+    int dry = getenv("RS_DRY") != NULL;
+    msynth_seek(g_syn, 0);
     for (int64_t ms = 0; g_pos < total; ms++) {
         int64_t to = (ms + 1) * RATE / 1000;
         if (to > total) to = total;
-        if (to > g_pos) { msynth_render(g_syn, pcm + g_pos * 2, (uint32_t)(to - g_pos), g_pos); g_pos = to; }
+        if (to > g_pos) {
+            uint32_t n = (uint32_t)(to - g_pos);
+            int16_t l[64], r[64], v[64 * 2], *bufs[3] = { l, r, v };
+            static const uint32_t ids[3] = { 0, 1, 0x40 }, fn[3] = { 0, 1, 0x40 };
+            static const int32_t pitch[3] = { 0, 0, 0 };
+            memset(l, 0, sizeof(l)); memset(r, 0, sizeof(r)); memset(v, 0, sizeof(v));
+            msynth_read(g_syn, bufs, ids, fn, pitch, 3, n);
+            /* the reverb buffer is stereo and gets the mono send on both channels */
+            for (int i = (int)n - 1; i >= 0; i--) v[2 * i] = v[2 * i + 1] = v[i];
+            wavesrev_stereo16(rev, v, n);
+            for (uint32_t i = 0; i < n; i++) {
+                int a = l[i] + (dry ? 0 : v[2 * i]), b = r[i] + (dry ? 0 : v[2 * i + 1]);
+                pcm[(g_pos + i) * 2] = (int16_t)(a > 32767 ? 32767 : a < -32768 ? -32768 : a);
+                pcm[(g_pos + i) * 2 + 1] = (int16_t)(b > 32767 ? 32767 : b < -32768 ? -32768 : b);
+            }
+            g_pos = to;
+        }
         rtime_t now = h_clock(NULL);
         for (int pass = 0; pass < 8; pass++) {
             int ran = 0;
