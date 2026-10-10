@@ -35,6 +35,8 @@ struct dm_host {
     /* threads */
     HANDLE th[3], ev[2], quit;
     volatile LONG stop;
+    int noreverb;
+    FILE *dump;                 /* REAL_MUSIC_DUMP=file: raw 16-bit stereo of the dry + wet output (debugging) */
 };
 
 /* ------------------------------------------------------------------ clocks */
@@ -152,8 +154,14 @@ static void sink_pass(dm_host *h)
         memset(l, 0, sizeof(l)); memset(r, 0, sizeof(r)); memset(v, 0, sizeof(v));
         msynth_read(h->syn, bufs, ids, fn, pitch, 3, n);
         for (int i = (int)n - 1; i >= 0; i--) { v[2 * i] = v[2 * i + 1] = v[i]; dry[2 * i] = l[i]; dry[2 * i + 1] = r[i]; }
-        wavesrev_stereo16(h->rev, v, n);
+        if (h->noreverb) memset(v, 0, n * 4);
+        else wavesrev_stereo16(h->rev, v, n);
         uint32_t at = (uint32_t)(h->written % h->bufframes);
+        if (h->dump) {
+            int16_t mix[512];
+            for (uint32_t k = 0; k < 2 * n; k++) { int x = dry[k] + v[k]; mix[k] = (int16_t)(x > 32767 ? 32767 : x < -32768 ? -32768 : x); }
+            fwrite(mix, 4, n, h->dump);
+        }
         write_buffer(h->dry, at, dry, n, h->bufframes);
         write_buffer(h->wet, at, v, n, h->bufframes);
         h->written += n;
@@ -216,6 +224,10 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     QueryPerformanceCounter(&h->qlast);
     h->rt0 = qpc_rt(h);
     h->lastclock = h->rt0;
+    {
+        char dp[MAX_PATH];
+        if (GetEnvironmentVariableA("REAL_MUSIC_DUMP", dp, MAX_PATH)) h->dump = fopen(dp, "wb");
+    }
     if (FAILED(rl_device_acquire(&h->dev))) { free(h); return NULL; }
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, 1);
     msynth_set_gain(h->syn, 0);
@@ -264,6 +276,7 @@ void dm_host_free(dm_host *h)
     msynth_free(h->syn);
     wavesrev_free(h->rev);
     if (h->dev) rl_device_release(h->dev);
+    if (h->dump) fclose(h->dump);
     DeleteCriticalSection(&h->lock);
     free(h);
 }
@@ -277,6 +290,39 @@ void dm_host_set_volume(dm_host *h, int32_t mb)
 {
     EnterCriticalSection(&h->lock);
     msynth_set_gain(h->syn, mb);
+    LeaveCriticalSection(&h->lock);
+}
+
+/* a MIDI message played as soon as possible: stamped at the play position plus the sink's lead, so messages keep
+ * their relative timing (no quantising to sink passes); never before what has been rendered already */
+void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len)
+{
+    EnterCriticalSection(&h->lock);
+    int64_t t = (host_clock(h) - h->rt0) * h->rate / 10000000 + (int64_t)h->rate * AHEAD_MS / 1000;
+    if (t < h->written) t = h->written;
+    msynth_midi(h->syn, t, msg, len, 1);
+    LeaveCriticalSection(&h->lock);
+}
+
+/* every instrument of a collection, as a GM synth has them (the Microsoft GS Wavetable synth loads all of gm.dls) */
+int dm_host_download_all(dm_host *h, dm_collection *c)
+{
+    int n = 0;
+    EnterCriticalSection(&h->lock);
+    for (int i = 0; i < dls_count(c); i++) {
+        uint32_t patch;
+        int hr;
+        if (dls_enum(c, i, &patch, NULL) < 0) continue;
+        if (dls_port_download(h->dls, c, patch, 0, 0, NULL, 0, &hr)) n++;
+    }
+    LeaveCriticalSection(&h->lock);
+    return n;
+}
+
+void dm_host_set_reverb(dm_host *h, int on)
+{
+    EnterCriticalSection(&h->lock);
+    h->noreverb = !on;
     LeaveCriticalSection(&h->lock);
 }
 

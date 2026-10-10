@@ -10,6 +10,8 @@
 #include <mmsystem.h>
 #include <stdio.h>
 #include <string.h>
+#include <stddef.h>
+#include <math.h>
 
 static __thread int t_depth;
 #define IND (_d ? "    " : "")
@@ -23,6 +25,88 @@ static void hexs(char *out, int n, const BYTE *p, DWORD len)
     for (DWORD i = 0; i < len && o + 4 < n; i++) o += snprintf(out + o, n - o, "%02x ", p[i]);
     if (len * 3 >= (DWORD)n - 4 && o + 4 < n) snprintf(out + o, n - o, "...");
 }
+
+/* ------------------------------------------------------------------ the reAL-Music MIDI device
+ * midi=true: a General MIDI software synth device, "reAL-Music GM Synth", added after the system's MIDI outputs and
+ * standing in for the MIDI mapper.  It is reAL-Music's synth (Microsoft's DLS synth) with every instrument of gm.dls
+ * (or gmdls=) loaded, as the Microsoft GS Wavetable synth has them, playing through reAL like any game sound. */
+#include "music/dmhost.h"
+
+#define RM_MAGIC 0x4d4c4552     /* 'RELM' */
+typedef struct {
+    DWORD magic;
+    DWORD_PTR cb, inst;
+    DWORD flags;
+    DWORD volume;
+    BYTE running;               /* running status */
+} rm_midiout;
+
+static dm_host *s_host;
+static CRITICAL_SECTION s_mcs;
+static rm_midiout *s_outs[16];
+static const char RM_NAME[] = "reAL-Music GM Synth";
+
+static rm_midiout *ours(HMIDIOUT h)
+{
+    if (!h) return NULL;
+    for (int i = 0; i < 16; i++) if (s_outs[i] && (HMIDIOUT)s_outs[i] == h) return s_outs[i];
+    return NULL;
+}
+
+static dm_host *midi_host(void)
+{
+    if (s_host) return s_host;
+    s_host = dm_host_new(g_cfg.midi_rate, 64, 1);
+    if (!s_host) { LOG_INFO("midi: cannot start the synth"); return NULL; }
+    dm_host_set_reverb(s_host, g_cfg.midi_reverb);
+    const char *gm = dm_gm_dls_path();
+    dm_collection *c = dm_collection_from_file(gm, 1);
+    if (c) LOG_INFO("midi: %s: %d instruments loaded", gm, dm_host_download_all(s_host, c));
+    else LOG_INFO("midi: no GM collection (%s): the synth has no instruments; set gmdls= to a DLS file", gm);
+    return s_host;
+}
+
+static void midi_send(const BYTE *m, uint32_t len)
+{
+    dm_host *h = midi_host();
+    if (h) dm_host_midi(h, m, len);
+}
+
+static void callback(rm_midiout *o, UINT msg, DWORD_PTR p1)
+{
+    static BOOL (WINAPI *dcb)(DWORD_PTR, DWORD, HDRVR, DWORD, DWORD_PTR, DWORD_PTR, DWORD_PTR);
+    if ((o->flags & CALLBACK_TYPEMASK) == CALLBACK_NULL) return;
+    if (!dcb) *(FARPROC *)&dcb = GetProcAddress(GetModuleHandleA("winmm.dll"), "DriverCallback");
+    if (dcb) dcb(o->cb, HIWORD(o->flags & CALLBACK_TYPEMASK), (HDRVR)o, msg, o->inst, p1, 0);
+}
+
+static UINT real_devs(void);
+static int is_rm_id(UINT_PTR id)
+{
+    if (!g_cfg.midi) return 0;
+    if (id == MIDI_MAPPER || id == 0xffff) return 1;
+    return id == real_devs();
+}
+
+static void fill_caps(MIDIOUTCAPSW *w, MIDIOUTCAPSA *a)
+{
+    WORD mid = 1, pid = 102;    /* MM_MICROSOFT, MM_MSFT_GENERIC_MIDISYNTH */
+    DWORD support = MIDICAPS_VOLUME | MIDICAPS_LRVOLUME;
+    if (w) {
+        memset(w, 0, sizeof(*w));
+        w->wMid = mid; w->wPid = pid; w->vDriverVersion = 0x0100;
+        MultiByteToWideChar(CP_ACP, 0, RM_NAME, -1, w->szPname, MAXPNAMELEN);
+        w->wTechnology = MOD_SWSYNTH; w->wVoices = 64; w->wNotes = 64; w->wChannelMask = 0xffff; w->dwSupport = support;
+    }
+    if (a) {
+        memset(a, 0, sizeof(*a));
+        a->wMid = mid; a->wPid = pid; a->vDriverVersion = 0x0100;
+        lstrcpynA(a->szPname, RM_NAME, MAXPNAMELEN);
+        a->wTechnology = MOD_SWSYNTH; a->wVoices = 64; a->wNotes = 64; a->wChannelMask = 0xffff; a->dwSupport = support;
+    }
+}
+
+#define TRACE(...) do { if (g_cfg.midi_trace) LOG_INFO(__VA_ARGS__); } while (0)
 
 /* ------------------------------------------------------------------ midiOut */
 static UINT (WINAPI *o_getnumdevs)(void);
@@ -39,97 +123,238 @@ static MMRESULT (WINAPI *o_setvol)(HMIDIOUT, DWORD);
 static MMRESULT (WINAPI *o_getvol)(HMIDIOUT, LPDWORD);
 static MMRESULT (WINAPI *o_message)(HMIDIOUT, UINT, DWORD_PTR, DWORD_PTR);
 static MMRESULT (WINAPI *o_cache)(HMIDIOUT, UINT, LPWORD, UINT);
+static MMRESULT (WINAPI *o_getid)(HMIDIOUT, LPUINT);
+
+static UINT real_devs(void) { return o_getnumdevs ? o_getnumdevs() : 0; }
 
 static UINT WINAPI h_getnumdevs(void)
 {
     ENTER(); UINT r = o_getnumdevs(); LEAVE();
-    LOG_INFO("midi: %smidiOutGetNumDevs() -> %u", IND, r);
+    if (g_cfg.midi && !_d) r++;
+    TRACE("midi: %smidiOutGetNumDevs() -> %u", IND, r);
     return r;
 }
 static MMRESULT WINAPI h_getcapsA(UINT_PTR id, LPMIDIOUTCAPSA c, UINT sz)
 {
-    ENTER(); MMRESULT r = o_getcapsA(id, c, sz); LEAVE();
-    LOG_INFO("midi: %smidiOutGetDevCapsA(%ld) -> %u%s%s tech %u voices %u notes %u chanmask %04x support %lx", IND, (long)id, r,
-             r ? "" : " ", r ? "" : c->szPname, r ? 0 : c->wTechnology, r ? 0 : c->wVoices, r ? 0 : c->wNotes,
-             r ? 0 : c->wChannelMask, r ? 0UL : (unsigned long)c->dwSupport);
+    ENTER();
+    MMRESULT r;
+    if (!_d && is_rm_id(id) && c && sz >= sizeof(*c)) { fill_caps(NULL, c); r = 0; }
+    else r = o_getcapsA(id, c, sz);
+    LEAVE();
+    TRACE("midi: %smidiOutGetDevCapsA(%ld) -> %u %s", IND, (long)id, r, r ? "" : c->szPname);
     return r;
 }
 static MMRESULT WINAPI h_getcapsW(UINT_PTR id, LPMIDIOUTCAPSW c, UINT sz)
 {
-    ENTER(); MMRESULT r = o_getcapsW(id, c, sz); LEAVE();
+    ENTER();
+    MMRESULT r;
+    if (!_d && is_rm_id(id) && c && sz >= sizeof(*c)) { fill_caps(c, NULL); r = 0; }
+    else r = o_getcapsW(id, c, sz);
+    LEAVE();
     char name[64] = "";
     if (!r) WideCharToMultiByte(CP_ACP, 0, c->szPname, -1, name, sizeof(name), NULL, NULL);
-    LOG_INFO("midi: %smidiOutGetDevCapsW(%ld) -> %u %s", IND, (long)id, r, name);
+    TRACE("midi: %smidiOutGetDevCapsW(%ld) -> %u %s", IND, (long)id, r, name);
     return r;
 }
 static MMRESULT WINAPI h_open(LPHMIDIOUT ph, UINT id, DWORD_PTR cb, DWORD_PTR inst, DWORD fl)
 {
-    ENTER(); MMRESULT r = o_open(ph, id, cb, inst, fl); LEAVE();
-    LOG_INFO("midi: %smidiOutOpen(dev %d, callback %p, inst %p, flags %lx) -> %u handle %p", IND, (int)id, (void *)cb,
-             (void *)inst, (unsigned long)fl, r, ph ? (void *)*ph : NULL);
+    ENTER();
+    MMRESULT r;
+    if (!_d && is_rm_id(id)) {
+        r = MMSYSERR_NOMEM;
+        rm_midiout *o = calloc(1, sizeof(*o));
+        if (o && ph) {
+            o->magic = RM_MAGIC; o->cb = cb; o->inst = inst; o->flags = fl; o->volume = 0xffffffff;
+            EnterCriticalSection(&s_mcs);
+            for (int i = 0; i < 16; i++) if (!s_outs[i]) { s_outs[i] = o; r = 0; break; }
+            LeaveCriticalSection(&s_mcs);
+            if (!r) { *ph = (HMIDIOUT)o; midi_host(); callback(o, MOM_OPEN, 0); }
+            else free(o);
+        } else { free(o); r = MMSYSERR_INVALPARAM; }
+        LOG_INFO("midi: midiOutOpen(%d) -> reAL-Music GM Synth (%u)", (int)id, r);
+    } else r = o_open(ph, id, cb, inst, fl);
+    LEAVE();
+    TRACE("midi: %smidiOutOpen(dev %d, callback %p, inst %p, flags %lx) -> %u handle %p", IND, (int)id, (void *)cb,
+          (void *)inst, (unsigned long)fl, r, ph && !r ? (void *)*ph : NULL);
     return r;
+}
+static void all_off(void)
+{
+    for (int c = 0; c < 16; c++) {
+        BYTE m1[3] = { (BYTE)(0xb0 | c), 0x40, 0 }, m2[3] = { (BYTE)(0xb0 | c), 0x7b, 0 };
+        midi_send(m1, 3); midi_send(m2, 3);
+    }
 }
 static MMRESULT WINAPI h_close(HMIDIOUT h)
 {
-    ENTER(); MMRESULT r = o_close(h); LEAVE();
-    LOG_INFO("midi: %smidiOutClose(%p) -> %u", IND, (void *)h, r);
+    ENTER();
+    MMRESULT r;
+    rm_midiout *o = ours(h);
+    if (o) {
+        all_off();
+        EnterCriticalSection(&s_mcs);
+        for (int i = 0; i < 16; i++) if (s_outs[i] == o) s_outs[i] = NULL;
+        LeaveCriticalSection(&s_mcs);
+        callback(o, MOM_CLOSE, 0);
+        free(o);
+        r = 0;
+    } else r = o_close(h);
+    LEAVE();
+    TRACE("midi: %smidiOutClose(%p) -> %u", IND, (void *)h, r);
     return r;
 }
 static MMRESULT WINAPI h_short(HMIDIOUT h, DWORD m)
 {
-    ENTER(); MMRESULT r = o_short(h, m); LEAVE();
-    LOG_INFO("midi: %sshort %p %02x %02x %02x%s", IND, (void *)h, (unsigned)(m & 0xff), (unsigned)((m >> 8) & 0xff),
-             (unsigned)((m >> 16) & 0xff), r ? " FAILED" : "");
+    ENTER();
+    MMRESULT r = 0;
+    rm_midiout *o = ours(h);
+    if (o) {
+        BYTE b[3] = { (BYTE)m, (BYTE)(m >> 8), (BYTE)(m >> 16) };
+        if (b[0] < 0x80) {      /* running status */
+            if (!o->running) { LEAVE(); return MIDIERR_BADOPENMODE; }
+            b[2] = b[1]; b[1] = b[0]; b[0] = o->running;
+        } else if (b[0] < 0xf0) o->running = b[0];
+        if (b[0] < 0xf0) {
+            uint32_t len = (b[0] & 0xe0) == 0xc0 ? 2 : 3;
+            midi_send(b, len);
+        }
+    } else r = o_short(h, m);
+    LEAVE();
+    TRACE("midi: %sshort %p %02x %02x %02x%s", IND, (void *)h, (unsigned)(m & 0xff), (unsigned)((m >> 8) & 0xff),
+          (unsigned)((m >> 16) & 0xff), r ? " FAILED" : "");
     return r;
 }
 static MMRESULT WINAPI h_long(HMIDIOUT h, LPMIDIHDR hd, UINT sz)
 {
     char x[200];
     if (hd) hexs(x, sizeof(x), (const BYTE *)hd->lpData, hd->dwBufferLength); else x[0] = 0;
-    ENTER(); MMRESULT r = o_long(h, hd, sz); LEAVE();
-    LOG_INFO("midi: %smidiOutLongMsg(%p, %lu bytes) -> %u: %s", IND, (void *)h, hd ? (unsigned long)hd->dwBufferLength : 0UL, r, x);
+    ENTER();
+    MMRESULT r;
+    rm_midiout *o = ours(h);
+    if (o) {
+        if (!hd || !hd->lpData) r = MMSYSERR_INVALPARAM;
+        else if (!(hd->dwFlags & MHDR_PREPARED)) r = MIDIERR_UNPREPARED;
+        else {
+            const BYTE *d = (const BYTE *)hd->lpData;
+            DWORD n = hd->dwBufferLength;
+            /* a buffer may hold several messages: sysex blocks, or short messages */
+            for (DWORD i = 0; i < n; ) {
+                if (d[i] == 0xf0) {
+                    DWORD e = i + 1;
+                    while (e < n && d[e] != 0xf7) e++;
+                    if (e < n) e++;
+                    midi_send(d + i, e - i);
+                    i = e;
+                } else if (d[i] >= 0x80 && d[i] < 0xf0) {
+                    uint32_t len = (d[i] & 0xe0) == 0xc0 ? 2 : 3;
+                    if (i + len <= n) midi_send(d + i, len);
+                    o->running = d[i];
+                    i += len;
+                } else i++;
+            }
+            hd->dwFlags &= ~MHDR_INQUEUE;
+            hd->dwFlags |= MHDR_DONE;
+            callback(o, MOM_DONE, (DWORD_PTR)hd);
+            r = 0;
+        }
+    } else r = o_long(h, hd, sz);
+    LEAVE();
+    TRACE("midi: %smidiOutLongMsg(%p, %lu bytes) -> %u: %s", IND, (void *)h, hd ? (unsigned long)hd->dwBufferLength : 0UL, r, x);
     return r;
 }
 static MMRESULT WINAPI h_prep(HMIDIOUT h, LPMIDIHDR hd, UINT sz)
 {
-    ENTER(); MMRESULT r = o_prep(h, hd, sz); LEAVE();
-    LOG_INFO("midi: %smidiOutPrepareHeader(%p, %p) -> %u", IND, (void *)h, (void *)hd, r);
+    ENTER();
+    MMRESULT r;
+    if (ours(h)) {
+        if (!hd || sz < offsetof(MIDIHDR, dwOffset)) r = MMSYSERR_INVALPARAM;
+        else { hd->dwFlags |= MHDR_PREPARED; hd->dwFlags &= ~MHDR_DONE; r = 0; }
+    } else r = o_prep(h, hd, sz);
+    LEAVE();
+    TRACE("midi: %smidiOutPrepareHeader(%p, %p) -> %u", IND, (void *)h, (void *)hd, r);
     return r;
 }
 static MMRESULT WINAPI h_unprep(HMIDIOUT h, LPMIDIHDR hd, UINT sz)
 {
-    ENTER(); MMRESULT r = o_unprep(h, hd, sz); LEAVE();
-    LOG_INFO("midi: %smidiOutUnprepareHeader(%p, %p) -> %u", IND, (void *)h, (void *)hd, r);
+    ENTER();
+    MMRESULT r;
+    if (ours(h)) {
+        if (!hd) r = MMSYSERR_INVALPARAM;
+        else if (hd->dwFlags & MHDR_INQUEUE) r = MIDIERR_STILLPLAYING;
+        else { hd->dwFlags &= ~MHDR_PREPARED; r = 0; }
+    } else r = o_unprep(h, hd, sz);
+    LEAVE();
+    TRACE("midi: %smidiOutUnprepareHeader(%p, %p) -> %u", IND, (void *)h, (void *)hd, r);
     return r;
 }
 static MMRESULT WINAPI h_reset(HMIDIOUT h)
 {
-    ENTER(); MMRESULT r = o_reset(h); LEAVE();
-    LOG_INFO("midi: %smidiOutReset(%p) -> %u", IND, (void *)h, r);
+    ENTER();
+    MMRESULT r;
+    rm_midiout *o = ours(h);
+    if (o) { all_off(); o->running = 0; r = 0; }
+    else r = o_reset(h);
+    LEAVE();
+    TRACE("midi: %smidiOutReset(%p) -> %u", IND, (void *)h, r);
     return r;
+}
+static int32_t vol_mb(WORD v)
+{
+    if (!v) return -9600;
+    double mb = 2000.0 * log10((double)v / 65535.0);
+    return mb < -9600 ? -9600 : (int32_t)mb;
 }
 static MMRESULT WINAPI h_setvol(HMIDIOUT h, DWORD v)
 {
-    ENTER(); MMRESULT r = o_setvol(h, v); LEAVE();
-    LOG_INFO("midi: %smidiOutSetVolume(%p, %08lx) -> %u", IND, (void *)h, (unsigned long)v, r);
+    ENTER();
+    MMRESULT r;
+    rm_midiout *o = ours(h);
+    if (o || (g_cfg.midi && is_rm_id((UINT_PTR)h))) {
+        if (o) o->volume = v;
+        WORD l = LOWORD(v), rr = HIWORD(v);
+        dm_host *hh = midi_host();
+        if (hh) dm_host_set_volume(hh, vol_mb((WORD)(((DWORD)l + rr) / 2)));
+        r = 0;
+    } else r = o_setvol(h, v);
+    LEAVE();
+    TRACE("midi: %smidiOutSetVolume(%p, %08lx) -> %u", IND, (void *)h, (unsigned long)v, r);
     return r;
 }
 static MMRESULT WINAPI h_getvol(HMIDIOUT h, LPDWORD v)
 {
-    ENTER(); MMRESULT r = o_getvol(h, v); LEAVE();
-    LOG_INFO("midi: %smidiOutGetVolume(%p) -> %u %08lx", IND, (void *)h, r, v && !r ? (unsigned long)*v : 0UL);
+    ENTER();
+    MMRESULT r;
+    rm_midiout *o = ours(h);
+    if (o) { if (v) *v = o->volume; r = v ? 0 : MMSYSERR_INVALPARAM; }
+    else r = o_getvol(h, v);
+    LEAVE();
+    TRACE("midi: %smidiOutGetVolume(%p) -> %u %08lx", IND, (void *)h, r, v && !r ? (unsigned long)*v : 0UL);
     return r;
 }
 static MMRESULT WINAPI h_message(HMIDIOUT h, UINT m, DWORD_PTR a, DWORD_PTR b)
 {
-    ENTER(); MMRESULT r = o_message(h, m, a, b); LEAVE();
-    LOG_INFO("midi: %smidiOutMessage(%p, %u, %p, %p) -> %u", IND, (void *)h, m, (void *)a, (void *)b, r);
+    ENTER();
+    MMRESULT r = ours(h) ? MMSYSERR_NOTSUPPORTED : o_message(h, m, a, b);
+    LEAVE();
+    TRACE("midi: %smidiOutMessage(%p, %u, %p, %p) -> %u", IND, (void *)h, m, (void *)a, (void *)b, r);
     return r;
 }
 static MMRESULT WINAPI h_cache(HMIDIOUT h, UINT bank, LPWORD p, UINT fl)
 {
-    ENTER(); MMRESULT r = o_cache(h, bank, p, fl); LEAVE();
-    LOG_INFO("midi: %smidiOutCachePatches(%p, bank %u, flags %x) -> %u", IND, (void *)h, bank, fl, r);
+    ENTER();
+    MMRESULT r = ours(h) ? MMSYSERR_NOTSUPPORTED : o_cache(h, bank, p, fl);
+    LEAVE();
+    TRACE("midi: %smidiOutCachePatches(%p, bank %u, flags %x) -> %u", IND, (void *)h, bank, fl, r);
+    return r;
+}
+static MMRESULT WINAPI h_getid(HMIDIOUT h, LPUINT id)
+{
+    ENTER();
+    MMRESULT r;
+    if (ours(h)) { if (id) *id = real_devs(); r = id ? 0 : MMSYSERR_INVALPARAM; }
+    else r = o_getid(h, id);
+    LEAVE();
+    TRACE("midi: %smidiOutGetID(%p) -> %u", IND, (void *)h, r);
     return r;
 }
 
@@ -147,7 +372,7 @@ static MMRESULT WINAPI hs_open(LPHMIDISTRM ph, LPUINT dev, DWORD n, DWORD_PTR cb
 {
     UINT d = dev ? *dev : 0;
     ENTER(); MMRESULT r = s_open(ph, dev, n, cb, inst, fl); LEAVE();
-    LOG_INFO("midi: %smidiStreamOpen(dev %d, %lu, callback %p, flags %lx) -> %u handle %p", IND, (int)d, (unsigned long)n,
+    TRACE("midi: %smidiStreamOpen(dev %d, %lu, callback %p, flags %lx) -> %u handle %p", IND, (int)d, (unsigned long)n,
              (void *)cb, (unsigned long)fl, r, ph ? (void *)*ph : NULL);
     return r;
 }
@@ -156,12 +381,12 @@ static MMRESULT WINAPI hs_out(HMIDISTRM h, LPMIDIHDR hd, UINT sz)
     char x[200];
     if (hd) hexs(x, sizeof(x), (const BYTE *)hd->lpData, hd->dwBytesRecorded < 48 ? hd->dwBytesRecorded : 48); else x[0] = 0;
     ENTER(); MMRESULT r = s_out(h, hd, sz); LEAVE();
-    LOG_INFO("midi: %smidiStreamOut(%p, %lu bytes) -> %u: %s", IND, (void *)h, hd ? (unsigned long)hd->dwBytesRecorded : 0UL, r, x);
+    TRACE("midi: %smidiStreamOut(%p, %lu bytes) -> %u: %s", IND, (void *)h, hd ? (unsigned long)hd->dwBytesRecorded : 0UL, r, x);
     return r;
 }
 #define SIMPLE(name, fn, label) \
     static MMRESULT WINAPI name(HMIDISTRM h) { ENTER(); MMRESULT r = fn(h); LEAVE(); \
-        LOG_INFO("midi: %s" label "(%p) -> %u", IND, (void *)h, r); return r; }
+        TRACE("midi: %s" label "(%p) -> %u", IND, (void *)h, r); return r; }
 SIMPLE(hs_restart, s_restart, "midiStreamRestart")
 SIMPLE(hs_pause, s_pause, "midiStreamPause")
 SIMPLE(hs_stop, s_stop, "midiStreamStop")
@@ -170,13 +395,13 @@ static MMRESULT WINAPI hs_prop(HMIDISTRM h, LPBYTE p, DWORD fl)
 {
     ENTER(); MMRESULT r = s_prop(h, p, fl); LEAVE();
     unsigned long v = p ? (unsigned long)((DWORD *)p)[1] : 0;
-    LOG_INFO("midi: %smidiStreamProperty(%p, flags %lx) -> %u value %lu", IND, (void *)h, (unsigned long)fl, r, v);
+    TRACE("midi: %smidiStreamProperty(%p, flags %lx) -> %u value %lu", IND, (void *)h, (unsigned long)fl, r, v);
     return r;
 }
 static MMRESULT WINAPI hs_pos(HMIDISTRM h, LPMMTIME t, UINT sz)
 {
     ENTER(); MMRESULT r = s_pos(h, t, sz); LEAVE();
-    if (g_cfg.log_level >= 3) LOG_INFO("midi: %smidiStreamPosition(%p) -> %u", IND, (void *)h, r);
+    if (g_cfg.log_level >= 3) TRACE("midi: %smidiStreamPosition(%p) -> %u", IND, (void *)h, r);
     return r;
 }
 
@@ -223,7 +448,7 @@ static void mci_log(const char *fn, MCIDEVICEID id, UINT m, DWORD_PTR fl, DWORD_
         snprintf(extra, sizeof(extra), " timeformat %lu", (unsigned long)sp->dwTimeFormat);
     }
     if (m == MCI_STATUS && g_cfg.log_level < 3 && !r) return;      /* polled constantly */
-    LOG_INFO("midi: %s%s(dev %u, %s %#x, flags %lx)%s -> %lu", IND, fn, id, mci_name(m), m, (unsigned long)fl, extra, (unsigned long)r);
+    TRACE("midi: %s%s(dev %u, %s %#x, flags %lx)%s -> %lu", IND, fn, id, mci_name(m), m, (unsigned long)fl, extra, (unsigned long)r);
 }
 static MCIERROR WINAPI hm_cmdA(MCIDEVICEID id, UINT m, DWORD_PTR fl, DWORD_PTR p)
 {
@@ -241,7 +466,7 @@ static MCIERROR WINAPI hm_strA(LPCSTR cmd, LPSTR ret, UINT n, HWND w)
 {
     ENTER(); MCIERROR r = m_strA(cmd, ret, n, w); LEAVE();
     if (g_cfg.log_level >= 3 || r || !cmd || _strnicmp(cmd, "status", 6))
-        LOG_INFO("midi: %smciSendStringA(\"%s\") -> %lu \"%s\"", IND, cmd ? cmd : "", (unsigned long)r, ret && n && !r ? ret : "");
+        TRACE("midi: %smciSendStringA(\"%s\") -> %lu \"%s\"", IND, cmd ? cmd : "", (unsigned long)r, ret && n && !r ? ret : "");
     return r;
 }
 static MCIERROR WINAPI hm_strW(LPCWSTR cmd, LPWSTR ret, UINT n, HWND w)
@@ -251,7 +476,7 @@ static MCIERROR WINAPI hm_strW(LPCWSTR cmd, LPWSTR ret, UINT n, HWND w)
     if (cmd) WideCharToMultiByte(CP_ACP, 0, cmd, -1, c, sizeof(c), NULL, NULL);
     if (ret && n && !r) WideCharToMultiByte(CP_ACP, 0, ret, -1, o, sizeof(o), NULL, NULL);
     if (g_cfg.log_level >= 3 || r || _strnicmp(c, "status", 6))
-        LOG_INFO("midi: %smciSendStringW(\"%s\") -> %lu \"%s\"", IND, c, (unsigned long)r, o);
+        TRACE("midi: %smciSendStringW(\"%s\") -> %lu \"%s\"", IND, c, (unsigned long)r, o);
     return r;
 }
 
@@ -261,15 +486,17 @@ static MCIERROR WINAPI hm_strW(LPCWSTR cmd, LPWSTR ret, UINT n, HWND w)
 
 void rl_midi_hook(int can_load)
 {
-    static int done;
-    if (!g_cfg.enabled || !g_cfg.midi_trace || done) return;
+    static LONG done;
+    if (!g_cfg.enabled || !(g_cfg.midi_trace || g_cfg.midi) || done) return;
     HMODULE mm = GetModuleHandleA("winmm.dll");
     if (!mm && can_load) mm = LoadLibraryA("winmm.dll");
     if (!mm) return;
-    done = 1;
+    if (InterlockedExchange(&done, 1)) return;     /* hook once: a second patch would wrap our own hooks */
     HMODULE pin;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_midi_hook, &pin);
-    LOG_INFO("midi: tracing winmm MIDI and MCI calls");
+    InitializeCriticalSection(&s_mcs);
+    if (g_cfg.midi) LOG_INFO("midi: reAL-Music GM Synth replaces the MIDI mapper");
+    if (g_cfg.midi_trace) LOG_INFO("midi: tracing winmm MIDI and MCI calls");
     HOOK("midiOutGetNumDevs", o_getnumdevs, h_getnumdevs);
     HOOK("midiOutGetDevCapsA", o_getcapsA, h_getcapsA);
     HOOK("midiOutGetDevCapsW", o_getcapsW, h_getcapsW);
@@ -284,6 +511,7 @@ void rl_midi_hook(int can_load)
     HOOK("midiOutGetVolume", o_getvol, h_getvol);
     HOOK("midiOutMessage", o_message, h_message);
     HOOK("midiOutCachePatches", o_cache, h_cache);
+    HOOK("midiOutGetID", o_getid, h_getid);
     HOOK("midiStreamOpen", s_open, hs_open);
     HOOK("midiStreamOut", s_out, hs_out);
     HOOK("midiStreamRestart", s_restart, hs_restart);

@@ -23,6 +23,8 @@ static void defaults(void)
     g_cfg.enabled = 1;
     g_cfg.hrtf_mode = 1;
     g_cfg.resampler = RL_INTERP_SINC;
+    g_cfg.midi_rate = 22050;
+    g_cfg.midi_reverb = 1;
 }
 
 static char *trim(char *s)
@@ -75,6 +77,9 @@ static void apply(const char *key, const char *val)
                                  s_cur_section && s_cur_section[0] ? "]" : "");
     }
     else if (!_stricmp(key, "miditrace"))  g_cfg.midi_trace = is_true(val);
+    else if (!_stricmp(key, "midi"))       g_cfg.midi = is_true(val);
+    else if (!_stricmp(key, "midirate"))   g_cfg.midi_rate = clampi(atoi(val), 11025, 48000);
+    else if (!_stricmp(key, "midireverb")) g_cfg.midi_reverb = is_true(val);
     else if (!_stricmp(key, "gmdls"))      lstrcpynA(g_cfg.gm_dls, val, MAX_PATH);
     else if (!_stricmp(key, "resampler"))
         g_cfg.resampler = (!_stricmp(val, "linear") || !_stricmp(val, "alchemy")) ? RL_INTERP_LINEAR : RL_INTERP_SINC;
@@ -184,5 +189,6 @@ void rl_config_load(void)
     }
     if (g_cfg.log_level > 0) rl_crash_logger();
     LOG_INFO("  music=%d (set by %s) gmdls=%s", g_cfg.music, s_music_from, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
-    if (g_cfg.midi_trace) LOG_INFO("  miditrace=1");
+    if (g_cfg.midi || g_cfg.midi_trace)
+        LOG_INFO("  midi=%d midirate=%d midireverb=%d miditrace=%d", g_cfg.midi, g_cfg.midi_rate, g_cfg.midi_reverb, g_cfg.midi_trace);
 }

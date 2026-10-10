@@ -18,6 +18,11 @@ void dm_host_set_volume(dm_host *h, int32_t mb);
 rtime_t dm_host_clock(dm_host *h);
 uint32_t dm_host_rate(dm_host *h);
 
+/* plain MIDI input (the winmm MIDI device): a message (short, or sysex starting with 0xf0) played now */
+void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len);
+int dm_host_download_all(dm_host *h, dm_collection *c);     /* returns how many instruments went in */
+void dm_host_set_reverb(dm_host *h, int on);
+
 /* the process-wide collection cache (the loader's) */
 dm_collection *dm_collection_from_file(const char *path, int gm);
 const char *dm_gm_dls_path(void);          /* gm.dls: reAL.ini [Music] GMDLS, else the system's */

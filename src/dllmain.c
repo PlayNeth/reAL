@@ -162,6 +162,9 @@ static int insn_len(const BYTE *p)
     case 0x83: if ((p[1] & 0xC0) == 0xC0) return 3; return 0;                                 /* op r, imm8 */
     case 0x81: if ((p[1] & 0xC0) == 0xC0) return 6; return 0;                                 /* op r, imm32 */
     case 0xB8: case 0xB9: case 0xBA: return 5;                                              /* mov r, imm32 */
+    case 0x8D:                                                                              /* lea r, [r+d8] */
+        if ((p[1] & 0xC0) == 0x40) return (p[1] & 7) == 4 ? 4 : 3;
+        return 0;
     default: return 0;
     }
 }

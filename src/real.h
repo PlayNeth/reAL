@@ -38,6 +38,9 @@ typedef struct rl_config {
     int  music;                 /* reAL-Music: serve DirectMusic (loader/performance) ourselves */
     char gm_dls[MAX_PATH];      /* custom GM collection; "" = the system's gm.dls */
     int  midi_trace;            /* log the game's winmm MIDI / MCI calls */
+    int  midi;                  /* reAL-Music GM Synth as the MIDI mapper / an extra MIDI output */
+    int  midi_rate;             /* its sample rate */
+    int  midi_reverb;           /* reverb send (CC91) through the Waves reverb */
 } rl_config;
 
 extern rl_config g_cfg;
