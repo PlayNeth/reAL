@@ -2,6 +2,7 @@
  * Same output strategy ALchemy's software path uses (CWASAPIRender), which under Wine goes
  * through mmdevapi -> winepulse/winealsa -> PipeWire/PulseAudio/ALSA. */
 #include "real.h"
+#include <math.h>
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -99,8 +100,13 @@ void rl_device_eax_use(rl_device *dev, int version)
         dev->eax1_damping = rl_eax1_presets[0].damping;
     } else if (version == 2) {
         eax2l_reset(&dev->eax2l);
-    } else {
+    } else if (version == 3) {
         eax3l_reset(&dev->eax3l);
+    } else if (!dev->eax4_init) {
+        /* EAX 4: context defaults; slot 0 reverb and slot 1 chorus, both locked (fn 0x10042220(4)) */
+        dev->eax4_init = TRUE;
+        eax4_context_reset(&dev->eax4c);
+        eax4_slots_init(dev->eax4s);
     }
     dev->reverb_dirty = TRUE;
     update_all_gains(dev);
@@ -116,8 +122,40 @@ void rl_device_eax_listener_changed(rl_device *dev)
     dev->reverb_dirty = TRUE;
 }
 
+static float slot_gain(int32_t mb) { return mb <= -10000 ? 0.0f : powf(10.0f, (float)mb / 2000.0f); }
+
+/* EAX 4: every slot holding a reverb gets its own engine (slot 0 uses dev->reverb) */
+static void apply_eax4(rl_device *dev)
+{
+    for (int k = 0; k < 4; k++) {
+        eax4_slot *s = &dev->eax4s[k];
+        dev->fx_gain[k] = slot_gain(s->volume);
+        if (s->type != EAX4FX_REVERB) continue;
+        rl_reverb *rv = &dev->reverb;
+        alrv_props *props = &dev->eax_props;
+        if (k) {
+            if (!dev->xreverb[k - 1]) {
+                rl_reverb *n = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*n));
+                if (!n || !rl_reverb_init(n, dev->out_rate ? dev->out_rate : 48000)) { HeapFree(GetProcessHeap(), 0, n); continue; }
+                dev->xreverb[k - 1] = n;
+                alrv_props_default(&dev->xprops[k - 1]);
+                s->reverb.dirty = 0xffffffff;        /* full conversion into the new engine */
+            }
+            rv = dev->xreverb[k - 1];
+            props = &dev->xprops[k - 1];
+        }
+        if (!eax3l_apply(&s->reverb, props)) continue;
+        rl_reverb_set_props(rv, props);
+        LOG_EAX("reverb: EAX4 slot %d env %lu room %ld decay %.2f hf ratio %.2f volume %ld%s", k,
+                (unsigned long)s->reverb.p.environment, (long)s->reverb.p.room, s->reverb.p.decay_time,
+                s->reverb.p.decay_hf_ratio, (long)s->volume, (s->flags & EAX4SLOT_ENVIRONMENT) ? " (environment)" : "");
+    }
+    update_all_gains(dev);      /* the sources' room / HF gains depend on the slots' reverb */
+}
+
 static void apply_reverb(rl_device *dev)
 {
+    if (dev->eax_version == 4) { apply_eax4(dev); return; }
     if (dev->eax_version == 2 || dev->eax_version == 3) {
         int changed = dev->eax_version == 2 ? eax2l_apply(&dev->eax2l, &dev->eax_props)
                                             : eax3l_apply(&dev->eax3l, &dev->eax_props);
@@ -154,7 +192,7 @@ static void mix(rl_device *dev, UINT32 frames)
         HeapFree(GetProcessHeap(), 0, dev->sendbuf);
         dev->mixbuf_frames = frames * 2;
         dev->mixbuf = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * 2 * sizeof(float));
-        dev->sendbuf = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * sizeof(float));
+        dev->sendbuf = HeapAlloc(GetProcessHeap(), 0, RL_SENDS * dev->mixbuf_frames * sizeof(float));
         if (!dev->mixbuf || !dev->sendbuf) {
             HeapFree(GetProcessHeap(), 0, dev->mixbuf);
             HeapFree(GetProcessHeap(), 0, dev->sendbuf);
@@ -164,18 +202,39 @@ static void mix(rl_device *dev, UINT32 frames)
         }
     }
     memset(dev->mixbuf, 0, frames * 2 * sizeof(float));
-    memset(dev->sendbuf, 0, frames * sizeof(float));
 
     EnterCriticalSection(&dev->lock);
     if (dev->reverb_dirty) {
         dev->reverb_dirty = FALSE;
         apply_reverb(dev);
     }
-    BOOL use_reverb = dev->eax_used && dev->reverb.eng[0].mem;
+    if (dev->eax_commit) {
+        dev->eax_commit = FALSE;
+        update_all_gains(dev);
+    }
+    /* the effect buses this period: slot 0 for EAX 1-3, every slot running a reverb for EAX 4 */
+    float *bus[RL_SENDS] = { NULL };
+    rl_reverb *fxr[RL_SENDS] = { NULL };
+    float fxg[RL_SENDS] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    int nbus = 0;
+    if (dev->eax_used && dev->reverb.eng[0].mem) {
+        if (dev->eax_version == 4) {
+            for (int k = 0; k < 4; k++) {
+                if (dev->eax4s[k].type != EAX4FX_REVERB) continue;
+                rl_reverb *rv = k ? dev->xreverb[k - 1] : &dev->reverb;
+                if (!rv || !rv->eng[0].mem) continue;
+                bus[k] = dev->sendbuf + (size_t)k * dev->mixbuf_frames;
+                fxr[k] = rv; fxg[k] = dev->fx_gain[k]; nbus++;
+            }
+        } else {
+            bus[0] = dev->sendbuf; fxr[0] = &dev->reverb; nbus = 1;
+        }
+    }
+    for (int k = 0; k < RL_SENDS; k++) if (bus[k]) memset(bus[k], 0, frames * sizeof(float));
     rl_buffer *b = dev->playing;
     while (b) {
         rl_buffer *next = b->next_playing;
-        if (rl_voice_mix(&b->voice, dev->mixbuf, use_reverb ? dev->sendbuf : NULL, frames, dev->out_rate, rl_signal_event))
+        if (rl_voice_mix(&b->voice, dev->mixbuf, nbus ? bus : NULL, frames, dev->out_rate, rl_signal_event))
             rl_device_stop_voice(dev, b);
         else if (!b->voice.playing)
             rl_device_stop_voice(dev, b);
@@ -184,7 +243,11 @@ static void mix(rl_device *dev, UINT32 frames)
     float master = rl_db100_to_gain(dev->primary_volume);
     LeaveCriticalSection(&dev->lock);
 
-    if (use_reverb) rl_reverb_process(&dev->reverb, dev->sendbuf, dev->mixbuf, frames);
+    for (int k = 0; k < RL_SENDS; k++) {
+        if (!bus[k]) continue;
+        if (fxg[k] != 1.0f) for (UINT32 i = 0; i < frames; i++) bus[k][i] *= fxg[k];   /* slot volume */
+        rl_reverb_process(fxr[k], bus[k], dev->mixbuf, frames);
+    }
 
     if (master != 1.0f)
         for (UINT32 i = 0; i < frames * 2; i++) dev->mixbuf[i] *= master;
@@ -313,6 +376,9 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
         EnterCriticalSection(&dev->lock);
         rl_reverb_free(&dev->reverb);
         rl_reverb_init(&dev->reverb, mixfmt->nSamplesPerSec);
+        for (int k = 0; k < 3; k++)          /* EAX 4 slot reverbs are recreated at the new rate */
+            if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); dev->xreverb[k] = NULL; }
+        dev->eax4s[0].reverb.dirty = 0xffffffff;
         dev->reverb_dirty = TRUE;
         LeaveCriticalSection(&dev->lock);
     }
@@ -477,6 +543,7 @@ void rl_device_release(rl_device *dev)
     HeapFree(GetProcessHeap(), 0, dev->mixbuf);
     HeapFree(GetProcessHeap(), 0, dev->sendbuf);
     rl_reverb_free(&dev->reverb);
+    for (int k = 0; k < 3; k++) if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); }
     rl_hrtf_free(&dev->hrtf);
     HeapFree(GetProcessHeap(), 0, dev);
 }

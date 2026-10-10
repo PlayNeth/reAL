@@ -26,9 +26,10 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's own reverb (CHRvbReverb) ported and verified sample-for-sample against ALchemy, incl. its stereo virtualizer |
 | Volume/pan/send smoothing, declicked position jumps | ✅ |
 | EAX 2.0 and 3.0 (listener reverb incl. environment size scaling, EAX 3 reflections/reverb panning, per-buffer direct/room/HF, obstruction, occlusion, exclusion, roll-off, air absorption) | ✅ ALchemy's property handling and per-source model ported; verified bit-for-bit against ALchemy in the emulator |
-| EAX 4–5 | ⏳ reported unsupported (games fall back to EAX 3) |
+| EAX 4.0 (context, 4 FX slots, a reverb engine per slot, per-source sends / occlusion / exclusion per slot, properties of all 12 effects) | ✅ ALchemy's handling and source model ported; bit-for-bit against ALchemy in the emulator. Audio: reverb; the other 11 effects are accepted but not heard yet |
+| EAX 5.0 | ⏳ reported unsupported (games fall back to EAX 4) |
 | Doppler (DS3D factor, EAX 3 per-buffer factor) | ✅ ALchemy's formula, bit-identical in the emulator |
-| CMSS, EAX 4/5 effects | ⏳ |
+| CMSS, audio for the 11 non-reverb EAX 4 effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 
 Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; a
@@ -36,7 +37,9 @@ windowed-sinc resampler instead of linear interpolation (a 9 kHz tone in a 22 kH
 mirror image only 6.5 dB below it with linear, −0.1 dB and −85 dB with sinc); EAX 3
 reverb panning routes the late reverb's right-hand 30°/90° slots to front-right/side-right like the
 reflections (ALchemy swaps those two, so a reverb panned hard right lands in the front speaker);
-and setting EAX 3 air absorption back to 0 takes effect (ALchemy keeps the old HF-decay limit).
+setting EAX 3 air absorption back to 0 takes effect (ALchemy keeps the old HF-decay limit); an EAX 4
+reverb loaded into a slot through ALLPARAMETERS starts from the default room (ALchemy leaves it all zeros,
+which breaks F.E.A.R.'s extra reverb slot); the flanger's default delay is the SDK's 0.002 s (ALchemy 0.0002).
 
 Tested under Wine 9.0 (32-bit prefix → winepulse → PulseAudio). `tests/dstest.c` passes and the
 recorded output matches the expected 3D gains.
@@ -78,7 +81,7 @@ environment turns on API logging to `reAL.log` next to the game's exe.
    done (src/eax.c)
 3. ~~HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), doppler~~ done
 4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
-5. EAX 4/5: FX slots, sends, the 11 remaining effects (`CPlug*`)
+5. ~~EAX 4: FX slots, sends~~ done; still to do: audio for the 11 other effects (`CPlug*`), EAX 5
 6. CMSS-3D upmix, speaker configs > 2.0
 7. Later, once reAL is (close to) feature complete: a DirectMusic drop-in for Wine ("reDM") that works
    alongside reAL. Start with a DirectMusic tracer to see what games use (loader, segment playback,

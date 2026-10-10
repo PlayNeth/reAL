@@ -175,13 +175,14 @@ static void test_spatial(void)
 static void test_send(void)
 {
     rl_voice v = make_voice(1);
-    v.send_gain = v.cur_send = 0.5f;
+    v.send_gain[0] = v.cur_send[0] = 0.5f;
     float out[20] = { 0 }, send[10] = { 0 };
-    rl_voice_mix(&v, out, send, 10, 44100, NULL);
+    float *sb[RL_SENDS] = { send };
+    rl_voice_mix(&v, out, sb, 10, 44100, NULL);
     CHECK(NEAR(send[4], 0.5f * 400 / 32768.0f));
-    v.send_gain = v.cur_send = 0.0f;
+    v.send_gain[0] = v.cur_send[0] = 0.0f;
     memset(send, 0, sizeof(send));
-    rl_voice_mix(&v, out, send, 10, 44100, NULL);
+    rl_voice_mix(&v, out, sb, 10, 44100, NULL);
     CHECK(send[3] == 0.0f);
 }
 
@@ -326,12 +327,13 @@ static double tone_power(float lp_a, int on_send, double f, uint32_t rate)
     rl_voice v; memset(&v, 0, sizeof(v));
     v.data = (const uint8_t *)sine; v.size = sizeof(sine); v.channels = 1; v.block = 2; v.sfmt = RL_S16;
     v.rate = rate; v.looping = 1;
-    v.gain[0] = v.gain[1] = 1.0f; v.send_gain = 1.0f;
-    v.lp_a = on_send ? 1.0f : lp_a; v.send_lp_a = on_send ? lp_a : 1.0f;
+    v.gain[0] = v.gain[1] = 1.0f; v.send_gain[0] = 1.0f;
+    v.lp_a = on_send ? 1.0f : lp_a; v.send_lp_a[0] = on_send ? lp_a : 1.0f;
     rl_voice_start(&v);
     static float out[2 * 24000], send[24000];
     memset(out, 0, sizeof(out)); memset(send, 0, sizeof(send));
-    rl_voice_mix(&v, out, send, 24000, rate, NULL);
+    float *sb[RL_SENDS] = { send };
+    rl_voice_mix(&v, out, sb, 24000, rate, NULL);
     double e = 0;
     for (int i = 12000; i < 24000; i++) e += on_send ? (double)send[i] * send[i] : (double)out[2 * i] * out[2 * i];
     return e;

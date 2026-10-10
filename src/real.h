@@ -83,15 +83,23 @@ typedef struct rl_device {
 
     /* EAX */
     BOOL        eax_used;         /* game made an EAX call: reverb on (ALchemy loads no effect before) */
-    int         eax_version;      /* 1..3: the EAX version the game last used (selects the source model) */
+    int         eax_version;      /* 1..4: the EAX version the game last used (selects the source model) */
     DWORD       eax1_env;
     float       eax1_volume, eax1_decay, eax1_damping;
     eax2_listener eax2l;          /* EAX 2 / EAX 3 listener property blocks */
     eax3_listener eax3l;
     alrv_props  eax_props;        /* reverb properties they are folded into */
     BOOL        reverb_dirty;
-    rl_reverb   reverb;
-    float      *sendbuf;
+    rl_reverb   reverb;           /* FX slot 0's reverb (the only one before EAX 4) */
+    float      *sendbuf;          /* RL_SENDS effect buses of mixbuf_frames each; bus 0 feeds `reverb` */
+    BOOL        eax_commit;       /* an immediate EAX set: recompute every source (applied by the mixer) */
+    /* EAX 4: context and FX slots; slots 1..3 get their own reverb when one is loaded into them */
+    BOOL        eax4_init;
+    eax4_context eax4c;
+    eax4_slot   eax4s[4];
+    rl_reverb  *xreverb[3];
+    alrv_props  xprops[3];
+    float       fx_gain[4];       /* slot volume, linear */
 
     /* HRTF (loaded from reAL_hrtf.bin once the output rate is known) */
     rl_hrtf_set hrtf;
@@ -159,6 +167,7 @@ struct rl_buffer {
     float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */
     eax2_buffer   eax2;
     eax3_buffer   eax3;
+    eax4_source   eax4;
 };
 
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out);

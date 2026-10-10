@@ -238,14 +238,15 @@ void rl_voice_start(rl_voice *v)
     if (!v->playing) {
         v->cur_gain[0] = v->gain[0];
         v->cur_gain[1] = v->gain[1];
-        v->cur_send = v->send_gain;
+        for (int k = 0; k < RL_SENDS; k++) v->cur_send[k] = v->send_gain[k];
         v->xfade_left = 0;
-        v->lp_z[0] = v->lp_z[1] = v->send_z = 0.0f;
+        v->lp_z[0] = v->lp_z[1] = 0.0f;
+        for (int k = 0; k < RL_SENDS; k++) v->send_z[k] = 0.0f;
     }
     v->playing = 1;
 }
 
-static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
+static int mix_inner(rl_voice *v, float *out, float *mono, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
 {
     uint32_t nframes = rl_voice_frames(v);
     if (!v->playing || !nframes || !out_rate) return 0;
@@ -268,21 +269,30 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
     uint32_t ramp = out_rate / 200;
     if (ramp > frames) ramp = frames;
     if (ramp < 1) ramp = 1;
-    float gl = v->cur_gain[0], gr = v->cur_gain[1], gs = v->cur_send;
+    float gl = v->cur_gain[0], gr = v->cur_gain[1];
     const float dl = (v->gain[0] - gl) / (float)ramp;
     const float dr = (v->gain[1] - gr) / (float)ramp;
-    const float ds = (v->send_gain - gs) / (float)ramp;
-    if (!send || (gs <= 0.0f && v->send_gain <= 0.0f)) send = NULL;
-    const float la = v->lp_a > 0.0f && v->lp_a < 1.0f ? v->lp_a : 1.0f, sa = v->send_lp_a > 0.0f && v->send_lp_a < 1.0f ? v->send_lp_a : 1.0f;
-    float z0 = v->lp_z[0], z1 = v->lp_z[1], zs = v->send_z;
+    /* active sends: bus present and some gain */
+    int ns = 0, sk[RL_SENDS];
+    float *sb[RL_SENDS], gs[RL_SENDS], ds[RL_SENDS], sa[RL_SENDS], zs[RL_SENDS];
+    for (int k = 0; k < RL_SENDS; k++) {
+        if (!sends || !sends[k] || (v->cur_send[k] <= 0.0f && v->send_gain[k] <= 0.0f)) continue;
+        sk[ns] = k; sb[ns] = sends[k]; gs[ns] = v->cur_send[k];
+        ds[ns] = (v->send_gain[k] - gs[ns]) / (float)ramp;
+        sa[ns] = v->send_lp_a[k] > 0.0f && v->send_lp_a[k] < 1.0f ? v->send_lp_a[k] : 1.0f;
+        zs[ns] = v->send_z[k];
+        ns++;
+    }
+    const float la = v->lp_a > 0.0f && v->lp_a < 1.0f ? v->lp_a : 1.0f;
+    float z0 = v->lp_z[0], z1 = v->lp_z[1];
 
     /* declick a position jump: crossfade from the old position over ~5 ms */
     if (v->xfade_left == RL_XFADE_PENDING) v->xfade_left = out_rate / 200 ? out_rate / 200 : 1;
     const uint32_t xf_total = out_rate / 200 ? out_rate / 200 : 1;
 
     for (uint32_t i = 0; i < frames; i++) {
-        if (i < ramp) { gl += dl; gr += dr; gs += ds; }
-        else { gl = v->gain[0]; gr = v->gain[1]; gs = v->send_gain; }
+        if (i < ramp) { gl += dl; gr += dr; for (int j = 0; j < ns; j++) gs[j] += ds[j]; }
+        else { gl = v->gain[0]; gr = v->gain[1]; for (int j = 0; j < ns; j++) gs[j] = v->send_gain[sk[j]]; }
 
         float l, r;
         if (use_sinc) read_sinc(v, kt, v->pos, nframes, &l, &r);
@@ -302,10 +312,13 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
             v->xfade_left--;
         }
 
-        if (send) {
-            float s = 0.5f * (l + r);
-            if (sa < 1.0f) { zs += sa * (s - zs); s = zs; }
-            send[i] += s * gs;
+        if (ns) {
+            const float m = 0.5f * (l + r);
+            for (int j = 0; j < ns; j++) {
+                float s = m;
+                if (sa[j] < 1.0f) { zs[j] += sa[j] * (s - zs[j]); s = zs[j]; }
+                sb[j][i] += s * gs[j];
+            }
         }
         if (la < 1.0f) { z0 += la * (l - z0); z1 += la * (r - z1); l = z0; r = z1; }
         if (mono) {
@@ -327,8 +340,9 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
             }
         }
     }
-    v->cur_gain[0] = gl; v->cur_gain[1] = gr; v->cur_send = gs;
-    v->lp_z[0] = z0; v->lp_z[1] = z1; v->send_z = zs;
+    v->cur_gain[0] = gl; v->cur_gain[1] = gr;
+    for (int j = 0; j < ns; j++) { v->cur_send[sk[j]] = gs[j]; v->send_z[sk[j]] = zs[j]; }
+    v->lp_z[0] = z0; v->lp_z[1] = z1;
     if (ramp == frames) { /* ramp finished exactly at the block end */ }
 
     if (stopped) {
@@ -341,10 +355,10 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
     return stopped;
 }
 
-int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
+int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
 {
     if (!v->hrtf || !v->hrtf_set || !v->hrtf_set->dirs)
-        return mix_inner(v, out, NULL, send, frames, out_rate, signal);
+        return mix_inner(v, out, NULL, sends, frames, out_rate, signal);
 
     /* HRTF path: render the voice to mono in chunks, then convolve into the stereo output */
     float mono[512];
@@ -352,8 +366,11 @@ int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t
     for (uint32_t done = 0; done < frames; ) {
         uint32_t n = frames - done > 512 ? 512 : frames - done;
         memset(mono, 0, n * sizeof(float));
-        if (!stopped && v->playing)
-            stopped = mix_inner(v, NULL, mono, send ? send + done : NULL, n, out_rate, signal);
+        if (!stopped && v->playing) {
+            float *sub[RL_SENDS];
+            for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
+            stopped = mix_inner(v, NULL, mono, sends ? sub : NULL, n, out_rate, signal);
+        }
         rl_hrtf_render(v->hrtf, v->hrtf_set, mono, out + done * 2, n);
         done += n;
     }

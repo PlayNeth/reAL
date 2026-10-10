@@ -300,3 +300,66 @@ input → HPF → LP2 → ring A (early taps) and ring B (late-input taps).
 - Verification: tests/test_alrv.c (8 environments incl. modulated ones: >76 dB SNR, most >100 dB),
   tests/test_alrv_params.c (266 property sets: identical blocks), virtualizer 114 dB.
   Ground truth: emulator scripts gen_gt.py / gen_params.py (re/gt).
+
+## EAX 4.0 (ported in src/eax.c, src/eax4fx.c; verified in the emulator)
+
+**Dispatch** (`0x1001eaa0`, GUID table at `.rdata 0x100b3aec`): EAX4 context `0x10028260`, FX slots 0-3
+`0x10028540` (one handler, slot from the GUID via `0x10027270`; `0x10027340` maps an index back to the
+GUID), source `0x10027400`.  EAX5: context `0x10022500`, slots `0x10022950`, source `0x100215d0`.
+Request struct: [0] buffer, [5] flags (1 get, 2 set, 0x200 basic support), [6] id (bit 31 deferred),
+[7] size, [8] data.  Failures set the context's last error (+0xa8) and return 0xc0000001
+(-> DSERR_INVALIDPARAM); a non-deferred Set commits (`0x1001d680`).  First use of version 4 calls
+`0x10042220(4)`: slot 0 <- reverb (type 10), slot 1 <- chorus (type 3), both locked with the system key
+(-1,-1) and lock = 1 (games cannot unlock them); slots 2/3 empty; `0x10050850` resets each slot.
+
+**Context** (ctx + 0x8c): primary slot GUID, distance factor (+0x10), air absorption HF (+0x14), HF
+reference (+0x18), dirty (+0x20), last error (+0xa8 = ctx+0x8c+0x1c, read-and-clear by id 6).
+ALL `0x1004f700` (primary must be NULL or a slot GUID, air -100..0, HF ref 1000..20000; distance factor
+not checked), primary `0x1004f840`, distance factor `0x1004f8d0` (FLT_MIN..FLT_MAX), air `0x1004f930`,
+HF ref `0x1004f990`.  Last error codes: -2 invalid parameter, -4 load effect failed (slot 0x10002),
+-1 lock failed, -3 no effect in the slot.
+
+**FX slot** (slot object: +0x14 effect, +0x18/+0x1c lock key, +0x28 props: GUID +0x2c, volume +0x3c,
+lock +0x40, flags +0x44, dirty +0x48): ids 0x10000 none, 0x10001 ALL (`0x1004d3a0`: volume
+-10000..0, flags & ~1 == 0, lock check, load effect), 0x10002 load effect (`0x1004d470`), 0x10003 volume
+(`0x1004d510`), 0x10004 lock (`0x100507e0`), 0x10005 flags (only ENVIRONMENT = 1).  Ids < 0x10000 go
+to the loaded effect by type (+0xc): 1 AGC compressor, 2 autowah, 3 chorus, ..., 10 reverb (props block
+effect+0x23a8, EAX3 listener layout, same setters 0x100444f0..0x100455b0 as EAX3, conversion 0x10045740
+from the reverb update 0x10050e90), 11 ...  Effect GUID -> type: `0x1004cfb0` (NULL = 0).
+
+**Source** (buffer+0x218): +8 EAX3-layout props (0x48 bytes), +0x50 + 0x20*slot per-slot sends {room,
+roomHF, occlusion, occlusionLF, occlusionRoomRatio, occlusionDirectRatio, exclusion, exclusionLF},
++0xd0 two active slot GUIDs (NULL, EAX_PrimaryFXSlotID or a slot; no dirty bit), +0xf0 dirty, +0xf4 per-slot
+send dirty.  Ids 0..0x1b (0x17 send, 0x18 all send, 0x19 occlusion send, 0x1a exclusion send, 0x1b active
+slots; send arrays are {GUID, values} records, partial application on a bad record).
+Conversion: `0x1004e7e0` (called from the voice update 0x10040ee0 case 4); direct HF reference = context HF
+ref, or the primary slot's reverb HF ref when that slot has the ENVIRONMENT flag.
+
+Effect types (GUID table `.rdata 0x100b4464`): 1 AGC compressor, 2 autowah, 3 chorus, 4 distortion, 5 echo,
+6 equalizer, 7 flanger, 8 frequency shifter, 9 pitch shifter, 10 reverb, 11 ring modulator, 12 vocal morpher.
+Their setters accept exactly the SDK ranges (float compares, NaN rejected; a float is only written when it
+compares unequal, so -0 does not replace 0); defaults at `.rdata 0x100b4444..` equal the SDK's except the
+flanger delay (0.0002 s instead of 0.002 s).
+
+Slot loading: `0x1004ffc0` keeps an already loaded effect of the same type (with its properties); LOADEFFECT
+(`0x1004d470`) then resets the effect's properties for EAX 4 (vtable +4, arg 4), ALLPARAMETERS (`0x1004d3a0`)
+does not, so a reverb created through ALLPARAMETERS keeps zeroed properties (F.E.A.R. reads slot 3 back, gets
+zeros, and its write is rejected for HF reference 0).  The slot lock only matters for the system key (-1,-1)
+of slots 0/1; any value is stored for the others.  Slot volume (mB) scales the effect output (`0x1004d540` ->
+slot + 0x50, then the 12 output gains of the slot's bus).
+
+Source conversion details (`0x1004e7e0`, EBX = source block, [0] context props, [1] DS3D geometry):
+* direct as EAX 3, plus, when the primary slot has the ENVIRONMENT flag, that slot's send occlusion
+  (max(ratio * LF, ratio + LF - 1) * occlusion); direct HF likewise; air absorption HF from the primary
+  reverb when the primary slot is ENVIRONMENT and holds a reverb, else from the context; all distance terms
+  use DS3D distance factor x context distance factor.
+* per slot: not active -> 0; slot without ENVIRONMENT -> send = room + the direct path's computed mB (no
+  clamp at 0 mB), send HF = room HF + direct HF's; ENVIRONMENT slot -> the EAX 3 room / room HF model with the
+  slot's send occlusion / exclusion (and the source's own for the primary slot), the slot reverb's room
+  roll-off, decay / decay HF (DECAYHFLIMIT with that reverb's air absorption) for ROOMAUTO, and its air
+  absorption; nothing reverb specific when the slot holds another effect.
+* every HF filter of the voice (direct and sends) uses one reference: the primary ENVIRONMENT reverb's, else
+  the context's.  Doppler factor = listener x source (max 10), speed of sound / (DS3D x context distance factor).
+Verification: re/gen_eax4_gt.py runs the context and source handlers (whole request path) on random
+sequences and the conversion on random states; re/gen_eax4fx_gt.py the slot handler's effect properties.
+tests/test_eax4.c: 1800 + 6000 + 3000 + 7920 cases identical.

@@ -51,6 +51,13 @@ static const GUID EAX3_L = { 0xa8fa6882, 0xb476, 0x11d3, { 0xbd, 0xb9, 0x00, 0xc
 static const GUID EAX3_B = { 0xa8fa6881, 0xb476, 0x11d3, { 0xbd, 0xb9, 0x00, 0xc0, 0xf0, 0x2d, 0xdf, 0x87 } };
 static const GUID EAX4_C = { 0x1d4870ad, 0x0def, 0x43c0, { 0xa4, 0x0c, 0x52, 0x36, 0x32, 0x29, 0x63, 0x42 } };
 static const GUID EAX4_S = { 0x1b86b823, 0x22df, 0x4eae, { 0x8b, 0x3c, 0x12, 0x78, 0xce, 0x54, 0x42, 0x27 } };
+static const GUID EAX4_SLOT[4] = {
+    { 0xc4d79f1e, 0xf1ac, 0x436b, { 0xa8, 0x1d, 0xa7, 0x38, 0xe7, 0x04, 0x54, 0x69 } },
+    { 0x08c00e96, 0x74be, 0x4491, { 0x93, 0xaa, 0xe8, 0xad, 0x35, 0xa4, 0x91, 0x17 } },
+    { 0x1d433b88, 0xf0f6, 0x4637, { 0x91, 0x9f, 0x60, 0xe7, 0xe0, 0x6b, 0x5e, 0xdd } },
+    { 0xefff08ea, 0xc7d8, 0x44ab, { 0x93, 0xad, 0x6d, 0xbd, 0x5f, 0x91, 0x00, 0x64 } } };
+static const GUID EAX4_PRIMARY = { 0xf317866d, 0x924c, 0x450c, { 0x86, 0x1b, 0xe6, 0xda, 0xa2, 0x5e, 0x7c, 0x20 } };
+static const GUID EAX_REVERB_EFFECT = { 0x0cf95c8f, 0xa3cc, 0x4849, { 0xb0, 0xb6, 0x83, 0x2e, 0xcc, 0x18, 0x22, 0xdf } };
 static const GUID EAX5_C = { 0x57e13437, 0xb932, 0x4ab2, { 0xb8, 0xbd, 0x52, 0x66, 0xc1, 0xa8, 0x87, 0xee } };
 static const GUID EAX5_S = { 0x5edf82f0, 0x24a7, 0x4f38, { 0x8e, 0x64, 0x2f, 0x09, 0xca, 0x05, 0xde, 0xe1 } };
 
@@ -199,8 +206,10 @@ int main(int argc, char **argv)
     IDirectSoundBuffer_QueryInterface(b, &IID_IKsPropertySet, (void **)&ks);
     IDirectSoundBuffer_QueryInterface(b2, &IID_IKsPropertySet, (void **)&ks2);
     if (!ks || !ks2) { P("no IKsPropertySet\n"); return 1; }
-    g_lst = g_ver == 2 ? &EAX2_L : &EAX3_L;
-    g_buf = g_ver == 2 ? &EAX2_B : &EAX3_B;
+    /* EAX 4: the "listener" is FX slot 0's reverb (same property ids as the EAX 3 listener), the buffer
+     * properties are the EAX 4 source's (same ids as EAX 3 for these) */
+    g_lst = g_ver == 2 ? &EAX2_L : g_ver == 4 ? &EAX4_SLOT[0] : &EAX3_L;
+    g_buf = g_ver == 2 ? &EAX2_B : g_ver == 4 ? &EAX4_S : &EAX3_B;
     /* property ids differ between the versions */
     const ULONG L_ENV = g_ver == 2 ? 11 : 2, L_ROOM = g_ver == 2 ? 2 : 5, L_DECAY = g_ver == 2 ? 5 : 8,
                 L_HFR = g_ver == 2 ? 6 : 9, L_RDEL = g_ver == 2 ? 10 : 15;
@@ -258,6 +267,37 @@ int main(int argc, char **argv)
     seti(ks, g_lst, L_ENV, 2);
     seti(ks, g_lst, L_ROOM, -10000);
     slot(b, "listener room -10000");
+    if (g_ver == 4) {
+        seti(ks, g_lst, L_ENV, 2);                       /* back to the short room */
+        seti(ks, &EAX4_SLOT[0], 0x10003, -1000);         /* slot volume */
+        slot(b, "slot volume -1000");
+        seti(ks, &EAX4_SLOT[0], 0x10003, 0);
+        /* a second reverb in slot 2, loaded through ALLPARAMETERS like F.E.A.R. does */
+        struct { GUID g; LONG volume, lock; DWORD flags; } fs = { EAX_REVERB_EFFECT, 0, 1, 1 };
+        kset(ks, &EAX4_SLOT[2], 0x10001, &fs, sizeof(fs));
+        BYTE rv[112]; ULONG got = 0;
+        hr = IKsPropertySet_Get(ks, &EAX4_SLOT[2], 1, NULL, 0, rv, sizeof(rv), &got);
+        LONG env2; float hfref2; memcpy(&env2, rv, 4); memcpy(&hfref2, rv + 0x60, 4);
+        P("slot 2 reverb after ALL load: get %08lx env %ld hf reference %.0f\n", hr, env2, hfref2);
+        hr = IKsPropertySet_Set(ks, &EAX4_SLOT[2], 1, NULL, 0, rv, sizeof(rv));
+        P("slot 2 reverb ALL set back -> %08lx\n", hr);
+        seti(ks, &EAX4_SLOT[2], L_ENV, 2);
+        GUID act[2] = { EAX4_SLOT[2], { 0 } };
+        kset(ks, &EAX4_S, 27, act, sizeof(act));
+        slot(b, "slot 2 only");
+        act[0] = EAX4_PRIMARY; act[1] = EAX4_SLOT[2];
+        kset(ks, &EAX4_S, 27, act, sizeof(act));
+        slot(b, "primary + slot 2");
+        struct { GUID g; LONG room, roomhf; } snd = { EAX4_SLOT[2], -10000, 0 };
+        kset(ks, &EAX4_S, 23, &snd, sizeof(snd));
+        slot(b, "primary + slot 2 send -10000");
+        /* deferred source change, committed by a slot NONE set (F.E.A.R.'s pattern) */
+        seti(ks, &EAX4_S, 7 | 0x80000000u, -10000);
+        kset(ks, &EAX4_SLOT[1], 0, NULL, 0);
+        slot(b, "deferred room -10000 committed");
+        LONG err = 0; IKsPropertySet_Get(ks, &EAX4_C, 6, NULL, 0, &err, 4, &got);
+        P("last error %ld\n", err);
+    }
     P("END\n");
     Sleep(300);
     InterlockedExchange(&g_rec_stop, 1);

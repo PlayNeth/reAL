@@ -7,6 +7,7 @@
 #include "hrtf.h"
 
 #define RL_NOTIFY_STOP 0xFFFFFFFFu
+#define RL_SENDS 4                  /* effect sends per voice (EAX 4 FX slots) */
 #define RL_XFADE_PENDING 0xFFFFFFFFu
 
 typedef struct rl_notify {
@@ -37,16 +38,16 @@ typedef struct rl_voice {
     int      playing;
     int      looping;
 
-    /* final per-output-channel gains (stereo out) and mono reverb send gain */
+    /* final per-output-channel gains (stereo out) and the mono effect sends (one per FX slot) */
     float    gain[2];
-    float    send_gain;
+    float    send_gain[RL_SENDS];
     /* EAX high-frequency damping: one-pole low-passes y += a (x - y) on the direct path and on the
      * reverb send (a = 1: off), as ALchemy applies the direct HF / room HF gains */
-    float    lp_a, send_lp_a;
-    float    lp_z[2], send_z;
+    float    lp_a, send_lp_a[RL_SENDS];
+    float    lp_z[2], send_z[RL_SENDS];
     /* smoothing state (owned by the mixer) */
     float    cur_gain[2];
-    float    cur_send;
+    float    cur_send[RL_SENDS];
     uint64_t xfade_pos;     /* old position being faded out after a jump */
     uint32_t xfade_left;    /* samples of crossfade left, or RL_XFADE_PENDING */
 
@@ -67,8 +68,9 @@ static inline uint32_t rl_voice_play_bytes(const rl_voice *v) { return (uint32_t
 /* Accumulate `frames` stereo float frames into `out` (interleaved L,R) at out_rate.
  * Advances the voice, fires notifications through `signal`.
  * Returns 1 if the voice stopped (reached end of a non-looping buffer). */
-/* `send` (mono, may be NULL) receives the voice scaled by send_gain for the reverb bus. */
-int rl_voice_mix(rl_voice *v, float *out, float *send, uint32_t frames, uint32_t out_rate, rl_signal_fn signal);
+/* `sends` (may be NULL, as may each entry): RL_SENDS mono effect buses; bus k receives the voice scaled by
+ * send_gain[k] through its own HF filter. */
+int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal);
 
 /* Start playing (snaps smoothed gains to target if the voice was stopped). */
 void rl_voice_start(rl_voice *v);
