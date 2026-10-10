@@ -83,10 +83,17 @@ static void port_priority(void *ctx, uint32_t g, uint32_t ch, uint32_t prio) { m
 
 static void *port_download(void *ctx, dm_collection *c, uint32_t patch, int sp, uint32_t np, const uint32_t *r, int nr, int *hr)
 {
-    return dls_port_download(((dm_host *)ctx)->dls, c, patch, sp, np, r, nr, hr);
+    void *d = dls_port_download(((dm_host *)ctx)->dls, c, patch, sp, np, r, nr, hr);
+    if (!d) LOG_INFO("music: download of instrument %08x failed (%08x)", patch, *hr);
+    return d;
 }
 static void port_unload(void *ctx, void *handle) { dls_port_unload(((dm_host *)ctx)->dls, handle); }
-static int sink_dl(void *ctx, const void *buf, uint32_t size, void **handle) { return msynth_download(((dm_host *)ctx)->syn, buf, size, handle); }
+static int sink_dl(void *ctx, const void *buf, uint32_t size, void **handle)
+{
+    int r = msynth_download(((dm_host *)ctx)->syn, buf, size, handle);
+    if (r < 0) LOG_INFO("music: synth refused a %s download (%d, %u bytes)", size >= 4 && *(const uint32_t *)buf == 2 ? "wave" : "instrument", r, size);
+    return r;
+}
 static void sink_ul(void *ctx, void *handle) { msynth_unload(((dm_host *)ctx)->syn, handle); }
 
 /* ------------------------------------------------------------------ the sink */

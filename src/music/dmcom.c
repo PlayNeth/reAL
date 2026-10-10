@@ -839,8 +839,9 @@ static HRESULT WINAPI pf_stopex(IDirectMusicPerformance8 *i, IUnknown *obj, __in
 {
     rm_perf *p = prf(i);
     if (!p->host) return DMUS_E_NOT_INIT;
-    rm_segment *g = unsafe_segment(obj);
-    rm_state *s = g ? NULL : unsafe_state(obj);
+    const void *vt = obj ? *(const void **)obj : NULL;        /* our own objects: no QueryInterface probing */
+    rm_segment *g = (vt == &st_vtbl || vt == &ap_vtbl) ? NULL : unsafe_segment(obj);
+    rm_state *s = (g || vt == &ap_vtbl) ? NULL : unsafe_state(obj);
     rm_path *a = (g || s) ? NULL : unsafe_path(obj);
     if (obj && !g && !s && !a) return E_INVALIDARG;
     int hr;
