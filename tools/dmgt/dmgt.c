@@ -18,11 +18,12 @@
 #include <dsound.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 
 static char g_dir[MAX_PATH];
 static const char *const g_dlls[] = { "dmusic.dll", "dmsynth.dll", "dmloader.dll", "dmime.dll", "dmband.dll", "dmstyle.dll",
-                                      "dmcompos.dll", "dmscript.dll", "dswave.dll", NULL };
+                                      "dmcompos.dll", "dmscript.dll", "dswave.dll", "dsdmo.dll", NULL };
 static HMODULE g_mods[16];
 static FILE *g_dl;
 static IDirectMusicSynth8 *g_synth;     /* the synth dmusic.dll created for its port */
@@ -217,6 +218,43 @@ static void patch_iat(HMODULE m)
     }
 }
 
+/* replace an import by name (works for functions Wine only has stubs for) */
+static void patch_import_name(HMODULE m, const char *dll, const char *name, void *fn)
+{
+    BYTE *base = (BYTE *)m;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY *dd = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    for (IMAGE_IMPORT_DESCRIPTOR *d = (void *)(base + dd->VirtualAddress); dd->VirtualAddress && d->Name; d++) {
+        if (lstrcmpiA((char *)base + d->Name, dll)) continue;
+        IMAGE_THUNK_DATA *on = (void *)(base + d->OriginalFirstThunk);
+        void **slot = (void **)(base + d->FirstThunk);
+        for (; on->u1.AddressOfData; on++, slot++) {
+            if (IMAGE_SNAP_BY_ORDINAL(on->u1.Ordinal)) continue;
+            IMAGE_IMPORT_BY_NAME *ibn = (void *)(base + on->u1.AddressOfData);
+            if (strcmp((char *)ibn->Name, name)) continue;
+            DWORD old;
+            VirtualProtect(slot, sizeof(void *), PAGE_READWRITE, &old);
+            *slot = fn;
+            VirtualProtect(slot, sizeof(void *), old, &old);
+        }
+    }
+}
+
+/* dsdmo.dll imports msvcrt's SSE2 libm entry points (double arguments in xmm0/xmm1, result in xmm0), which Wine's
+ * msvcrt lacks: thunks to pow/sqrt */
+__attribute__((used)) double __cdecl call_pow(double a, double b) { return pow(a, b); }
+__attribute__((used)) double __cdecl call_sqrt(double a) { return sqrt(a); }
+__attribute__((naked)) static void libm_pow_thunk(void)
+{
+    __asm__("subl $20, %esp\n movsd %xmm0, (%esp)\n movsd %xmm1, 8(%esp)\n call _call_pow\n fstpl (%esp)\n"
+            " movsd (%esp), %xmm0\n addl $20, %esp\n ret");
+}
+__attribute__((naked)) static void libm_sqrt_thunk(void)
+{
+    __asm__("subl $12, %esp\n movsd %xmm0, (%esp)\n call _call_sqrt\n fstpl (%esp)\n"
+            " movsd (%esp), %xmm0\n addl $12, %esp\n ret");
+}
+
 static void load_dm(const char *dir)
 {
     strcpy(g_dir, dir);
@@ -230,6 +268,10 @@ static void load_dm(const char *dir)
         HMODULE m = LoadLibraryA(p);
         if (!m) { fprintf(stderr, "cannot load %s (%lu)\n", p, GetLastError()); continue; }
         patch_iat(m);
+        if (!strcmp(g_dlls[i], "dsdmo.dll")) {
+            patch_import_name(m, "msvcrt.dll", "_libm_sse2_pow_precise", (void *)libm_pow_thunk);
+            patch_import_name(m, "msvcrt.dll", "_libm_sse2_sqrt_precise", (void *)libm_sqrt_thunk);
+        }
         if (getenv("DMGT_VTIME")) { LoadLibraryA("winmm.dll"); v_hook(m); }
         g_mods[n++] = m;
     }
@@ -622,6 +664,58 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     ExitProcess(0);
 }
 
+/* ------------------------------------------------------------------ wavesrev: dsdmo.dll's Waves reverb on raw PCM
+ * dmgt <dmdir> wavesrev <in.raw> <out.raw> <rate> <channels> [ingain mix time hfratio] [chunk]: 16-bit PCM in place
+ * through IMediaObjectInPlace::Process, in chunks of <chunk> frames (default 441) */
+#include <mediaobj.h>
+static const GUID CLSID_WavesReverb = { 0x87fc0268, 0x9a55, 0x4360, { 0x95, 0xaa, 0x00, 0x4a, 0x1d, 0x9d, 0xe2, 0x6c } };
+static const GUID MT_Audio = { 0x73647561, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID MST_PCM = { 0x00000001, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
+static const GUID FMT_WaveFormatEx = { 0x05589f81, 0xc356, 0x11ce, { 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a } };
+static const GUID IID_MOInPlace = { 0x651b9ad0, 0x0fc7, 0x4aa9, { 0x95, 0x38, 0xd8, 0x99, 0x31, 0x01, 0x07, 0x41 } };
+static const GUID IID_FXWaves = { 0x46858c3a, 0x0dc6, 0x45e3, { 0xb7, 0x60, 0xd4, 0xee, 0xf1, 0x6c, 0xb3, 0x25 } };
+typedef struct { float fInGain, fReverbMix, fReverbTime, fHighFreqRTRatio; } wr_params;
+static int cmd_wavesrev(int argc, char **argv)
+{
+    IClassFactory *cf;
+    HRESULT hr = get_class(&CLSID_WavesReverb, &IID_IClassFactory, (void **)&cf);
+    if (FAILED(hr)) die("WavesReverb class", hr);
+    IMediaObject *mo;
+    if (FAILED(hr = IClassFactory_CreateInstance(cf, NULL, &IID_IMediaObject, (void **)&mo))) die("CreateInstance", hr);
+    DWORD rate = strtoul(argv[5], NULL, 0), ch = strtoul(argv[6], NULL, 0);
+    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, (WORD)ch, rate, rate * ch * 2, (WORD)(ch * 2), 16, 0 };
+    DMO_MEDIA_TYPE mt = { 0 };
+    mt.majortype = MT_Audio; mt.subtype = MST_PCM; mt.bFixedSizeSamples = TRUE; mt.lSampleSize = ch * 2;
+    mt.formattype = FMT_WaveFormatEx; mt.cbFormat = sizeof(wf); mt.pbFormat = (BYTE *)&wf;
+    if (FAILED(hr = IMediaObject_SetInputType(mo, 0, &mt, 0))) die("SetInputType", hr);
+    if (FAILED(hr = IMediaObject_SetOutputType(mo, 0, &mt, 0))) die("SetOutputType", hr);
+    if (argc > 10) {
+        IUnknown *fx;
+        if (FAILED(hr = IMediaObject_QueryInterface(mo, &IID_FXWaves, (void **)&fx))) die("QI WavesReverb", hr);
+        wr_params p = { atof(argv[7]), atof(argv[8]), atof(argv[9]), atof(argv[10]) };
+        hr = ((HRESULT (WINAPI *)(void *, wr_params *))(*(void ***)fx)[3])(fx, &p);
+        if (FAILED(hr)) die("SetAllParameters", hr);
+    }
+    if (FAILED(hr = IMediaObject_AllocateStreamingResources(mo))) die("AllocateStreamingResources", hr);
+    void *ip;
+    if (FAILED(hr = IMediaObject_QueryInterface(mo, &IID_MOInPlace, &ip))) die("QI InPlace", hr);
+    FILE *f = fopen(argv[3], "rb");
+    if (!f) die("open input", E_FAIL);
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    BYTE *b = malloc(n);
+    fread(b, 1, n, f); fclose(f);
+    DWORD chunk = (argc > 11 ? strtoul(argv[11], NULL, 0) : 441) * ch * 2;
+    for (long o = 0; o < n; o += chunk) {
+        DWORD sz = (DWORD)(n - o < (long)chunk ? n - o : chunk);
+        hr = ((HRESULT (WINAPI *)(void *, ULONG, BYTE *, REFERENCE_TIME, DWORD))(*(void ***)ip)[3])(ip, sz, b + o, 0, 0);
+        if (FAILED(hr)) die("Process", hr);
+    }
+    f = fopen(argv[4], "wb");
+    fwrite(b, 1, n, f); fclose(f);
+    fprintf(stderr, "processed %ld bytes\n", n);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: dmgt <dmdir> synth <dls> <out.wav> <script>\n"); return 2; }
@@ -630,6 +724,7 @@ int main(int argc, char **argv)
     if (getenv("DMGT_DLDUMP")) g_dl = fopen(getenv("DMGT_DLDUMP"), "wb");
     load_dm(argv[1]);
     if (!strcmp(argv[2], "synth") && argc >= 6) return cmd_synth(argv[3], argv[4], argv[5]);
+    if (!strcmp(argv[2], "wavesrev") && argc >= 7) return cmd_wavesrev(argc, argv);
     if (!strcmp(argv[2], "perf") && argc >= 6) return cmd_perf(argv[3], argv[4], atoi(argv[5]), argc > 6 ? strtoul(argv[6], NULL, 0) : 0);
     fprintf(stderr, "unknown command\n");
     return 2;
