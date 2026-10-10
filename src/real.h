@@ -34,6 +34,7 @@ typedef struct rl_config {
     char real_dsound[MAX_PATH];
     int  hrtf_mode;             /* 0 off, 1 auto (use reAL_hrtf.bin if found) */
     char hrtf_path[MAX_PATH];   /* explicit file, overrides the search */
+    int  resampler;             /* RL_INTERP_* (default sinc) */
 } rl_config;
 
 extern rl_config g_cfg;

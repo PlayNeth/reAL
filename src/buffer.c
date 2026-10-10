@@ -1278,6 +1278,7 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     b->shared->size = bytes;
 
     b->voice.data = data;
+    b->voice.interp = g_cfg.resampler;
     b->voice.size = bytes;
     b->voice.channels = b->fmt.Format.nChannels;
     b->voice.block = (uint16_t)block;

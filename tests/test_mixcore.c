@@ -213,6 +213,78 @@ static void test_reverb_pan(void)
     CHECK(fabs(c) < 1.0 && right > 3.0 && left < -3.0);
 }
 
+/* ---- resampler quality ---- */
+static float rs_src[96000];
+/* level (dB re full scale) of frequency f in x (Hann-windowed single-bin DFT) */
+static double tone_db(const float *x, int n, double f, double rate)
+{
+    double re = 0, im = 0, wsum = 0;
+    for (int i = 0; i < n; i++) {
+        double w = 0.5 - 0.5 * cos(2 * M_PI * i / (n - 1));
+        re += w * x[i] * cos(2 * M_PI * f * i / rate); im += w * x[i] * sin(2 * M_PI * f * i / rate);
+        wsum += w;
+    }
+    return 20 * log10(2 * sqrt(re * re + im * im) / wsum + 1e-20);
+}
+/* play a looping float tone (amplitude 0.5) at src_rate * pitch into out_rate; left channel out */
+static void rs_play(int interp, double f, uint32_t src_rate, float pitch, uint32_t out_rate, float *outl, int n)
+{
+    int len = (int)src_rate;   /* one second, integer periods for integer f -> seamless loop */
+    for (int i = 0; i < len; i++) rs_src[i] = (float)(0.5 * sin(2 * M_PI * f * i / src_rate));
+    rl_voice v; memset(&v, 0, sizeof(v));
+    v.data = (const uint8_t *)rs_src; v.size = len * 4; v.channels = 1; v.block = 4; v.sfmt = RL_F32;
+    v.rate = src_rate; v.pitch = pitch; v.looping = 1; v.interp = interp;
+    v.gain[0] = v.gain[1] = 1.0f;
+    rl_voice_start(&v);
+    static float out[2 * 65536];
+    memset(out, 0, sizeof(out));
+    rl_voice_mix(&v, out, NULL, (uint32_t)n, out_rate, NULL);
+    for (int i = 0; i < n; i++) outl[i] = out[2 * i];
+}
+static void test_resampler_quality(void)
+{
+    static float y[65536];
+    const int n = 32768;
+    double r[2][4];
+    for (int m = 0; m < 2; m++) {
+        /* 22.05k -> 48k, 9 kHz tone: wanted level and its image at 22050 - 9000 */
+        rs_play(m, 9000, 22050, 1.0f, 48000, y, n);
+        r[m][0] = tone_db(y, n, 9000, 48000);
+        r[m][1] = tone_db(y, n, 13050, 48000) - r[m][0];
+        /* 22.05k -> 48k, 3 kHz tone: passband level and image at 19050 */
+        rs_play(m, 3000, 22050, 1.0f, 48000, y, n);
+        r[m][2] = tone_db(y, n, 19050, 48000) - tone_db(y, n, 3000, 48000);
+        /* 44.1k source pitched up 2x into 48k: an 18 kHz tone becomes 36 kHz (above Nyquist), the
+         * alias lands at 12 kHz */
+        rs_play(m, 18000, 44100, 2.0f, 48000, y, n);
+        r[m][3] = tone_db(y, n, 12000, 48000) + 6.02;   /* re the tone's level */
+    }
+    printf("     resampler (linear -> sinc): 9 kHz@22k level %.1f -> %.1f dB, its image %.1f -> %.1f dB,\n"
+           "       3 kHz image %.1f -> %.1f dB, alias when pitched up %.1f -> %.1f dB\n",
+           r[0][0] + 6.02, r[1][0] + 6.02, r[0][1], r[1][1], r[0][2], r[1][2], r[0][3], r[1][3]);
+    CHECK(r[1][1] < -70 && r[1][2] < -70 && r[1][3] < -70);
+    CHECK(fabs(r[1][0] + 6.02) < 1.0);              /* 9 kHz (0.82 of Nyquist) within 1 dB */
+
+    /* DC passes exactly at any phase; same-rate playback is a bit-exact copy */
+    for (int i = 0; i < 1000; i++) rs_src[i] = 0.25f;
+    rl_voice v; memset(&v, 0, sizeof(v));
+    v.data = (const uint8_t *)rs_src; v.size = 4000; v.channels = 1; v.block = 4; v.sfmt = RL_F32;
+    v.rate = 30001; v.looping = 1; v.interp = RL_INTERP_SINC; v.gain[0] = v.gain[1] = 1.0f;
+    rl_voice_start(&v);
+    float out[2 * 500] = { 0 };
+    rl_voice_mix(&v, out, NULL, 500, 48000, NULL);
+    float maxerr = 0;
+    for (int i = 0; i < 500; i++) maxerr = fmaxf(maxerr, fabsf(out[2 * i] - 0.25f));
+    CHECK(maxerr < 1e-6f);
+    for (int i = 0; i < 1000; i++) rs_src[i] = (float)sin(i * 0.37);
+    v.rate = 48000; v.pos = 0;
+    memset(out, 0, sizeof(out));
+    rl_voice_mix(&v, out, NULL, 500, 48000, NULL);
+    int exact = 1;
+    for (int i = 0; i < 500; i++) if (out[2 * i] != rs_src[i]) exact = 0;
+    CHECK(exact);
+}
+
 /* Doppler (ALchemy's formula) and the voice pitch it drives */
 static void test_doppler(void)
 {
@@ -364,6 +436,7 @@ int main(void)
     test_send();
     test_eax_lowpass();
     test_doppler();
+    test_resampler_quality();
     test_reverb_pan();
     test_eax1_conversion();
     test_declick();

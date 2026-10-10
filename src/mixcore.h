@@ -16,6 +16,11 @@ typedef struct rl_notify {
 
 typedef enum rl_sfmt { RL_U8, RL_S16, RL_S24, RL_S32, RL_F32 } rl_sfmt;
 
+/* resampling: linear (ALchemy's) or a 32-tap Kaiser-windowed sinc (flat to 0.8 of the source's
+ * Nyquist frequency, images and aliases >= 76 dB down; widened when the source plays faster than the
+ * output rate so it does not alias, up to 4x).  Same-rate playback is copied through either way. */
+enum { RL_INTERP_LINEAR = 0, RL_INTERP_SINC = 1 };
+
 typedef struct rl_voice {
     /* source data (owned elsewhere) */
     const uint8_t *data;
@@ -28,6 +33,7 @@ typedef struct rl_voice {
     uint64_t pos;           /* 32.32 fixed point frame position */
     uint32_t rate;          /* current playback frequency in Hz */
     float    pitch;         /* Doppler shift, multiplies rate (0 is taken as 1) */
+    int      interp;        /* RL_INTERP_* */
     int      playing;
     int      looping;
 

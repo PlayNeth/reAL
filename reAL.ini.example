@@ -15,6 +15,10 @@ duration=25
 maxvoicecount=128
 disabledirectmusic=false
 
+; resampling of buffers that play at a different rate than the output: sinc (default, clean) or
+; linear (what ALchemy does: duller top end, audible aliasing on low-rate sounds)
+resampler=sinc
+
 ; logging: 0 off, 1 info, 2 API calls, 3 everything (per Lock/Play - very verbose)
 log=0
 log3d=false

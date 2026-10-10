@@ -1,6 +1,10 @@
 #include "mixcore.h"
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 float rl_db100_to_gain(int32_t mb)
 {
@@ -81,6 +85,144 @@ static inline void read_at(const rl_voice *v, uint64_t pos, uint32_t nframes, fl
     }
 }
 
+/* ---- windowed-sinc interpolation ----
+ * Polyphase: for each kernel width a table of 256 phases (+1) x T taps, each row normalised to sum 1
+ * (DC passes exactly); the weights for a position are interpolated linearly between two rows.
+ * Sources played faster than the output rate use a kernel widened by a scale s <= out/in from a ladder
+ * of widths (ratio 0.9, down to 0.25 = 4x), so nothing above the output Nyquist frequency aliases. */
+#define SINC_W      16               /* half width in source frames at s = 1 (32 taps) */
+#define SINC_FC     0.93             /* cutoff, fraction of the source Nyquist frequency */
+#define SINC_BETA   7.5              /* Kaiser window */
+#define SINC_PHASES 256
+#define SINC_LEVELS 14               /* s = 0.9^j, last one clamped to 0.25 */
+#define SINC_MAXT   128
+
+typedef struct sinc_tab { int half, taps; float s; float w[]; } sinc_tab;
+static sinc_tab *s_tabs[SINC_LEVELS];
+
+static double bessel_i0(double x)
+{
+    double sum = 1.0, term = 1.0, q = x * x / 4.0;
+    for (int k = 1; k < 64 && term > 1e-12 * sum; k++) { term *= q / ((double)k * k); sum += term; }
+    return sum;
+}
+
+static float level_scale(int j)
+{
+    float s = 1.0f;
+    for (int i = 0; i < j; i++) s *= 0.9f;
+    return j == SINC_LEVELS - 1 || s < 0.25f ? 0.25f : s;
+}
+
+static const sinc_tab *sinc_get(int j)
+{
+    sinc_tab *t = __atomic_load_n(&s_tabs[j], __ATOMIC_ACQUIRE);
+    if (t) return t;
+    const double s = level_scale(j), wid = SINC_W / s, i0b = bessel_i0(SINC_BETA);
+    int half = (int)ceil(wid);
+    half += half & 1;                                    /* taps a multiple of 4 */
+    const int taps = 2 * half;
+    t = malloc(sizeof(*t) + sizeof(float) * (size_t)(SINC_PHASES + 1) * taps);
+    if (!t) return NULL;
+    t->half = half; t->taps = taps; t->s = (float)s;
+    for (int p = 0; p <= SINC_PHASES; p++) {
+        double frac = (double)p / SINC_PHASES, sum = 0;
+        float *row = t->w + (size_t)p * taps;
+        for (int k = 1 - half; k <= half; k++) {
+            double x = (k - frac) * s, r = fabs(x) / SINC_W, h = 0;
+            if (r < 1.0) {
+                double px = M_PI * SINC_FC * x;
+                h = (fabs(px) < 1e-12 ? 1.0 : sin(px) / px) * bessel_i0(SINC_BETA * sqrt(1.0 - r * r)) / i0b;
+            }
+            row[k + half - 1] = (float)h; sum += h;
+        }
+        for (int k = 0; k < taps; k++) row[k] = (float)(row[k] / sum);
+    }
+    sinc_tab *expect = NULL;
+    if (!__atomic_compare_exchange_n(&s_tabs[j], &expect, t, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        free(t);                                         /* another thread built it first */
+        t = expect;
+    }
+    return t;
+}
+
+/* the table for a step (source frames per output frame, 32.32) */
+static const sinc_tab *sinc_for_step(uint64_t step)
+{
+    int j = 0;
+    if (step > (1ull << 32)) {
+        float need = (float)(4294967296.0 / (double)step);
+        while (j < SINC_LEVELS - 1 && level_scale(j) > need) j++;
+    }
+    return sinc_get(j);
+}
+
+typedef int16_t __attribute__((may_alias)) s16a;
+typedef float   __attribute__((may_alias)) f32a;
+
+static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos, uint32_t nframes,
+                             float *l, float *r)
+{
+    const int T = t->taps;
+    const uint32_t f32 = (uint32_t)pos;
+    const float *a = t->w + (size_t)(f32 >> 24) * T, *b = a + T;
+    const float u = (float)(f32 & 0xFFFFFF) * (1.0f / 16777216.0f);
+    float w[SINC_MAXT];
+    for (int k = 0; k < T; k++) w[k] = a[k] + u * (b[k] - a[k]);
+
+    const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
+    const int stereo = v->channels >= 2;
+    float al = 0.0f, ar = 0.0f;
+    if (base >= 0 && base + T <= (int64_t)nframes) {
+        const uint8_t *p = v->data + (size_t)base * v->block;
+        if (v->sfmt == RL_S16 && v->channels == 1) {
+            const s16a *q = (const s16a *)p;
+            for (int k = 0; k < T; k++) al += w[k] * (float)q[k];
+            *l = *r = al * (1.0f / 32768.0f);
+            return;
+        }
+        if (v->sfmt == RL_S16 && v->channels == 2) {
+            const s16a *q = (const s16a *)p;
+            for (int k = 0; k < T; k++) { al += w[k] * (float)q[2 * k]; ar += w[k] * (float)q[2 * k + 1]; }
+            *l = al * (1.0f / 32768.0f); *r = ar * (1.0f / 32768.0f);
+            return;
+        }
+        if (v->sfmt == RL_U8 && v->channels <= 2) {
+            const int c = v->channels;
+            for (int k = 0; k < T; k++) al += w[k] * (float)p[c * k];
+            if (c == 2) for (int k = 0; k < T; k++) ar += w[k] * (float)p[2 * k + 1];
+            /* weights sum to 1: subtract the 128 offset once */
+            *l = (al - 128.0f) * (1.0f / 128.0f);
+            *r = c == 2 ? (ar - 128.0f) * (1.0f / 128.0f) : *l;
+            return;
+        }
+        if (v->sfmt == RL_F32 && v->channels == 1) {
+            const f32a *q = (const f32a *)p;
+            for (int k = 0; k < T; k++) al += w[k] * q[k];
+            *l = *r = al;
+            return;
+        }
+        for (int k = 0; k < T; k++) {
+            al += w[k] * fetch(v, (uint32_t)(base + k), 0);
+            if (stereo) ar += w[k] * fetch(v, (uint32_t)(base + k), 1);
+        }
+    } else {
+        /* near the ends: wrap a looping buffer, silence outside a one-shot */
+        for (int k = 0; k < T; k++) {
+            int64_t n = base + k;
+            if (n < 0 || n >= (int64_t)nframes) {
+                if (!v->looping) continue;
+                n %= (int64_t)nframes;
+                if (n < 0) n += nframes;
+            }
+            al += w[k] * fetch(v, (uint32_t)n, 0);
+            if (stereo) ar += w[k] * fetch(v, (uint32_t)n, 1);
+        }
+    }
+    *l = al;
+    *r = stereo ? ar : al;
+}
+
 void rl_voice_jump(rl_voice *v, uint64_t newpos)
 {
     if (v->playing && v->xfade_left == 0) {
@@ -113,6 +255,12 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
         ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
         : ((uint64_t)v->rate << 32) / out_rate;
     const uint32_t p0 = rl_voice_play_bytes(v);
+
+    /* interpolator: exact copy when the rates match (the phase never changes), else linear or sinc */
+    int use_sinc = v->interp == RL_INTERP_SINC && !(step == (1ull << 32) && (uint32_t)v->pos == 0 &&
+                                                   (!v->xfade_left || (uint32_t)v->xfade_pos == 0));
+    const sinc_tab *kt = use_sinc ? sinc_for_step(step) : NULL;
+    if (!kt) use_sinc = 0;
     uint32_t wraps = 0;
     int stopped = 0;
 
@@ -137,12 +285,16 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *send, uint32_t
         else { gl = v->gain[0]; gr = v->gain[1]; gs = v->send_gain; }
 
         float l, r;
-        read_at(v, v->pos, nframes, &l, &r);
+        if (use_sinc) read_sinc(v, kt, v->pos, nframes, &l, &r);
+        else read_at(v, v->pos, nframes, &l, &r);
 
         if (v->xfade_left) {
             float t = (float)v->xfade_left / (float)xf_total;   /* 1 -> 0 */
             float ol = 0.0f, orr = 0.0f;
-            if (v->xfade_pos < end) read_at(v, v->xfade_pos, nframes, &ol, &orr);
+            if (v->xfade_pos < end) {
+                if (use_sinc) read_sinc(v, kt, v->xfade_pos, nframes, &ol, &orr);
+                else read_at(v, v->xfade_pos, nframes, &ol, &orr);
+            }
             l = l * (1.0f - t) + ol * t;
             r = r * (1.0f - t) + orr * t;
             v->xfade_pos += step;

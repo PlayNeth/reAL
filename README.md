@@ -16,7 +16,7 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | IDirectSound / IDirectSound8, class factory (CoCreateInstance) | ✅ |
 | Secondary buffers: PCM 8/16/24/32-bit, float, WAVE_FORMAT_EXTENSIBLE, 1-8 ch | ✅ |
 | Lock/Unlock (wrap), play/write cursors, looping, one-shots, SetCurrentPosition | ✅ |
-| Volume, pan, frequency (linear resampler) | ✅ |
+| Volume, pan, frequency | ✅ 32-tap windowed-sinc resampler (`resampler=linear` for ALchemy's) |
 | Position notifications incl. DSBPN_OFFSETSTOP | ✅ |
 | DuplicateSoundBuffer (shared data) | ✅ |
 | DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ |
@@ -31,7 +31,9 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | CMSS, EAX 4/5 effects | ⏳ |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 
-Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; EAX 3
+Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; a
+windowed-sinc resampler instead of linear interpolation (a 9 kHz tone in a 22 kHz sound: −5 dB and a
+mirror image only 6.5 dB below it with linear, −0.1 dB and −85 dB with sinc); EAX 3
 reverb panning routes the late reverb's right-hand 30°/90° slots to front-right/side-right like the
 reflections (ALchemy swaps those two, so a reverb panned hard right lands in the front speaker);
 and setting EAX 3 air absorption back to 0 takes effect (ALchemy keeps the old HF-decay limit).
@@ -77,7 +79,7 @@ environment turns on API logging to `reAL.log` next to the game's exe.
 3. ~~HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), doppler~~ done
 4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
 5. EAX 4/5: FX slots, sends, the 11 remaining effects (`CPlug*`)
-6. CMSS-3D upmix, speaker configs > 2.0, better SRC
+6. CMSS-3D upmix, speaker configs > 2.0
 7. Later, once reAL is (close to) feature complete: a DirectMusic drop-in for Wine ("reDM") that works
    alongside reAL. Start with a DirectMusic tracer to see what games use (loader, segment playback,
    DLS synth first; styles/chord maps only if needed); the synth could mix straight into reAL.
