@@ -13,7 +13,7 @@
  *
  * dmtrace.ini next to the dll (all optional):
  *   level=1           1: everything but per-frame calls; 2: also AddRef/Release/GetTime/GetParam/...;
- *                     3: also the DirectMusic DLLs' internal calls
+ *                     3: also the DirectMusic DLLs' (and other Windows DLLs') internal calls
  *   target_dir=C:\dm  load dmime.dll, dmusic.dll ... from this directory instead of the registered ones
  *   logfile=...       default: dmtrace.log next to the game's exe
  * Environment: DMTRACE_LEVEL, DMTRACE_TARGET_DIR.
@@ -99,13 +99,31 @@ static void add_module(HMODULE h)
     LeaveCriticalSection(&g_cs);
 }
 
+/* callers inside Windows' own DLLs (dsound's mixer threads polling the clock, ...) are not the game */
+static int in_windows_dir(void *ra)
+{
+    static struct { HMODULE m; int sys; } cache[64];
+    static int ncache;
+    static char windir[MAX_PATH];
+    static size_t wl;
+    HMODULE m;
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)ra, &m))
+        return 0;
+    for (int i = 0; i < ncache; i++) if (cache[i].m == m) return cache[i].sys;
+    if (!wl) { GetSystemWindowsDirectoryA(windir, MAX_PATH); strcat(windir, "\\"); wl = strlen(windir); }
+    char path[MAX_PATH];
+    int sys = m != GetModuleHandleA(NULL) && GetModuleFileNameA(m, path, MAX_PATH) && !_strnicmp(path, windir, wl);
+    if (ncache < 64) { cache[ncache].m = m; cache[ncache].sys = sys; ncache++; }
+    return sys;
+}
+
 int dt_want(void *ra, int level)
 {
     if (!g_log || g_level < level) return 0;
     if (g_level >= 3) return 1;
     uintptr_t a = (uintptr_t)ra;
     for (int i = 0; i < g_nmods; i++) if (a >= g_mods[i].lo && a < g_mods[i].hi) return 0;
-    return 1;
+    return !in_windows_dir(ra);
 }
 
 /* ======================================================================== vtable copies */
@@ -431,7 +449,7 @@ static BOOL real_server(REFCLSID clsid, char *path)
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void **ppv)
 {
     init_once();
-    char path[MAX_PATH], b[64], b2[64];
+    char path[MAX_PATH], b[64], b2[64], b3[64];
     if (!ppv) return E_POINTER;
     *ppv = NULL;
     if (!real_server(clsid, path)) {
@@ -448,7 +466,7 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID iid, void **ppv)
     char hb[16];
     if (dt_want(__builtin_return_address(0), 1) || 1)
         logf("DllGetClassObject(%s, %s) from %s -> %s factory=%s", guidname(clsid, b, sizeof(b)), guidname(iid, b2, sizeof(b2)),
-             path, hrname(hr, hb), SUCCEEDED(hr) ? objname(*ppv, b, sizeof(b)) : "-");
+             path, hrname(hr, hb), SUCCEEDED(hr) ? objname(*ppv, b3, sizeof(b3)) : "-");
     return hr;
 }
 
