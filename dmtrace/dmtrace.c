@@ -488,7 +488,9 @@ static void redirect_hklm(void)
     char name[64];
     for (DWORD i = 0;; i++) {
         DWORD nl = sizeof(name);
-        if (RegEnumKeyExA(clsids, i, name, &nl, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        LONG e = RegEnumKeyExA(clsids, i, name, &nl, NULL, NULL, NULL, NULL);
+        if (e == ERROR_MORE_DATA || (e == ERROR_SUCCESS && name[0] != '{')) continue;
+        if (e != ERROR_SUCCESS) break;
         char sub[128], val[MAX_PATH] = "";
         snprintf(sub, sizeof(sub), "%s\\InprocServer32", name);
         HKEY h;
@@ -531,40 +533,65 @@ static void restore_hklm(void)
     logf("DllUnregisterServer: restored %d machine-wide registrations", n);
 }
 
+/* redirect one class to us in HKCU if its machine-wide server is a DirectMusic dll; 1 if it was */
+static int register_one(HKEY clsids, const char *name, int n)
+{
+    char sub[128], val[MAX_PATH] = "", tm[64] = "Both", cur[MAX_PATH] = "";
+    snprintf(sub, sizeof(sub), "%s\\InprocServer32", name);
+    HKEY h;
+    if (RegOpenKeyExA(clsids, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) return 0;
+    DWORD sz = sizeof(val);
+    RegQueryValueExA(h, NULL, NULL, NULL, (BYTE *)val, &sz);
+    sz = sizeof(tm);
+    RegQueryValueExA(h, "ThreadingModel", NULL, NULL, (BYTE *)tm, &sz);
+    RegCloseKey(h);
+    if (!is_dm_server(val)) return 0;
+    char key[200];
+    snprintf(key, sizeof(key), "Software\\Classes\\CLSID\\%s\\InprocServer32", name);
+    if (RegOpenKeyExA(HKEY_CURRENT_USER, key, 0, KEY_READ, &h) == ERROR_SUCCESS) {
+        sz = sizeof(cur);
+        RegQueryValueExA(h, NULL, NULL, NULL, (BYTE *)cur, &sz);
+        RegCloseKey(h);
+        if (!lstrcmpiA(cur, g_self_path)) return 0;         /* already done */
+    }
+    if (n < 3) logf("  %s: %s", name, val);
+    HKEY w;
+    LONG ce = RegCreateKeyExA(HKEY_CURRENT_USER, key, 0, NULL, 0, KEY_WRITE, NULL, &w, NULL);
+    if (ce != ERROR_SUCCESS) { logf("  cannot write HKCU\\%s (error %ld)", key, (long)ce); return 0; }
+    RegSetValueExA(w, NULL, 0, REG_SZ, (const BYTE *)g_self_path, (DWORD)strlen(g_self_path) + 1);
+    RegSetValueExA(w, "ThreadingModel", 0, REG_SZ, (const BYTE *)tm, (DWORD)strlen(tm) + 1);
+    RegCloseKey(w);
+    return 1;
+}
+
 HRESULT WINAPI DllRegisterServer(void)
 {
     init_once();
     HKEY clsids;
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Classes\\CLSID", 0, KEY_READ, &clsids) != ERROR_SUCCESS) return E_FAIL;
-    int n = 0;
+    LONG e = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Classes\\CLSID", 0, KEY_READ, &clsids);
+    if (e != ERROR_SUCCESS) { logf("DllRegisterServer: cannot open HKLM\\Software\\Classes\\CLSID (error %ld)", (long)e); return E_FAIL; }
+    int n = 0, seen = 0;
     char name[64];
+    /* the DirectMusic classes known from the headers first, then everything else registered to a DM dll */
+    for (int i = 0; dt_guids[i].name; i++) {
+        if (strncmp(dt_guids[i].name, "CLSID_", 6)) continue;
+        if (clsid_key(&dt_guids[i].g, name)) n += register_one(clsids, name, n);
+    }
+    int known = n;
     for (DWORD i = 0;; i++) {
         DWORD nl = sizeof(name);
-        if (RegEnumKeyExA(clsids, i, name, &nl, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
-        char sub[128], val[MAX_PATH] = "", tm[64] = "Both";
-        snprintf(sub, sizeof(sub), "%s\\InprocServer32", name);
-        HKEY h;
-        if (RegOpenKeyExA(clsids, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) continue;
-        DWORD sz = sizeof(val);
-        RegQueryValueExA(h, NULL, NULL, NULL, (BYTE *)val, &sz);
-        sz = sizeof(tm);
-        RegQueryValueExA(h, "ThreadingModel", NULL, NULL, (BYTE *)tm, &sz);
-        RegCloseKey(h);
-        if (!is_dm_server(val)) continue;
-        if (n < 3) logf("  %s: %s", name, val);
-        char key[200];
-        snprintf(key, sizeof(key), "Software\\Classes\\CLSID\\%s\\InprocServer32", name);
-        HKEY w;
-        if (RegCreateKeyExA(HKEY_CURRENT_USER, key, 0, NULL, 0, KEY_WRITE, NULL, &w, NULL) != ERROR_SUCCESS) continue;
-        RegSetValueExA(w, NULL, 0, REG_SZ, (const BYTE *)g_self_path, (DWORD)strlen(g_self_path) + 1);
-        RegSetValueExA(w, "ThreadingModel", 0, REG_SZ, (const BYTE *)tm, (DWORD)strlen(tm) + 1);
-        RegCloseKey(w);
-        n++;
+        e = RegEnumKeyExA(clsids, i, name, &nl, NULL, NULL, NULL, NULL);
+        if (e == ERROR_MORE_DATA) continue;             /* odd long key names: not a CLSID */
+        if (e != ERROR_SUCCESS) break;
+        seen++;
+        if (name[0] == '{') n += register_one(clsids, name, n);
     }
     RegCloseKey(clsids);
+    logf("DllRegisterServer: %d known classes, %d more found among %d registered (scan ended with %ld)", known, n - known, seen, (long)e);
     logf("DllRegisterServer: %d DirectMusic classes now go through %s%s", n, g_self_path,
          n ? "" : " (no DirectMusic registration found under HKLM\\Software\\Classes\\CLSID)");
     if (n && !hkcr_sees_us()) redirect_hklm();
+    else if (n) logf("DllRegisterServer: OK, DirectMusic now resolves to dmtrace for this user");
     return n ? S_OK : E_FAIL;
 }
 
@@ -578,7 +605,9 @@ HRESULT WINAPI DllUnregisterServer(void)
     int nd = 0;
     for (DWORD i = 0;; i++) {
         DWORD nl = sizeof(name);
-        if (RegEnumKeyExA(clsids, i, name, &nl, NULL, NULL, NULL, NULL) != ERROR_SUCCESS) break;
+        LONG e = RegEnumKeyExA(clsids, i, name, &nl, NULL, NULL, NULL, NULL);
+        if (e == ERROR_MORE_DATA) continue;
+        if (e != ERROR_SUCCESS) break;
         char sub[128], val[MAX_PATH] = "";
         snprintf(sub, sizeof(sub), "%s\\InprocServer32", name);
         HKEY h;
