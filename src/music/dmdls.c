@@ -296,7 +296,9 @@ static uint8_t *build_instrument(const dm_collection *c, const dls_instr *in, ui
         put32(x.b + x.ofs[ri] + 0xc, ai);
     }
     put32(x.b + x.ofs[0] + 4, prev);
-    put32(x.b + x.ofs[0] + 8, add_artchain(&x, in->arts, in->narts));
+    /* add_artchain can move the buffer: get the index first, then the address */
+    uint32_t gi = add_artchain(&x, in->arts, in->narts);
+    put32(x.b + x.ofs[0] + 8, gi);
     return bld_finish(&x, 3, id, size);
 }
 
