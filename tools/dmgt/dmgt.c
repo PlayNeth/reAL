@@ -505,6 +505,22 @@ static HRESULT WINAPI my_playbuffer(IDirectMusicPort *p, IDirectMusicBuffer *b)
 }
 static HRESULT WINAPI my_activate(IDirectMusicPort *p, BOOL on) { return S_OK; }
 
+/* DMGT_TMAP: print dmime's tempo map (perf+0x12c, history +0x134: internal pmsgs, hdr+0x20 rt, +0x28 mt, +0x50 tempo) */
+static void dump_tmap(void *perf, const char *when)
+{
+    if (!getenv("DMGT_TMAP")) return;
+    fprintf(stderr, "%s prepared %ld target %ld nextscan %ld\n", when, *(LONG *)((BYTE *)perf + 0x328), *(LONG *)((BYTE *)perf + 0x32c), *(LONG *)((BYTE *)perf + 0x330));
+    for (int k = 0; k < 10; k++)
+        for (BYTE *s = *(BYTE **)((BYTE *)perf + 0x3c + 8 * k); s; s = *(BYTE **)s)
+            fprintf(stderr, "%s list%d ss %p mtstart %ld mtlast %ld length %ld\n", when, k, s - 8, *(LONG *)(s - 8 + 0x58), *(LONG *)(s - 8 + 0x64), *(LONG *)(s - 8 + 0x48));
+    for (int q = 0; q < 2; q++) {
+        BYTE *h = *(BYTE **)((BYTE *)perf + (q ? 0x134 : 0x12c));
+        for (; h; h = *(BYTE **)h)
+            fprintf(stderr, "%s %s mt %ld rt %lld tempo %f\n", when, q ? "hist" : "map", *(LONG *)(h + 0x28),
+                    *(LONGLONG *)(h + 0x20), *(double *)(h + 0x50));
+    }
+}
+
 static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
 {
     IDirectMusicLoader8 *loader;
@@ -561,7 +577,33 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     IDirectMusicSegmentState *st;
     if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg, NULL, NULL, flags, 0, &st, NULL, NULL)))
         die("PlaySegmentEx", hr);
+    /* DMGT_STOP=<ms>: Stop(segment, state, 0, 0) then StopEx both, as MC2 does; DMGT_NEXT=<ms>:<segment>: then play
+     * another segment with the same flags */
+    DWORD stop_ms = getenv("DMGT_STOP") ? atoi(getenv("DMGT_STOP")) : 0, next_ms = 0;
+    IDirectMusicSegment8 *sg2 = NULL;
+    if (getenv("DMGT_NEXT")) {
+        char *p;
+        next_ms = strtoul(getenv("DMGT_NEXT"), &p, 0);
+        MultiByteToWideChar(CP_ACP, 0, p + 1, -1, w, MAX_PATH);
+        if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&sg2)))
+            die("load segment 2", hr);
+        IDirectMusicSegment8_Download(sg2, (IUnknown *)perf);
+    }
     for (DWORD t = 0; t < ms + 1500; t++) {
+        if (stop_ms && t == stop_ms) {
+            dump_tmap(perf, "prestop");
+            IDirectMusicPerformance8_Stop(perf, (IDirectMusicSegment *)sg, st, 0, 0);
+            IDirectMusicPerformance8_StopEx(perf, (IUnknown *)sg, 0, 0);
+            IDirectMusicPerformance8_StopEx(perf, (IUnknown *)st, 0, 0);
+            dump_tmap(perf, "stop");
+        }
+        if (sg2 && t == next_ms) {
+            IDirectMusicSegmentState *st2;
+            if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg2, NULL, NULL, flags, 0, &st2, NULL, NULL)))
+                die("PlaySegmentEx 2", hr);
+            dump_tmap(perf, "next");
+        }
+        if (t && t % 1000 == 0) { char w[16]; sprintf(w, "t%lu", t); dump_tmap(perf, w); }
         if (g_vtime) { v_step(10000); continue; }
         g_now += 10000;
         Sleep(t < 50 ? 5 : (getenv("DMGT_SLEEP") ? atoi(getenv("DMGT_SLEEP")) : 1));
