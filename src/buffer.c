@@ -959,19 +959,49 @@ static HRESULT eax_hr(int r)
     return r == EAX_OK ? DS_OK : r == EAX_BADID ? E_PROP_ID_UNSUPPORTED : DSERR_INVALIDPARAM;
 }
 
+/* property names for the EAX log; a leading '#' marks an integer (mB / enum / flags) property */
+static const char *const k_eax2l_names[] = { "none", "ALL", "#room", "#roomHF", "roomRolloff", "decayTime",
+    "decayHFRatio", "#reflections", "reflectionsDelay", "#reverb", "reverbDelay", "#environment", "environmentSize",
+    "environmentDiffusion", "airAbsorptionHF", "#flags" };
+static const char *const k_eax3l_names[] = { "none", "ALL", "#environment", "environmentSize",
+    "environmentDiffusion", "#room", "#roomHF", "#roomLF", "decayTime", "decayHFRatio", "decayLFRatio",
+    "#reflections", "reflectionsDelay", "reflectionsPan", "#reverb", "reverbDelay", "reverbPan", "echoTime",
+    "echoDepth", "modulationTime", "modulationDepth", "airAbsorptionHF", "HFReference", "LFReference",
+    "roomRolloff", "#flags" };
+static const char *const k_eax2b_names[] = { "none", "ALL", "#direct", "#directHF", "#room", "#roomHF",
+    "roomRolloff", "#obstruction", "obstructionLF", "#occlusion", "occlusionLF", "occlusionRoom",
+    "#outsideVolumeHF", "airAbsorption", "#flags" };
+static const char *const k_eax3b_names[] = { "none", "ALL", "obstructionParams", "occlusionParams",
+    "exclusionParams", "#direct", "#directHF", "#room", "#roomHF", "#obstruction", "obstructionLF", "#occlusion",
+    "occlusionLF", "occlusionRoom", "occlusionDirect", "#exclusion", "exclusionLF", "#outsideVolumeHF",
+    "doppler", "rolloff", "roomRolloff", "airAbsorption", "#flags" };
+
 static void log_eax23(rl_buffer *b, const char *op, int which, ULONG id, const void *data, ULONG len, HRESULT hr)
 {
     if (!g_cfg.log_eax) return;
     static const char *names[] = { [2] = "EAX2 listener", [3] = "EAX3 listener", [12] = "EAX2 buffer", [13] = "EAX3 buffer" };
-    char v[64] = "";
-    if (data && len >= 4) {
+    const char *const *tab = which == 2 ? k_eax2l_names : which == 3 ? k_eax3l_names : which == 12 ? k_eax2b_names : k_eax3b_names;
+    const ULONG ntab = which == 2 ? EAX2L_COUNT : which == 3 ? EAX3L_COUNT : which == 12 ? EAX2B_COUNT : EAX3B_COUNT;
+    const ULONG pid = id & ~EAX_DEFERRED;
+    const char *pname = pid < ntab ? tab[pid] : "?";
+    const int isint = pname[0] == '#';
+    if (isint) pname++;
+    char v[96] = "";
+    if (data && len == 4) {
         int32_t i; float f;
         memcpy(&i, data, 4); memcpy(&f, data, 4);
-        snprintf(v, sizeof(v), " %ld / %g", (long)i, f);
+        if (isint) snprintf(v, sizeof(v), " = %ld", (long)i);
+        else snprintf(v, sizeof(v), " = %g", f);
+    } else if (data && len == 12 && !isint) {
+        float f[3]; memcpy(f, data, 12);
+        snprintf(v, sizeof(v), " = (%g, %g, %g)", f[0], f[1], f[2]);
+    } else if (data && len == 8 && !isint) {
+        int32_t i; float f;
+        memcpy(&i, data, 4); memcpy(&f, (const char *)data + 4, 4);
+        snprintf(v, sizeof(v), " = (%ld, %g)", (long)i, f);
     }
-    rl_log(0, "Buffer[%d]::KsProp %s %s id %lu%s len %lu%s -> %08lx", b->id, op, names[which],
-           (unsigned long)(id & ~EAX_DEFERRED), (id & EAX_DEFERRED) ? " (deferred)" : "", (unsigned long)len, v,
-           (unsigned long)hr);
+    rl_log(0, "Buffer[%d]::KsProp %s %s %s (id %lu)%s len %lu%s -> %08lx", b->id, op, names[which], pname,
+           (unsigned long)pid, (id & EAX_DEFERRED) ? " (deferred)" : "", (unsigned long)len, v, (unsigned long)hr);
 }
 
 enum { EAX1_L_ALL, EAX1_L_ENVIRONMENT, EAX1_L_VOLUME, EAX1_L_DECAYTIME, EAX1_L_DAMPING, EAX1_L_COUNT };
