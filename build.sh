@@ -80,6 +80,7 @@ if command -v cc >/dev/null 2>&1; then
     cc -O2 -std=gnu11 -Wall -o build/test_fx tests/test_fx.c src/eax4dsp.c -lm
     # reAL-Music performance engine against dmime captures (tools/dmgt perf, DMGT_VTIME=1)
     cc -O1 -std=gnu11 -Wall -o build/test_perf tests/test_perf.c src/music/dmperf.c src/music/dmseg.c -lm
+    cc -O1 -std=gnu11 -Wall -o build/test_dls tests/test_dls.c src/music/dmdls.c
     cc -O2 -std=gnu11 -Wall -o build/test_msynth tests/test_msynth.c src/music/msynth.c -lm
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then
