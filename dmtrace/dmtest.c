@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <dmusici.h>
 #include <stdio.h>
+#include <string.h>
 
 int main(int argc, char **argv)
 {
@@ -11,6 +12,9 @@ int main(int argc, char **argv)
     MultiByteToWideChar(CP_ACP, 0, file, -1, wfile, MAX_PATH);
     GetCurrentDirectoryW(MAX_PATH, wdir);
     CoInitialize(NULL);
+    char srv[MAX_PATH] = "(not registered)"; LONG sl = sizeof(srv);
+    RegQueryValueA(HKEY_CLASSES_ROOT, "CLSID\\{D2AC2881-B39B-11D1-8704-00600893B1BD}\\InprocServer32", srv, &sl);
+    printf("DirectMusicPerformance server: %s%s\n", srv, strstr(srv, "dmtrace") ? "  (dmtrace is active)" : "  (dmtrace is NOT active)");
     IDirectMusicLoader8 *loader = NULL; IDirectMusicPerformance8 *perf = NULL; IDirectMusicSegment8 *seg = NULL;
     HRESULT hr = CoCreateInstance(&CLSID_DirectMusicLoader, NULL, CLSCTX_INPROC, &IID_IDirectMusicLoader8, (void **)&loader);
     printf("loader %08lx\n", hr); if (FAILED(hr)) return 1;

@@ -54,8 +54,12 @@ static void init_once(void)
         s = strrchr(logpath, '\\'); if (s) s[1] = 0; else logpath[0] = 0;
         strcat(logpath, "dmtrace.log");
     }
-    g_log = fopen(logpath, "a");
     char exe[MAX_PATH]; GetModuleFileNameA(NULL, exe, MAX_PATH);
+    const char *eb = strrchr(exe, '\\'); eb = eb ? eb + 1 : exe;
+    if (!lstrcmpiA(eb, "regsvr32.exe")) snprintf(logpath, sizeof(logpath), "%sdmtrace.log", dir);
+    g_log = fopen(logpath, "a");
+    if (!g_log) { snprintf(logpath, sizeof(logpath), "%sdmtrace.log", dir); g_log = fopen(logpath, "a"); }
+    if (!g_log && GetTempPathA(MAX_PATH, buf)) { snprintf(logpath, sizeof(logpath), "%sdmtrace.log", buf); g_log = fopen(logpath, "a"); }
     SYSTEMTIME t; GetLocalTime(&t);
     if (g_log)
         fprintf(g_log, "==== dmtrace %04d-%02d-%02d %02d:%02d:%02d  exe=%s  level=%d  target_dir=%s\n", t.wYear,
@@ -547,6 +551,7 @@ HRESULT WINAPI DllRegisterServer(void)
         RegQueryValueExA(h, "ThreadingModel", NULL, NULL, (BYTE *)tm, &sz);
         RegCloseKey(h);
         if (!is_dm_server(val)) continue;
+        if (n < 3) logf("  %s: %s", name, val);
         char key[200];
         snprintf(key, sizeof(key), "Software\\Classes\\CLSID\\%s\\InprocServer32", name);
         HKEY w;
@@ -557,7 +562,8 @@ HRESULT WINAPI DllRegisterServer(void)
         n++;
     }
     RegCloseKey(clsids);
-    logf("DllRegisterServer: %d DirectMusic classes now go through %s", n, g_self_path);
+    logf("DllRegisterServer: %d DirectMusic classes now go through %s%s", n, g_self_path,
+         n ? "" : " (no DirectMusic registration found under HKLM\\Software\\Classes\\CLSID)");
     if (n && !hkcr_sees_us()) redirect_hklm();
     return n ? S_OK : E_FAIL;
 }
