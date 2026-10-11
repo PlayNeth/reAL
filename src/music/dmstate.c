@@ -66,7 +66,7 @@ dm_segment *dm_segstate_segment(dm_segstate *ss) { return ss->seg; }
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt) { *mt = ss->mtstart; return DM_OK; }
 
 /* 77311cea + 77315351 */
-static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags)
+static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags, dm_audiopath *ap)
 {
     dm_segstate *ss = calloc(1, sizeof(*ss));
     if (!ss) return NULL;
@@ -90,6 +90,8 @@ static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags)
         if (ss->loopend <= ss->startpoint) { ss->loopstart = ss->loopend = 0; ss->repeats = 0; }
     }
     ss->repeatsleft = ss->repeats;
+    ss->audiopath = ap;                     /* known to the tracks' InitPlay (the wave track asks for it) */
+    if (ap) dm_audiopath_addref(ap);
     for (int i = 0; i < ss->ntr; i++) {
         uint32_t id = ++g_trackid;
         if (!ss->firstid) ss->firstid = id;
@@ -187,7 +189,11 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
                     if (((ss->trackflags & TF_START) && (cfg & 0x80)) || ((ss->trackflags & TF_LOOP) && (cfg & 0x100))) f |= 0x200;
                     if (e->rtbits & 4) { f |= TF_START; e->rtbits &= ~4u; }
                     pf->cfgplaying = cfg;
-                    if (track_play(pf, ss, e, ss->segpos, ss->segpos + n, ss->mtoffset, ss->trackflags | f) != 0) e->notok = 1;
+                    int r;
+                    if ((cfg & 0x40) && e->t->kind == TRK_WAVE)     /* DMUS_TRACKCONFIG_PLAY_CLOCKTIME: PlayEx in rt */
+                        r = wt_play(pf, ss, e, ss->rtsegpos, ss->rtsegpos + rtdelta, ss->rtoffset, ss->trackflags | f | TF_CLOCK, 1);
+                    else r = track_play(pf, ss, e, ss->segpos, ss->segpos + n, ss->mtoffset, ss->trackflags | f);
+                    if (r != 0) e->notok = 1;
                 }
                 pf->inplay = 0;
             }
@@ -547,7 +553,7 @@ static void start_primary(dm_perf *pf, dm_segstate *ss)
 }
 
 /* PlaySegmentEx 7730d51c / 7730d2ee */
-int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out)
+static int perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out)
 {
     if (!pf->nports) return DMUS_E_NOT_INIT;
     pf->xprec = pf->appxprec;
@@ -561,10 +567,8 @@ int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm
     }
     if (!ap) ap = pf->defpath;
     if (ap && !ap->active) return DMUS_E_NOT_INIT;
-    dm_segstate *ss = ss_create(pf, seg, flags);
+    dm_segstate *ss = ss_create(pf, seg, flags, ap);
     if (!ss) return DM_E_OUTOFMEMORY;
-    ss->audiopath = ap;
-    if (ap) dm_audiopath_addref(ap);
     ss->i64start = start; ss->flags = flags;
     pf->played = 1;
     if (flags & SEGF_AFTERPREPARETIME) {
@@ -586,6 +590,15 @@ int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm
     else start_secondary(pf, ss);
     if (pf->ops.signal) pf->ops.signal(pf->ctx, DM_THREAD_TRANSPORT);
     return DM_OK;
+}
+
+/* the application thread's own rand() (the transport thread's is seeded with the time it started) */
+int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out)
+{
+    pf->apprand = 1;
+    int hr = perf_play(pf, seg, flags, start, ap, out);
+    pf->apprand = 0;
+    return hr;
 }
 
 /* 7730dc1f: stop one state at mt */

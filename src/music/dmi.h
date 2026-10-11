@@ -137,7 +137,20 @@ struct dm_pmsg {
     uint32_t nf_option, nf_field1, nf_field2;
     uint8_t ts_bpm, ts_beat;
     uint16_t ts_grids;
+    /* WAVE (DMUS_WAVE_PMSG) */
+    rtime_t w_startoff;     /* +0x38 */
+    rtime_t w_dur;          /* +0x40 */
+    int32_t w_offset;       /* +0x48 */
+    int32_t w_vol;          /* +0x4c */
+    int32_t w_pitch;        /* +0x50 */
+    uint8_t w_flags;        /* +0x54 DMUS_WAVEF_* */
+    struct dm_wvoice *w_voice;      /* punkUser: the port's voice */
 };
+#define WAVEF_OFF 1
+#define WAVEF_STREAMING 2
+#define WAVEF_NOINVALIDATE 4
+#define WAVEF_NOPREROLL 8
+#define WAVEF_IGNORELOOPS 0x20
 
 typedef struct { dm_pmsg *head, *hint; } dm_queue;
 
@@ -183,7 +196,67 @@ typedef struct {
     uint32_t validate;
 } dm_bandtrack;
 
-enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX };
+/* ------------------------------------------------------------------ waves (dmwave.c: dswave CDirectSoundWave) */
+typedef struct dm_wave {
+    int refs;
+    uint16_t channels, bits;
+    uint32_t rate, frames;          /* PCM as played: interleaved 8-bit unsigned or 16-bit */
+    uint8_t *data;
+    uint32_t filerate, fileframes, skip;   /* the file's own format (the length in ms comes from these) */
+    int streaming, nopreroll;       /* GetStreamingParms: DMUS_WAVEF_STREAMING, DMUS_WAVEF_NOPREROLL */
+    rtime_t readahead;
+    dm_guid guid; int hasguid;
+    uint32_t vers[2]; int hasvers;
+    char name[64];
+    void *wrapper;                  /* the COM object (weak) */
+} dm_wave;
+/* a compressed format's decoder (the host's ACM): fills ch, rate and bits unless set (the 'wavu' format) */
+typedef int (*dm_wave_decoder)(const uint8_t *wfx, uint32_t wfxlen, const uint8_t *in, uint32_t inlen,
+                               uint8_t **out, uint32_t *outlen, uint16_t *ch, uint32_t *rate, uint16_t *bits);
+void dm_wave_set_decoder(dm_wave_decoder fn);
+dm_wave *dm_wave_load(const void *data, size_t size);
+void dm_wave_addref(dm_wave *w);
+void dm_wave_release(dm_wave *w);
+uint32_t dm_wave_length_ms(const dm_wave *w);
+
+/* wave track (dmime CWavTrack 77328647): parts sorted by PChannel, items in play order */
+typedef struct dm_dlnode { struct dm_dlnode *next; void *dl; } dm_dlnode;
+typedef struct dm_waveitem {
+    struct dm_waveitem *next;   /* +0x50 */
+    int64_t rt;                 /* +0x00 rtTime (a music time unless the track plays in clock time) */
+    int32_t vol, pitch;         /* +0x08 +0x0c */
+    uint32_t variations;        /* +0x10 */
+    int64_t startoff;           /* +0x18 rtStartOffset (reference time) */
+    int64_t dur;                /* +0x20 rtDuration (a music time unless clock time) */
+    mtime_t logical;            /* +0x28 */
+    uint32_t flags;             /* +0x2c */
+    dm_wave *wave;              /* +0x30 */
+    dm_dlnode *dls;             /* +0x34 the streaming downloads made for it */
+    uint16_t volrange, pitchrange;  /* +0x38 */
+    int streaming, nopreroll;   /* +0x3c +0x40 */
+    uint32_t loopstart, loopend;    /* +0x44 +0x48 */
+    int32_t index;              /* +0x4c voice slot */
+} dm_waveitem;
+typedef struct dm_wavepart {
+    struct dm_wavepart *next;
+    uint32_t pch, index;
+    int32_t vol;
+    uint32_t variations, lock, flags;
+    dm_waveitem *items;
+} dm_wavepart;
+typedef struct dm_wavetrack {
+    int32_t vol; uint32_t flags;            /* +0x30 +0x34 DMUS_WAVETRACKF_SYNC_VAR 1, PERSIST_CONTROL 2 */
+    uint32_t nparts; uint32_t *pchs;        /* +0x38 +0x3c */
+    dm_wavepart *parts;                     /* +0x40 */
+    uint32_t version;                       /* +0x48 */
+    uint32_t aud[6];                        /* +0x50 audition: variation, pchannel, index, lock, by part, by lock */
+    int autodl, autodl_set;                 /* +0x68 +0x6c */
+    uint32_t *persistvar, *persistused;     /* +0x70 +0x74 */
+    uint32_t nitems;                        /* +0x78 */
+    struct wsdl *sdl;                       /* +0x80 streaming downloads in use, by state */
+} dm_wavetrack;
+
+enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE };
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 typedef struct dm_track {
@@ -225,6 +298,10 @@ int dm_segment_has_notification(const dm_segment *s, const dm_guid *g);
 /* segment loading: resolve a DLS reference (DMRF) of a band instrument; NULL guid/file means the default GM set */
 typedef dm_collection *(*dm_getcoll_fn)(void *ctx, const dm_guid *guid, const char *file);
 dm_segment *dm_segment_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
+/* with wave references too (a wave track's DMRF: guid, file, name); a RIFF WAVE file loads as a one-wave segment */
+typedef dm_wave *(*dm_getwave_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
+dm_segment *dm_segment_load_ex(const void *data, size_t size, dm_getcoll_fn getcoll, dm_getwave_fn getwave, void *ctx);
+dm_segment *dm_segment_from_wave(dm_wave *w);
 /* a Standard MIDI File (or RMID) as dmime imports it (dmsmf.c) */
 dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 int dm_is_midi(const void *data, size_t size);

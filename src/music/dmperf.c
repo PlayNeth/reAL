@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 
 /* ------------------------------------------------------------------ objects */
 typedef struct {            /* DX8 control merger: { list; sum; base } */
@@ -112,9 +113,18 @@ struct dm_perf {
     dm_guid *ntypes; int nntypes;               /* +0x100 AddNotificationType list */
     rtime_t notif_min;                          /* +0xf8 how long delivered notifications are kept */
     void (*notify_cb)(void *ctx); void *notify_ctx;     /* +0xf0 the notification event */
+    struct wdl *wdls;                           /* wave downloads (dmime's process-wide list 7732d4f0) */
+    uint32_t rnd, rndapp;                       /* rand() of the transport thread (srand(time) at its start 7730eb7f)
+                                                 * and of the application thread (seed 1) */
+    int apprand;                                /* running in the application thread (PlaySegment) */
 };
 
 static uint32_t g_trackid;                      /* 7732b1b0 */
+
+/* a port's wave voice, shared by the wave track's state and the wave messages (dmwavetrack.c) */
+typedef struct dm_wvoice { int refs; int port; void *h; } dm_wvoice;
+static void wv_release(dm_perf *pf, dm_wvoice *v);
+static int wave_out(dm_perf *pf, dm_pmsg *p, rtime_t rt);
 
 /* ------------------------------------------------------------------ small helpers */
 /* _ftol: truncation.  The tempo arithmetic runs on the x87 with the calling thread's precision control: dmime's own
@@ -152,6 +162,7 @@ static int pm_free(dm_perf *pf, dm_pmsg *p)
     p->sx_data = NULL;
     if (p->userref && p->user) ss_unref(p->user);       /* FreePMsg releases punkUser */
     p->user = NULL; p->userref = 0;
+    if (p->w_voice) { wv_release(pf, p->w_voice); p->w_voice = NULL; }
     p->hflags = 0xDEAD0;
     p->next = pf->pool;
     pf->pool = p;
@@ -167,6 +178,7 @@ static dm_pmsg *pm_clone(dm_perf *pf, const dm_pmsg *s)
     p->next = NULL; p->hflags = hf; p->rtlast = 0;
     if (s->sx_data) { p->sx_data = malloc(s->sx_len); if (p->sx_data) memcpy(p->sx_data, s->sx_data, s->sx_len); }
     if (p->userref && p->user) ((dm_segstate *)p->user)->refs++;
+    if (p->w_voice) p->w_voice->refs++;
     return p;
 }
 
@@ -1215,6 +1227,7 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
             if (guid_same(&p->nf_guid, &GUID_NOTIFICATION_SEGMENT_) && p->nf_option != NOTIF_SEGEND) return DMUS_S_FREE;
             break;
         case PT_NOTE: if (p->n_flags & NOTEF_NOTEON) return DMUS_S_FREE; break;
+        case PT_WAVE: if (!(p->w_flags & WAVEF_OFF)) return DMUS_S_FREE; break;
         default: return DMUS_S_FREE;
         }
     }
@@ -1266,6 +1279,7 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
         case PT_SYSEX: return sysex_out(pf, p, rt);
         case PT_CURVE: return curve_out(pf, p, rt);
         case PT_PATCH: return patch_out(pf, p, rt);
+        case PT_WAVE: return wave_out(pf, p, rt);
         case PT_CHANNEL_PRIORITY: {
             uint32_t pi, group, chan;
             if (map_pch(pf, p->pch, &pi, &group, &chan, NULL) >= 0 && pi < (uint32_t)pf->nports && pf->ports[pi].ops.priority)
@@ -1288,12 +1302,14 @@ static void tool_flush(dm_perf *pf, dm_pmsg *p, rtime_t rt)
 {
     if (p->type == PT_NOTE) { if (!(p->n_flags & NOTEF_NOTEON)) note_out(pf, p, rt); }
     else if (p->type == PT_CURVE) { if (p->c_flags & CURVEF_RESET) curve_out(pf, p, rt); }
+    else if (p->type == PT_WAVE) { if (p->w_flags & WAVEF_OFF) wave_out(pf, p, rt); }
 }
 
 /* 7730463b */
 static int invalidatable(const dm_pmsg *p)
 {
     if (p->type == PT_NOTE) return !(p->n_flags & NOTEF_NOINVALIDATE);
+    if (p->type == PT_WAVE) return !(p->w_flags & WAVEF_NOINVALIDATE);
     return 1;
 }
 
@@ -1335,6 +1351,10 @@ static void flush_queue(dm_perf *pf, uint32_t vid, dm_queue *q, rtime_t cut, rti
                 goto keep;
             }
             goto drop;
+        } else if (x->type == PT_WAVE) {       /* 773097ec */
+            if ((x->w_flags & WAVEF_IGNORELOOPS) && (fl & 2)) continue;
+            if (!(x->w_flags & WAVEF_OFF)) { if (!(x->flags & PF_LOCKTOREFTIME)) r = M2R(pf, x->mt); }
+            else if (fl & 1) x->w_flags |= WAVEF_NOINVALIDATE;
         }
 test:
         if (r < cut) {
@@ -1654,6 +1674,7 @@ int dm_audiopath_set_volume(dm_audiopath *ap, int32_t vol, uint32_t dur)
 dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx)
 {
     dm_perf *pf = calloc(1, sizeof(*pf));
+    if (pf) pf->rnd = pf->rndapp = 1;
     if (!pf) return NULL;
     pf->ops = *ops; pf->ctx = ctx;
     pf->bumper = 500000; pf->bumper_ms = 50; pf->prepare_ms = 1000; pf->period = 10;
@@ -1681,6 +1702,7 @@ void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms) { pf->bumper_ms = ms; p
 uint32_t dm_perf_get_bumper_length(dm_perf *pf) { return pf->bumper_ms; }
 void dm_perf_set_app_precision(dm_perf *pf, int extended) { pf->appxprec = extended; }
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes) { pf->fixes = fixes; }
+void dm_perf_set_seed(dm_perf *pf, uint32_t seed) { pf->rnd = seed; }
 
 
 static void free_queue(dm_perf *pf, dm_queue *q)

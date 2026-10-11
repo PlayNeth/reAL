@@ -32,6 +32,15 @@ typedef struct {
     void (*unload)(void *ctx, void *handle);
     /* AssignChannelToBuses (audiopaths): the synth channel's output buses */
     void (*assign)(void *ctx, uint32_t group, uint32_t chan, const uint32_t *buses, uint32_t n);
+    /* waves (the port's private interface: DownloadWave, UnloadWave, AllocVoice; the voice's Play and Stop).  A
+     * download or voice handle stays valid until wave_unload / voice_free. */
+    void *(*wave_download)(void *ctx, dm_wave *w, rtime_t hint, int *hr);
+    void (*wave_unload)(void *ctx, void *dl);
+    void *(*voice_alloc)(void *ctx, void *dl, uint32_t chan, uint32_t group, rtime_t start, uint32_t loopstart,
+                         uint32_t loopend, int *hr);
+    int (*voice_play)(void *ctx, void *voice, rtime_t rt, int32_t pitch, int32_t vol);
+    int (*voice_stop)(void *ctx, void *voice, rtime_t rt);
+    void (*voice_free)(void *ctx, void *voice);
 } dm_portops;
 
 dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx);
@@ -88,6 +97,9 @@ int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);
 /* instrument download for a segment's band tracks (IDirectMusicSegment::Download / Unload) */
 int dm_segment_download(dm_perf *pf, dm_segment *seg);
 int dm_segment_unload(dm_perf *pf, dm_segment *seg);
+/* the same through an audiopath (GUID_DownloadToAudioPath / GUID_UnloadFromAudioPath: its PChannels) */
+int dm_segment_download_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap);
+int dm_segment_unload_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap);
 
 int dm_perf_m2r(dm_perf *pf, mtime_t mt, rtime_t *rt);
 int dm_perf_r2m(dm_perf *pf, rtime_t rt, mtime_t *mt);
@@ -108,6 +120,8 @@ void dm_perf_set_app_precision(dm_perf *pf, int extended);
 #define DM_FIX_MEASURE_NUMBER 2 /* measure/beat notifications count measures across time signature changes (the
                                  * original divides the time by the current measure length, so the count jumps) */
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
+/* the transport thread's srand(time(NULL)) (wave track variations and random volume/pitch) */
+void dm_perf_set_seed(dm_perf *pf, uint32_t seed);
 
 /* notifications (AddNotificationType, RemoveNotificationType, SetNotificationHandle, GetNotificationPMsg, FreePMsg).
  * A notification's user is its segment state (or NULL); dm_perf_free_pmsg releases it. */

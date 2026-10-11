@@ -538,20 +538,10 @@ static int bandtrack_download(dm_perf *pf, dm_bandtrack *T, int unload)
     return hr;
 }
 
-int dm_segment_download(dm_perf *pf, dm_segment *seg)
-{
-    int hr = DM_OK;
-    for (int i = 0; i < seg->ntracks; i++)
-        if (seg->tracks[i].kind == TRK_BAND) { int r = bandtrack_download(pf, seg->tracks[i].data, 0); if (r < 0) hr = r; }
-    return hr;
-}
+#include "dmwavetrack.c"
 
-int dm_segment_unload(dm_perf *pf, dm_segment *seg)
-{
-    for (int i = 0; i < seg->ntracks; i++)
-        if (seg->tracks[i].kind == TRK_BAND) bandtrack_download(pf, seg->tracks[i].data, 1);
-    return DM_OK;
-}
+int dm_segment_download(dm_perf *pf, dm_segment *seg) { return dm_segment_download_ap(pf, seg, NULL); }
+int dm_segment_unload(dm_perf *pf, dm_segment *seg) { return dm_segment_unload_ap(pf, seg, NULL); }
 
 /* ------------------------------------------------------------------ dispatch */
 static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags)
@@ -595,6 +585,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         e->state = S;
         break;
     }
+    case TRK_WAVE: wt_initplay(pf, ss, e); break;
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));
@@ -610,6 +601,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
 
 static void track_endplay(dm_perf *pf, sstrack *e)
 {
+    if (e->t->kind == TRK_WAVE) { wt_endplay(pf, e); return; }
     if (e->t->kind == TRK_SEQ && e->state) { free(((seqstate *)e->state)->ev); free(((seqstate *)e->state)->cv); }
     if (e->t->kind == TRK_BAND && e->state && ((dm_bandtrack *)e->t->data)->autodl) bandtrack_download(pf, e->t->data, 1);
     free(e->state);
@@ -624,6 +616,7 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_TIMESIG: return ts_play(pf, ss, e, start, end, off, flags);
     case TRK_BAND: return band_play(pf, ss, e, start, end, off, flags);
     case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
+    case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
     }
     return DM_OK;
 }

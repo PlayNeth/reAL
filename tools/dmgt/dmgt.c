@@ -18,6 +18,7 @@
 #include <dsound.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <time.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
@@ -603,9 +604,14 @@ static HRESULT WINAPI my_alloc(void *p, IUnknown *dl, DWORD ch, DWORD grp, REFER
 static void hook_wave_port(void *port)
 {
     if (!getenv("DMGT_WAVE")) return;
-    patch_vt(port, 20, my_dlwave, (void **)&o_dlwave);
-    patch_vt(port, 21, my_unwave, (void **)&o_unwave);
-    patch_vt(port, 22, my_alloc, (void **)&o_alloc);
+    /* dmime uses the port's private interface (IID 7048bcd8-...): DownloadWave, UnloadWave, AllocVoice at 3..5 */
+    static const GUID IID_PortP = { 0x7048bcd8, 0x43fd, 0x4ca5, { 0x93, 0x11, 0xf3, 0x24, 0x8f, 0x0a, 0x25, 0x22 } };
+    IUnknown *pp = NULL;
+    if (FAILED(IUnknown_QueryInterface((IUnknown *)port, &IID_PortP, (void **)&pp)) || !pp) { printf("no private port\n"); return; }
+    patch_vt(pp, 3, my_dlwave, (void **)&o_dlwave);
+    patch_vt(pp, 4, my_unwave, (void **)&o_unwave);
+    patch_vt(pp, 5, my_alloc, (void **)&o_alloc);
+    IUnknown_Release(pp);
 }
 
 /* DMGT_TMAP: print dmime's tempo map (perf+0x12c, history +0x134: internal pmsgs, hdr+0x20 rt, +0x28 mt, +0x50 tempo) */
@@ -670,6 +676,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     /* DMGT_APATH=1: set up like Midnight Club II: InitAudio(shared stereo+reverb, 128), four standard audiopaths of
      * 64 PChannels, the segment played on the first; DMGT_VOL="<ms>:<vol>,...": AudioPath::SetVolume calls */
     IDirectMusicAudioPath *apath = NULL;
+    long t_init = (long)time(NULL);     /* dmime's transport thread seeds rand() with time(NULL) when it starts */
     if (getenv("DMGT_APATH")) {
         if (FAILED(hr = my_cocreate(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&perf))) die("performance", hr);
         IDirectMusic *dmi = (IDirectMusic *)dm;
@@ -722,6 +729,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         }
     }
     g_ev = fopen(out, "w");
+    if (g_ev) fprintf(g_ev, "# time %ld %ld\n", t_init, (long)time(NULL));
     if (getenv("DMGT_NOTIFY")) {
         const char *ty = getenv("DMGT_NTYPES") ? getenv("DMGT_NTYPES") : "spm";
         g_nf = fopen(getenv("DMGT_NOTIFY"), "w");

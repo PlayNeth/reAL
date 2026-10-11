@@ -77,6 +77,55 @@ static void *p_download(void *c, dm_collection *coll, uint32_t patch, int sp, ui
 }
 static void p_unload(void *c, void *h) { dls_port_unload(g_dls, h); }
 
+/* waves: logged as dmgt's DMGT_WAVE does ("W ..." lines, objects numbered in order of appearance; downloads before
+ * the segment plays are numbered but not logged, as dmgt's log is not open yet then) */
+static void *g_wobj[1024]; static int g_nwobj, g_wlog;
+static int wid(void *o) { for (int i = 0; i < g_nwobj; i++) if (g_wobj[i] == o) return i; if (g_nwobj < 1024) g_wobj[g_nwobj] = o; return g_nwobj++; }
+static int g_hn;
+static void *w_download(void *c, dm_wave *w, rtime_t hint, int *hr)
+{
+    void *d = (void *)(intptr_t)(0x10000 + ++g_hn);
+    int a = wid(w), b = wid(d);
+    if (g_wlog) fprintf(g_out, "W download w%d -> d%d hint %lld -> %08x\n", a, b, (long long)hint, 0);
+    *hr = 0;
+    return d;
+}
+static void w_unload(void *c, void *d) { int a = wid(d); if (g_wlog) fprintf(g_out, "W unload d%d\n", a); }
+static void *w_alloc(void *c, void *d, uint32_t ch, uint32_t grp, rtime_t rt, uint32_t ls, uint32_t le, int *hr)
+{
+    void *v = (void *)(intptr_t)(0x10000 + ++g_hn);
+    int a = wid(d), b = wid(v);
+    fprintf(g_out, "W alloc d%d ch %u grp %u rt %lld loop %u %u -> v%d %08x\n", a, ch, grp, (long long)rt, ls, le, b, 0);
+    *hr = 0;
+    return v;
+}
+static int w_play(void *c, void *v, rtime_t rt, int32_t pitch, int32_t vol)
+{
+    fprintf(g_out, "W play v%d rt %lld pitch %d vol %d -> %08x\n", wid(v), (long long)rt, pitch, vol, 0);
+    return 0;
+}
+static int w_stop(void *c, void *v, rtime_t rt) { fprintf(g_out, "W stop v%d rt %lld -> %08x\n", wid(v), (long long)rt, 0); return 0; }
+static void w_free(void *c, void *v) {}
+static dm_wave *getwave(void *ctx, const dm_guid *g, const char *file, const char *name)
+{
+    static struct { char name[256]; dm_wave *w; } cache[64];
+    static int n;
+    if (!file) return NULL;
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", g_dir, file);
+    for (int i = 0; i < n; i++) if (!strcmp(cache[i].name, path)) { dm_wave_addref(cache[i].w); return cache[i].w; }
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    void *b = malloc(sz);
+    if (fread(b, 1, sz, f) != (size_t)sz) { fclose(f); free(b); return NULL; }
+    fclose(f);
+    dm_wave *w = dm_wave_load(b, sz);
+    free(b);
+    if (w && n < 64) { snprintf(cache[n].name, 256, "%s", path); cache[n++].w = w; dm_wave_addref(w); }
+    return w;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: test_perf seg.sgt out.log ms [flags]\n"); return 2; }
@@ -93,9 +142,12 @@ int main(int argc, char **argv)
     dm_getcoll_fn gc = getenv("TP_NOCOLL") ? NULL : getcoll;
     dls_sink sk = { s_dl, s_ul };
     g_dls = dls_port_new(&sk, NULL);
-    dm_segment *seg = dm_is_midi(buf, sz) ? dm_segment_from_midi(buf, sz, gc, NULL) : dm_segment_load(buf, sz, gc, NULL);
-    if (!seg) { fprintf(stderr, "load failed\n"); return 1; }
     g_out = fopen(argv[2], "w");
+    dm_segment *seg = NULL;
+    if (dm_is_midi(buf, sz)) seg = dm_segment_from_midi(buf, sz, gc, NULL);
+    else if (sz > 12 && !memcmp((char *)buf + 8, "WAVE", 4)) { dm_wave *w = dm_wave_load(buf, sz); if (w) { wid(w); seg = dm_segment_from_wave(w); dm_wave_release(w); } }
+    else seg = dm_segment_load_ex(buf, sz, gc, getwave, NULL);
+    if (!seg) { fprintf(stderr, "load failed\n"); return 1; }
     int ms = atoi(argv[3]);
     uint32_t flags = argc > 4 ? strtoul(argv[4], NULL, 0) : 0;
     const char *order = getenv("TP_ORDER");      /* realtime thread first on a shared tick (TP_ORDER=tr: transport first) */
@@ -107,9 +159,10 @@ int main(int argc, char **argv)
     int64_t dl[2];
     dl[0] = g_now + (int64_t)dm_perf_transport(pf) * 10000;
     dl[1] = g_now + (int64_t)dm_perf_realtime(pf) * 10000;
-    dm_portops po = { p_latency, p_play, NULL, p_download, p_unload };
+    dm_portops po = { p_latency, p_play, NULL, p_download, p_unload, NULL, w_download, w_unload, w_alloc, w_play, w_stop, w_free };
     dm_perf_set_app_precision(pf, getenv("TP_PREC") ? atoi(getenv("TP_PREC")) : 1);     /* dmgt main thread: 64-bit x87 */
     if (getenv("TP_FIX")) dm_perf_set_fixes(pf, strtoul(getenv("TP_FIX"), NULL, 0));
+    if (getenv("TP_SEED")) dm_perf_set_seed(pf, strtoul(getenv("TP_SEED"), NULL, 0));
     int port = dm_perf_add_port(pf, &po, NULL);
     dm_perf_assign_block(pf, 0, port, 1);
     g_sig[0] = g_sig[1] = 0;
@@ -125,7 +178,8 @@ int main(int argc, char **argv)
         if (strchr(ty, 'm')) dm_perf_add_notification_type(pf, &gm);
     }
     dm_segstate *ss;
-    int hr = dm_perf_play(pf, seg, flags, 0, NULL, &ss);
+    g_wlog = 1;
+    int hr = dm_perf_play(pf, seg, flags, getenv("TP_STARTMT") ? atoi(getenv("TP_STARTMT")) : 0, NULL, &ss);
     g_ss1 = ss;
     if (hr < 0) { fprintf(stderr, "play %08x\n", hr); return 1; }
     /* TP_STOP=<ms>: stop the segment (as dmgt DMGT_STOP); TP_NEXT=<ms>:<segment>: play a second segment */
