@@ -12,3 +12,5 @@ EXPORTS
     DirectSoundFullDuplexCreate  @10
     DirectSoundCreate8           @11
     DirectSoundCaptureCreate8    @12
+    DllRegisterServer                PRIVATE
+    DllUnregisterServer              PRIVATE

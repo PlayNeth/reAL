@@ -76,6 +76,7 @@ $CC -O1 -o build/eaxtest.exe tests/eaxtest.c -lole32 -luuid
 rm -f build/eaxtest.lib build/eaxtest.pdb
 $CC -O1 -o build/streamtest.exe tests/streamtest.c -lwinmm -ldsound
 $CC -O1 -o build/dmplay.exe tests/dmplay.c -ldsound -lole32 -luuid -ldxguid -ladvapi32
+$CC -O1 -DNO_DSOUND -o build/dmplay_nods.exe tests/dmplay.c -lole32 -luuid -ldxguid -ladvapi32
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound

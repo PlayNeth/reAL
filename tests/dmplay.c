@@ -1,4 +1,5 @@
-/* dmplay - plays a MIDI file or segment through DirectMusic, with reAL loaded (for reAL-Music) */
+/* dmplay - plays a MIDI file or segment through DirectMusic, with reAL loaded (for reAL-Music); built with -DNO_DSOUND
+ * (dmplay_nods.exe) it never loads dsound.dll itself, as a game that reaches reAL only through a regsvr32 registration */
 #define COBJMACROS
 #include <windows.h>
 #include <dmusici.h>
@@ -8,7 +9,9 @@
 
 int main(int argc, char **argv)
 {
+#ifndef NO_DSOUND
     void *volatile keep = (void *)DirectSoundCreate; (void)keep;     /* load reAL like a DirectSound game */
+#endif
     const char *file = argc > 1 ? argv[1] : "test.mid";
     WCHAR wfile[MAX_PATH], wdir[MAX_PATH];
     MultiByteToWideChar(CP_ACP, 0, file, -1, wfile, MAX_PATH);

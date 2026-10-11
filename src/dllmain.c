@@ -1,6 +1,8 @@
 /* reAL - DLL entry points / exports */
 #include "real.h"
 #include "music/dmcom.h"
+#include <olectl.h>
+#include <dmusici.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -417,10 +419,116 @@ static IClassFactoryVtbl cf_vtbl = { cf_QueryInterface, cf_AddRef, cf_Release, c
 static rl_factory s_cf_ds  = { { &cf_vtbl }, FALSE };
 static rl_factory s_cf_ds8 = { { &cf_vtbl }, TRUE };
 
+/* ---------------------------------------------------------------- reAL-Music as a registered COM server
+ * A game that creates DirectMusic before anything loads dsound.dll (or never loads it from its own folder) is out of
+ * reach of the COM hooks.  For those, a copy of reAL (reAL-music.dll) can be registered as the DirectMusic classes'
+ * server with regsvr32; it then serves them where music is enabled for the game, and elsewhere hands the request to
+ * the server that was registered before it (normally Windows' dmloader/dmime/dmusic), so other programs are unaffected. */
+static const struct { const CLSID *clsid; const char *dll; } s_music_classes[] = {
+    { &CLSID_DirectMusicLoader, "dmloader.dll" },
+    { &CLSID_DirectMusicPerformance, "dmime.dll" },
+    { &CLSID_DirectMusicSegment, "dmime.dll" },
+    { &CLSID_DirectMusic, "dmusic.dll" },
+};
+#define MUSIC_PREV "reAL.previous"
+
+static void clsid_key(const CLSID *c, char *out, size_t n)
+{
+    snprintf(out, n, "CLSID\\{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}\\InprocServer32",
+             (unsigned long)c->Data1, c->Data2, c->Data3, c->Data4[0], c->Data4[1], c->Data4[2], c->Data4[3],
+             c->Data4[4], c->Data4[5], c->Data4[6], c->Data4[7]);
+}
+
+static BOOL reg_get(HKEY k, const char *name, char *out, DWORD n)
+{
+    DWORD type, sz = n - 1;
+    if (RegQueryValueExA(k, name, NULL, &type, (BYTE *)out, &sz) != ERROR_SUCCESS || (type != REG_SZ && type != REG_EXPAND_SZ)) return FALSE;
+    out[sz < n ? sz : n - 1] = 0;
+    return out[0] != 0;
+}
+
+/* the server registered before reAL (or Windows' own) */
+static HRESULT music_forward(REFCLSID clsid, REFIID riid, LPVOID *out)
+{
+    char key[128], path[MAX_PATH], self[MAX_PATH];
+    const char *dll = NULL;
+    for (size_t i = 0; i < sizeof(s_music_classes) / sizeof(s_music_classes[0]); i++)
+        if (IsEqualCLSID(clsid, s_music_classes[i].clsid)) dll = s_music_classes[i].dll;
+    if (!dll) return CLASS_E_CLASSNOTAVAILABLE;
+    GetModuleFileNameA(g_self, self, MAX_PATH);
+    path[0] = 0;
+    HKEY k;
+    clsid_key(clsid, key, sizeof(key));
+    if (RegOpenKeyExA(HKEY_CLASSES_ROOT, key, 0, KEY_READ, &k) == ERROR_SUCCESS) {
+        if (!reg_get(k, MUSIC_PREV, path, sizeof(path)) || !_stricmp(path, self)) path[0] = 0;
+        RegCloseKey(k);
+    }
+    if (!path[0]) {
+        UINT n = GetSystemDirectoryA(path, MAX_PATH - 16);
+        if (!n || n >= MAX_PATH - 16) return CLASS_E_CLASSNOTAVAILABLE;
+        lstrcatA(path, "\\");
+        lstrcatA(path, dll);
+    }
+    HMODULE h = LoadLibraryA(path);
+    HRESULT (WINAPI *fn)(REFCLSID, REFIID, LPVOID *) = h ? (void *)GetProcAddress(h, "DllGetClassObject") : NULL;
+    LOG_INFO("music: DirectMusic class handed to %s (%s)", path, fn ? "ok" : "not loadable");
+    return fn ? fn(clsid, riid, out) : CLASS_E_CLASSNOTAVAILABLE;
+}
+
+HRESULT WINAPI DllRegisterServer(void)
+{
+    char self[MAX_PATH], key[128], cur[MAX_PATH], prev[MAX_PATH];
+    GetModuleFileNameA(g_self, self, MAX_PATH);
+    for (size_t i = 0; i < sizeof(s_music_classes) / sizeof(s_music_classes[0]); i++) {
+        HKEY k;
+        clsid_key(s_music_classes[i].clsid, key, sizeof(key));
+        if (RegCreateKeyExA(HKEY_CLASSES_ROOT, key, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &k, NULL) != ERROR_SUCCESS)
+            return SELFREG_E_CLASS;
+        if (!reg_get(k, MUSIC_PREV, prev, sizeof(prev))) {      /* first registration: remember what was there */
+            if (!reg_get(k, NULL, cur, sizeof(cur)) || !_stricmp(cur, self)) {
+                UINT n = GetSystemDirectoryA(cur, MAX_PATH - 16);
+                cur[n < MAX_PATH - 16 ? n : 0] = 0;
+                lstrcatA(cur, "\\");
+                lstrcatA(cur, s_music_classes[i].dll);
+            }
+            RegSetValueExA(k, MUSIC_PREV, 0, REG_SZ, (const BYTE *)cur, lstrlenA(cur) + 1);
+        }
+        RegSetValueExA(k, NULL, 0, REG_SZ, (const BYTE *)self, lstrlenA(self) + 1);
+        RegSetValueExA(k, "ThreadingModel", 0, REG_SZ, (const BYTE *)"Both", 5);
+        RegCloseKey(k);
+    }
+    LOG_INFO("music: registered %s as the DirectMusic loader/performance/segment/DirectMusic server", self);
+    return S_OK;
+}
+
+HRESULT WINAPI DllUnregisterServer(void)
+{
+    char key[128], prev[MAX_PATH];
+    for (size_t i = 0; i < sizeof(s_music_classes) / sizeof(s_music_classes[0]); i++) {
+        HKEY k;
+        clsid_key(s_music_classes[i].clsid, key, sizeof(key));
+        if (RegOpenKeyExA(HKEY_CLASSES_ROOT, key, 0, KEY_READ | KEY_WRITE, &k) != ERROR_SUCCESS) continue;
+        if (reg_get(k, MUSIC_PREV, prev, sizeof(prev))) {
+            RegSetValueExA(k, NULL, 0, REG_SZ, (const BYTE *)prev, lstrlenA(prev) + 1);
+            RegDeleteValueA(k, MUSIC_PREV);
+        }
+        RegCloseKey(k);
+    }
+    LOG_INFO("music: DirectMusic servers restored");
+    return S_OK;
+}
+
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID *out)
 {
     char gb[64];
     LOG_CALL("DllGetClassObject(%s)", rl_guid_str(clsid, gb));
+    if (clsid && rm_handles(clsid)) {         /* reached only through a regsvr32 registration (see above) */
+        if (!out) return E_POINTER;
+        *out = NULL;
+        if (!g_cfg.enabled || !g_cfg.music) return music_forward(clsid, riid, out);
+        rl_music_hook(1);                     /* from here on the COM hooks serve the game directly */
+        return hook_cogetclass(clsid, CLSCTX_INPROC_SERVER, NULL, riid, out);
+    }
     /* DirectSound's private device-enumeration class: ALchemy does not offer it (CLASS_E_CLASSNOTAVAILABLE).
      * Forwarding it hands games the real dsound's device GUIDs instead of reAL's */
     static const CLSID clsid_private = { 0x11ab3ec0, 0x25ec, 0x11d1, { 0xa4, 0xd8, 0x00, 0xc0, 0x4f, 0xc2, 0x8a, 0xca } };
