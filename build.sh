@@ -43,7 +43,7 @@ for f in $MUSIC_SRCS; do
     OBJS="$OBJS $o"
 done
 # shellcheck disable=SC2086
-$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid
+$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32
 rm -f build/dsound.lib build/dsound.pdb build/dllmain.lib
 echo "built build/dsound.dll"
 

@@ -50,11 +50,47 @@ static HRESULT WINAPI my_download(IDirectMusicSynth8 *s, LPHANDLE h, LPVOID data
     return hr;
 }
 
+/* DirectX 8 voices: PlayVoice / StopVoice recorded in the download dump ('DMPV' / 'DMSV' records) */
+typedef HRESULT (WINAPI *playvoice_fn)(IDirectMusicSynth8 *, REFERENCE_TIME, DWORD, DWORD, DWORD, DWORD, LONG, LONG,
+                                       SAMPLE_TIME, SAMPLE_TIME, SAMPLE_TIME);
+typedef HRESULT (WINAPI *stopvoice_fn)(IDirectMusicSynth8 *, REFERENCE_TIME, DWORD);
+static playvoice_fn g_orig_playvoice;
+static stopvoice_fn g_orig_stopvoice;
+static HRESULT WINAPI my_playvoice(IDirectMusicSynth8 *s, REFERENCE_TIME rt, DWORD id, DWORD grp, DWORD ch, DWORD dlid,
+                                   LONG pitch, LONG vol, SAMPLE_TIME st, SAMPLE_TIME ls, SAMPLE_TIME le)
+{
+    if (g_dl) {
+        DWORD tag = 0x56504d44, sz = 56;    /* 'DMPV' */
+        fwrite(&tag, 4, 1, g_dl); fwrite(&sz, 4, 1, g_dl);
+        fwrite(&rt, 8, 1, g_dl); fwrite(&id, 4, 1, g_dl); fwrite(&grp, 4, 1, g_dl); fwrite(&ch, 4, 1, g_dl);
+        fwrite(&dlid, 4, 1, g_dl); fwrite(&pitch, 4, 1, g_dl); fwrite(&vol, 4, 1, g_dl);
+        fwrite(&st, 8, 1, g_dl); fwrite(&ls, 8, 1, g_dl); fwrite(&le, 8, 1, g_dl);
+    }
+    HRESULT hr = g_orig_playvoice(s, rt, id, grp, ch, dlid, pitch, vol, st, ls, le);
+    fprintf(stderr, "  PlayVoice rt %lld id %lu grp %lu ch %lu dl %lu pitch %ld vol %ld start %llu loop %llu %llu -> %08lx\n",
+            rt, id, grp, ch, dlid, pitch, vol, st, ls, le, (unsigned long)hr);
+    return hr;
+}
+static HRESULT WINAPI my_stopvoice(IDirectMusicSynth8 *s, REFERENCE_TIME rt, DWORD id)
+{
+    if (g_dl) {
+        DWORD tag = 0x56534d44, sz = 12;    /* 'DMSV' */
+        fwrite(&tag, 4, 1, g_dl); fwrite(&sz, 4, 1, g_dl); fwrite(&rt, 8, 1, g_dl); fwrite(&id, 4, 1, g_dl);
+    }
+    HRESULT hr = g_orig_stopvoice(s, rt, id);
+    fprintf(stderr, "  StopVoice rt %lld id %lu -> %08lx\n", rt, id, (unsigned long)hr);
+    return hr;
+}
+
 static void hook_synth(IDirectMusicSynth8 *s)
 {
     void **vt = *(void ***)s;
     DWORD old;
     if (g_orig_download) return;
+    VirtualProtect(&vt[20], 2 * sizeof(void *), PAGE_EXECUTE_READWRITE, &old);
+    g_orig_playvoice = (playvoice_fn)vt[20]; vt[20] = (void *)my_playvoice;
+    g_orig_stopvoice = (stopvoice_fn)vt[21]; vt[21] = (void *)my_stopvoice;
+    VirtualProtect(&vt[20], 2 * sizeof(void *), old, &old);
     VirtualProtect(&vt[6], sizeof(void *), PAGE_EXECUTE_READWRITE, &old);
     g_orig_download = (download_fn)vt[6];
     vt[6] = (void *)my_download;
@@ -376,6 +412,10 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
     pp.dwChannelGroups = 1;
     pp.dwSampleRate = rate;
     pp.dwEffectFlags = getenv("DMGT_REVERB") && atoi(getenv("DMGT_REVERB")) ? DMUS_EFFECT_REVERB : DMUS_EFFECT_NONE;
+    if (getenv("DMGT_BUSES")) {     /* a DirectX 8 port (audiopath feature): wave voices need it */
+        pp.dwValidParams |= DMUS_PORTPARAMS_FEATURES;
+        pp.dwFeatures = DMUS_PORT_FEATURE_AUDIOPATH | DMUS_PORT_FEATURE_STREAMING;
+    }
     IDirectMusicPort *port;
     if (FAILED(hr = IDirectMusic8_CreatePort(dm, &CLSID_DirectMusicSynth, (DMUS_PORTPARAMS *)&pp, &port, NULL))) die("CreatePort", hr);
     if (!g_synth) die("synth not seen", E_FAIL);
@@ -451,8 +491,32 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
     int nev = 0;
     DWORD end_ms = 0;
     char line[256];
+    static const GUID IID_PortP = { 0x7048bcd8, 0x43fd, 0x4ca5, { 0x93, 0x11, 0xf3, 0x24, 0x8f, 0x0a, 0x25, 0x22 } };
+    static const GUID CLSID_DSWave = { 0x8a667154, 0xf9cb, 0x11d2, { 0xad, 0x8a, 0x00, 0x60, 0xb0, 0x57, 0x5a, 0xbc } };
+    void **portp = NULL;
     while (fgets(line, sizeof(line), f) && nev < 4096) {
         unsigned ms, st, d1 = 0, d2 = 0;
+        char wfile[200];
+        unsigned ch, sofs, dur; int pitch, vol; unsigned long ls, le;
+        /* "<ms> W <file.wav> <channel> <pitch> <volume> <start offset ms> <loop start> <loop end> <duration ms>": a wave
+         * through the port (DownloadWave, AllocVoice, the voice's Play and Stop) */
+        if (sscanf(line, "%u W %199s %u %d %d %u %lu %lu %u", &ms, wfile, &ch, &pitch, &vol, &sofs, &ls, &le, &dur) == 9) {
+            if (!portp && FAILED(hr = IDirectMusicPort_QueryInterface(port, &IID_PortP, (void **)&portp))) die("private port", hr);
+            WCHAR ww[MAX_PATH];
+            MultiByteToWideChar(CP_ACP, 0, wfile, -1, ww, MAX_PATH);
+            IUnknown *wave = NULL, *dlw = NULL, *voice = NULL;
+            if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DSWave, &IID_IUnknown, ww, (void **)&wave))) die("load wave", hr);
+            hr = ((HRESULT (WINAPI *)(void *, IUnknown *, IUnknown **, REFERENCE_TIME))(*(void ***)portp)[3])(portp, wave, &dlw, (REFERENCE_TIME)sofs * 10000);
+            if (FAILED(hr)) die("DownloadWave", hr);
+            hr = ((HRESULT (WINAPI *)(void *, IUnknown *, DWORD, DWORD, REFERENCE_TIME, LONGLONG, LONGLONG, IUnknown **))(*(void ***)portp)[5])(
+                portp, dlw, ch, 1, (REFERENCE_TIME)sofs * 10000, (LONGLONG)ls, (LONGLONG)le, &voice);
+            if (FAILED(hr)) die("AllocVoice", hr);
+            hr = ((HRESULT (WINAPI *)(void *, REFERENCE_TIME, LONG, LONG))(*(void ***)voice)[3])(voice, (REFERENCE_TIME)ms * 10000, pitch, vol);
+            fprintf(stderr, "wave %s: Play -> %08lx\n", wfile, (unsigned long)hr);
+            if (dur) ((HRESULT (WINAPI *)(void *, REFERENCE_TIME))(*(void ***)voice)[4])(voice, (REFERENCE_TIME)(ms + dur) * 10000);
+            if (ms + dur > end_ms) end_ms = ms + dur;
+            continue;
+        }
         if (line[0] == '#' || sscanf(line, "%u %x %u %u", &ms, &st, &d1, &d2) < 2) continue;
         if (st == 0) { end_ms = ms; continue; }     /* "<ms> 0": end of render */
         evs[nev].ms = ms; evs[nev].msg[0] = st; evs[nev].msg[1] = d1; evs[nev].msg[2] = d2; nev++;

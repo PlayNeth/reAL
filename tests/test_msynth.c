@@ -35,11 +35,22 @@ int main(int argc, char **argv)
     msynth_set_gain(s, getenv("MS_GAIN") ? atoi(getenv("MS_GAIN")) : 0);
     int ndl = 0;
     for (long p = 0; p + 8 <= n;) {
-        uint32_t sz = *(uint32_t *)(dl + p + 4);
-        void *h;
-        int r = msynth_download(s, dl + p + 8, sz, &h);
-        if (r < 0) fprintf(stderr, "download %d failed: %d\n", ndl, r);
-        ndl++;
+        uint32_t tag = *(uint32_t *)(dl + p), sz = *(uint32_t *)(dl + p + 4);
+        const uint8_t *q = dl + p + 8;
+        if (tag == 0x56504d44) {        /* 'DMPV': PlayVoice(rt, id, group, channel, dlid, pitch, volume, start, loop) */
+            int64_t rt; uint64_t st, ls, le;
+            memcpy(&rt, q, 8); memcpy(&st, q + 32, 8); memcpy(&ls, q + 40, 8); memcpy(&le, q + 48, 8);
+            const uint32_t *u = (const uint32_t *)(q + 8);
+            msynth_play_voice(s, rt * rate / 10000000, u[0], u[1], u[2], u[3], (int32_t)u[4], (int32_t)u[5], st, ls, le);
+        } else if (tag == 0x56534d44) { /* 'DMSV' */
+            int64_t rt; memcpy(&rt, q, 8);
+            msynth_stop_voice(s, rt * rate / 10000000, *(const uint32_t *)(q + 8));
+        } else {
+            void *h;
+            int r = msynth_download(s, q, sz, &h);
+            if (r < 0) fprintf(stderr, "download %d failed: %d\n", ndl, r);
+            ndl++;
+        }
         p += 8 + sz;
     }
     FILE *f = fopen(argv[2], "r");

@@ -424,11 +424,13 @@ static rl_factory s_cf_ds8 = { { &cf_vtbl }, TRUE };
  * reach of the COM hooks.  For those, a copy of reAL (reAL-music.dll) can be registered as the DirectMusic classes'
  * server with regsvr32; it then serves them where music is enabled for the game, and elsewhere hands the request to
  * the server that was registered before it (normally Windows' dmloader/dmime/dmusic), so other programs are unaffected. */
+static const CLSID s_CLSID_DirectSoundWave = { 0x8a667154, 0xf9cb, 0x11d2, { 0xad, 0x8a, 0x00, 0x60, 0xb0, 0x57, 0x5a, 0xbc } };
 static const struct { const CLSID *clsid; const char *dll; } s_music_classes[] = {
     { &CLSID_DirectMusicLoader, "dmloader.dll" },
     { &CLSID_DirectMusicPerformance, "dmime.dll" },
     { &CLSID_DirectMusicSegment, "dmime.dll" },
     { &CLSID_DirectMusic, "dmusic.dll" },
+    { &s_CLSID_DirectSoundWave, "dswave.dll" },
 };
 #define MUSIC_PREV "reAL.previous"
 

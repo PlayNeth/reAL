@@ -160,7 +160,25 @@ typedef struct ms_wave {
     int refs;
     void *block;            /* download buffer copy owning data */
     int dead;               /* unloaded while still in use: freed when the last reference goes */
+    uint8_t streaming;      /* +21 a streaming wave's buffer */
+    uint8_t playing;        /* +22 */
+    uint8_t valid;          /* +23 filled (Refresh) */
+    uint8_t guarded;        /* +24 the guard sample holds the next buffer's first */
 } ms_wave;
+
+/* a wave articulation (77487920, 0x40 bytes): DMUS_WAVEARTDL, the format, the buffers (DirectX 8 voices) */
+typedef struct ms_bufnode { struct ms_bufnode *next; ms_wave *w; } ms_bufnode;
+typedef struct ms_wartic {
+    struct ms_wartic *next;
+    uint32_t id;            /* +04 */
+    uint32_t idx, bus, nbuf, master, options;   /* +08 DMUS_WAVEARTDL */
+    uint16_t tag, ch; uint32_t rate, avg; uint16_t align, bits, cb;  /* +1c WAVEFORMATEX */
+    ms_bufnode *bufs;       /* +30 */
+    uint8_t fmt;            /* +34 */
+    int streaming;          /* +38 */
+    int refs;               /* +3c */
+    int dead;
+} ms_wartic;
 
 static void wave_unref(ms_wave *w, int n)
 {
@@ -265,6 +283,8 @@ typedef struct {            /* CDigitalAudio (voice+0xf0) */
     int oneshot;            /* +74 */
     int32_t b0, a1, a2;     /* +78 filter coefficients */
     int32_t y1, y2;         /* +84 filter state */
+    ms_bufnode *node;       /* +8c the buffer playing (a wave voice) */
+    ms_wartic *artic;       /* +90 a wave voice's articulation */
     int64_t played;         /* +98 */
 } v_da;
 
@@ -304,6 +324,15 @@ typedef struct ms_voice {
     int32_t lastgain[32];   /* +414 */
 } ms_voice;
 
+typedef struct ms_vev {     /* 77483ec0: an event of the control logic's voice list (0x48) */
+    struct ms_vev *next;
+    int64_t t;
+    uint32_t slot, voiceid;
+    int32_t vol, pitch;
+    uint64_t start, lstart, lend;
+    ms_wartic *artic;
+} ms_vev;
+
 /* ------------------------------------------------------------------ control logic (one per channel group) */
 typedef struct ms_cl {
     struct msynth *synth;
@@ -334,6 +363,7 @@ typedef struct ms_cl {
     uint8_t drum[16];       /* +1164 */
     uint32_t mono[16];      /* +1174 */
     uint32_t buses[16][33]; /* +1380 */
+    struct ms_vev *vev;     /* +11b8 DirectX 8 voices waiting to start (PlayVoice) */
 } ms_cl;
 
 /* ------------------------------------------------------------------ synth */
@@ -356,6 +386,7 @@ struct msynth {
     /* CInstManager (+a8) */
     ms_instr *instr[NBUCKET];
     ms_wave *waves[NBUCKET];
+    ms_wartic *wartic[NBUCKET];     /* +a8+100 */
     uint32_t imrate;        /* +a8+fc */
     int64_t readpos;        /* IDirectSoundSource position */
 };
@@ -741,6 +772,93 @@ static int dl_wave(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nof
     return 0;
 }
 
+/* 77487430: a streaming (5) or one-shot (6) wave buffer: raw bytes, made playable by the articulation that names it */
+static int dl_wavebuf(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t type, uint32_t id, void **handle)
+{
+    if (nofs < 1) return -6;
+    const uint8_t *wd = OFS(0);
+    uint32_t size = U32(wd, 0);
+    ms_wave *wv = calloc(1, sizeof(*wv));
+    if (!wv) return -1;
+    wv->id = id;
+    wv->rate = 0x5622;
+    wv->fmt = 1;
+    wv->block = calloc(1, size + 8);
+    if (!wv->block) { free(wv); return -1; }
+    memcpy(wv->block, wd + 4, size);
+    wv->data = wv->block;
+    wv->len = size;
+    if (type == 5) { wv->streaming = 1; wv->valid = 1; }
+    ms_wave **b = &s->waves[id % NBUCKET];
+    wv->next = *b; *b = wv;
+    wv->refs++;
+    *handle = wv;
+    return 0;
+}
+
+static ms_wave *find_wave(msynth *s, uint32_t id);
+static void wartic_free(ms_wartic *a)      /* 774876e0 */
+{
+    while (a->bufs) {
+        ms_bufnode *n = a->bufs;
+        a->bufs = n->next;
+        wave_unref(n->w, 1);
+        free(n);
+    }
+    free(a);
+}
+static void wartic_unref(ms_wartic *a)     /* 77487c30 */
+{
+    if (--a->refs == 0) wartic_free(a);
+}
+
+/* 77487920: a wave articulation: DMUS_WAVEARTDL, the WAVEFORMATEX, the buffers' download ids; the buffers take the
+ * format (8-bit data made signed, the length in samples plus a guard sample copying the last) */
+static int dl_wartic(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t id, void **handle)
+{
+    if (nofs < 3) return -6;
+    const uint8_t *ad = OFS(0), *wf = OFS(1);
+    const uint32_t *ids = (const uint32_t *)OFS(2);
+    ms_wartic *a = calloc(1, sizeof(*a));
+    if (!a) return -1;
+    a->refs = 1;
+    a->id = id;
+    a->idx = U32(ad, 0); a->bus = U32(ad, 4); a->nbuf = U32(ad, 8); a->master = U32(ad, 12); a->options = U16(ad, 16);
+    a->tag = U16(wf, 0); a->ch = U16(wf, 2); a->rate = U32(wf, 4); a->avg = U32(wf, 8); a->align = U16(wf, 12);
+    a->bits = U16(wf, 14); a->cb = U16(wf, 16);
+    if (a->bits == 8) a->fmt = 2;
+    else if (a->bits == 16) a->fmt = 1;
+    else { free(a); return -7; }
+    ms_bufnode **tail = &a->bufs;
+    for (uint32_t i = 0; i < a->nbuf; i++) {
+        ms_wave *w = find_wave(s, ids[i]);
+        if (!w) { wartic_free(a); return -8; }
+        w->rate = a->rate;
+        if (a->fmt == 2) {
+            for (uint32_t k = 0; k < w->len; k++) ((uint8_t *)w->data)[k] -= 0x80;
+            w->fmt = 2;
+        } else {
+            w->len >>= 1;
+            w->fmt = 1;
+        }
+        uint32_t n = w->len++;
+        if (n + 1 > 1) {
+            if (w->fmt == 2) ((uint8_t *)w->data)[n] = ((uint8_t *)w->data)[n - 1];
+            else ((int16_t *)w->data)[n] = ((int16_t *)w->data)[n - 1];
+        }
+        ms_bufnode *nd = calloc(1, sizeof(*nd));
+        if (!nd) { wartic_free(a); return -1; }
+        nd->w = w;
+        if (w->streaming) a->streaming = 1;
+        *tail = nd; tail = &nd->next;
+    }
+    for (ms_bufnode *n = a->bufs; n; n = n->next) n->w->refs++;
+    ms_wartic **b = &s->wartic[id % NBUCKET];
+    a->next = *b; *b = a;
+    *handle = a;
+    return 0;
+}
+
 int msynth_download(msynth *s, const void *buf, uint32_t size, void **handle)
 {
     const uint32_t *h = buf;
@@ -756,7 +874,9 @@ int msynth_download(msynth *s, const void *buf, uint32_t size, void **handle)
     case 1: r = dl_instrument(s, buf, ofs, nofs, 0, handle); break;
     case 3: r = dl_instrument(s, buf, ofs, nofs, 1, handle); break;
     case 2: r = dl_wave(s, buf, ofs, nofs, h[1], handle); break;
-    default: break;   /* wave articulation / streaming downloads: not yet */
+    case 4: r = dl_wartic(s, buf, ofs, nofs, h[1], handle); break;
+    case 5: case 6: r = dl_wavebuf(s, buf, ofs, nofs, h[0], h[1], handle); break;
+    default: break;
     }
     free(ofs);
     return r;
@@ -767,6 +887,8 @@ int msynth_unload(msynth *s, void *handle)
     for (int b = 0; b < NBUCKET; b++) {
         for (ms_instr **p = &s->instr[b]; *p; p = &(*p)->next)
             if (*p == handle) { ms_instr *in = *p; *p = in->next; instr_free(in); return 0; }
+        for (ms_wartic **p = &s->wartic[b]; *p; p = &(*p)->next)
+            if (*p == handle) { ms_wartic *a = *p; *p = a->next; wartic_unref(a); return 0; }
         for (ms_wave **p = &s->waves[b]; *p; p = &(*p)->next)
             if (*p == handle) {
                 /* 774881d0: the download's reference goes; a wave still used by regions or playing voices stays
@@ -1228,6 +1350,19 @@ static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n
         d->b0 = b0; d->a1 = a1; d->a2 = a2;
         return 1;
     }
+    if (d->artic && d->artic->streaming) {     /* a streaming wave: wait for the buffer; the guard from the next */
+        ms_wave *cw = d->node->w;
+        if (!cw->valid) return 1;
+        cw->playing = 1;
+        if (!cw->guarded) {
+            ms_bufnode *nx = d->node->next ? d->node->next : d->artic->bufs;
+            if (nx->w->valid) {
+                if (d->src.fmt == 2) ((uint8_t *)cw->data)[cw->len - 1] = ((uint8_t *)nx->w->data)[0];
+                else ((int16_t *)cw->data)[cw->len - 1] = ((int16_t *)nx->w->data)[0];
+                cw->guarded = 1;
+            }
+        }
+    }
     if (!d->src.wave || !d->src.wave->data) return 0;
     uint32_t dp = (uint32_t)abs(pitch - d->lastpitch) * 2;
     if ((int32_t)maxdelta <= (int32_t)dp) maxdelta = dp;
@@ -1270,6 +1405,12 @@ static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n
             if (d->end < m.looplen) return 0;
         } else {
             m.end = d->end;
+            /* a wave voice's buffer stops two samples short of its length (guard included), one when the next
+             * buffer is ready to continue (streaming) */
+            if (d->node && d->node->w && (int32_t)d->node->w->len - 1 <= (m.end >> 12)) {
+                ms_bufnode *nx = d->node->next ? d->node->next : d->artic->bufs;
+                m.end = ((int32_t)d->node->w->len - (nx && nx->w->valid ? 1 : 2)) * 0x1000;
+            }
             m.looplen = 0;
             startpos = d->pos;
         }
@@ -1299,7 +1440,24 @@ static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n
         } else {
             if (n <= mixed) { d->played += (d->pos - startpos) >> 12; break; }
             d->played += ((d->pos - startpos) >> 12) - 1;
-            return 0;   /* streamed waves would continue with the next buffer */
+            if (!d->artic || !d->artic->streaming) return 0;
+            /* a streaming wave goes on with its next buffer once that is filled */
+            ms_wave *cw = d->node->w;
+            cw->playing = 0; cw->valid = 0; cw->guarded = 0;
+            d->node = d->node->next ? d->node->next : d->artic->bufs;
+            cw = d->node->w;
+            d->data = cw->data;
+            if (!cw->valid) { d->inc = target; return 1; }
+            cw->playing = 1;
+            ms_bufnode *nx = d->node->next ? d->node->next : d->artic->bufs;
+            if (nx->w->valid) {
+                if (d->src.fmt == 2) ((uint8_t *)cw->data)[cw->len - 1] = ((uint8_t *)nx->w->data)[0];
+                else ((int16_t *)cw->data)[cw->len - 1] = ((int16_t *)nx->w->data)[0];
+                cw->guarded = 1;
+            }
+            done += mixed << (stereo & 31);
+            d->pos = 0;
+            for (uint32_t i = 0; i < nbuf; i++) bufs[i] += done;
         }
         n -= mixed;
     }
@@ -1315,10 +1473,12 @@ static int32_t curve_mb(const ms_curve *c, int64_t t) { return ms_cc2mb[curve_at
 /* the bus description of the Mix call in progress (77485a00 stores it in the synth for the voices) */
 static int find_bus(msynth *s, uint32_t id, uint32_t *func, int32_t *pitch, uint32_t *index);
 
+static void wartic_unref(ms_wartic *a);
 static void voice_free_wave(ms_voice *v)    /* 7748b160 */
 {
     v->active = 0;
     if (v->da.src.wave) { wave_unref(v->da.src.wave, 2); v->da.src.wave = NULL; }
+    if (v->da.artic) { wartic_unref(v->da.artic); v->da.artic = NULL; }
 }
 
 /* 7748b380: pitch modulation (cents) at t */
@@ -1571,8 +1731,7 @@ static void voice_mix(ms_voice *v, int16_t **bufs, uint32_t flags, int64_t start
 out:
     v->active = alive;
     if (!alive) {
-        v->active = 0;
-        if (v->da.src.wave) { wave_unref(v->da.src.wave, 2); v->da.src.wave = NULL; }
+        voice_free_wave(v);
         v->stop = chunk;
     }
     v->lastmix = chunk;
@@ -1619,10 +1778,12 @@ static void cl_init(ms_cl *c, msynth *s)    /* 77484400 */
     cl_reset(c);
 }
 
+static void wartic_unref(ms_wartic *a);
 static void cl_free(ms_cl *c)
 {
     ms_node *p = c->q.head;
     while (p) { ms_node *n = p->next; free(p); p = n; }
+    while (c->vev) { ms_vev *e = c->vev; c->vev = e->next; wartic_unref(e->artic); free(e); }
     for (int i = 0; i < 16; i++) {
         curve_clear(&c->mw[i]); curve_clear(&c->pb[i]); curve_clear(&c->vol[i]); curve_clear(&c->expr[i]);
         curve_clear(&c->pan[i]); curve_clear(&c->rev[i]); curve_clear(&c->cho[i]); curve_clear(&c->cc74[i]);
@@ -2089,6 +2250,12 @@ void msynth_free(msynth *s)
     free(s->cl);
     for (int b = 0; b < NBUCKET; b++) {
         while (s->instr[b]) { ms_instr *in = s->instr[b]; s->instr[b] = in->next; instr_free(in); }
+        while (s->wartic[b]) {
+            ms_wartic *a = s->wartic[b];
+            s->wartic[b] = a->next;
+            while (a->bufs) { ms_bufnode *n = a->bufs; a->bufs = n->next; free(n); }
+            free(a);
+        }
         while (s->waves[b]) { ms_wave *w = s->waves[b]; s->waves[b] = w->next; free(w->block); free(w); }
     }
     free(s);
@@ -2130,6 +2297,187 @@ static void twice(msynth *s, int16_t *b, uint32_t n)
     }
 }
 
+/* ================================================================== DirectX 8 voices (PlayVoice / StopVoice) */
+
+/* 7748a390: the sample player for a wave voice: the articulation's first buffer, the start position (wrapped into the
+ * loop when it starts past the loop's beginning; restarted from 0 past the end of a wave that does not loop) */
+static void da_start_wave(v_da *d, msynth *s, ms_wartic *a, int32_t pitch, uint64_t start, uint64_t ls, uint64_t le)
+{
+    d->synth = s;
+    a->refs++;
+    if (d->artic) wartic_unref(d->artic);
+    d->artic = a;
+    d->node = a->bufs;
+    ms_wave *w = d->node->w;
+    w->refs += 2;
+    memset(&d->src, 0, sizeof(d->src));
+    d->src.wave = w;
+    d->src.len = w->len; d->src.rate = w->rate; d->src.fmt = w->fmt; d->src.waveid = w->id;
+    d->src.loopstart = 0; d->src.loopend = w->len;
+    d->data = w->data;
+    d->oneshot = 1;
+    d->base = (int32_t)((uint32_t)(cents2ratio(pitch) * w->rate) / s->rate);
+    d->inc = d->base;
+    d->lastpitch = 0;
+    d->played = 0;
+    d->y1 = d->y2 = 0;
+    d->pos64 = (int64_t)(start << 12);
+    d->lstart64 = 0;
+    d->lend64 = (int64_t)w->len << 12;
+    d->end64 = (int64_t)w->len << 12;
+    d->big = w->len > 0x7ffff;
+    if (!a->streaming) {
+        if (ls || le) {
+            d->lstart64 = (int64_t)(ls << 12);
+            d->lend64 = (int64_t)(le << 12);
+            d->oneshot = 0;
+        }
+        uint64_t ll = le - ls;
+        if (ll > 0x7ffff) d->oneshot = 1;
+        if (ls < start) {
+            if (!d->oneshot) {
+                if (ll) d->pos64 = (int64_t)((((start - ls) % ll) + ls) << 12);
+            } else if ((start >> 32) || w->len < (uint32_t)start) d->pos64 = 0;
+        }
+    }
+    d->pos = (int32_t)d->pos64;
+    d->lstart = (int32_t)d->lstart64;
+    d->lend = (int32_t)d->lend64;
+    d->end = d->big ? 0x7fffffff : (int32_t)d->end64;
+}
+
+/* 7748c430: start a wave voice on a channel: the default envelope, no LFOs or pitch envelope, no filter; a mono wave
+ * goes to the left/right buses, each channel of a multichannel wave to the bus of its own speaker */
+static int voice_start_wave(ms_voice *v, msynth *s, ms_wartic *a, uint32_t voiceid, int64_t t, const ms_chan *c,
+                            int32_t vol, int32_t pitch, uint64_t start, uint64_t ls, uint64_t le)
+{
+    v->synth = s;
+    v->multichan = a->bus < 0x12 && (a->options & 2);
+    uint32_t func;
+    if (c->buses[0] == 1 && find_bus(s, c->buses[1], &func, NULL, NULL) && func == 0) v->multichan = 1;
+    for (uint32_t i = 0; i < c->buses[0] && i < 32; i++) {
+        v->busofs[i] = -0x2580;
+        if (!find_bus(s, c->buses[1 + i], &func, NULL, NULL)) continue;
+        if (func < 0x12) {
+            if (!(a->options & 2) ? (func == 0 || func == 1) : func == a->bus) v->busofs[i] = vol;
+        } else if (func == 0x40 || func == 0x41 || func != 0xffffffff) v->busofs[i] = vol;
+        v->lastvol[i] = -0x2580;
+        v->lastgain[i] = DB2LIN(-1000);
+    }
+    ms_eg def;
+    memset(&def, 0, sizeof(def));
+    def.sustain = 1000;
+    v->interval = eg_start(&v->veg, &def, t, 0, 0, s->rate / 250);
+    if (s->interval < v->interval) v->interval = s->interval;
+    v->pb = c->pb; v->expr = c->expr; v->vol = c->vol; v->pan = c->pan; v->rev = c->rev; v->cho = c->cho; v->cc74 = c->cc74;
+    memcpy(v->buses, c->buses, sizeof(v->buses));
+    v->start = t;
+    v->lastmix = t - 1;
+    v->stealing = 0;
+    v->x1e0 = 0;
+    v->group = 0;
+    v->panofs = 0;
+    v->volmb = 0;
+    v->nonexcl = 0;
+    v->sustained = 0;
+    v->lfo.on = 0;
+    v->vib.on = 0;
+    v->peg.on = 0;
+    v->voiceid = (int32_t)voiceid;
+    v->keyon = 1;
+    v->stop = I64MAX;
+    v->flt.p.cutoff = 0x7fff;
+    da_start_wave(&v->da, s, a, pitch, start, ls, le);
+    return 1;
+}
+
+/* 77484000 (via 77485060): queue a PlayVoice for every slot of the channel */
+int msynth_play_voice(msynth *s, int64_t t, uint32_t voiceid, uint32_t group, uint32_t chan, uint32_t dlid,
+                      int32_t pitch, int32_t vol, uint64_t start, uint64_t ls, uint64_t le)
+{
+    if (group - 1 >= s->ncl || chan > 15) return -1;
+    if (t == 0) t = s->lastrender;
+    ms_wartic *a;
+    for (a = s->wartic[dlid % NBUCKET]; a && a->id != dlid; a = a->next) {}
+    if (!a) return 0;
+    ms_cl *c = s->cl[group - 1];
+    for (uint32_t slot = 0; slot < 16; slot++) {
+        if (c->chan[slot] != chan) continue;
+        ms_vev *e = calloc(1, sizeof(*e));
+        if (!e) return -1;
+        e->t = t; e->slot = slot; e->voiceid = voiceid; e->vol = vol; e->pitch = pitch;
+        e->start = start; e->lstart = ls; e->lend = le;
+        e->artic = a; a->refs++;
+        ms_vev **p = &c->vev;       /* after the events at the same time */
+        while (*p && (*p)->t <= t) p = &(*p)->next;
+        e->next = *p; *p = e;
+    }
+    return 0;
+}
+
+/* 774852a0: Refresh: a streaming buffer has been filled (8-bit data made signed) */
+int msynth_refresh(msynth *s, uint32_t dlid)
+{
+    ms_wave *w = find_wave(s, dlid);
+    if (!w) return 0;
+    if (w->playing) return -1;
+    if (w->valid) return -1;
+    w->valid = 1;
+    if (w->fmt == 2) for (uint32_t k = 0; k < w->len; k++) ((uint8_t *)w->data)[k] -= 0x80;
+    return 0;
+}
+
+/* 77485150: StopVoice: the playing voice releases at t, or its start still waiting goes */
+int msynth_stop_voice(msynth *s, int64_t t, uint32_t voiceid)
+{
+    if (t == 0) t = s->lastrender;
+    int found = 0;
+    for (ms_voice *v = s->active; v; v = v->next)
+        if (v->voiceid == (int32_t)voiceid) { v->x1e0 = t; found = 1; }
+    if (found) return 0;
+    for (uint32_t i = 0; i < s->ncl; i++)       /* 77483e50 */
+        for (ms_vev **p = &s->cl[i]->vev; *p;) {
+            ms_vev *e = *p;
+            if (e->voiceid == voiceid && t <= e->t) { *p = e->next; wartic_unref(e->artic); free(e); }
+            else p = &e->next;
+        }
+    return 0;
+}
+
+/* 77484110: start the voices due by end */
+static void cl_voices(ms_cl *c, int64_t end)
+{
+    msynth *s = c->synth;
+    ms_vev *e;
+    while ((e = c->vev) && e->t <= end) {
+        c->vev = e->next;
+        uint32_t slot = e->slot;
+        ms_voice *v = s->freelist;
+        if (v) { s->freelist = v->next; v->next = NULL; }
+        else if ((v = s->extra)) { s->extra = v->next; v->next = NULL; }
+        else v = synth_steal(s, c->prio[slot]);
+        if (v) {
+            v->slot = (uint16_t)slot;
+            v->note = 0xffff;
+            v->patch = 0xffffffffu;
+            v->prio = c->prio[slot];
+            v->cl = c;
+            v->region = NULL;
+            ms_chan ch = { &c->mw[slot], &c->pb[slot], &c->expr[slot], &c->vol[slot], &c->pan[slot],
+                           &c->press[slot], &c->rev[slot], &c->cho[slot], &c->cc74[slot], c->buses[slot] };
+            int32_t pitch = c->coarse[slot] + c->finetune[slot] + e->pitch;
+            if (!voice_start_wave(v, s, e->artic, e->voiceid, e->t, &ch, e->vol, pitch, e->start, e->lstart, e->lend)) {
+                v->next = s->freelist; s->freelist = v;
+            } else {
+                v->active = 1;
+                synth_insert(s, v);
+            }
+        }
+        wartic_unref(e->artic);
+        free(e);
+    }
+}
+
 /* 77485a00 */
 static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, uint32_t frames, int64_t pos)
 {
@@ -2139,7 +2487,7 @@ static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, 
         if ((flags & 1) && i) break;
         halve(s, bufs[i], frames << (flags & 1));
     }
-    for (uint32_t i = 0; i < s->ncl; i++) cl_process(s->cl[i], pos, end);
+    for (uint32_t i = 0; i < s->ncl; i++) { cl_process(s->cl[i], pos, end); cl_voices(s->cl[i], end); }
     for (ms_voice *v = s->active, *next; v; v = next) {
         next = v->next;
         if (v->x1e0 && v->x1e0 < end) voice_noteoff(v, v->x1e0);

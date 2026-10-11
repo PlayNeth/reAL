@@ -121,6 +121,121 @@ static int sink_dl(void *ctx, const void *buf, uint32_t size, void **handle)
 }
 static void sink_ul(void *ctx, void *handle) { msynth_unload(((dm_host *)ctx)->syn, handle); }
 
+
+/* ------------------------------------------------------------------ the synth port's waves (dmusic.dll): a wave is
+ * downloaded as dmusic does a one-shot wave (77192536 / 771934f7 / 77193799): one buffer per channel (type 6, the
+ * whole channel) and one articulation per channel (type 4: the channel's bus, multichannel option when stereo); a
+ * voice plays every channel (771945bd), with consecutive voice ids.  A wave already downloaded is shared (77192735).
+ * Waves stream in dmusic when they ask to; here every wave is whole in memory, which plays the same. */
+typedef struct hwdl {
+    struct hwdl *next;
+    int refs;
+    dm_wave *w;
+    uint32_t nch, rate;
+    void *buf[8], *art[8];
+    uint32_t artid[8];
+} hwdl;
+typedef struct { hwdl *dl; uint32_t id, chan, group; uint64_t start, ls, le; } hvoice;
+static hwdl *g_wdls;
+static uint32_t g_waveid = 0x40000000, g_voiceid;
+
+static void hwdl_release(dm_host *h, hwdl *d)
+{
+    if (--d->refs > 0) return;
+    for (hwdl **p = &g_wdls; *p; p = &(*p)->next) if (*p == d) { *p = d->next; break; }
+    for (uint32_t c = 0; c < d->nch; c++) {
+        if (d->art[c]) msynth_unload(h->syn, d->art[c]);
+        if (d->buf[c]) msynth_unload(h->syn, d->buf[c]);
+    }
+    dm_wave_release(d->w);
+    free(d);
+}
+
+static void *port_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr)
+{
+    dm_host *h = ctx;
+    (void)hint;
+    if (!w->streaming)
+        for (hwdl *d = g_wdls; d; d = d->next) if (d->w == w) { d->refs++; *hr = 0; return d; }
+    if (w->channels == 0 || w->channels > 8) { *hr = (int)0x8878112a; return NULL; }
+    hwdl *d = calloc(1, sizeof(*d));
+    if (!d) { *hr = (int)0x8007000e; return NULL; }
+    d->refs = 1; d->w = w; dm_wave_addref(w);
+    d->nch = w->channels; d->rate = w->rate;
+    uint32_t bps = w->bits / 8, bytes = w->frames * bps;
+    for (uint32_t c = 0; c < d->nch; c++) {
+        /* DMUS_DOWNLOADINFO + 2 offsets + DMUS_WAVEDATA (771927fe) */
+        uint32_t size = 0x1c + ((bytes + 3) & ~3u);
+        uint32_t *b = calloc(1, size + 4);
+        uint32_t bid = g_waveid++;
+        b[0] = 6; b[1] = bid; b[2] = 2; b[3] = size; b[4] = 0x18; b[5] = 0x1c; b[6] = bytes;
+        uint8_t *o = (uint8_t *)(b + 7);
+        for (uint32_t k = 0; k < w->frames; k++)
+            memcpy(o + k * bps, w->data + (k * d->nch + c) * bps, bps);
+        int r = msynth_download(h->syn, b, size, &d->buf[c]);
+        free(b);
+        if (r < 0) { *hr = (int)0x80004005; d->nch = c; hwdl_release(h, d); return NULL; }
+        /* the articulation (77192ff8): DMUS_WAVEARTDL, WAVEFORMATEX, the buffer's id */
+        uint32_t a[32] = { 0 };
+        uint32_t aid = g_waveid++;
+        a[0] = 4; a[1] = aid; a[2] = 3; a[3] = 0x50; a[4] = 0x1c; a[5] = 0x30; a[6] = 0x44;
+        a[7] = 1; a[8] = c; a[9] = 1; a[10] = 0; a[11] = d->nch > 1 ? 2 : 0;
+        uint8_t *wf = (uint8_t *)(a + 12);
+        uint16_t v16;
+        v16 = 1; memcpy(wf, &v16, 2);
+        v16 = (uint16_t)d->nch; memcpy(wf + 2, &v16, 2);
+        memcpy(wf + 4, &w->rate, 4);
+        uint32_t avg = w->rate * bps * d->nch; memcpy(wf + 8, &avg, 4);
+        v16 = (uint16_t)(bps * d->nch); memcpy(wf + 12, &v16, 2);
+        v16 = w->bits; memcpy(wf + 14, &v16, 2);
+        a[17] = bid;
+        r = msynth_download(h->syn, a, 0x50, &d->art[c]);
+        if (r < 0) { *hr = (int)0x80004005; d->nch = c + 1; hwdl_release(h, d); return NULL; }
+        d->artid[c] = aid;
+    }
+    d->next = g_wdls; g_wdls = d;
+    *hr = 0;
+    return d;
+}
+static void port_wave_unload(void *ctx, void *dl) { hwdl_release(ctx, dl); }
+
+static void *port_voice_alloc(void *ctx, void *dl, uint32_t chan, uint32_t group, rtime_t start, uint32_t ls,
+                              uint32_t le, int *hr)
+{
+    hwdl *d = dl;
+    hvoice *v = calloc(1, sizeof(*v));
+    if (!v) { *hr = (int)0x8007000e; return NULL; }
+    v->dl = d; d->refs++;
+    v->id = g_voiceid; g_voiceid += d->nch;       /* 77193fa9 */
+    v->chan = chan; v->group = group;
+    v->start = (uint64_t)((uint64_t)d->rate * (uint64_t)start / 10000000);   /* 77192f56 */
+    v->ls = ls; v->le = le;
+    *hr = 0;
+    return v;
+}
+static int64_t rt_sample(dm_host *h, rtime_t rt) { return rt ? (rt - h->rt0) * h->rate / 10000000 : 0; }
+static int port_voice_play(void *ctx, void *voice, rtime_t rt, int32_t pitch, int32_t vol)
+{
+    dm_host *h = ctx;
+    hvoice *v = voice;
+    for (uint32_t c = 0; c < v->dl->nch; c++)
+        msynth_play_voice(h->syn, rt_sample(h, rt), v->id + c, v->group, v->chan, v->dl->artid[c], pitch, vol, v->start, v->ls, v->le);
+    return 0;
+}
+static int port_voice_stop(void *ctx, void *voice, rtime_t rt)
+{
+    dm_host *h = ctx;
+    hvoice *v = voice;
+    for (uint32_t c = 0; c < v->dl->nch; c++) msynth_stop_voice(h->syn, rt_sample(h, rt), v->id + c);
+    return 0;
+}
+static void port_voice_free(void *ctx, void *voice)
+{
+    hvoice *v = voice;
+    hwdl_release(ctx, v->dl);
+    free(v);
+}
+
 /* ------------------------------------------------------------------ the sink */
 /* the standard buffers' formats as dmime asks for them (7732084b): 16-bit at the synth rate */
 static rl_buffer *make_buffer_ex(dm_host *h, int nch, DWORD flags, const GUID *alg3d)
@@ -307,7 +422,8 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
     if (h->pf) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER);
-    dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign };
+    dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign,
+                      port_wave_download, port_wave_unload, port_voice_alloc, port_voice_play, port_voice_stop, port_voice_free };
     dm_perf_add_port(h->pf, &po, h);
     /* start both buffers in the same mixer period so they stay sample-aligned */
     EnterCriticalSection(&h->dev->lock);

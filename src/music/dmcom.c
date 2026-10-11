@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include "dmhost.h"
 #include "dmcom.h"
+#include <mmreg.h>
+#include <msacm.h>
 
 /* methods reAL-Music does not implement: logged, so a game that relies on one shows up in reAL.log */
 static HRESULT rm_notimpl(const char *fn)
@@ -75,6 +77,14 @@ typedef struct {
     DMUS_OBJECTDESC desc;
 } rm_collection;
 
+typedef struct {
+    IDirectMusicObject IDirectMusicObject_iface;
+    IPersistStream IPersistStream_iface;
+    LONG ref;
+    dm_wave *w;
+    DMUS_OBJECTDESC desc;
+} rm_wave;
+
 typedef struct { IDirectMusic8 IDirectMusic8_iface; LONG ref; } rm_dmusic;
 typedef struct { IReferenceClock IReferenceClock_iface; LONG ref; } rm_clock;
 
@@ -82,7 +92,7 @@ typedef struct {                            /* the loader's object cache */
     WCHAR path[MAX_PATH];
     GUID guid;
     BOOL hasguid;
-    IUnknown *obj;                          /* rm_segment or rm_collection */
+    IUnknown *obj;                          /* rm_segment, rm_collection or rm_wave */
 } cache_entry;
 
 struct rm_loader {
@@ -94,6 +104,7 @@ struct rm_loader {
 };
 
 static const GUID RM_GUID_DefaultGMCollection = { 0xf17e8673, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const GUID RM_CLSID_DirectSoundWave = { 0x8a667154, 0xf9cb, 0x11d2, { 0xad, 0x8a, 0x00, 0x60, 0xb0, 0x57, 0x5a, 0xbc } };
 
 static char *guidstr(const GUID *g, char b[64]) { return (char *)rl_guid_str(g, b); }
 
@@ -380,12 +391,14 @@ static HRESULT WINAPI seg_settrackcfg(IDirectMusicSegment8 *i, REFGUID g, DWORD 
 static HRESULT WINAPI seg_getapconfig(IDirectMusicSegment8 *i, IUnknown **c) { if (c) *c = NULL; return DMUS_E_NO_AUDIOPATH_CONFIG; }
 static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c) { return rm_notimpl(__func__); }
 static rm_perf *perf_from_unknown(IUnknown *u);
+static rm_path *unsafe_path(IUnknown *u);
 static HRESULT WINAPI seg_download(IDirectMusicSegment8 *i, IUnknown *target)
 {
     rm_perf *p = perf_from_unknown(target);
     if (!p || !p->host || !sgm(i)->seg) return E_INVALIDARG;
+    rm_path *a = unsafe_path(target);
     dm_host_lock(p->host);
-    int hr = dm_segment_download(dm_host_perf(p->host), sgm(i)->seg);
+    int hr = dm_segment_download_ap(dm_host_perf(p->host), sgm(i)->seg, a ? a->ap : NULL);
     dm_host_unlock(p->host);
     LOG_CALL("music: Segment::Download -> %08x", hr);
     return hr < 0 ? DMUS_S_PARTIALDOWNLOAD : S_OK;
@@ -394,8 +407,9 @@ static HRESULT WINAPI seg_unload(IDirectMusicSegment8 *i, IUnknown *target)
 {
     rm_perf *p = perf_from_unknown(target);
     if (!p || !p->host || !sgm(i)->seg) return E_INVALIDARG;
+    rm_path *a = unsafe_path(target);
     dm_host_lock(p->host);
-    dm_segment_unload(dm_host_perf(p->host), sgm(i)->seg);
+    dm_segment_unload_ap(dm_host_perf(p->host), sgm(i)->seg, a ? a->ap : NULL);
     dm_host_unlock(p->host);
     return S_OK;
 }
@@ -414,6 +428,19 @@ static HRESULT WINAPI sgo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECT
 static IDirectMusicObjectVtbl sgo_vtbl = { sgo_qi, sgo_addref, sgo_release, sgo_getdesc, sgo_setdesc, sgo_parse };
 
 static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *file);
+static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, const char *name);
+static dm_segment *segment_from_data(const BYTE *b, DWORD n, rm_loader *l)
+{
+    if (dm_is_midi(b, n)) return dm_segment_from_midi(b, n, loader_getcoll, l);
+    if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WAVE", 4)) {      /* a wave as a segment */
+        dm_wave *w = dm_wave_load(b, n);
+        if (!w) return NULL;
+        dm_segment *g = dm_segment_from_wave(w);
+        dm_wave_release(w);
+        return g;
+    }
+    return dm_segment_load_ex(b, n, loader_getcoll, loader_getwave, l);
+}
 static rm_segment *sgp(IPersistStream *i) { return impl_from(i, rm_segment, IPersistStream_iface); }
 static HRESULT WINAPI sgp_qi(IPersistStream *i, REFIID r, void **o) { return seg_qi(&sgp(i)->IDirectMusicSegment8_iface, r, o); }
 static ULONG WINAPI sgp_addref(IPersistStream *i) { return seg_addref(&sgp(i)->IDirectMusicSegment8_iface); }
@@ -425,7 +452,7 @@ static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
     rm_segment *s = sgp(i);
     BYTE *b; DWORD n;
     if (!read_stream(st, &b, &n)) return E_FAIL;
-    dm_segment *g = dm_is_midi(b, n) ? dm_segment_from_midi(b, n, loader_getcoll, s->loader) : dm_segment_load(b, n, loader_getcoll, s->loader);
+    dm_segment *g = segment_from_data(b, n, s->loader);
     free(b);
     if (!g) return DMUS_E_UNSUPPORTED_STREAM;
     if (s->seg) { if (s->seg->wrapper == s) s->seg->wrapper = NULL; dm_segment_release(s->seg); }
@@ -453,6 +480,154 @@ static rm_segment *new_segment(dm_segment *g)
     s->desc.guidClass = CLSID_DirectMusicSegment;
     if (g && g->name[0]) { MultiByteToWideChar(CP_ACP, 0, g->name, -1, s->desc.wszName, DMUS_MAX_NAME); s->desc.dwValidData |= DMUS_OBJ_NAME; }
     return s;
+}
+
+
+/* ------------------------------------------------------------------ waves (dswave CDirectSoundWave): IDirectMusicObject
+ * and IPersistStream; segments and wave tracks take the dm_wave inside */
+static rm_wave *wvo(IDirectMusicObject *i) { return impl_from(i, rm_wave, IDirectMusicObject_iface); }
+static rm_wave *wvp(IPersistStream *i) { return impl_from(i, rm_wave, IPersistStream_iface); }
+static IDirectMusicObjectVtbl wvo_vtbl;
+static HRESULT WINAPI wvo_qi(IDirectMusicObject *i, REFIID riid, void **out)
+{
+    rm_wave *w = wvo(i);
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicObject)) *out = &w->IDirectMusicObject_iface;
+    else if (IsEqualIID(riid, &IID_IPersistStream) || IsEqualIID(riid, &IID_IPersist)) *out = &w->IPersistStream_iface;
+    else return rm_noiface("Wave::QueryInterface", riid, out);
+    InterlockedIncrement(&w->ref);
+    return S_OK;
+}
+static ULONG WINAPI wvo_addref(IDirectMusicObject *i) { return InterlockedIncrement(&wvo(i)->ref); }
+static ULONG WINAPI wvo_release(IDirectMusicObject *i)
+{
+    rm_wave *w = wvo(i);
+    LONG r = InterlockedDecrement(&w->ref);
+    if (!r) { if (w->w) { if (w->w->wrapper == w) w->w->wrapper = NULL; dm_wave_release(w->w); } free(w); }
+    return r;
+}
+/* 6c782466 */
+static HRESULT WINAPI wvo_getdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d)
+{
+    if (!d) return E_POINTER;
+    DWORD sz = d->dwSize;
+    memcpy(d, &wvo(i)->desc, sz < sizeof(*d) ? sz : sizeof(*d));
+    d->dwSize = sz;
+    return S_OK;
+}
+static HRESULT WINAPI wvo_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d)
+{
+    rm_wave *w = wvo(i);
+    if (!d) return E_POINTER;
+    if (d->dwValidData & DMUS_OBJ_OBJECT) w->desc.guidObject = d->guidObject;
+    if (d->dwValidData & DMUS_OBJ_NAME) memcpy(w->desc.wszName, d->wszName, sizeof(d->wszName));
+    if (d->dwValidData & DMUS_OBJ_VERSION) w->desc.vVersion = d->vVersion;
+    w->desc.dwValidData |= d->dwValidData & (DMUS_OBJ_OBJECT | DMUS_OBJ_NAME | DMUS_OBJ_VERSION);
+    return (d->dwValidData & ~(DMUS_OBJ_OBJECT | DMUS_OBJ_NAME | DMUS_OBJ_VERSION | DMUS_OBJ_CLASS)) ? S_FALSE : S_OK;
+}
+static HRESULT WINAPI wvo_parse(IDirectMusicObject *i, LPSTREAM st, LPDMUS_OBJECTDESC d)
+{
+    BYTE *b; DWORD n;
+    if (!st || !d) return E_POINTER;
+    if (!read_stream(st, &b, &n)) return E_FAIL;
+    dm_wave *w = dm_wave_load(b, n);
+    free(b);
+    if (!w) return DMUS_E_UNSUPPORTED_STREAM;
+    memset(d, 0, sizeof(*d));
+    d->dwSize = sizeof(*d);
+    d->dwValidData = DMUS_OBJ_CLASS;
+    d->guidClass = RM_CLSID_DirectSoundWave;
+    if (w->hasguid) { memcpy(&d->guidObject, &w->guid, sizeof(GUID)); d->dwValidData |= DMUS_OBJ_OBJECT; }
+    if (w->name[0]) { MultiByteToWideChar(CP_ACP, 0, w->name, -1, d->wszName, DMUS_MAX_NAME); d->dwValidData |= DMUS_OBJ_NAME; }
+    if (w->hasvers) { d->vVersion.dwVersionMS = w->vers[0]; d->vVersion.dwVersionLS = w->vers[1]; d->dwValidData |= DMUS_OBJ_VERSION; }
+    dm_wave_release(w);
+    return S_OK;
+}
+static IDirectMusicObjectVtbl wvo_vtbl = { wvo_qi, wvo_addref, wvo_release, wvo_getdesc, wvo_setdesc, wvo_parse };
+static HRESULT WINAPI wvp_qi(IPersistStream *i, REFIID r, void **o) { return wvo_qi(&wvp(i)->IDirectMusicObject_iface, r, o); }
+static ULONG WINAPI wvp_addref(IPersistStream *i) { return wvo_addref(&wvp(i)->IDirectMusicObject_iface); }
+static ULONG WINAPI wvp_release(IPersistStream *i) { return wvo_release(&wvp(i)->IDirectMusicObject_iface); }
+static HRESULT WINAPI wvp_getclass(IPersistStream *i, CLSID *c) { if (!c) return E_POINTER; *c = RM_CLSID_DirectSoundWave; return S_OK; }
+static HRESULT WINAPI wvp_isdirty(IPersistStream *i) { return S_FALSE; }
+static void wave_desc(rm_wave *o)
+{
+    dm_wave *w = o->w;
+    o->desc.dwValidData |= DMUS_OBJ_LOADED;
+    if (w->hasguid) { memcpy(&o->desc.guidObject, &w->guid, sizeof(GUID)); o->desc.dwValidData |= DMUS_OBJ_OBJECT; }
+    if (w->name[0]) { MultiByteToWideChar(CP_ACP, 0, w->name, -1, o->desc.wszName, DMUS_MAX_NAME); o->desc.dwValidData |= DMUS_OBJ_NAME; }
+    if (w->hasvers) { o->desc.vVersion.dwVersionMS = w->vers[0]; o->desc.vVersion.dwVersionLS = w->vers[1]; o->desc.dwValidData |= DMUS_OBJ_VERSION; }
+}
+static HRESULT WINAPI wvp_load(IPersistStream *i, IStream *st)
+{
+    rm_wave *o = wvp(i);
+    BYTE *b; DWORD n;
+    if (!st) return E_INVALIDARG;
+    if (!read_stream(st, &b, &n)) return E_FAIL;
+    dm_wave *w = dm_wave_load(b, n);
+    free(b);
+    if (!w) return E_INVALIDARG;
+    if (o->w) { if (o->w->wrapper == o) o->w->wrapper = NULL; dm_wave_release(o->w); }
+    o->w = w;
+    w->wrapper = o;
+    wave_desc(o);
+    return S_OK;
+}
+static HRESULT WINAPI wvp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }
+static HRESULT WINAPI wvp_getsize(IPersistStream *i, ULARGE_INTEGER *s) { return rm_notimpl(__func__); }
+static IPersistStreamVtbl wvp_vtbl = { wvp_qi, wvp_addref, wvp_release, wvp_getclass, wvp_isdirty, wvp_load, wvp_save, wvp_getsize };
+
+static rm_wave *new_wave(dm_wave *w)
+{
+    rm_wave *o = calloc(1, sizeof(*o));
+    if (!o) return NULL;
+    o->IDirectMusicObject_iface.lpVtbl = &wvo_vtbl;
+    o->IPersistStream_iface.lpVtbl = &wvp_vtbl;
+    o->ref = 1;
+    o->desc.dwSize = sizeof(o->desc);
+    o->desc.dwValidData = DMUS_OBJ_CLASS;
+    o->desc.guidClass = RM_CLSID_DirectSoundWave;
+    if (w) { o->w = w; w->wrapper = o; wave_desc(o); }
+    return o;
+}
+
+/* compressed waves (dswave decodes through ACM: 6c783750): the whole file to PCM, in the format 'wavu' named or
+ * acmFormatSuggest picks */
+static int acm_decode(const uint8_t *wfx, uint32_t wfxlen, const uint8_t *in, uint32_t inlen, uint8_t **out,
+                      uint32_t *outlen, uint16_t *ch, uint32_t *rate, uint16_t *bits)
+{
+    uint32_t need = wfxlen < 18 ? 18 : wfxlen;
+    WAVEFORMATEX *src = calloc(1, need + 64);
+    if (!src) return 0;
+    memcpy(src, wfx, wfxlen);
+    if (wfxlen < 18) src->cbSize = 0;
+    WAVEFORMATEX dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.wFormatTag = WAVE_FORMAT_PCM;
+    if (*ch) {
+        dst.nChannels = *ch; dst.nSamplesPerSec = *rate; dst.wBitsPerSample = *bits;
+        dst.nBlockAlign = (WORD)(dst.nChannels * dst.wBitsPerSample / 8);
+        dst.nAvgBytesPerSec = dst.nSamplesPerSec * dst.nBlockAlign;
+    } else if (acmFormatSuggest(NULL, src, &dst, sizeof(dst), ACM_FORMATSUGGESTF_WFORMATTAG)) { free(src); return 0; }
+    HACMSTREAM has;
+    if (acmStreamOpen(&has, NULL, src, &dst, NULL, 0, 0, ACM_STREAMOPENF_NONREALTIME)) { free(src); return 0; }
+    DWORD osize = 0;
+    if (acmStreamSize(has, inlen, &osize, ACM_STREAMSIZEF_SOURCE) || !osize) { acmStreamClose(has, 0); free(src); return 0; }
+    uint8_t *ib = malloc(inlen ? inlen : 1), *ob = malloc(osize + dst.nBlockAlign);
+    if (!ib || !ob) { free(ib); free(ob); acmStreamClose(has, 0); free(src); return 0; }
+    memcpy(ib, in, inlen);
+    ACMSTREAMHEADER hd;
+    memset(&hd, 0, sizeof(hd));
+    hd.cbStruct = sizeof(hd); hd.pbSrc = ib; hd.cbSrcLength = inlen; hd.pbDst = ob; hd.cbDstLength = osize;
+    int ok = 0;
+    if (!acmStreamPrepareHeader(has, &hd, 0)) {
+        ok = !acmStreamConvert(has, &hd, ACM_STREAMCONVERTF_BLOCKALIGN | ACM_STREAMCONVERTF_START | ACM_STREAMCONVERTF_END);
+        acmStreamUnprepareHeader(has, &hd, 0);
+    }
+    acmStreamClose(has, 0);
+    free(ib); free(src);
+    if (!ok) { free(ob); return 0; }
+    *out = ob; *outlen = hd.cbDstLengthUsed;
+    *ch = dst.nChannels; *rate = dst.nSamplesPerSec; *bits = dst.wBitsPerSample;
+    return 1;
 }
 
 /* ------------------------------------------------------------------ segment states */
@@ -1196,6 +1371,36 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
     return NULL;
 }
 
+/* a wave track item's reference (773248af: the loader's GetObject of a DirectSoundWave by guid, file or name) */
+static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out);
+static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, const char *name)
+{
+    rm_loader *l = ctx;
+    if (!l) return NULL;
+    DMUS_OBJECTDESC d;
+    memset(&d, 0, sizeof(d));
+    d.dwSize = sizeof(d);
+    d.dwValidData = DMUS_OBJ_CLASS;
+    d.guidClass = RM_CLSID_DirectSoundWave;
+    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
+    if (file) {
+        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
+        d.dwValidData |= DMUS_OBJ_FILENAME;
+        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
+    }
+    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
+    IDirectMusicObject *o = NULL;
+    if (FAILED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &IID_IDirectMusicObject, (void **)&o)) || !o) {
+        LOG_INFO("music: wave track: wave %s not found", file ? file : name ? name : "(by guid)");
+        return NULL;
+    }
+    rm_wave *w = o->lpVtbl == &wvo_vtbl ? wvo(o) : NULL;
+    dm_wave *r = w ? w->w : NULL;
+    dm_wave_addref(r);
+    IDirectMusicObject_Release(o);
+    return r;
+}
+
 static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out)
 {
     rm_loader *l = ldr(i);
@@ -1228,6 +1433,30 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
         col_release(&o->IDirectMusicCollection_iface);
         return hr;
     }
+    if ((d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectSoundWave)) {
+        BYTE *data = NULL;
+        DWORD size = 0;
+        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
+        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
+            size = (DWORD)d->llMemLength;
+            data = malloc(size ? size : 1);
+            if (data) memcpy(data, d->pbMemData, size);
+        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
+            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
+        } else return DMUS_E_LOADER_NOFILENAME;
+        if (!data) return E_OUTOFMEMORY;
+        dm_wave *w = dm_wave_load(data, size);
+        free(data);
+        if (!w) return DMUS_E_UNSUPPORTED_STREAM;
+        rm_wave *o = new_wave(w);
+        if (!o) { dm_wave_release(w); return E_OUTOFMEMORY; }
+        if (path[0]) { lstrcpynW(o->desc.wszFileName, path, DMUS_MAX_FILENAME); o->desc.dwValidData |= DMUS_OBJ_FILENAME | DMUS_OBJ_FULLPATH; }
+        if (g) { o->desc.guidObject = *g; o->desc.dwValidData |= DMUS_OBJ_OBJECT; }
+        cache_add(l, path, g ? g : (w->hasguid ? (const GUID *)&w->guid : NULL), (IUnknown *)&o->IDirectMusicObject_iface);
+        HRESULT hr = wvo_qi(&o->IDirectMusicObject_iface, riid, out);
+        wvo_release(&o->IDirectMusicObject_iface);
+        return hr;
+    }
     if (!isseg) {
         LOG_INFO("music: Loader::GetObject: class %s not supported", guidstr(&d->guidClass, b1));
         return DMUS_E_LOADER_NOCLASSID;
@@ -1243,7 +1472,7 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
         if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
     } else return DMUS_E_LOADER_NOFILENAME;
     if (!data) return E_OUTOFMEMORY;
-    dm_segment *sgt = dm_is_midi(data, size) ? dm_segment_from_midi(data, size, loader_getcoll, l) : dm_segment_load(data, size, loader_getcoll, l);
+    dm_segment *sgt = segment_from_data(data, size, l);
     free(data);
     if (!sgt) return DMUS_E_UNSUPPORTED_STREAM;
     rm_segment *s = new_segment(sgt);
@@ -1330,6 +1559,14 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
     char b1[64], b2[64];
     LOG_CALL("music: create %s (%s)", guidstr(clsid, b1), guidstr(riid, b2));
     *out = NULL;
+    dm_wave_set_decoder(acm_decode);
+    if (IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave)) {
+        rm_wave *o = new_wave(NULL);
+        if (!o) return E_OUTOFMEMORY;
+        HRESULT hr = wvo_qi(&o->IDirectMusicObject_iface, riid, out);
+        wvo_release(&o->IDirectMusicObject_iface);
+        return hr;
+    }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicLoader)) {
         rm_loader *l = calloc(1, sizeof(*l));
         if (!l) return E_OUTOFMEMORY;
@@ -1369,5 +1606,6 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
 BOOL rm_handles(REFCLSID clsid)
 {
     return IsEqualCLSID(clsid, &CLSID_DirectMusicLoader) || IsEqualCLSID(clsid, &CLSID_DirectMusicPerformance) ||
-           IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic);
+           IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
+           IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave);
 }
