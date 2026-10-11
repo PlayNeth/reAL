@@ -265,14 +265,6 @@ static void write_buffer(rl_buffer *b, uint32_t frame, const int16_t *src, uint3
     IDirectSoundBuffer8_Unlock(&b->IDirectSoundBuffer8_iface, p1, n1, p2, n2);
 }
 
-/* a Doppler / frequency ratio as the synth's per-bus pitch offset in cents */
-static int32_t ratio_cents(float r)
-{
-    if (!(r > 0.0f) || r == 1.0f) return 0;
-    double c = 1200.0 * log2((double)r);
-    return (int32_t)(c < 0 ? c - 0.5 : c + 0.5);
-}
-
 static void sink_pass(dm_host *h)
 {
     DWORD play = 0, wr = 0;
@@ -296,7 +288,7 @@ static void sink_pass(dm_host *h)
         hbuf *x = &h->hb[k];
         first[k] = nb;
         if (!x->b) continue;
-        int32_t pc = x->kind >= HB_3D ? ratio_cents(rl_buffer_sink_ratio(x->b)) : 0;
+        int32_t pc = x->kind >= HB_3D ? rl_buffer_sink_cents(x->b) : 0;
         for (int c = 0; c < x->nch; c++) { ids[nb] = x->bus[c]; fn[nb] = x->func[c]; pitch[nb] = pc; bufs[nb] = tmp[nb]; nb++; }
     }
     while (h->written < target) {

@@ -456,6 +456,11 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
     int dx8 = getenv("DMGT_BUSES") != NULL;
     DWORD busid[32], busfn[32], nbus = 0;
     LONG buspitch[32] = { 0 };
+    if (dx8 && getenv("DMGT_BUSPITCH"))           /* per-bus pitch offsets in cents, as dsound passes a sink buffer's */
+        for (char *p = getenv("DMGT_BUSPITCH"), k = 0; *p && k < 32; k++) {
+            buspitch[(int)k] = strtol(p, &p, 0);
+            if (*p == ',') p++; else break;
+        }
     if (dx8) {
         for (char *p = getenv("DMGT_BUSES"); *p && nbus < 32;) {
             busid[nbus] = strtoul(p, &p, 0);

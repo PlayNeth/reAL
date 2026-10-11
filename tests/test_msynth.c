@@ -69,6 +69,11 @@ int main(int argc, char **argv)
     if (bl) {   /* DirectX 8 sink: one mono buffer per bus (dmgt DMGT_BUSES) */
         uint32_t ids[32], fn[32], nb = 0;
         int32_t pitch[32] = { 0 };
+        if (getenv("MS_BUSPITCH"))      /* per-bus pitch offsets (dmgt DMGT_BUSPITCH) */
+            for (char *p = getenv("MS_BUSPITCH"), k = 0; *p && k < 32; k++) {
+                pitch[(int)k] = strtol(p, &p, 0);
+                if (*p == ',') p++; else break;
+            }
         for (char *p = (char *)bl; *p && nb < 32;) {
             ids[nb] = strtoul(p, &p, 0);
             fn[nb] = *p == ':' ? strtoul(p + 1, &p, 0) : ids[nb];

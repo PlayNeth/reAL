@@ -115,6 +115,38 @@ float rl_spatial_doppler(const rl_listener3d *l, const rl_source3d *s, float fac
     return r > 10.0f ? 10.0f : r;
 }
 
+static int is_zero(rl_vec3 v) { return v.x == 0.0f && v.y == 0.0f && v.z == 0.0f; }
+
+uint32_t rl_spatial_doppler_ds(const rl_listener3d *l, const rl_source3d *s, uint32_t freq)
+{
+    float df = l->doppler_factor;
+    if (!(df > 0.0f) || (is_zero(l->vel) && is_zero(s->vel))) return freq;
+    float v = 0.0f;
+    if (s->mode == RL_DS3DMODE_NORMAL || s->mode == RL_DS3DMODE_HEADRELATIVE) {
+        rl_vec3 lp = v3(0, 0, 0), lv = v3(0, 0, 0);
+        if (s->mode == RL_DS3DMODE_NORMAL) { lp = l->pos; lv = l->vel; }
+        rl_vec3 a = sub(s->pos, lp), b = sub(s->vel, lv);         /* listener -> source; relative velocity */
+        if (!is_zero(a)) {
+            float d = (float)((double)a.y * b.y + (double)a.x * b.x + (double)a.z * b.z);
+            float n = (float)sqrt((double)a.x * a.x + (double)a.y * a.y + (double)a.z * a.z);
+            v = (float)((double)d / n);                           /* positive: moving apart */
+        }
+    }
+    double w = (double)v * l->distance_factor * 1000.0 * df;     /* mm/s */
+    if (!(w <= 3.4028234663852886e+38)) w = 3.4028234663852886e+38;
+    if (w < -3.4028234663852886e+38) w = -3.4028234663852886e+38;
+    v = (float)w;
+    if (v > 179830.0f) v = 179830.0f;
+    if (v < -179830.0f) v = -179830.0f;
+    float f = (float)((double)(float)freq * 359660.0 / (359660.0 + v));
+    return (uint32_t)(int64_t)f;
+}
+
+int32_t rl_sink_cents(uint32_t freq, uint32_t rate)
+{
+    return freq && rate ? (int32_t)(log10((double)freq / (double)rate) * 3986.3137138648344) : 0;
+}
+
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain)
 {
     rl_geom g;

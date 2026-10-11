@@ -45,6 +45,13 @@ void rl_spatial_geometry(const rl_listener3d *l, const rl_source3d *s, rl_geom *
  * factor: the listener's Doppler factor (EAX 3 adds the buffer's own). */
 float rl_spatial_doppler(const rl_listener3d *l, const rl_source3d *s, float factor);
 
+/* Microsoft DirectSound's software Doppler (Windows 7 dsound.dll 6efcbb49 with 6efcb2ff / 6efcb36d), which is what
+ * DirectMusic's sink buffers got under ALchemy (DirectMusic played through the real DirectSound): only the relative
+ * velocity along the listener-source line counts, speed of sound 359.66 m/s, the frequency truncated to whole Hz. */
+uint32_t rl_spatial_doppler_ds(const rl_listener3d *l, const rl_source3d *s, uint32_t freq);
+/* a sink buffer's frequency as the synth's pitch offset, as dsound passes it (6efd6bbe): trunc(1200 log2(f / rate)) */
+int32_t rl_sink_cents(uint32_t freq, uint32_t rate);
+
 /* Compute stereo gains (multiplied with volume elsewhere). */
 /* dist_gain (may be NULL) receives the distance+cone attenuation without panning */
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain);

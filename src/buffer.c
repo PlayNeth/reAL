@@ -1,6 +1,7 @@
 /* reAL - IDirectSoundBuffer8 + IDirectSound3DBuffer + IDirectSoundNotify + IKsPropertySet
  *        + IDirectSound3DListener (primary buffer) */
 #include "real.h"
+#include <math.h>
 #include <stdio.h>
 #include <float.h>
 #include <string.h>
@@ -133,10 +134,13 @@ static void update_gains(rl_buffer *b)
         b->voice.pitch = spatial ? rl_spatial_doppler(&dev->listener, &b->src3d, dop) : 1.0f;
     }
 
-    if (b->sink) {      /* a sink buffer keeps its rate: the shift is the synth's (DirectX 8 sink) */
-        float r = b->voice.pitch > 0.0f ? b->voice.pitch : 1.0f;
-        if (b->freq) r *= (float)b->freq / (float)orig_rate(b);
-        b->sink_ratio = r;
+    if (b->sink) {
+        /* a sink buffer keeps its rate: the shift goes to the synth as a per-bus pitch offset (DirectX 8 sink).  These
+         * are Microsoft DirectSound's buffers even under ALchemy, so the Doppler is DirectSound's (whole Hz), and the
+         * offset is dsound's (6efd6bbe): cents = trunc(1200 * log2(frequency / sink rate)) */
+        DWORD rate = orig_rate(b), f = b->freq ? b->freq : rate;
+        if (spatial) f = rl_spatial_doppler_ds(&dev->listener, &b->src3d, f);
+        b->sink_cents = rl_sink_cents(f, rate);
         b->voice.pitch = 1.0f;
     }
     b->voice.lp_a = lp_a;
@@ -1420,11 +1424,11 @@ static void flags_str(DWORD f, char *out, size_t n)
 void rl_buffer_set_sink(rl_buffer *b, DWORD caps)
 {
     EnterCriticalSection(&b->dev->lock);
-    b->sink = TRUE; b->sink_ratio = 1.0f; b->sink_caps = caps;
+    b->sink = TRUE; b->sink_cents = 0; b->sink_caps = caps;
     rl_buffer_update_gains(b);
     LeaveCriticalSection(&b->dev->lock);
 }
-float rl_buffer_sink_ratio(rl_buffer *b) { return b->sink ? b->sink_ratio : 1.0f; }
+int32_t rl_buffer_sink_cents(rl_buffer *b) { return b->sink ? b->sink_cents : 0; }
 
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out)
 {

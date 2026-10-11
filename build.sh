@@ -79,6 +79,7 @@ $CC -O1 -o build/dmplay.exe tests/dmplay.c -ldsound -lole32 -luuid -ldxguid -lad
 $CC -O1 -DNO_DSOUND -o build/dmplay_nods.exe tests/dmplay.c -lole32 -luuid -ldxguid -ladvapi32
 $CC -O1 -o build/notiftest.exe tests/notiftest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/aptest.exe tests/aptest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -o build/dopptest.exe tests/dopptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
@@ -88,6 +89,7 @@ rm -f build/mc2sim.lib build/mc2sim.pdb
 if command -v cc >/dev/null 2>&1; then
     cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/alrv_params.c src/eax.c src/eax4fx.c src/hrtf.c -lm
     ./build/test_mixcore
+    cc -O1 -g -std=gnu11 -Wall -o build/test_doppler tests/test_doppler.c src/spatial.c src/mixcore.c src/hrtf.c -lm
     # comparison with ALchemy's own reverb (ground truth from the emulator, see docs; optional)
     cc -O2 -std=gnu11 -Wall -o build/test_alrv tests/test_alrv.c src/alrv.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_alrv_params tests/test_alrv_params.c src/alrv_params.c -lm
