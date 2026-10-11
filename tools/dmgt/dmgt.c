@@ -17,6 +17,7 @@
 #include <dmdls.h>
 #include <dsound.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
@@ -548,6 +549,65 @@ static HRESULT WINAPI my_playbuffer(IDirectMusicPort *p, IDirectMusicBuffer *b)
 }
 static HRESULT WINAPI my_activate(IDirectMusicPort *p, BOOL on) { return S_OK; }
 
+/* wave playback through the port (IDirectMusicPort8 DownloadWave / AllocVoice, the private voice's Play / Stop),
+ * logged as "W ..." lines; objects get small ids in order of appearance */
+static void *g_wobj[256]; static int g_nwobj;
+static int wid(void *o) { for (int i = 0; i < g_nwobj; i++) if (g_wobj[i] == o) return i; if (g_nwobj < 256) g_wobj[g_nwobj] = o; return g_nwobj++; }
+typedef HRESULT (WINAPI *dlwave_fn)(void *, IUnknown *, IUnknown **, REFERENCE_TIME);
+typedef HRESULT (WINAPI *unwave_fn)(void *, IUnknown *);
+typedef HRESULT (WINAPI *alloc_fn)(void *, IUnknown *, DWORD, DWORD, REFERENCE_TIME, LONGLONG, LONGLONG, IUnknown **);
+typedef HRESULT (WINAPI *vplay_fn)(void *, REFERENCE_TIME, LONG, LONG);
+typedef HRESULT (WINAPI *vstop_fn)(void *, REFERENCE_TIME);
+static dlwave_fn o_dlwave; static unwave_fn o_unwave; static alloc_fn o_alloc; static vplay_fn o_vplay; static vstop_fn o_vstop;
+static void wlog(const char *f, ...)
+{
+    va_list a; va_start(a, f);
+    EnterCriticalSection(&g_evcs);
+    if (g_ev) { fprintf(g_ev, "W "); vfprintf(g_ev, f, a); fprintf(g_ev, "\n"); }
+    LeaveCriticalSection(&g_evcs);
+    va_end(a);
+}
+static HRESULT WINAPI my_vplay(void *v, REFERENCE_TIME rt, LONG pitch, LONG vol)
+{
+    HRESULT hr = o_vplay(v, rt, pitch, vol);
+    wlog("play v%d rt %lld pitch %ld vol %ld -> %08lx", wid(v), rt, pitch, vol, hr);
+    return hr;
+}
+static HRESULT WINAPI my_vstop(void *v, REFERENCE_TIME rt)
+{
+    HRESULT hr = o_vstop(v, rt);
+    wlog("stop v%d rt %lld -> %08lx", wid(v), rt, hr);
+    return hr;
+}
+static HRESULT WINAPI my_dlwave(void *p, IUnknown *w, IUnknown **dl, REFERENCE_TIME hint)
+{
+    HRESULT hr = o_dlwave(p, w, dl, hint);
+    wlog("download w%d -> d%d hint %lld -> %08lx", wid(w), dl && *dl ? wid(*dl) : -1, hint, hr);
+    return hr;
+}
+static HRESULT WINAPI my_unwave(void *p, IUnknown *dl)
+{
+    wlog("unload d%d", wid(dl));
+    return o_unwave(p, dl);
+}
+static HRESULT WINAPI my_alloc(void *p, IUnknown *dl, DWORD ch, DWORD grp, REFERENCE_TIME rt, LONGLONG ls, LONGLONG le, IUnknown **v)
+{
+    HRESULT hr = o_alloc(p, dl, ch, grp, rt, ls, le, v);
+    if (SUCCEEDED(hr) && v && *v && !o_vplay) {
+        patch_vt(*v, 3, my_vplay, (void **)&o_vplay);
+        patch_vt(*v, 4, my_vstop, (void **)&o_vstop);
+    }
+    wlog("alloc d%d ch %lu grp %lu rt %lld loop %lld %lld -> v%d %08lx", wid(dl), ch, grp, rt, ls, le, v && *v ? wid(*v) : -1, hr);
+    return hr;
+}
+static void hook_wave_port(void *port)
+{
+    if (!getenv("DMGT_WAVE")) return;
+    patch_vt(port, 20, my_dlwave, (void **)&o_dlwave);
+    patch_vt(port, 21, my_unwave, (void **)&o_unwave);
+    patch_vt(port, 22, my_alloc, (void **)&o_alloc);
+}
+
 /* DMGT_TMAP: print dmime's tempo map (perf+0x12c, history +0x134: internal pmsgs, hdr+0x20 rt, +0x28 mt, +0x50 tempo) */
 static void dump_tmap(void *perf, const char *when)
 {
@@ -625,6 +685,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         patch_vt(port, 3, my_playbuffer, NULL);
         patch_vt(port, 8, my_latclock, NULL);
         patch_vt(port, 15, my_activate, NULL);
+        hook_wave_port(port);
     } else {
     if (FAILED(hr = IDirectMusic8_CreatePort(dm, &CLSID_DirectMusicSynth, (DMUS_PORTPARAMS *)&pp, &port, NULL))) die("CreatePort", hr);
     patch_vt(port, 3, my_playbuffer, NULL);
