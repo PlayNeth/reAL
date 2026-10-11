@@ -10,6 +10,7 @@
 #include "dmhost.h"
 #include "msynth.h"
 #include "wavesrev.h"
+#include "sf2dls.h"
 #include <stdio.h>
 #include <float.h>
 #include <string.h>
@@ -351,7 +352,18 @@ dm_collection *dm_collection_from_file(const char *path, int gm)
         parsed = 1;
         DWORD size = GetFileSize(f, NULL), got = 0;
         void *b = malloc(size ? size : 1);
-        if (b && ReadFile(f, b, size, &got, NULL) && got == size) c = dls_load(b, size, gm);
+        if (b && ReadFile(f, b, size, &got, NULL) && got == size) {
+            if (size >= 12 && !memcmp(b, "RIFF", 4) && !memcmp((char *)b + 8, "sfbk", 4)) {
+                size_t dn = 0;
+                int ni = 0;
+                void *d = sf2_to_dls(b, size, &dn, &ni);
+                if (d) {
+                    LOG_INFO("music: %s is a SoundFont: %d presets converted to DLS (%lu KB)", full, ni, (unsigned long)(dn >> 10));
+                    c = dls_load(d, dn, gm);
+                    free(d);
+                }
+            } else c = dls_load(b, size, gm);
+        }
         free(b);
         CloseHandle(f);
     }
@@ -435,7 +447,7 @@ const char *dm_gm_dls_path(void)
     { char *sl = strrchr(tmp, '\\'); if (sl) { lstrcpyA(sl + 1, "gm.dls"); lstrcpynA(cand[n++], tmp, MAX_PATH); } }
     for (int i = 0; i < n; i++) {
         int ok = file_exists(cand[i]);
-        LOG_INFO("music: gm.dls candidate %s: %s", cand[i], ok ? "found" : "not found");
+        LOG_INFO("music: GM collection candidate %s: %s", cand[i], ok ? "found" : "not found");
         if (ok) { lstrcpynA(path, cand[i], MAX_PATH); return path; }
     }
     lstrcpynA(path, cand[0], MAX_PATH);
