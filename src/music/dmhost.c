@@ -15,11 +15,18 @@
 #include "wavesrev.h"
 #include "sf2dls.h"
 #include <stdio.h>
+#include <math.h>
 #include <float.h>
 #include <string.h>
 
 #define AHEAD_MS 80         /* written ahead of the play cursor */
 #define BUF_MS 1000
+
+/* the sink's buffers: [0] the shared stereo (dry) buffer, [1] the shared reverb buffer, then the audiopaths' own
+ * (3D, mono, stereo).  Each takes one bus per channel (DirectX 8 sink: IDirectSoundSource::Read into the bus buffers) */
+enum { HB_DRY, HB_REVERB, HB_3D, HB_MONO, HB_STEREO };
+#define MAXHB 64
+typedef struct { rl_buffer *b; int kind, nch, refs; uint32_t bus[2], func[2]; } hbuf;
 
 struct dm_host {
     CRITICAL_SECTION lock;
@@ -30,6 +37,10 @@ struct dm_host {
     uint32_t rate;
     rl_device *dev;
     rl_buffer *dry, *wet;
+    hbuf hb[MAXHB];
+    uint32_t nextbus;
+    rl_buffer *primary;
+    int buslog, peak[MAXHB];        /* REAL_MUSIC_BUSLOG: each sink buffer's peak, once a second */
     uint32_t bufframes;
     /* clock */
     LARGE_INTEGER qpf, qlast;
@@ -95,6 +106,7 @@ static void *port_download(void *ctx, dm_collection *c, uint32_t patch, int sp, 
     return d;
 }
 static void port_unload(void *ctx, void *handle) { dls_port_unload(((dm_host *)ctx)->dls, handle); }
+static void port_assign(void *ctx, uint32_t g, uint32_t c, const uint32_t *buses, uint32_t n) { msynth_assign_buses(((dm_host *)ctx)->syn, g, c, buses, n); }
 static int sink_dl(void *ctx, const void *buf, uint32_t size, void **handle)
 {
     int r = msynth_download(((dm_host *)ctx)->syn, buf, size, handle);
@@ -110,29 +122,40 @@ static int sink_dl(void *ctx, const void *buf, uint32_t size, void **handle)
 static void sink_ul(void *ctx, void *handle) { msynth_unload(((dm_host *)ctx)->syn, handle); }
 
 /* ------------------------------------------------------------------ the sink */
-static rl_buffer *make_buffer(dm_host *h)
+/* the standard buffers' formats as dmime asks for them (7732084b): 16-bit at the synth rate */
+static rl_buffer *make_buffer_ex(dm_host *h, int nch, DWORD flags, const GUID *alg3d)
 {
-    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 2, h->rate, h->rate * 4, 4, 16, 0 };
+    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, (WORD)nch, h->rate, h->rate * 2 * nch, (WORD)(2 * nch), 16, 0 };
     DSBUFFERDESC d;
     memset(&d, 0, sizeof(d));
     d.dwSize = sizeof(d);
-    d.dwFlags = DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME | DSBCAPS_LOCSOFTWARE;
-    d.dwBufferBytes = h->bufframes * 4;
+    d.dwFlags = flags | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_LOCSOFTWARE;
+    d.dwBufferBytes = h->bufframes * 2 * nch;
     d.lpwfxFormat = &wf;
+    if (alg3d) d.guid3DAlgorithm = *alg3d;
     rl_buffer *b = NULL;
     if (FAILED(rl_buffer_create(h->dev, NULL, &d, &b))) return NULL;
     return b;
 }
+static rl_buffer *make_buffer(dm_host *h) { return make_buffer_ex(h, 2, DSBCAPS_GLOBALFOCUS | DSBCAPS_CTRLVOLUME, NULL); }
 
-static void write_buffer(rl_buffer *b, uint32_t frame, const int16_t *src, uint32_t n, uint32_t bufframes)
+static void write_buffer(rl_buffer *b, uint32_t frame, const int16_t *src, uint32_t n, int nch)
 {
     void *p1, *p2;
     DWORD n1, n2;
-    if (FAILED(IDirectSoundBuffer8_Lock(&b->IDirectSoundBuffer8_iface, frame * 4, n * 4, &p1, &n1, &p2, &n2, 0))) return;
+    uint32_t fb = 2 * nch;
+    if (FAILED(IDirectSoundBuffer8_Lock(&b->IDirectSoundBuffer8_iface, frame * fb, n * fb, &p1, &n1, &p2, &n2, 0))) return;
     memcpy(p1, src, n1);
     if (p2) memcpy(p2, (const BYTE *)src + n1, n2);
     IDirectSoundBuffer8_Unlock(&b->IDirectSoundBuffer8_iface, p1, n1, p2, n2);
-    (void)bufframes;
+}
+
+/* a Doppler / frequency ratio as the synth's per-bus pitch offset in cents */
+static int32_t ratio_cents(float r)
+{
+    if (!(r > 0.0f) || r == 1.0f) return 0;
+    double c = 1200.0 * log2((double)r);
+    return (int32_t)(c < 0 ? c - 0.5 : c + 0.5);
 }
 
 static void sink_pass(dm_host *h)
@@ -149,26 +172,60 @@ static void sink_pass(dm_host *h)
         h->written = h->played;
         msynth_seek(h->syn, h->written);
     }
-    static const uint32_t ids[3] = { 0, 1, 0x40 }, fn[3] = { 0, 1, 0x40 };
-    static const int32_t pitch[3] = { 0, 0, 0 };
+    static uint32_t ids[2 * MAXHB], fn[2 * MAXHB];
+    static int32_t pitch[2 * MAXHB];
+    static int16_t tmp[2 * MAXHB][256], out[512];
+    int16_t *bufs[2 * MAXHB];
+    int nb = 0, first[MAXHB];
+    for (int k = 0; k < MAXHB; k++) {
+        hbuf *x = &h->hb[k];
+        first[k] = nb;
+        if (!x->b) continue;
+        int32_t pc = x->kind >= HB_3D ? ratio_cents(rl_buffer_sink_ratio(x->b)) : 0;
+        for (int c = 0; c < x->nch; c++) { ids[nb] = x->bus[c]; fn[nb] = x->func[c]; pitch[nb] = pc; bufs[nb] = tmp[nb]; nb++; }
+    }
     while (h->written < target) {
         uint32_t n = (uint32_t)(target - h->written);
         if (n > 256) n = 256;
-        int16_t l[256], r[256], v[512], dry[512], *bufs[3] = { l, r, v };
-        memset(l, 0, sizeof(l)); memset(r, 0, sizeof(r)); memset(v, 0, sizeof(v));
-        msynth_read(h->syn, bufs, ids, fn, pitch, 3, n);
-        for (int i = (int)n - 1; i >= 0; i--) { v[2 * i] = v[2 * i + 1] = v[i]; dry[2 * i] = l[i]; dry[2 * i + 1] = r[i]; }
-        if (h->noreverb) memset(v, 0, n * 4);
-        else wavesrev_stereo16(h->rev, v, n);
+        for (int k = 0; k < nb; k++) memset(tmp[k], 0, n * sizeof(int16_t));
+        msynth_read(h->syn, bufs, ids, fn, pitch, nb, n);
         uint32_t at = (uint32_t)(h->written % h->bufframes);
+        int16_t dry[512], v[512];
+        for (int k = 0; k < MAXHB; k++) {
+            hbuf *x = &h->hb[k];
+            if (!x->b) continue;
+            const int16_t *a = tmp[first[k]], *b2 = x->nch > 1 ? tmp[first[k] + 1] : NULL;
+            switch (x->kind) {
+            case HB_DRY: case HB_STEREO:            /* two buses interleaved */
+                for (uint32_t i = 0; i < n; i++) { out[2 * i] = a[i]; out[2 * i + 1] = b2[i]; }
+                if (x->kind == HB_DRY) memcpy(dry, out, n * 4);
+                write_buffer(x->b, at, out, n, 2);
+                break;
+            case HB_REVERB:                         /* the mono send to both channels, then the Waves reverb */
+                for (uint32_t i = 0; i < n; i++) v[2 * i] = v[2 * i + 1] = a[i];
+                if (h->noreverb) memset(v, 0, n * 4);
+                else wavesrev_stereo16(h->rev, v, n);
+                write_buffer(x->b, at, v, n, 2);
+                break;
+            default:                                /* 3D and mono buffers: the bus as it is */
+                write_buffer(x->b, at, a, n, 1);
+                break;
+            }
+            if (h->buslog) for (uint32_t i = 0; i < n * x->nch; i++) {
+                int v2 = (x->nch > 1 ? (i & 1 ? b2 : a)[i / 2] : a[i]);
+                if (v2 < 0) v2 = -v2;
+                if (v2 > h->peak[k]) h->peak[k] = v2;
+            }
+        }
         if (h->dump) {
             int16_t mix[512];
             for (uint32_t k = 0; k < 2 * n; k++) { int x = dry[k] + v[k]; mix[k] = (int16_t)(x > 32767 ? 32767 : x < -32768 ? -32768 : x); }
             fwrite(mix, 4, n, h->dump);
         }
-        write_buffer(h->dry, at, dry, n, h->bufframes);
-        write_buffer(h->wet, at, v, n, h->bufframes);
         h->written += n;
+        if (h->buslog && h->written / h->rate != (h->written - n) / h->rate) {
+            for (int k = 0; k < MAXHB; k++) if (h->hb[k].b) { LOG_INFO("music: bus buffer %d (kind %d) peak %d", k, h->hb[k].kind, h->peak[k]); h->peak[k] = 0; }
+        }
     }
 }
 
@@ -231,6 +288,7 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     {
         char dp[MAX_PATH];
         if (GetEnvironmentVariableA("REAL_MUSIC_DUMP", dp, MAX_PATH)) h->dump = fopen(dp, "wb");
+        h->buslog = GetEnvironmentVariableA("REAL_MUSIC_BUSLOG", dp, MAX_PATH) != 0;
     }
     if (FAILED(rl_device_acquire(&h->dev))) { free(h); return NULL; }
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, 1);
@@ -241,10 +299,15 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->dry = make_buffer(h);
     h->wet = make_buffer(h);
     if (!h->syn || !h->dls || !h->rev || !h->dry || !h->wet) { dm_host_free(h); return NULL; }
+    rl_buffer_set_sink(h->dry, 0x482c0);
+    rl_buffer_set_sink(h->wet, 0x482c0);
+    h->hb[0] = (hbuf){ h->dry, HB_DRY, 2, 1, { 0, 1 }, { 0, 1 } };
+    h->hb[1] = (hbuf){ h->wet, HB_REVERB, 1, 1, { 0x40 }, { 0x40 } };
+    h->nextbus = 0x1000;
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
     if (h->pf) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER);
-    dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload };
+    dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign };
     dm_perf_add_port(h->pf, &po, h);
     /* start both buffers in the same mixer period so they stay sample-aligned */
     EnterCriticalSection(&h->dev->lock);
@@ -274,6 +337,8 @@ void dm_host_free(dm_host *h)
     for (int i = 0; i < 3; i++) if (h->th[i]) { WaitForSingleObject(h->th[i], 2000); CloseHandle(h->th[i]); }
     for (int i = 0; i < 2; i++) if (h->ev[i]) CloseHandle(h->ev[i]);
     if (h->quit) CloseHandle(h->quit);
+    for (int k = 2; k < MAXHB; k++) if (h->hb[k].b) IDirectSoundBuffer8_Release(&h->hb[k].b->IDirectSoundBuffer8_iface);
+    if (h->primary) IDirectSoundBuffer8_Release(&h->primary->IDirectSoundBuffer8_iface);
     if (h->dry) IDirectSoundBuffer8_Release(&h->dry->IDirectSoundBuffer8_iface);
     if (h->wet) IDirectSoundBuffer8_Release(&h->wet->IDirectSoundBuffer8_iface);
     dm_perf_free(h->pf);
@@ -322,6 +387,104 @@ int dm_host_download_all(dm_host *h, dm_collection *c)
     }
     LeaveCriticalSection(&h->lock);
     return n;
+}
+
+/* ------------------------------------------------------------------ audiopath buffers
+ * A standard audiopath's buffers (dmime 773211f9 / 7732084b): shared stereo + reverb (DMUS_APATH_SHARED_STEREOPLUSREVERB),
+ * a 3D mono buffer (DYNAMIC_3D, no virtualization asked), a mono one (DYNAMIC_MONO) or a stereo one (DYNAMIC_STEREO).
+ * The path's buses are written to buses[] (up to 4); the buffers' indices to idx[] (up to 2). */
+static const GUID DS3DALG_NO_VIRTUALIZATION_ = { 0xc241333f, 0x1c1b, 0x11d2, { 0x94, 0xf5, 0x00, 0xc0, 0x4f, 0xc2, 0x8a, 0xca } };
+int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t buses[4], uint32_t *nbuses)
+{
+    *nidx = 0; *nbuses = 0;
+    EnterCriticalSection(&h->lock);
+    int r = -1;
+    if (type == 1) {        /* DMUS_APATH_SHARED_STEREOPLUSREVERB */
+        h->hb[0].refs++; h->hb[1].refs++;
+        idx[0] = 0; idx[1] = 1; *nidx = 2;
+        buses[0] = 0; buses[1] = 1; buses[2] = 0x40; *nbuses = 3;
+        r = 0;
+    } else if (type == 6 || type == 7 || type == 8) {
+        int k;
+        for (k = 2; k < MAXHB && h->hb[k].b; k++) ;
+        if (k < MAXHB) {
+            hbuf *x = &h->hb[k];
+            rl_buffer *b;
+            if (type == 6) b = make_buffer_ex(h, 1, DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_GLOBALFOCUS |
+                                              DSBCAPS_MUTE3DATMAXDISTANCE, &DS3DALG_NO_VIRTUALIZATION_);
+            else if (type == 7) b = make_buffer_ex(h, 1, DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_GLOBALFOCUS, NULL);
+            else b = make_buffer_ex(h, 2, DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_GLOBALFOCUS, NULL);
+            if (b) {
+                rl_buffer_set_sink(b, type == 6 ? 0x682b0 : 0x482e0);      /* 7732084b's flags | CTRLFX */
+                x->b = b; x->refs = 1;
+                x->kind = type == 6 ? HB_3D : type == 7 ? HB_MONO : HB_STEREO;
+                x->nch = type == 8 ? 2 : 1;
+                for (int c = 0; c < x->nch; c++) {
+                    x->bus[c] = h->nextbus++;
+                    x->func[c] = type == 6 ? 0x200 : (uint32_t)c;     /* DSBUSID_DYNAMIC_0 / LEFT, RIGHT */
+                    buses[c] = x->bus[c];
+                }
+                *nbuses = x->nch;
+                idx[0] = k; *nidx = 1;
+                /* in step with the shared buffers: same frame position, playing */
+                DWORD play = 0, wr = 0;
+                IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr);
+                IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
+                IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
+                r = 0;
+            }
+        }
+    }
+    LeaveCriticalSection(&h->lock);
+    return r;
+}
+
+void dm_host_path_close(dm_host *h, const int *idx, int nidx)
+{
+    EnterCriticalSection(&h->lock);
+    for (int i = 0; i < nidx; i++) {
+        hbuf *x = &h->hb[idx[i]];
+        if (--x->refs > 0 || idx[i] < 2) continue;
+        rl_buffer *b = x->b;
+        memset(x, 0, sizeof(*x));
+        IDirectSoundBuffer8_Stop(&b->IDirectSoundBuffer8_iface);
+        IDirectSoundBuffer8_Release(&b->IDirectSoundBuffer8_iface);
+    }
+    LeaveCriticalSection(&h->lock);
+}
+
+/* the buffer object (AudioPath::GetObjectInPath, DMUS_PATH_BUFFER) */
+HRESULT dm_host_buffer_query(dm_host *h, int idx, REFIID iid, void **out)
+{
+    *out = NULL;
+    if (idx < 0 || idx >= MAXHB || !h->hb[idx].b) return DMUS_E_NOT_FOUND;
+    return IDirectSoundBuffer8_QueryInterface(&h->hb[idx].b->IDirectSoundBuffer8_iface, iid, out);
+}
+
+/* DMUS_PATH_PRIMARY_BUFFER: the primary buffer (with the 3D listener) of reAL's device */
+HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out)
+{
+    *out = NULL;
+    EnterCriticalSection(&h->lock);
+    if (!h->primary) {
+        DSBUFFERDESC d;
+        memset(&d, 0, sizeof(d));
+        d.dwSize = sizeof(d);
+        d.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME;
+        rl_buffer_create(h->dev, NULL, &d, &h->primary);
+    }
+    LeaveCriticalSection(&h->lock);
+    if (!h->primary) return DMUS_E_NOT_FOUND;
+    return IDirectSoundBuffer8_QueryInterface(&h->primary->IDirectSoundBuffer8_iface, iid, out);
+}
+
+/* the shared reverb (DMUS_PATH_BUFFER_DMO on the reverb buffer): IDirectSoundFXWavesReverb parameters */
+int dm_host_reverb_set(dm_host *h, float ingain, float mix, float time, float hfratio)
+{
+    EnterCriticalSection(&h->lock);
+    int r = wavesrev_set(h->rev, ingain, mix, time, hfratio);
+    LeaveCriticalSection(&h->lock);
+    return r;
 }
 
 void dm_host_set_reverb(dm_host *h, int on)

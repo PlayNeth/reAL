@@ -52,12 +52,15 @@ typedef struct {
     LONG ref;
     dm_audiopath *ap;
     rm_perf *perf;
+    DWORD type, npch;
+    int buf[2], nbuf;                       /* the host's sink buffers, in the path's buffer order */
 } rm_path;
 
 struct rm_perf {
     IDirectMusicPerformance8 IDirectMusicPerformance8_iface;
     LONG ref;
     dm_host *host;
+    DSFXWavesReverb revparams;              /* the shared reverb's parameters as last set */
     rm_path *defpath;
     IDirectMusic8 *dm;
     BOOL closed;
@@ -519,6 +522,49 @@ static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD s
 static IDirectMusicSegmentState8Vtbl st_vtbl = { st_qi, st_addref, st_release, st_getrepeats, st_getsegment, st_getstart,
     st_getseek, st_getstartpoint, st_settrackcfg, st_getobj };
 
+/* ------------------------------------------------------------------ the shared reverb's DMO interface */
+typedef struct { IDirectSoundFXWavesReverb8 iface; LONG ref; rm_perf *perf; } rm_reverb;
+static rm_reverb *rvb(IDirectSoundFXWavesReverb8 *i) { return impl_from(i, rm_reverb, iface); }
+static HRESULT WINAPI rv_qi(IDirectSoundFXWavesReverb8 *i, REFIID riid, void **out)
+{
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectSoundFXWavesReverb8)) { *out = i; InterlockedIncrement(&rvb(i)->ref); return S_OK; }
+    return rm_noiface(__func__, riid, out);
+}
+static ULONG WINAPI rv_addref(IDirectSoundFXWavesReverb8 *i) { return InterlockedIncrement(&rvb(i)->ref); }
+static ULONG WINAPI rv_release(IDirectSoundFXWavesReverb8 *i)
+{
+    rm_reverb *r = rvb(i);
+    LONG n = InterlockedDecrement(&r->ref);
+    if (!n) { IDirectMusicPerformance8_Release(&r->perf->IDirectMusicPerformance8_iface); free(r); }
+    return n;
+}
+static HRESULT WINAPI rv_set(IDirectSoundFXWavesReverb8 *i, LPCDSFXWavesReverb p)
+{
+    rm_reverb *r = rvb(i);
+    if (!p) return E_POINTER;
+    if (!r->perf->host || dm_host_reverb_set(r->perf->host, p->fInGain, p->fReverbMix, p->fReverbTime, p->fHighFreqRTRatio) < 0)
+        return E_INVALIDARG;
+    r->perf->revparams = *p;
+    return S_OK;
+}
+static HRESULT WINAPI rv_get(IDirectSoundFXWavesReverb8 *i, LPDSFXWavesReverb p)
+{
+    if (!p) return E_POINTER;
+    *p = rvb(i)->perf->revparams;
+    return S_OK;
+}
+static IDirectSoundFXWavesReverbVtbl rv_vtbl = { rv_qi, rv_addref, rv_release, rv_set, rv_get };
+static HRESULT reverb_object(rm_perf *p, REFIID iid, void **out)
+{
+    rm_reverb *r = calloc(1, sizeof(*r));
+    if (!r) return E_OUTOFMEMORY;
+    r->iface.lpVtbl = &rv_vtbl; r->ref = 1; r->perf = p;
+    IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
+    HRESULT hr = rv_qi(&r->iface, iid, out);
+    rv_release(&r->iface);
+    return hr;
+}
+
 /* ------------------------------------------------------------------ audiopaths */
 static IDirectMusicAudioPathVtbl ap_vtbl;
 static rm_path *apt(IDirectMusicAudioPath *i) { return impl_from(i, rm_path, IDirectMusicAudioPath_iface); }
@@ -545,7 +591,10 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
     LONG r = InterlockedDecrement(&a->ref);
     LOG_CALL("music: AudioPath::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
-        if (a->perf->host) { dm_host_lock(a->perf->host); dm_audiopath_release(a->ap); dm_host_unlock(a->perf->host); }
+        if (a->perf->host) {
+            dm_host_lock(a->perf->host); dm_audiopath_release(a->ap); dm_host_unlock(a->perf->host);
+            dm_host_path_close(a->perf->host, a->buf, a->nbuf);
+        }
         IDirectMusicPerformance8_Release(&a->perf->IDirectMusicPerformance8_iface);
         free(a);
     }
@@ -556,8 +605,24 @@ static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage
     rm_path *a = apt(i);
     if (!o) return E_POINTER;
     *o = NULL;
-    if (stage == DMUS_PATH_PERFORMANCE) return IDirectMusicPerformance8_QueryInterface(&a->perf->IDirectMusicPerformance8_iface, iid, o);
-    if (stage == DMUS_PATH_AUDIOPATH) return ap_qi(i, iid, o);
+    if (buf && (stage < DMUS_PATH_BUFFER || stage > 0x7fff)) return DMUS_E_NOT_FOUND;     /* 7731fbc1 */
+    if (stage == DMUS_PATH_PERFORMANCE) return n || pch ? DMUS_E_NOT_FOUND : IDirectMusicPerformance8_QueryInterface(&a->perf->IDirectMusicPerformance8_iface, iid, o);
+    if (stage == DMUS_PATH_AUDIOPATH) return n || pch ? DMUS_E_NOT_FOUND : ap_qi(i, iid, o);
+    if (stage == DMUS_PATH_BUFFER) {
+        /* the path's buffers for its PChannels (DMUS_PCHANNEL_ALL: any), dwBuffer counting them in order */
+        if (n || !a->perf->host || (pch != DMUS_PCHANNEL_ALL && pch >= a->npch) || buf >= (DWORD)a->nbuf) return DMUS_E_NOT_FOUND;
+        return dm_host_buffer_query(a->perf->host, a->buf[buf], iid, o);
+    }
+    if (stage == DMUS_PATH_PRIMARY_BUFFER) {
+        if (n || pch || !a->perf->host) return DMUS_E_NOT_FOUND;
+        return dm_host_primary_query(a->perf->host, iid, o);
+    }
+    if (stage == DMUS_PATH_BUFFER_DMO) {
+        if (!a->perf->host || (pch != DMUS_PCHANNEL_ALL && pch >= a->npch) || buf >= (DWORD)a->nbuf) return DMUS_E_NOT_FOUND;
+        if (a->buf[buf] == 1 && n == 0 && (IsEqualGUID(g, &GUID_All_Objects) || IsEqualGUID(g, &GUID_DSFX_WAVES_REVERB)))
+            return reverb_object(a->perf, iid, o);
+        return DMUS_E_NOT_FOUND;
+    }
     char b1[64];
     LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s) not supported", (unsigned long)stage, guidstr(iid, b1));
     return DMUS_E_NOT_FOUND;
@@ -667,6 +732,7 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     if (p->host) return S_OK;
     p->host = dm_host_new(rate ? rate : 22050, voices ? voices : 64, 64);
     if (!p->host) return E_OUTOFMEMORY;
+    p->revparams.fInGain = 0; p->revparams.fReverbMix = 0; p->revparams.fReverbTime = 1000; p->revparams.fHighFreqRTRatio = 0.001f;
     if (!s_clockperf) s_clockperf = p;
     g_lastperf = p;
     return S_OK;
@@ -994,8 +1060,8 @@ static HRESULT WINAPI pf_stopex(IDirectMusicPerformance8 *i, IUnknown *obj, __in
 static HRESULT WINAPI pf_clonepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *s, DMUS_PMSG **d) { return rm_notimpl(__func__); }
 static HRESULT WINAPI pf_createpath(IDirectMusicPerformance8 *i, IUnknown *cfg, BOOL act, IDirectMusicAudioPath **out)
 {
-    LOG_INFO("music: CreateAudioPath from a configuration: using a standard stereo path");
-    return pf_createstdpath(i, DMUS_APATH_DYNAMIC_STEREO, 64, act, out);
+    LOG_INFO("music: CreateAudioPath from a configuration: using a standard stereo + reverb path");
+    return pf_createstdpath(i, DMUS_APATH_SHARED_STEREOPLUSREVERB, 64, act, out);
 }
 static HRESULT WINAPI pf_createstdpath(IDirectMusicPerformance8 *i, DWORD type, DWORD npch, BOOL act, IDirectMusicAudioPath **out)
 {
@@ -1004,11 +1070,19 @@ static HRESULT WINAPI pf_createstdpath(IDirectMusicPerformance8 *i, DWORD type, 
     *out = NULL;
     if (!p->host) return DMUS_E_NOT_INIT;
     if (!npch) npch = 16;
+    int idx[2], nidx;
+    uint32_t buses[4], nbuses;
+    if (dm_host_path_open(p->host, type, idx, &nidx, buses, &nbuses) < 0) {
+        LOG_INFO("music: CreateStandardAudioPath(type %lu): not a standard type", (unsigned long)type);
+        return E_INVALIDARG;
+    }
     dm_audiopath *ap;
-    PERF_LOCKED(p, ap = dm_perf_create_audiopath(dm_host_perf(p->host), npch, act));
-    if (!ap) return E_OUTOFMEMORY;
+    PERF_LOCKED(p, ap = dm_perf_create_audiopath(dm_host_perf(p->host), npch, act, buses, nbuses));
+    if (!ap) { dm_host_path_close(p->host, idx, nidx); return E_OUTOFMEMORY; }
     rm_path *a = new_path(p, ap);
-    if (!a) { PERF_LOCKED(p, dm_audiopath_release(ap)); return E_OUTOFMEMORY; }
+    if (!a) { PERF_LOCKED(p, dm_audiopath_release(ap)); dm_host_path_close(p->host, idx, nidx); return E_OUTOFMEMORY; }
+    a->type = type; a->npch = npch; a->nbuf = nidx;
+    for (int k = 0; k < nidx; k++) a->buf[k] = idx[k];
     LOG_CALL("music: CreateStandardAudioPath(type %lu, %lu pchannels) -> %p", (unsigned long)type, (unsigned long)npch, (void *)a);
     *out = &a->IDirectMusicAudioPath_iface;
     return S_OK;

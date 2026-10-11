@@ -43,6 +43,7 @@ void rl_fpu_leave(unsigned int cw)
     _controlfp(cw, _MCW_EM | _MCW_PC | _MCW_RC);
 }
 
+static DWORD orig_rate(rl_buffer *b);
 void rl_buffer_update_gains(rl_buffer *b)
 {
     unsigned int cw = rl_fpu_enter();
@@ -132,6 +133,12 @@ static void update_gains(rl_buffer *b)
         b->voice.pitch = spatial ? rl_spatial_doppler(&dev->listener, &b->src3d, dop) : 1.0f;
     }
 
+    if (b->sink) {      /* a sink buffer keeps its rate: the shift is the synth's (DirectX 8 sink) */
+        float r = b->voice.pitch > 0.0f ? b->voice.pitch : 1.0f;
+        if (b->freq) r *= (float)b->freq / (float)orig_rate(b);
+        b->sink_ratio = r;
+        b->voice.pitch = 1.0f;
+    }
     b->voice.lp_a = lp_a;
     if (!eax4) {
         b->voice.send_lp_a[0] = send_lp_a;
@@ -284,6 +291,7 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
         caps->dwFlags |= DSBCAPS_LOCHARDWARE;
     }
     caps->dwBufferBytes = This->is_primary ? 4096 : This->desc.dwBufferBytes;
+    if (This->sink) { caps->dwFlags = This->sink_caps; caps->dwBufferBytes = 0; }   /* as DirectSound's sink buffers */
     caps->dwUnlockTransferRate = 4096;
     caps->dwPlayCpuOverhead = 0;
     return DS_OK;
@@ -502,7 +510,8 @@ static HRESULT WINAPI dsb_SetFrequency(IDirectSoundBuffer8 *iface, DWORD freq)
     if (freq != DSBFREQUENCY_ORIGINAL && (freq < DSBFREQUENCY_MIN || freq > DSBFREQUENCY_MAX)) return DSERR_INVALIDPARAM;
     EnterCriticalSection(&This->dev->lock);
     This->freq = freq;
-    This->voice.rate = freq ? freq : orig_rate(This);
+    if (This->sink) rl_buffer_update_gains(This);
+    else This->voice.rate = freq ? freq : orig_rate(This);
     LeaveCriticalSection(&This->dev->lock);
     return DS_OK;
 }
@@ -1407,6 +1416,15 @@ static void flags_str(DWORD f, char *out, size_t n)
             len += strlen(t[i].s) + 1;
         }
 }
+
+void rl_buffer_set_sink(rl_buffer *b, DWORD caps)
+{
+    EnterCriticalSection(&b->dev->lock);
+    b->sink = TRUE; b->sink_ratio = 1.0f; b->sink_caps = caps;
+    rl_buffer_update_gains(b);
+    LeaveCriticalSection(&b->dev->lock);
+}
+float rl_buffer_sink_ratio(rl_buffer *b) { return b->sink ? b->sink_ratio : 1.0f; }
 
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out)
 {

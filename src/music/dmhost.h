@@ -3,6 +3,7 @@
  * plays it through DirectSound. */
 #ifndef REAL_DMHOST_H
 #define REAL_DMHOST_H
+#include <windows.h>
 #include "dmperf.h"
 #include "dmdls.h"
 
@@ -22,6 +23,12 @@ uint32_t dm_host_rate(dm_host *h);
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len);
 int dm_host_download_all(dm_host *h, dm_collection *c);     /* returns how many instruments went in */
 void dm_host_set_reverb(dm_host *h, int on);
+/* audiopath buffers (see dmhost.c) */
+int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t buses[4], uint32_t *nbuses);
+void dm_host_path_close(dm_host *h, const int *idx, int nidx);
+HRESULT dm_host_buffer_query(dm_host *h, int idx, REFIID iid, void **out);
+HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out);
+int dm_host_reverb_set(dm_host *h, float ingain, float mix, float time, float hfratio);
 
 /* the process-wide collection cache (the loader's) */
 dm_collection *dm_collection_from_file(const char *path, int gm);

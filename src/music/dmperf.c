@@ -1568,7 +1568,7 @@ static void drop_musicstopped(dm_perf *pf)
 
 /* ------------------------------------------------------------------ audiopaths */
 /* a standard audiopath: npch virtual PChannels 0..npch-1 on new performance PChannels of port 0 */
-dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate)
+dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate, const uint32_t *buses, uint32_t nbuses)
 {
     if (!pf->nports) return NULL;
     dm_audiopath *ap = calloc(1, sizeof(*ap));
@@ -1580,6 +1580,7 @@ dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate)
         uint32_t r = pf->nextpch++;
         ap->virt[i] = i; ap->real[i] = r;
         dm_perf_assign_pchannel(pf, r, 0, r / 16 + 1, r % 16);
+        if (buses && nbuses && pf->ports[0].ops.assign) pf->ports[0].ops.assign(pf->ports[0].ctx, r / 16 + 1, r % 16, buses, nbuses);
     }
     ap->next = pf->paths; pf->paths = ap;
     return ap;

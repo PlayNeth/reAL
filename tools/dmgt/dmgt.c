@@ -536,6 +536,7 @@ static HRESULT WINAPI my_playbuffer(IDirectMusicPort *p, IDirectMusicBuffer *b)
     DWORD grp, cb;
     BYTE *data;
     EnterCriticalSection(&g_evcs);
+    if (!g_ev) { LeaveCriticalSection(&g_evcs); return S_OK; }
     IDirectMusicBuffer_ResetReadPtr(b);
     while (IDirectMusicBuffer_GetNextEvent(b, &rt, &grp, &cb, &data) == S_OK) {
         fprintf(g_ev, "%lld %lu", rt, grp);
@@ -619,7 +620,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         for (int i = 0; i < 4; i++)
             if (FAILED(hr = IDirectMusicPerformance8_CreateStandardAudioPath(perf, DMUS_APATH_SHARED_STEREOPLUSREVERB, 64, TRUE, &aps[i]))) die("CreateStandardAudioPath", hr);
         apath = aps[0];
-        if (FAILED(hr = IDirectMusicAudioPath_GetObjectInPath(apath, DMUS_PCHANNEL_ALL, DMUS_PATH_PORT, 0, &GUID_AllZeros, 0, &IID_IDirectMusicPort, (void **)&port)))
+        if (FAILED(hr = IDirectMusicAudioPath_GetObjectInPath(apath, DMUS_PCHANNEL_ALL, DMUS_PATH_PORT, 0, &GUID_All_Objects, 0, &IID_IDirectMusicPort, (void **)&port)))
             die("GetObjectInPath(port)", hr);
         patch_vt(port, 3, my_playbuffer, NULL);
         patch_vt(port, 8, my_latclock, NULL);

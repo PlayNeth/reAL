@@ -159,6 +159,10 @@ struct rl_buffer {
     rl_voice      voice;
     LONG          volume, pan;
     DWORD         freq;         /* 0 means original */
+    BOOL          sink;         /* fed by the DirectMusic sink: always played at its own rate; its frequency and
+                                 * Doppler shift go to the synth as pitch (rl_buffer_sink_ratio) */
+    float         sink_ratio;
+    DWORD         sink_caps;    /* GetCaps flags of a sink buffer (DirectSound reports the ones DirectMusic asked for) */
     rl_notify    *notifies;
     DWORD         n_notifies;
     rl_buffer    *next_playing, *prev_playing;
@@ -181,6 +185,8 @@ struct rl_buffer {
 };
 
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out);
+void rl_buffer_set_sink(rl_buffer *b, DWORD caps);
+float rl_buffer_sink_ratio(rl_buffer *b);
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out);
 void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released */
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */

@@ -30,6 +30,8 @@ typedef struct {
     void *(*download)(void *ctx, dm_collection *coll, uint32_t patch, int setpatch, uint32_t newpatch,
                       const uint32_t *ranges, int nranges, int *hr);
     void (*unload)(void *ctx, void *handle);
+    /* AssignChannelToBuses (audiopaths): the synth channel's output buses */
+    void (*assign)(void *ctx, uint32_t group, uint32_t chan, const uint32_t *buses, uint32_t n);
 } dm_portops;
 
 dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx);
@@ -64,7 +66,7 @@ uint32_t dm_perf_realtime(dm_perf *pf);
 int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out);
 
 /* audiopaths: standard ones only (virtual PChannels 0..n-1 on new performance PChannels of port 0) */
-dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate);
+dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate, const uint32_t *buses, uint32_t nbuses);
 void dm_audiopath_addref(dm_audiopath *ap);
 void dm_audiopath_release(dm_audiopath *ap);
 int dm_audiopath_activate(dm_audiopath *ap, int on);
