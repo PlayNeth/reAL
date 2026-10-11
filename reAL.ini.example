@@ -48,6 +48,7 @@ logeax=false
 ; GM instrument collection: by default DirectMusic's own gm.dls (registry GMFilePath, else
 ; system32\drivers\gm.dls, also outside WOW64 redirection, then the game's folder). Point this at another
 ; DLS file or at a SoundFont (.sf2), absolute or relative to the game's folder, to use a custom one.
+; Under Wine a Linux path works too (gmdls=/home/me/SoundFonts/bank.sf2).
 ;gmdls=D:\Sound\MyGM.dls
 ; MIDI music (games that play General MIDI through Windows' MIDI API, e.g. Claw): midi=true adds the
 ; "reAL-Music GM Synth" output and makes it the MIDI mapper, so the game's music plays through reAL with

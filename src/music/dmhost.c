@@ -422,7 +422,14 @@ const char *dm_gm_dls_path(void)
     int n = 0;
     if (g_cfg.gm_dls[0]) {
         unquote(tmp, g_cfg.gm_dls, MAX_PATH);
-        if (tmp[0] && (tmp[1] == ':' || (tmp[0] == '\\' && tmp[1] == '\\'))) lstrcpynA(cand[n++], tmp, MAX_PATH);
+        /* a Linux path under Wine (/home/...): Wine's own conversion to its DOS name (normally Z:\home\...) */
+        WCHAR *(CDECL *dosname)(LPCSTR) = tmp[0] == '/' ?
+            (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_dos_file_name") : NULL;
+        WCHAR *w = dosname ? dosname(tmp) : NULL;
+        if (w) {
+            WideCharToMultiByte(CP_ACP, 0, w, -1, cand[n++], MAX_PATH, NULL, NULL);
+            HeapFree(GetProcessHeap(), 0, w);
+        } else if (tmp[0] && (tmp[1] == ':' || tmp[0] == '/' || tmp[0] == '\\')) lstrcpynA(cand[n++], tmp, MAX_PATH);
         else {
             char exe[MAX_PATH];
             GetModuleFileNameA(NULL, exe, MAX_PATH);
