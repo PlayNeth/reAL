@@ -2,7 +2,10 @@
  *
  * Audio: like DirectMusic's DirectSound sink, the synth is read in bus form (dry left/right and the reverb send)
  * into 16-bit stereo buffers: the dry one, and the shared reverb one whose Waves reverb we run ourselves before
- * writing it.  Both are reAL buffers, mixed (and resampled) by reAL's device like any game buffer.  The sink keeps a
+ * writing it.  As in Windows 7's dsound.dll (sink 6efd878f/6efd7bf4): the standard reverb buffer is 16-bit stereo
+ * on the one reverb-send bus, which is copied unchanged to both channels (6efdafe0) and then run through the buffer's
+ * Waves reverb in place; the dry buffer interleaves the left and right buses (6efdb10c); no gain on either.
+ * Both are reAL buffers, mixed (and resampled) by reAL's device like any game buffer.  The sink keeps a
  * fixed amount written ahead of the play cursor.
  * Time: the master clock follows the buffers' play position (so it never drifts from the audio), smoothed with
  * QueryPerformanceCounter between cursor reads; the latency clock is the time of the next sample to be written. */
