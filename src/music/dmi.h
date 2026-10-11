@@ -168,6 +168,7 @@ typedef struct {
     int16_t pbrange;
     dm_collection *coll;
     dm_dlrec *dl;
+    int notinfile;                      /* MIDI file import: a default instrument, sent but not downloaded */
 } dm_inst;
 typedef struct dm_band {
     mtime_t logical, physical;
@@ -181,7 +182,9 @@ typedef struct {
     uint32_t validate;
 } dm_bandtrack;
 
-enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND };
+enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX };
+typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
+typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 typedef struct dm_track {
     int kind;
     dm_guid clsid;
@@ -203,6 +206,11 @@ typedef struct dm_segment {
 /* segment loading: resolve a DLS reference (DMRF) of a band instrument; NULL guid/file means the default GM set */
 typedef dm_collection *(*dm_getcoll_fn)(void *ctx, const dm_guid *guid, const char *file);
 dm_segment *dm_segment_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
+/* a Standard MIDI File (or RMID) as dmime imports it (dmsmf.c) */
+dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
+int dm_is_midi(const void *data, size_t size);
+/* dmseg.c internals the MIDI importer builds on */
+void dm_segment_insert_track(dm_segment *s, const dm_track *t);
 void dm_segment_release(dm_segment *s);
 
 #endif

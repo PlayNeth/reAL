@@ -246,6 +246,26 @@ static dm_bandtrack *load_band(rd r, dm_getcoll_fn getcoll, void *ctx)
     return t;
 }
 
+/* ------------------------------------------------------------------ SysEx track (dmime 7731b4b4)
+ * Items stay in load order.  The original's chunk size bookkeeping can drop the last items of a long list (the MIDI
+ * importer writes the size short by 4 bytes per item); here every item in the chunk is read. */
+static dm_sysextrack *load_sysex(rd c)
+{
+    dm_sysextrack *t = calloc(1, sizeof(*t));
+    while (c.e - c.p >= 12) {
+        int32_t mt = (int32_t)u32(c.p);
+        uint32_t len = u32(c.p + 8);
+        c.p += 12;
+        if ((uint32_t)(c.e - c.p) < len) break;
+        t->items = realloc(t->items, (t->n + 1) * sizeof(*t->items));
+        dm_sysexitem *it = &t->items[t->n++];
+        it->mt = mt; it->len = len; it->data = malloc(len ? len : 1);
+        memcpy(it->data, c.p, len);
+        c.p += len;
+    }
+    return t;
+}
+
 /* ------------------------------------------------------------------ segment (77313c61, track list 7731330a) */
 /* 773112d8: a new track goes before the first one with a higher position; at equal positions a SysEx track goes
  * first, then a band track (before anything but a SysEx track) */
@@ -257,6 +277,17 @@ static int track_before(const dm_track *n, const dm_track *e)
         if (guid_eq(&n->clsid, &CLSID_BandTrack) && !guid_eq(&e->clsid, &CLSID_SysExTrack)) return 1;
     }
     return 0;
+}
+
+/* in segment track order */
+void dm_segment_insert_track(dm_segment *s, const dm_track *t)
+{
+    int i = 0;
+    while (i < s->ntracks && !track_before(t, &s->tracks[i])) i++;
+    s->tracks = realloc(s->tracks, (s->ntracks + 1) * sizeof(*s->tracks));
+    memmove(s->tracks + i + 1, s->tracks + i, (s->ntracks - i) * sizeof(*s->tracks));
+    s->tracks[i] = *t;
+    s->ntracks++;
 }
 
 static void load_track(dm_segment *s, rd r, dm_getcoll_fn getcoll, void *ctx)
@@ -285,14 +316,9 @@ static void load_track(dm_segment *s, rd r, dm_getcoll_fn getcoll, void *ctx)
                 else { rd x; uint32_t xid; while (next_chunk(&c, &xid, &x, NULL)) if (xid == FCC('t','i','m','s')) load_tims(ts, x); }
                 t.kind = TRK_TIMESIG; t.data = ts;
             } else if (guid_eq(&t.clsid, &CLSID_BandTrack)) { t.kind = TRK_BAND; t.data = load_band(c, getcoll, ctx); }
+            else if (guid_eq(&t.clsid, &CLSID_SysExTrack) && id == FCC('s','y','e','x')) { t.kind = TRK_SYSEX; t.data = load_sysex(c); }
             else t.kind = TRK_OTHER;
-            /* insert in segment track order */
-            int i = 0;
-            while (i < s->ntracks && !track_before(&t, &s->tracks[i])) i++;
-            s->tracks = realloc(s->tracks, (s->ntracks + 1) * sizeof(*s->tracks));
-            memmove(s->tracks + i + 1, s->tracks + i, (s->ntracks - i) * sizeof(*s->tracks));
-            s->tracks[i] = t;
-            s->ntracks++;
+            dm_segment_insert_track(s, &t);
             return;
         }
     }
@@ -336,6 +362,12 @@ static void free_track(dm_track *t)
         break;
     }
     case TRK_TEMPO: free(((dm_tempotrack *)t->data)->items); free(t->data); break;
+    case TRK_SYSEX: {
+        dm_sysextrack *x = t->data;
+        for (int i = 0; i < x->n; i++) free(x->items[i].data);
+        free(x->items); free(x);
+        break;
+    }
     case TRK_TIMESIG: free(((dm_tstrack *)t->data)->items); free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;

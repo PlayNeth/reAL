@@ -107,6 +107,7 @@ struct dm_perf {
     uint32_t nextpch;
     int xprec, appxprec;        /* extended precision now / in application threads */
     dm_pmsg *pool;
+    uint32_t fixes;             /* DM_FIX_* departures from the original */
 };
 
 static uint32_t g_trackid;                      /* 7732b1b0 */
@@ -1568,6 +1569,7 @@ uint32_t dm_perf_get_prepare_time(dm_perf *pf) { return pf->prepare_ms; }
 void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms) { pf->bumper_ms = ms; pf->bumper = (rtime_t)ms * 10000; }
 uint32_t dm_perf_get_bumper_length(dm_perf *pf) { return pf->bumper_ms; }
 void dm_perf_set_app_precision(dm_perf *pf, int extended) { pf->appxprec = extended; }
+void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes) { pf->fixes = fixes; }
 
 static void free_queue(dm_perf *pf, dm_queue *q)
 {
@@ -1590,4 +1592,11 @@ void dm_perf_free(dm_perf *pf)
         free(b);
     }
     free(pf);
+}
+
+/* debugging: the tempo map */
+void dm_perf_debug_tmap(dm_perf *pf)
+{
+    for (dm_pmsg *e = pf->tmap.head; e; e = e->next)
+        fprintf(stderr, "tmap mt %d rt %lld tempo %.17g master %.9g adjust %lld\n", e->mt, (long long)e->rt, e->tempo, (double)e->master, (long long)pf->adjust);
 }

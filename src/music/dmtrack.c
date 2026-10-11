@@ -296,6 +296,43 @@ static int ts_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtim
     return DM_OK;
 }
 
+/* ------------------------------------------------------------------ SysEx track (dmime 7731b5e2) */
+typedef struct { int cur; uint32_t validate; mtime_t lastend; } sysexstate;    /* cur: item index, -1 = none */
+
+static int sysex_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    dm_sysextrack *T = e->t->data;
+    sysexstate *S = e->state;
+    if (!S || (flags & TF_PLAY_OFF)) return DM_OK;
+    int seek = flags & TF_SEEK;
+    if (start == 0 && (flags & TF_START)) start = -768;         /* items placed before the start */
+    if (S->cur < 0 && flags == 0) return DM_FALSE;
+    if (S->validate != T->validate) { S->validate = T->validate; S->cur = -1; }
+    if (!T->n) return DMUS_S_END;
+    if (!seek && S->lastend == start) { if (S->cur < 0) S->cur = 0; }
+    else {      /* 7731b35c: from the current item unless it is already at or past the start */
+        if (S->cur < 0) S->cur = 0;
+        if (!(T->items[S->cur].mt < start)) S->cur = 0;
+        while (S->cur >= 0 && S->cur < T->n && T->items[S->cur].mt < start) S->cur++;
+        if (S->cur >= T->n) S->cur = -1;
+    }
+    S->lastend = end;
+    while (S->cur >= 0) {
+        const dm_sysexitem *it = &T->items[S->cur];
+        if (end <= it->mt) return DM_OK;
+        if (it->mt < start && !seek) break;
+        dm_pmsg *m = pm_alloc(pf, 0x40 + it->len);
+        if (!m) break;
+        m->sx_data = malloc(it->len ? it->len : 1);
+        if (m->sx_data) memcpy(m->sx_data, it->data, it->len);
+        m->sx_len = it->len;
+        m->mt = it->mt + off; m->flags = PF_MUSICTIME; m->pch = 0; m->vpch = e->vid; m->type = PT_SYSEX; m->group = 0xffffffff;
+        stamp_send(pf, ss, m);
+        S->cur = S->cur + 1 < T->n ? S->cur + 1 : -1;
+    }
+    return DM_OK;
+}
+
 /* ------------------------------------------------------------------ band track */
 typedef struct { int cur; uint32_t vid; int fstart; uint32_t validate; } bandstate;
 
@@ -303,6 +340,7 @@ typedef struct { int cur; uint32_t vid; int fstart; uint32_t validate; } bandsta
 static void band_send_inst(dm_perf *pf, dm_segstate *ss, sstrack *e, dm_band *b, dm_inst *in, mtime_t t, mtime_t off)
 {
     bandstate *S = e->state;
+    if (in->notinfile) return;          /* a MIDI file's default instrument: only there for the download */
     dm_pmsg tpl;
     memset(&tpl, 0, sizeof(tpl));
     tpl.mt = t + off; tpl.flags = PF_MUSICTIME; tpl.pch = in->pch; tpl.vpch = S->vid; tpl.group = b->groupbits;
@@ -394,11 +432,14 @@ static int build_ranges(const uint32_t *bits, uint32_t *out)
     return n;
 }
 
-static int inst_download(dm_perf *pf, dm_inst *in)
+static int inst_download(dm_perf *pf, dm_inst *in, int mode)
 {
     uint32_t pi, group, chan;
     int hr = map_pch(pf, in->pch, &pi, &group, &chan, NULL);
     if (hr < 0) return hr;
+    /* 7720413a: a GM / GS band (MIDI file import) plays PChannel 9 from the drum kits */
+    if (mode != 0 && mode != 4 && in->pch == 9) in->patch |= 0x80000000u;
+    if (in->notinfile) return DM_OK;    /* default instruments of a MIDI file are not downloaded */
     if (pi >= (uint32_t)pf->nports) return DMUS_E_NOT_INIT;
     for (dm_dlrec *r = in->dl; r; r = r->next) if (r->port == (int)pi) { r->refs++; return DM_OK; }
     if (!in->coll) return DM_OK;
@@ -439,7 +480,7 @@ static int bandtrack_download(dm_perf *pf, dm_bandtrack *T, int unload)
     for (int i = 0; i < T->nbands; i++)
         for (int k = 0; k < T->bands[i]->ninst; k++) {
             if (unload) inst_unload(pf, &T->bands[i]->inst[k]);
-            else { int r = inst_download(pf, &T->bands[i]->inst[k]); if (r < 0) hr = r; }
+            else { int r = inst_download(pf, &T->bands[i]->inst[k], T->bands[i]->mode); if (r < 0) hr = r; }
         }
     return hr;
 }
@@ -493,6 +534,14 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         e->state = S;
         break;
     }
+    case TRK_SYSEX: {
+        sysexstate *S = calloc(1, sizeof(*S));
+        if (!S) break;
+        S->cur = -1;
+        S->validate = ((dm_sysextrack *)e->t->data)->validate;
+        e->state = S;
+        break;
+    }
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));
@@ -521,6 +570,7 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_TEMPO: return tempo_play(pf, ss, e, start, end, off, flags);
     case TRK_TIMESIG: return ts_play(pf, ss, e, start, end, off, flags);
     case TRK_BAND: return band_play(pf, ss, e, start, end, off, flags);
+    case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
     }
     return DM_OK;
 }

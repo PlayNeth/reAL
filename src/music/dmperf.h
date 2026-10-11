@@ -96,5 +96,8 @@ void dm_perf_invalidate(dm_perf *pf, mtime_t mt, uint32_t flags);
 int dm_perf_stop_audiopath(dm_perf *pf, dm_audiopath *ap, mtime_t mt, uint32_t flags);
 /* x87 precision of application threads when not built with DM_FPU_NATIVE (1 = 64-bit mantissa, as under Wine) */
 void dm_perf_set_app_precision(dm_perf *pf, int extended);
+/* fixes of the original's flaws (off by default, for comparison against it) */
+#define DM_FIX_FIRST_TEMPO 1    /* a primary segment started from silence plays its first piece at its own tempo */
+void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
 
 #endif

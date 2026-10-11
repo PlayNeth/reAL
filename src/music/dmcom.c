@@ -408,7 +408,7 @@ static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
     rm_segment *s = sgp(i);
     BYTE *b; DWORD n;
     if (!read_stream(st, &b, &n)) return E_FAIL;
-    dm_segment *g = dm_segment_load(b, n, loader_getcoll, s->loader);
+    dm_segment *g = dm_is_midi(b, n) ? dm_segment_from_midi(b, n, loader_getcoll, s->loader) : dm_segment_load(b, n, loader_getcoll, s->loader);
     free(b);
     if (!g) return DMUS_E_UNSUPPORTED_STREAM;
     if (s->seg) dm_segment_release(s->seg);
@@ -1036,7 +1036,7 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
         if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
     } else return DMUS_E_LOADER_NOFILENAME;
     if (!data) return E_OUTOFMEMORY;
-    dm_segment *sgt = dm_segment_load(data, size, loader_getcoll, l);
+    dm_segment *sgt = dm_is_midi(data, size) ? dm_segment_from_midi(data, size, loader_getcoll, l) : dm_segment_load(data, size, loader_getcoll, l);
     free(data);
     if (!sgt) return DMUS_E_UNSUPPORTED_STREAM;
     rm_segment *s = new_segment(sgt);

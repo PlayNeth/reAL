@@ -223,11 +223,11 @@ static void ss_firststart(dm_perf *pf, dm_segstate *ss, int skiptempo)
     ss->mtend = ss_end(ss, ss->mtstart);
 }
 
-/* 773158ad: abort/stop at mt */
-static int ss_abort(dm_perf *pf, dm_segstate *ss, mtime_t mt)
+/* 773158ad: abort/stop at mt (noinv: the flush keeps notes playing, DMUS_SEGF_NOINVALIDATE) */
+static int ss_abort2(dm_perf *pf, dm_segstate *ss, mtime_t mt, int noinv)
 {
     if (mt < ss->mtlast) {
-        for (int i = 0; i < ss->ntr; i++) flush_from(pf, ss->tr[i].vid, mt, mt, 0);
+        for (int i = 0; i < ss->ntr; i++) flush_from(pf, ss->tr[i].vid, mt, mt, noinv != 0);
         ss->mtlast = mt;
     }
     ss->rtlast = M2R(pf, mt);
@@ -236,6 +236,59 @@ static int ss_abort(dm_perf *pf, dm_segstate *ss, mtime_t mt)
         return 0;
     }
     return 1;
+}
+
+static int ss_abort(dm_perf *pf, dm_segstate *ss, mtime_t mt) { return ss_abort2(pf, ss, mt, 0); }
+
+/* 7730433e: which tracks of the primary states play.  A control state's tracks with DMUS_TRACKCONFIG_CONTROL_PLAY
+ * (_NOTIFICATION) take over the primary's tracks of the same class and group: those stop playing (sending
+ * notifications) until the control state goes, then restart (rtbits 4: played with DMUS_TRACKF_START).
+ * rtbits: 8 / 0x10 originally off / on, 0x40 / 0x80 notifications originally off / on, 1 / 0x20 overridden now,
+ * 2 overridden before. */
+static void track_control(dm_perf *pf)
+{
+    for (dm_segstate *p = pf->lists[3]; p; p = p->lnext)
+        for (int i = 0; i < p->ntr; i++) {
+            sstrack *t = &p->tr[i];
+            uint32_t v = t->rtbits;
+            if (v == 0) v = ((t->cfg & 0x10) ? 0x10 : 8) | ((t->cfg & 0x20) ? 0x80 : 0x40);
+            else {
+                if (v & 1) v |= 2;
+                v &= ~0x21u;
+                if (v & 0x10) t->cfg |= 0x10;
+                if (v & 0x80) t->cfg |= 0x20;
+            }
+            t->rtbits = v;
+        }
+    for (dm_segstate *c = pf->lists[4]; c; c = c->lnext)
+        for (int i = 0; i < c->ntr; i++) {
+            sstrack *ct = &c->tr[i];
+            if (!((ct->cfg >> 16) & 3)) continue;
+            for (dm_segstate *p = pf->lists[3]; p; p = p->lnext)
+                for (int j = 0; j < p->ntr; j++) {
+                    sstrack *t = &p->tr[j];
+                    if (memcmp(&t->t->clsid, &ct->t->clsid, sizeof(dm_guid)) || !(ct->group & t->group)) continue;
+                    if ((ct->cfg & 0x10000) && (t->cfg & 0x10)) { t->rtbits |= 1; t->cfg &= ~0x10u; }
+                    if ((ct->cfg & 0x20000) && (t->cfg & 0x20)) { t->rtbits |= 0x20; t->cfg &= ~0x20u; }
+                }
+        }
+    for (dm_segstate *p = pf->lists[3]; p; p = p->lnext)
+        for (int i = 0; i < p->ntr; i++) {
+            uint32_t v = p->tr[i].rtbits;
+            if ((v & 0x10) && (v & 2) && !(v & 1)) p->tr[i].rtbits = v | 4;
+        }
+}
+
+/* 773045c4: a primary state without a time signature of its own moves the one in effect to its start */
+static void ts_restamp(dm_perf *pf, dm_segstate *ss)
+{
+    timesig tsg;
+    if (ss_getparam(ss, PRM_TIMESIG, 0xffffffff, 0, 0, NULL, &tsg) >= 0) return;
+    dm_pmsg *e = pf->tsq.head;
+    if (!e) return;
+    while (e->next && e->next->mt <= ss->mtstart) e = e->next;
+    e->mt = ss->mtstart;
+    e->rt = M2R(pf, ss->mtstart);
 }
 
 static void ss_mark_dirty_all(dm_perf *pf)
@@ -275,7 +328,7 @@ static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
     }
     if (hr == DMUS_S_END || (ss->mtstop != 0 && ss->mtstop <= ss->mtlast)) {
         if (ss->mtstop != 0 && ss->mtstop == ss->mtlast) ss_abort(pf, ss, ss->mtstop - 1);
-        if (k == 3) { list_unlink(pf, 3, ss); list_insert(pf, 6, ss); }
+        if (k == 3) { list_unlink(pf, 3, ss); list_insert(pf, 6, ss); track_control(pf); }
         else if (k == 4) { list_unlink(pf, 4, ss); list_insert(pf, ss->mtstop == ss->mtlast ? 9 : 7, ss); }
         else { list_unlink(pf, k, ss); list_insert(pf, 8, ss); }
         if (!pf->lists[3] && !pf->lists[5] && !pf->lists[0] && !pf->lists[2] && !pf->lists[4] && !pf->lists[1]) pf->stopped = 1;
@@ -343,33 +396,118 @@ static void start_secondary(dm_perf *pf, dm_segstate *ss)
     ss->mtoffset = ss->mtlast = ss->mtstart;
     if (ctl) {
         list_insert(pf, 4, ss);
-        if (!(ss->flags & SEGF_NOINVALIDATE)) invalidate(pf, ss->mtstart, 0);
+        if (!(ss->flags & SEGF_NOINVALIDATE)) { track_control(pf); invalidate(pf, ss->mtstart, 0); }
     } else list_insert(pf, 5, ss);
     for (dm_segstate *s = pf->lists[5], *nx; s; s = nx) { nx = s->lnext; ss_advance(pf, 5, s); }
     for (dm_segstate *s = pf->lists[4], *nx; s; s = nx) { nx = s->lnext; ss_advance(pf, 4, s); }
 }
 
-/* 7730ca85 (simplified): start a primary state */
+/* 7730ca85: start a primary state.  It replaces the primary playing at its start: states queued behind it are
+ * aborted, the one playing is cut one tick before (and with it the music after, unless DMUS_SEGF_NOINVALIDATE /
+ * _INVALIDATE_PRI); DMUS_SEGF_QUEUE starts it where the last primary ends. */
 static void start_primary(dm_perf *pf, dm_segstate *ss)
 {
     ss->trackflags |= TF_DIRTY;
+    if (ss->flags & SEGF_QUEUE) {
+        mtime_t qend = 0;
+        dm_segstate *cur = list_last(pf, 3);
+        if (!cur) { dm_segstate *d = list_last(pf, 6); if (d) qend = d->mtlast; }
+        else qend = ss_end(cur, cur->mtstart);
+        ss->flags &= ~SEGF_QUEUE;
+        if (!cur) {
+            if (!(ss->flags & SEGF_AFTERPREPARETIME)) ss->i64start = 0;
+            else if (!(ss->flags & SEGF_REFTIME)) { if (ss->i64start < pf->prepared) ss->i64start = pf->prepared; }
+            else if (ss->i64start < M2R(pf, pf->prepared)) { ss->flags &= ~SEGF_REFTIME; ss->i64start = pf->prepared; }
+        } else {
+            ss->mtstart = qend;
+            if (R2M(pf, dm_perf_queue_time(pf)) <= ss->mtstart) {
+                ss->flags &= ~SEGF_REFTIME;
+                ss->mtoffset = ss->mtstart;
+                list_insert(pf, 3, ss);
+                if (!ss->inited) ss_firststart(pf, ss, 1);         /* 7730c76e */
+                return;
+            }
+            ss->mtstart = 0;
+        }
+    }
     if (ss->i64start == 0) {
         mtime_t mt = R2M(pf, dm_perf_queue_time(pf));
         ss->flags &= ~SEGF_REFTIME;
         ss->i64start = mt;
-        while (pf->lists[3]) { dm_segstate *s = pf->lists[3]; pf->lists[3] = s->lnext; ss_abort(pf, s, mt); list_insert(pf, 9, s); }
+        dm_segstate *h = pf->lists[3];        /* every state queued behind the one playing goes */
+        while (h && h->lnext) {
+            dm_segstate *x = h->lnext;
+            h->lnext = x->lnext; x->lnext = NULL;
+            ss_abort(pf, x, mt);
+            list_insert(pf, 9, x);
+        }
     }
-    if (ss->flags & SEGF_REFTIME) { ss->i64start = R2M(pf, ss->i64start); ss->flags &= ~SEGF_REFTIME; }
+    if (ss->flags & SEGF_REFTIME) {
+        if (pf->lists[3] && pf->horizon < ss->i64start) { list_insert(pf, 0, ss); return; }
+        ss->i64start = R2M(pf, ss->i64start);
+        ss->flags &= ~SEGF_REFTIME;
+    }
+    /* 7730ae6a */
     ss->mtstart = resolve_mt(pf, (mtime_t)ss->i64start, ss->flags);
     ss->mtoffset = ss->mtlast = ss->mtstart;
-    for (dm_segstate *s = pf->lists[3], *nx; s; s = nx) {
-        nx = s->lnext;
-        ss_abort(pf, s, ss->mtstart);
-        list_unlink(pf, 3, s); list_insert(pf, 6, s);
+    dm_segstate *w;
+    while ((w = pf->lists[0])) { pf->lists[0] = w->lnext; w->lnext = NULL; ss_abort(pf, w, ss->mtstart); list_insert(pf, 9, w); }
+    dm_segstate *h = pf->lists[3];
+    if (!h) {
+        list_push(pf, 3, ss);
+        ts_restamp(pf, ss);
+        track_control(pf);
+        /* the original fills the tempo map only on the transport's next pass, so the first piece (up to the prepare
+         * time) is stamped at the old tempo, 120 bpm from a standing start; fixed: read the segment's tempo first */
+        if (pf->fixes & DM_FIX_FIRST_TEMPO) tempo_scan(pf, ss->mtstart, 0, NULL, 1);
+        ss_advance(pf, 3, ss);
+        return;
     }
-    list_push(pf, 3, ss);
-    if (!(ss->flags & SEGF_NOINVALIDATE)) invalidate(pf, ss->mtstart, ss->flags);
-    ss_advance(pf, 3, ss);
+    int noinv = (ss->flags >> 15) & 1;
+    if (h->mtstart < ss->mtstart) {
+        dm_segstate *u = h;
+        while (u->lnext && u->lnext->mtstart < ss->mtstart) u = u->lnext;
+        ss->lnext = u->lnext;
+        u->lnext = ss;
+        while (ss->lnext) {
+            dm_segstate *x = ss->lnext;
+            ss->lnext = x->lnext; x->lnext = NULL;
+            ss_abort(pf, x, ss->mtstart);
+            list_insert(pf, 9, x);
+        }
+    } else if (!h->started) {
+        dm_segstate *x;
+        while ((x = pf->lists[3])) { pf->lists[3] = x->lnext; x->lnext = NULL; ss_abort(pf, x, ss->mtstart); list_insert(pf, 9, x); }
+        list_push(pf, 3, ss);
+        ts_restamp(pf, ss);
+        track_control(pf);
+        /* the original fills the tempo map only on the transport's next pass, so the first piece (up to the prepare
+         * time) is stamped at the old tempo, 120 bpm from a standing start; fixed: read the segment's tempo first */
+        if (pf->fixes & DM_FIX_FIRST_TEMPO) tempo_scan(pf, ss->mtstart, 0, NULL, 1);
+        ss_advance(pf, 3, ss);
+        return;
+    } else {
+        list_push(pf, 3, ss);
+        while (ss->lnext) {
+            dm_segstate *x = ss->lnext;
+            ss->lnext = x->lnext; x->lnext = NULL;
+            ss_abort2(pf, x, ss->mtstart, noinv);
+            list_insert(pf, 9, x);
+        }
+    }
+    dm_segstate *h2 = pf->lists[3];
+    if (h2 && h2 != ss && h2->started && ss->mtstart <= h2->mtlast) {
+        ss_abort2(pf, h2, ss->mtstart - 1, noinv);
+        pf->lists[3] = h2->lnext; h2->lnext = NULL;
+        list_insert(pf, 6, h2);
+        for (dm_segstate *x = pf->lists[6]; x; x = x->lnext) if (ss->mtstart < x->mtlast) x->mtlast = ss->mtstart;
+        if (!(ss->flags & (0x10000000 | SEGF_NOINVALIDATE))) invalidate(pf, ss->mtstart, ss->flags);
+        else if ((ss->flags & 0x10000000) && !(ss->flags & SEGF_NOINVALIDATE))        /* 77315f98 */
+            for (int i = 0; i < h2->ntr; i++) flush_from(pf, h2->tr[i].vid, ss->mtstart, ss->mtstart, 0);
+        ts_restamp(pf, ss);
+        track_control(pf);
+        ss_advance(pf, 3, pf->lists[3]);
+    }
 }
 
 /* PlaySegmentEx 7730d51c / 7730d2ee */
@@ -537,14 +675,15 @@ uint32_t dm_perf_transport(dm_perf *pf)
                 ss_advance(pf, 3, pf->lists[3]);
                 dm_segstate *h = pf->lists[3], *n = h ? h->lnext : NULL;
                 if (!n || h->mtlast < n->mtstart) break;
-                ss_abort(pf, h, n->mtstart - 1);
+                ss_abort2(pf, h, n->mtstart - 1, (n->flags >> 15) & 1);
                 list_unlink(pf, 3, h); list_insert(pf, 6, h);
+                track_control(pf);
                 dm_segstate *h2 = pf->lists[3];
                 if (!(h2->flags & (0x10000000 | SEGF_NOINVALIDATE))) invalidate(pf, h2->mtstart, 0);
             }
             for (dm_segstate *s = pf->lists[4], *nx; s; s = nx) { nx = s->lnext; ss_advance(pf, 4, s); }
             for (dm_segstate *s = pf->lists[5], *nx; s; s = nx) { nx = s->lnext; ss_advance(pf, 5, s); }
-            if (dirty) ss_mark_dirty_all(pf);
+            if (dirty) { ss_mark_dirty_all(pf); track_control(pf); }
             pf->prepared = pf->target;
         } while (pf->target < target);
     }
