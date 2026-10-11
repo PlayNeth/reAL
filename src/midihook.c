@@ -33,12 +33,14 @@ static void hexs(char *out, int n, const BYTE *p, DWORD len)
 #include "music/dmhost.h"
 
 #define RM_MAGIC 0x4d4c4552     /* 'RELM' */
+typedef struct rm_stream rm_stream;
 typedef struct {
     DWORD magic;
     DWORD_PTR cb, inst;
     DWORD flags;
     DWORD volume;
     BYTE running;               /* running status */
+    rm_stream *st;              /* a midiStream handle */
 } rm_midiout;
 
 static dm_host *s_host;
@@ -108,6 +110,7 @@ static void fill_caps(MIDIOUTCAPSW *w, MIDIOUTCAPSA *a)
 }
 
 #define TRACE(...) do { if (g_cfg.midi_trace) LOG_INFO(__VA_ARGS__); } while (0)
+static void stream_flush(rm_stream *st);
 
 /* ------------------------------------------------------------------ midiOut */
 static UINT (WINAPI *o_getnumdevs)(void);
@@ -191,7 +194,8 @@ static MMRESULT WINAPI h_close(HMIDIOUT h)
     ENTER();
     MMRESULT r;
     rm_midiout *o = ours(h);
-    if (o) {
+    if (o && o->st) { r = MMSYSERR_INVALHANDLE; }
+    else if (o) {
         all_off();
         EnterCriticalSection(&s_mcs);
         for (int i = 0; i < 16; i++) if (s_outs[i] == o) s_outs[i] = NULL;
@@ -293,7 +297,8 @@ static MMRESULT WINAPI h_reset(HMIDIOUT h)
     ENTER();
     MMRESULT r;
     rm_midiout *o = ours(h);
-    if (o) { all_off(); o->running = 0; r = 0; }
+    if (o && o->st) { stream_flush(o->st); o->running = 0; r = 0; }
+    else if (o) { all_off(); o->running = 0; r = 0; }
     else r = o_reset(h);
     LEAVE();
     TRACE("midi: %smidiOutReset(%p) -> %u", IND, (void *)h, r);
@@ -359,7 +364,155 @@ static MMRESULT WINAPI h_getid(HMIDIOUT h, LPUINT id)
     return r;
 }
 
-/* ------------------------------------------------------------------ midiStream */
+/* ------------------------------------------------------------------ midiStream
+ * Streams on the reAL-Music device: buffers of MIDIEVENTs (delta ticks, stream id, event, long data) queued with
+ * midiStreamOut and played by a thread per stream, in stream time (it stops while paused).  Ticks follow the time
+ * division (PPQN with the current tempo, or SMPTE frames) and MEVT_TEMPO events.  A stream opens paused; Stop and
+ * midiOutReset return the queued buffers; MOM_DONE goes out when a buffer is finished, MOM_POSITIONCB for events
+ * with MEVT_F_CALLBACK. */
+struct rm_stream {
+    rm_midiout *o;
+    CRITICAL_SECTION cs;
+    HANDLE thread, wake;
+    volatile LONG quit;
+    int running;
+    DWORD timediv, tempo;           /* MIDIPROP values: ticks per quarter note (or SMPTE), microseconds per quarter */
+    LPMIDIHDR q[64]; int nq;        /* queued buffers, oldest first */
+    DWORD ofs;                      /* next event in q[0] */
+    double due_us;                  /* stream time of the next event (its delta already added) */
+    int have_due;
+    double base_us;                 /* stream time accumulated before the current run */
+    LARGE_INTEGER run_start, qpf;
+    double last_us;                 /* stream time of the last event played */
+    DWORD ticks;                    /* tick position of that event */
+};
+
+static double tick_us(rm_stream *st)
+{
+    if (st->timediv & 0x8000) {     /* SMPTE: -frames per second, ticks per frame */
+        int fps = -(signed char)(st->timediv >> 8), tpf = st->timediv & 0xff;
+        if (fps == 29) fps = 30;
+        return fps > 0 && tpf > 0 ? 1e6 / ((double)fps * tpf) : 1000.0;
+    }
+    DWORD tpq = st->timediv & 0x7fff;
+    return (double)st->tempo / (tpq ? tpq : 96);
+}
+
+static double stream_now(rm_stream *st)
+{
+    if (!st->running) return st->base_us;
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return st->base_us + (double)(c.QuadPart - st->run_start.QuadPart) * 1e6 / (double)st->qpf.QuadPart;
+}
+
+typedef struct { UINT msg; DWORD_PTR p1; } pending_cb;
+
+/* finish the head buffer (lock held): collect its MOM_DONE */
+static void finish_head(rm_stream *st, pending_cb *cbs, int *ncb)
+{
+    LPMIDIHDR h = st->q[0];
+    memmove(st->q, st->q + 1, (size_t)(--st->nq) * sizeof(*st->q));
+    st->ofs = 0;
+    st->have_due = 0;
+    h->dwFlags &= ~MHDR_INQUEUE;
+    h->dwFlags |= MHDR_DONE;
+    if (*ncb < 64) { cbs[*ncb].msg = MOM_DONE; cbs[*ncb].p1 = (DWORD_PTR)h; (*ncb)++; }
+}
+
+/* play everything due (lock held); returns the wait in ms until the next event, INFINITE when idle */
+static DWORD stream_pump(rm_stream *st, pending_cb *cbs, int *ncb)
+{
+    while (st->running && st->nq) {
+        LPMIDIHDR h = st->q[0];
+        const BYTE *d = (const BYTE *)h->lpData;
+        DWORD n = h->dwBytesRecorded;
+        if (st->ofs + 12 > n) { finish_head(st, cbs, ncb); continue; }
+        const MIDIEVENT *e = (const MIDIEVENT *)(d + st->ofs);
+        if (!st->have_due) { st->due_us += e->dwDeltaTime * tick_us(st); st->have_due = 1; }
+        double now = stream_now(st);
+        if (st->due_us > now) {
+            double w = (st->due_us - now) / 1000.0;
+            return w < 1 ? 1 : (DWORD)w;
+        }
+        st->ticks += e->dwDeltaTime;
+        st->last_us = st->due_us;
+        DWORD ev = e->dwEvent, len = 12;
+        if (ev & MEVT_F_LONG) {
+            DWORD l = ev & 0xffffff;
+            len = 12 + ((l + 3) & ~3u);
+            if (st->ofs + 12 + l > n) { finish_head(st, cbs, ncb); continue; }
+            if (MEVT_EVENTTYPE(ev) == MEVT_LONGMSG) {
+                const BYTE *x = d + st->ofs + 12;
+                /* a long message may carry sysex or a run of short messages */
+                for (DWORD i = 0; i < l; ) {
+                    if (x[i] == 0xf0) { DWORD k = i + 1; while (k < l && x[k] != 0xf7) k++; if (k < l) k++; midi_send(x + i, k - i); i = k; }
+                    else if (x[i] >= 0x80 && x[i] < 0xf0) { uint32_t m = (x[i] & 0xe0) == 0xc0 ? 2 : 3; if (i + m <= l) midi_send(x + i, m); i += m; }
+                    else i++;
+                }
+            }
+        } else {
+            switch (MEVT_EVENTTYPE(ev & ~MEVT_F_CALLBACK)) {
+            case MEVT_SHORTMSG: {
+                BYTE m[3] = { (BYTE)ev, (BYTE)(ev >> 8), (BYTE)(ev >> 16) };
+                if (m[0] < 0x80) { m[2] = m[1]; m[1] = m[0]; m[0] = st->o->running; }
+                else if (m[0] < 0xf0) st->o->running = m[0];
+                if (m[0] >= 0x80 && m[0] < 0xf0) midi_send(m, (m[0] & 0xe0) == 0xc0 ? 2 : 3);
+                break;
+            }
+            case MEVT_TEMPO: if (ev & 0xffffff) st->tempo = ev & 0xffffff; break;
+            default: break;     /* MEVT_NOP */
+            }
+        }
+        if ((ev & MEVT_F_CALLBACK) && *ncb < 64) {
+            h->dwOffset = st->ofs;
+            cbs[*ncb].msg = MOM_POSITIONCB; cbs[*ncb].p1 = (DWORD_PTR)h; (*ncb)++;
+        }
+        st->ofs += len;
+        st->have_due = 0;
+        if (st->ofs >= n) finish_head(st, cbs, ncb);
+    }
+    return INFINITE;
+}
+
+static DWORD WINAPI stream_thread(LPVOID p)
+{
+    rm_stream *st = p;
+    timeBeginPeriod(1);
+    while (!st->quit) {
+        pending_cb cbs[64];
+        int ncb = 0;
+        EnterCriticalSection(&st->cs);
+        DWORD w = stream_pump(st, cbs, &ncb);
+        LeaveCriticalSection(&st->cs);
+        for (int i = 0; i < ncb; i++) callback(st->o, cbs[i].msg, cbs[i].p1);
+        if (ncb && w > 0) w = 0;        /* callbacks may have queued more */
+        if (w) WaitForSingleObject(st->wake, w);
+    }
+    timeEndPeriod(1);
+    return 0;
+}
+
+/* return every queued buffer (Stop / Reset / Close) and silence; position back to 0 */
+static void stream_flush(rm_stream *st)
+{
+    pending_cb cbs[64];
+    int ncb = 0;
+    EnterCriticalSection(&st->cs);
+    st->running = 0;
+    while (st->nq) finish_head(st, cbs, &ncb);
+    st->base_us = 0; st->due_us = 0; st->have_due = 0; st->ticks = 0; st->ofs = 0; st->last_us = 0;
+    LeaveCriticalSection(&st->cs);
+    all_off();
+    for (int i = 0; i < ncb; i++) callback(st->o, cbs[i].msg, cbs[i].p1);
+}
+
+static rm_stream *our_stream(HMIDISTRM h)
+{
+    rm_midiout *o = ours((HMIDIOUT)h);
+    return o ? o->st : NULL;
+}
+
 static MMRESULT (WINAPI *s_open)(LPHMIDISTRM, LPUINT, DWORD, DWORD_PTR, DWORD_PTR, DWORD);
 static MMRESULT (WINAPI *s_out)(HMIDISTRM, LPMIDIHDR, UINT);
 static MMRESULT (WINAPI *s_restart)(HMIDISTRM);
@@ -372,36 +525,178 @@ static MMRESULT (WINAPI *s_pos)(HMIDISTRM, LPMMTIME, UINT);
 static MMRESULT WINAPI hs_open(LPHMIDISTRM ph, LPUINT dev, DWORD n, DWORD_PTR cb, DWORD_PTR inst, DWORD fl)
 {
     UINT d = dev ? *dev : 0;
-    ENTER(); MMRESULT r = s_open(ph, dev, n, cb, inst, fl); LEAVE();
+    ENTER();
+    MMRESULT r;
+    if (!_d && dev && is_rm_id(d)) {
+        r = MMSYSERR_NOMEM;
+        rm_midiout *o = calloc(1, sizeof(*o));
+        rm_stream *st = calloc(1, sizeof(*st));
+        if (o && st && ph) {
+            o->magic = RM_MAGIC; o->cb = cb; o->inst = inst; o->flags = fl; o->volume = 0xffffffff; o->st = st;
+            st->o = o; st->timediv = 96; st->tempo = 500000;
+            InitializeCriticalSection(&st->cs);
+            QueryPerformanceFrequency(&st->qpf);
+            st->wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+            EnterCriticalSection(&s_mcs);
+            for (int i = 0; i < 16; i++) if (!s_outs[i]) { s_outs[i] = o; r = 0; break; }
+            LeaveCriticalSection(&s_mcs);
+            if (!r) {
+                st->thread = CreateThread(NULL, 0, stream_thread, st, 0, NULL);
+                SetThreadPriority(st->thread, THREAD_PRIORITY_TIME_CRITICAL);
+                *ph = (HMIDISTRM)o;
+                *dev = real_devs();
+                midi_host();
+                callback(o, MOM_OPEN, 0);
+            }
+        }
+        if (r) { if (st) { if (st->wake) CloseHandle(st->wake); free(st); } free(o); if (!ph) r = MMSYSERR_INVALPARAM; }
+        LOG_INFO("midi: midiStreamOpen(%d) -> reAL-Music GM Synth (%u)", (int)d, r);
+    } else r = s_open(ph, dev, n, cb, inst, fl);
+    LEAVE();
     TRACE("midi: %smidiStreamOpen(dev %d, %lu, callback %p, flags %lx) -> %u handle %p", IND, (int)d, (unsigned long)n,
-             (void *)cb, (unsigned long)fl, r, ph ? (void *)*ph : NULL);
+          (void *)cb, (unsigned long)fl, r, ph && !r ? (void *)*ph : NULL);
     return r;
 }
 static MMRESULT WINAPI hs_out(HMIDISTRM h, LPMIDIHDR hd, UINT sz)
 {
     char x[200];
-    if (hd) hexs(x, sizeof(x), (const BYTE *)hd->lpData, hd->dwBytesRecorded < 48 ? hd->dwBytesRecorded : 48); else x[0] = 0;
-    ENTER(); MMRESULT r = s_out(h, hd, sz); LEAVE();
+    if (hd && hd->lpData) hexs(x, sizeof(x), (const BYTE *)hd->lpData, hd->dwBytesRecorded < 48 ? hd->dwBytesRecorded : 48); else x[0] = 0;
+    ENTER();
+    MMRESULT r;
+    rm_stream *st = our_stream(h);
+    if (st) {
+        if (!hd || !hd->lpData || sz < offsetof(MIDIHDR, dwOffset) || hd->dwBytesRecorded > hd->dwBufferLength) r = MMSYSERR_INVALPARAM;
+        else if (!(hd->dwFlags & MHDR_PREPARED)) r = MIDIERR_UNPREPARED;
+        else if (hd->dwFlags & MHDR_INQUEUE) r = MIDIERR_STILLPLAYING;
+        else {
+            EnterCriticalSection(&st->cs);
+            if (st->nq < 64) {
+                hd->dwFlags = (hd->dwFlags & ~MHDR_DONE) | MHDR_INQUEUE;
+                st->q[st->nq++] = hd;
+                r = 0;
+            } else r = MMSYSERR_NOMEM;
+            LeaveCriticalSection(&st->cs);
+            SetEvent(st->wake);
+        }
+    } else r = s_out(h, hd, sz);
+    LEAVE();
     TRACE("midi: %smidiStreamOut(%p, %lu bytes) -> %u: %s", IND, (void *)h, hd ? (unsigned long)hd->dwBytesRecorded : 0UL, r, x);
     return r;
 }
-#define SIMPLE(name, fn, label) \
-    static MMRESULT WINAPI name(HMIDISTRM h) { ENTER(); MMRESULT r = fn(h); LEAVE(); \
-        TRACE("midi: %s" label "(%p) -> %u", IND, (void *)h, r); return r; }
-SIMPLE(hs_restart, s_restart, "midiStreamRestart")
-SIMPLE(hs_pause, s_pause, "midiStreamPause")
-SIMPLE(hs_stop, s_stop, "midiStreamStop")
-SIMPLE(hs_close, s_close, "midiStreamClose")
+static MMRESULT WINAPI hs_restart(HMIDISTRM h)
+{
+    ENTER();
+    MMRESULT r = 0;
+    rm_stream *st = our_stream(h);
+    if (st) {
+        EnterCriticalSection(&st->cs);
+        if (!st->running) { QueryPerformanceCounter(&st->run_start); st->running = 1; }
+        LeaveCriticalSection(&st->cs);
+        SetEvent(st->wake);
+    } else r = s_restart(h);
+    LEAVE();
+    TRACE("midi: %smidiStreamRestart(%p) -> %u", IND, (void *)h, r);
+    return r;
+}
+static MMRESULT WINAPI hs_pause(HMIDISTRM h)
+{
+    ENTER();
+    MMRESULT r = 0;
+    rm_stream *st = our_stream(h);
+    if (st) {
+        EnterCriticalSection(&st->cs);
+        if (st->running) { st->base_us = stream_now(st); st->running = 0; }
+        LeaveCriticalSection(&st->cs);
+        SetEvent(st->wake);
+    } else r = s_pause(h);
+    LEAVE();
+    TRACE("midi: %smidiStreamPause(%p) -> %u", IND, (void *)h, r);
+    return r;
+}
+static MMRESULT WINAPI hs_stop(HMIDISTRM h)
+{
+    ENTER();
+    MMRESULT r = 0;
+    rm_stream *st = our_stream(h);
+    if (st) { stream_flush(st); SetEvent(st->wake); }
+    else r = s_stop(h);
+    LEAVE();
+    TRACE("midi: %smidiStreamStop(%p) -> %u", IND, (void *)h, r);
+    return r;
+}
+static void stream_close(rm_midiout *o)
+{
+    rm_stream *st = o->st;
+    stream_flush(st);
+    InterlockedExchange(&st->quit, 1);
+    SetEvent(st->wake);
+    if (GetCurrentThreadId() != GetThreadId(st->thread)) WaitForSingleObject(st->thread, 2000);
+    CloseHandle(st->thread);
+    CloseHandle(st->wake);
+    DeleteCriticalSection(&st->cs);
+    EnterCriticalSection(&s_mcs);
+    for (int i = 0; i < 16; i++) if (s_outs[i] == o) s_outs[i] = NULL;
+    LeaveCriticalSection(&s_mcs);
+    callback(o, MOM_CLOSE, 0);
+    free(st);
+    free(o);
+}
+static MMRESULT WINAPI hs_close(HMIDISTRM h)
+{
+    ENTER();
+    MMRESULT r = 0;
+    rm_midiout *o = ours((HMIDIOUT)h);
+    if (o && o->st) stream_close(o);
+    else r = s_close(h);
+    LEAVE();
+    TRACE("midi: %smidiStreamClose(%p) -> %u", IND, (void *)h, r);
+    return r;
+}
 static MMRESULT WINAPI hs_prop(HMIDISTRM h, LPBYTE p, DWORD fl)
 {
-    ENTER(); MMRESULT r = s_prop(h, p, fl); LEAVE();
+    ENTER();
+    MMRESULT r;
+    rm_stream *st = our_stream(h);
+    if (st) {
+        DWORD what = fl & ~(MIDIPROP_GET | MIDIPROP_SET);
+        if (!p || !(fl & (MIDIPROP_GET | MIDIPROP_SET)) || (fl & MIDIPROP_GET && fl & MIDIPROP_SET)) r = MMSYSERR_INVALPARAM;
+        else if (what != MIDIPROP_TIMEDIV && what != MIDIPROP_TEMPO) r = MMSYSERR_INVALPARAM;
+        else {
+            DWORD *v = &((DWORD *)p)[1];
+            EnterCriticalSection(&st->cs);
+            DWORD *field = what == MIDIPROP_TEMPO ? &st->tempo : &st->timediv;
+            if (fl & MIDIPROP_GET) *v = *field;
+            else if (what == MIDIPROP_TIMEDIV && st->running) r = MMSYSERR_INVALPARAM;     /* only while stopped / paused */
+            else *field = *v ? *v : *field;
+            LeaveCriticalSection(&st->cs);
+            r = 0;
+        }
+    } else r = s_prop(h, p, fl);
+    LEAVE();
     unsigned long v = p ? (unsigned long)((DWORD *)p)[1] : 0;
     TRACE("midi: %smidiStreamProperty(%p, flags %lx) -> %u value %lu", IND, (void *)h, (unsigned long)fl, r, v);
     return r;
 }
 static MMRESULT WINAPI hs_pos(HMIDISTRM h, LPMMTIME t, UINT sz)
 {
-    ENTER(); MMRESULT r = s_pos(h, t, sz); LEAVE();
+    ENTER();
+    MMRESULT r;
+    rm_stream *st = our_stream(h);
+    if (st) {
+        if (!t || sz < sizeof(MMTIME)) r = MMSYSERR_INVALPARAM;
+        else {
+            EnterCriticalSection(&st->cs);
+            double now = stream_now(st);
+            if (t->wType == TIME_TICKS) {
+                /* the last event's tick plus the ticks elapsed since it */
+                double tu = tick_us(st);
+                t->u.ticks = st->ticks + (now > st->last_us ? (DWORD)((now - st->last_us) / tu) : 0);
+            } else { t->wType = TIME_MS; t->u.ms = (DWORD)(now / 1000.0); }
+            LeaveCriticalSection(&st->cs);
+            r = 0;
+        }
+    } else r = s_pos(h, t, sz);
+    LEAVE();
     if (g_cfg.log_level >= 3) TRACE("midi: %smidiStreamPosition(%p) -> %u", IND, (void *)h, r);
     return r;
 }
