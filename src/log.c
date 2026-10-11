@@ -20,12 +20,15 @@ void rl_log_init(void)
         HANDLE m = CreateMutexA(NULL, FALSE, name);
         int second = m && GetLastError() == ERROR_ALREADY_EXISTS;
         s_log = fopen(g_cfg.log_file, second ? "a" : "w");
+        /* buffered: the 3D and call logs run to thousands of lines a second, often from inside the device lock, and a
+         * write per line (a syscall each, slow under Wine) stalled the game thread and the mixer.  Lines are flushed
+         * at most every 100 ms; info and crash lines (levels 0 and 1) are flushed at once. */
+        if (s_log) setvbuf(s_log, NULL, _IOFBF, 1 << 16);
     }
 }
 
 void rl_log(int level, const char *fmt, ...)
 {
-    (void)level;
     if (!s_inited || !s_log) return;
     char buf[1024];
     va_list ap;
@@ -38,6 +41,16 @@ void rl_log(int level, const char *fmt, ...)
     EnterCriticalSection(&s_log_cs);
     fprintf(s_log, "[%8lu %04lx] %s\n", (unsigned long)GetTickCount(),
             (unsigned long)GetCurrentThreadId(), buf);
+    static DWORD last;
+    DWORD now = GetTickCount();
+    if (level <= 1 || now - last >= 100) { fflush(s_log); last = now; }
+    LeaveCriticalSection(&s_log_cs);
+}
+
+void rl_log_flush(void)
+{
+    if (!s_inited || !s_log) return;
+    EnterCriticalSection(&s_log_cs);
     fflush(s_log);
     LeaveCriticalSection(&s_log_cs);
 }

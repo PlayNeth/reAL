@@ -50,6 +50,7 @@ void rl_config_load(void);
 
 /* ---------------- logging ---------------- */
 void rl_log_init(void);
+void rl_log_flush(void);
 void rl_crash_logger(void);
 void *rl_hotpatch(void *fn, void *repl, const char *name);   /* returns a pointer that runs the original */
 void rl_midi_hook(int can_load);
@@ -57,8 +58,8 @@ void rl_log(int level, const char *fmt, ...);
 #define LOG_INFO(...)  rl_log(1, __VA_ARGS__)
 #define LOG_CALL(...)  do { if (g_cfg.log_level >= 2) rl_log(2, __VA_ARGS__); } while (0)
 #define LOG_TRACE(...) do { if (g_cfg.log_level >= 3) rl_log(3, __VA_ARGS__); } while (0)
-#define LOG_3D(...)    do { if (g_cfg.log_3d) rl_log(0, __VA_ARGS__); } while (0)
-#define LOG_EAX(...)   do { if (g_cfg.log_eax) rl_log(0, __VA_ARGS__); } while (0)
+#define LOG_3D(...)    do { if (g_cfg.log_3d) rl_log(3, __VA_ARGS__); } while (0)
+#define LOG_EAX(...)   do { if (g_cfg.log_eax) rl_log(3, __VA_ARGS__); } while (0)
 const char *rl_guid_str(const GUID *g, char buf[64]);
 
 /* ---------------- real dsound forwarding ---------------- */
