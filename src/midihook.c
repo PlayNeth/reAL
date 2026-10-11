@@ -53,11 +53,12 @@ static rm_midiout *ours(HMIDIOUT h)
     return NULL;
 }
 
+static int s_host_failed;     /* don't retry on every message; midiOutOpen tries again */
 static dm_host *midi_host(void)
 {
-    if (s_host) return s_host;
+    if (s_host || s_host_failed) return s_host;
     s_host = dm_host_new(g_cfg.midi_rate, 64, 1);
-    if (!s_host) { LOG_INFO("midi: cannot start the synth"); return NULL; }
+    if (!s_host) { s_host_failed = 1; LOG_INFO("midi: cannot start the synth (no audio device?)"); return NULL; }
     dm_host_set_reverb(s_host, g_cfg.midi_reverb);
     const char *gm = dm_gm_dls_path();
     dm_collection *c = dm_collection_from_file(gm, 1);
@@ -168,7 +169,7 @@ static MMRESULT WINAPI h_open(LPHMIDIOUT ph, UINT id, DWORD_PTR cb, DWORD_PTR in
             EnterCriticalSection(&s_mcs);
             for (int i = 0; i < 16; i++) if (!s_outs[i]) { s_outs[i] = o; r = 0; break; }
             LeaveCriticalSection(&s_mcs);
-            if (!r) { *ph = (HMIDIOUT)o; midi_host(); callback(o, MOM_OPEN, 0); }
+            if (!r) { *ph = (HMIDIOUT)o; s_host_failed = 0; midi_host(); callback(o, MOM_OPEN, 0); }
             else free(o);
         } else { free(o); r = MMSYSERR_INVALPARAM; }
         LOG_INFO("midi: midiOutOpen(%d) -> reAL-Music GM Synth (%u)", (int)id, r);

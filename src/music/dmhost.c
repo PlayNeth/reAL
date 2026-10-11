@@ -333,6 +333,7 @@ static struct { char path[MAX_PATH]; dm_collection *c; } s_coll[128];
 
 static BOOL CALLBACK cinit(PINIT_ONCE o, PVOID p, PVOID *c) { (void)o; (void)p; (void)c; InitializeCriticalSection(&s_ccs); return TRUE; }
 
+static HANDLE open_file(const char *path);
 dm_collection *dm_collection_from_file(const char *path, int gm)
 {
     InitOnceExecuteOnce(&s_cinit, cinit, NULL, NULL);
@@ -343,8 +344,11 @@ dm_collection *dm_collection_from_file(const char *path, int gm)
     for (int i = 0; i < 128; i++)
         if (s_coll[i].c && !strcmp(s_coll[i].path, full)) { LeaveCriticalSection(&s_ccs); return s_coll[i].c; }
     dm_collection *c = NULL;
-    HANDLE f = CreateFileA(full, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    HANDLE f = open_file(full);
+    DWORD err = f == INVALID_HANDLE_VALUE ? GetLastError() : 0;
+    int parsed = 0;
     if (f != INVALID_HANDLE_VALUE) {
+        parsed = 1;
         DWORD size = GetFileSize(f, NULL), got = 0;
         void *b = malloc(size ? size : 1);
         if (b && ReadFile(f, b, size, &got, NULL) && got == size) c = dls_load(b, size, gm);
@@ -354,17 +358,63 @@ dm_collection *dm_collection_from_file(const char *path, int gm)
     if (c) {
         for (int i = 0; i < 128; i++) if (!s_coll[i].c) { lstrcpynA(s_coll[i].path, full, MAX_PATH); s_coll[i].c = c; break; }
         LOG_INFO("music: collection %s (%d instruments)", full, dls_count(c));
-    } else LOG_INFO("music: cannot load collection %s", full);
+    } else if (parsed) LOG_INFO("music: %s is not a DLS collection reAL can read", full);
+    else LOG_INFO("music: cannot open collection %s (error %lu)", full, (unsigned long)err);
     LeaveCriticalSection(&s_ccs);
     return c;
 }
 
+/* CreateFile, retried with WOW64 file system redirection off: a 32-bit game asking for system32\... is sent to
+ * syswow64\... (on Windows and in 64-bit Wine prefixes), where gm.dls may be missing */
+static HANDLE open_file(const char *path)
+{
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f != INVALID_HANDLE_VALUE) return f;
+    BOOL (WINAPI *dis)(PVOID *) = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "Wow64DisableWow64FsRedirection");
+    BOOL (WINAPI *rev)(PVOID) = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "Wow64RevertWow64FsRedirection");
+    PVOID old;
+    if (dis && rev && dis(&old)) {
+        f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        rev(old);
+    }
+    return f;
+}
+
+static int file_exists(const char *path)
+{
+    HANDLE f = open_file(path);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    CloseHandle(f);
+    return 1;
+}
+
+static void unquote(char *d, const char *s, int n)
+{
+    while (*s == ' ' || *s == '"') s++;
+    lstrcpynA(d, s, n);
+    for (int l = lstrlenA(d); l > 0 && (d[l - 1] == '"' || d[l - 1] == ' '); l--) d[l - 1] = 0;
+}
+
+/* gm.dls: gmdls= (absolute, or relative to the game's folder), else DirectMusic's own lookup (HKLM\Software\
+ * Microsoft\DirectMusic GMFilePath, system32\drivers\gm.dls), else the 64-bit system32 (Sysnative) and gm.dls next
+ * to the game or to reAL.  Every candidate tried is logged the first time. */
 const char *dm_gm_dls_path(void)
 {
     static char path[MAX_PATH];
-    if (g_cfg.gm_dls[0]) return g_cfg.gm_dls;
     if (path[0]) return path;
-    /* DirectMusic's own: HKLM\Software\Microsoft\DirectMusic GMFilePath, else system32\drivers\gm.dls */
+    char cand[8][MAX_PATH], tmp[MAX_PATH];
+    int n = 0;
+    if (g_cfg.gm_dls[0]) {
+        unquote(tmp, g_cfg.gm_dls, MAX_PATH);
+        if (tmp[0] && (tmp[1] == ':' || (tmp[0] == '\\' && tmp[1] == '\\'))) lstrcpynA(cand[n++], tmp, MAX_PATH);
+        else {
+            char exe[MAX_PATH];
+            GetModuleFileNameA(NULL, exe, MAX_PATH);
+            char *sl = strrchr(exe, '\\');
+            if (sl) sl[1] = 0;
+            snprintf(cand[n++], MAX_PATH, "%s%s", exe, tmp);
+        }
+    }
     HKEY k;
     char raw[MAX_PATH] = "";
     DWORD sz = sizeof(raw), type = 0;
@@ -372,11 +422,23 @@ const char *dm_gm_dls_path(void)
         if (RegQueryValueExA(k, "GMFilePath", NULL, &type, (BYTE *)raw, &sz) || (type != REG_SZ && type != REG_EXPAND_SZ)) raw[0] = 0;
         RegCloseKey(k);
     }
-    if (raw[0]) ExpandEnvironmentStringsA(raw, path, MAX_PATH);
-    if (!path[0] || GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
-        char sys[MAX_PATH];
-        GetSystemDirectoryA(sys, MAX_PATH);
-        snprintf(path, MAX_PATH, "%s\\drivers\\gm.dls", sys);
+    if (raw[0]) { ExpandEnvironmentStringsA(raw, tmp, MAX_PATH); unquote(cand[n++], tmp, MAX_PATH); }
+    char sys[MAX_PATH], win[MAX_PATH];
+    GetSystemDirectoryA(sys, MAX_PATH);
+    GetWindowsDirectoryA(win, MAX_PATH);
+    snprintf(cand[n++], MAX_PATH, "%s\\drivers\\gm.dls", sys);
+    snprintf(cand[n++], MAX_PATH, "%s\\Sysnative\\drivers\\gm.dls", win);
+    snprintf(cand[n++], MAX_PATH, "%s\\SysWOW64\\drivers\\gm.dls", win);
+    GetModuleFileNameA(NULL, tmp, MAX_PATH);
+    { char *sl = strrchr(tmp, '\\'); if (sl) { lstrcpyA(sl + 1, "gm.dls"); lstrcpynA(cand[n++], tmp, MAX_PATH); } }
+    GetModuleFileNameA(g_self, tmp, MAX_PATH);
+    { char *sl = strrchr(tmp, '\\'); if (sl) { lstrcpyA(sl + 1, "gm.dls"); lstrcpynA(cand[n++], tmp, MAX_PATH); } }
+    for (int i = 0; i < n; i++) {
+        int ok = file_exists(cand[i]);
+        LOG_INFO("music: gm.dls candidate %s: %s", cand[i], ok ? "found" : "not found");
+        if (ok) { lstrcpynA(path, cand[i], MAX_PATH); return path; }
     }
+    lstrcpynA(path, cand[0], MAX_PATH);
+    LOG_INFO("music: no gm.dls found; set gmdls= in reAL.ini to a DLS file");
     return path;
 }
