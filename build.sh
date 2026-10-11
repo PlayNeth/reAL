@@ -80,6 +80,7 @@ $CC -O1 -DNO_DSOUND -o build/dmplay_nods.exe tests/dmplay.c -lole32 -luuid -ldxg
 $CC -O1 -o build/notiftest.exe tests/notiftest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/aptest.exe tests/aptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/dopptest.exe tests/dopptest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -o build/comtest.exe tests/comtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound

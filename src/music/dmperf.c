@@ -808,6 +808,24 @@ int dm_perf_assign_block(dm_perf *pf, uint32_t block, int port, uint32_t group)
     return DM_OK;
 }
 
+/* PChannelInfo 7730672d / 773065ce: any PChannel in an assigned block (used or not) */
+int dm_perf_pchannel_info(dm_perf *pf, uint32_t pch, int *port, uint32_t *group, uint32_t *chan)
+{
+    if (!pf->nports) return DMUS_E_NOT_INIT;
+    pchentry *e = pch_lookup(pf, pch);
+    if (!e) return DM_E_INVALIDARG;
+    *port = (int)e->port; *group = e->group; *chan = e->chan;
+    return DM_OK;
+}
+
+/* AdjustTime 773053a5: +-1 s added to the reference time of the tempo map */
+int dm_perf_adjust_time(dm_perf *pf, rtime_t rt)
+{
+    if (rt < -10000000 || rt > 10000000) return DM_E_INVALIDARG;
+    pf->adjust += rt;
+    return DM_OK;
+}
+
 static int map_pch(dm_perf *pf, uint32_t pch, uint32_t *portidx, uint32_t *group, uint32_t *chan, int16_t *transpose)
 {
     if (!pf->nports) return DMUS_E_NOT_INIT;

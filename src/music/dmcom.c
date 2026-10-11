@@ -686,7 +686,15 @@ static HRESULT WINAPI st_getstart(IDirectMusicSegmentState8 *i, MUSIC_TIME *t)
     dm_segstate_start_time(sst(i)->ss, (mtime_t *)t);
     return S_OK;
 }
-static HRESULT WINAPI st_getseek(IDirectMusicSegmentState8 *i, MUSIC_TIME *t) { return rm_notimpl(__func__); }
+static HRESULT WINAPI st_getseek(IDirectMusicSegmentState8 *i, MUSIC_TIME *t)
+{
+    rm_state *s = sst(i);
+    if (!t || IsBadWritePtr(t, sizeof(*t))) return E_POINTER;
+    if (s->perf->host) dm_host_lock(s->perf->host);
+    *t = dm_segstate_seek(s->ss);
+    if (s->perf->host) dm_host_unlock(s->perf->host);
+    return S_OK;
+}
 static HRESULT WINAPI st_getstartpoint(IDirectMusicSegmentState8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; *t = sst(i)->seg && sst(i)->seg->seg ? sst(i)->seg->seg->playstart : 0; return S_OK; }
 static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off) { return S_OK; }
 static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
@@ -945,7 +953,22 @@ static HRESULT WINAPI pf_stop(IDirectMusicPerformance8 *i, IDirectMusicSegment *
     LOG_CALL("music: Performance::Stop(%p, %p, %ld) -> %08x", (void *)s, (void *)st, (long)t, hr);
     return hr;
 }
-static HRESULT WINAPI pf_getsegstate(IDirectMusicPerformance8 *i, IDirectMusicSegmentState **o, MUSIC_TIME t) { if (o) *o = NULL; return DMUS_E_NOT_FOUND; }
+static IUnknown *state_object(rm_perf *p, dm_segstate *ss);
+/* 77304d68: the primary segment state at music time t */
+static HRESULT WINAPI pf_getsegstate(IDirectMusicPerformance8 *i, IDirectMusicSegmentState **o, MUSIC_TIME t)
+{
+    rm_perf *p = prf(i);
+    if (!o || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_FOUND;
+    IUnknown *u = NULL;
+    dm_host_lock(p->host);
+    dm_segstate *ss = dm_perf_get_segstate(dm_host_perf(p->host), t);
+    if (ss) u = state_object(p, ss);
+    dm_host_unlock(p->host);
+    if (!u) return DMUS_E_NOT_FOUND;
+    *o = (IDirectMusicSegmentState *)u;
+    return S_OK;
+}
 static HRESULT WINAPI pf_setprepare(IDirectMusicPerformance8 *i, DWORD ms) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_set_prepare_time(dm_host_perf(p->host), ms)); return S_OK; }
 static HRESULT WINAPI pf_getprepare(IDirectMusicPerformance8 *i, DWORD *ms) { rm_perf *p = prf(i); if (!ms) return E_POINTER; PERF_LOCKED(p, *ms = dm_perf_get_prepare_time(dm_host_perf(p->host))); return S_OK; }
 static HRESULT WINAPI pf_setbumper(IDirectMusicPerformance8 *i, DWORD ms) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_set_bumper_length(dm_host_perf(p->host), ms)); return S_OK; }
@@ -1102,7 +1125,21 @@ static HRESULT WINAPI pf_assignpch(IDirectMusicPerformance8 *i, DWORD pch, IDire
     PERF_LOCKED(p, hr = dm_perf_assign_pchannel(dm_host_perf(p->host), pch, 0, g, c));
     return hr;
 }
-static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirectMusicPort **port, DWORD *g, DWORD *c) { return rm_notimpl(__func__); }
+/* 7730672d: reAL-Music has no IDirectMusicPort objects, so *port comes back NULL */
+static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirectMusicPort **port, DWORD *g, DWORD *c)
+{
+    rm_perf *p = prf(i);
+    if ((port && IsBadWritePtr(port, sizeof(*port))) || (g && IsBadWritePtr(g, sizeof(*g))) || (c && IsBadWritePtr(c, sizeof(*c))))
+        return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    int idx = 0, hr; uint32_t grp = 0, ch = 0;
+    PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch));
+    if (hr < 0) return E_INVALIDARG;
+    if (port) *port = NULL;
+    if (g) *g = grp;
+    if (c) *c = ch;
+    return S_OK;
+}
 static HRESULT WINAPI pf_downloadinst(IDirectMusicPerformance8 *i, IDirectMusicInstrument *in, DWORD pch, IDirectMusicDownloadedInstrument **d,
                                       DMUS_NOTERANGE *r, DWORD n, IDirectMusicPort **port, DWORD *g, DWORD *c) { return rm_notimpl(__func__); }
 static HRESULT WINAPI pf_invalidate(IDirectMusicPerformance8 *i, MUSIC_TIME t, DWORD f) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_invalidate(dm_host_perf(p->host), t, f)); return S_OK; }
@@ -1129,13 +1166,54 @@ static HRESULT WINAPI pf_setglobal(IDirectMusicPerformance8 *i, REFGUID g, void 
 }
 static HRESULT WINAPI pf_getlatency(IDirectMusicPerformance8 *i, REFERENCE_TIME *t) { rm_perf *p = prf(i); if (!t) return E_POINTER; PERF_LOCKED(p, *t = dm_perf_latency_time(dm_host_perf(p->host))); return S_OK; }
 static HRESULT WINAPI pf_getqueue(IDirectMusicPerformance8 *i, REFERENCE_TIME *t) { rm_perf *p = prf(i); if (!t) return E_POINTER; PERF_LOCKED(p, *t = dm_perf_queue_time(dm_host_perf(p->host))); return S_OK; }
-static HRESULT WINAPI pf_adjust(IDirectMusicPerformance8 *i, REFERENCE_TIME t) { return rm_notimpl(__func__); }
+static HRESULT WINAPI pf_adjust(IDirectMusicPerformance8 *i, REFERENCE_TIME t)
+{
+    rm_perf *p = prf(i);
+    if (t < -10000000 || t > 10000000) return E_INVALIDARG;
+    if (!p->host) return S_OK;
+    int hr;
+    PERF_LOCKED(p, hr = dm_perf_adjust_time(dm_host_perf(p->host), t));
+    return hr;
+}
 static HRESULT WINAPI pf_closedown_m(IDirectMusicPerformance8 *i) { LOG_CALL("music: Performance::CloseDown"); pf_closedown(prf(i)); return S_OK; }
 static HRESULT WINAPI pf_resolved(IDirectMusicPerformance8 *i, REFERENCE_TIME t, REFERENCE_TIME *o, DWORD f) { if (!o) return E_POINTER; *o = t; return S_OK; }
 static HRESULT WINAPI pf_midi2music(IDirectMusicPerformance8 *i, BYTE v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, WORD *o) { return rm_notimpl(__func__); }
 static HRESULT WINAPI pf_music2midi(IDirectMusicPerformance8 *i, WORD v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, BYTE *o) { return rm_notimpl(__func__); }
-static HRESULT WINAPI pf_time2rhythm(IDirectMusicPerformance8 *i, MUSIC_TIME t, DMUS_TIMESIGNATURE *ts, WORD *m, BYTE *b, BYTE *g, short *o) { return rm_notimpl(__func__); }
-static HRESULT WINAPI pf_rhythm2time(IDirectMusicPerformance8 *i, WORD m, BYTE b, BYTE g, short o, DMUS_TIMESIGNATURE *ts, MUSIC_TIME *t) { return rm_notimpl(__func__); }
+/* TimeToRhythm 7730897b / RhythmToTime 77308a97: measure, beat, grid and offset under a time signature (a beat of 0
+ * counts as a quarter, 0 grids as 256).  Microsoft divides by zero on 0 beats per measure; that is refused here. */
+static void ts_units(const DMUS_TIMESIGNATURE *ts, int *beat, int *grid)
+{
+    *beat = ts->bBeat ? 0xc00 / ts->bBeat : 0x300;
+    *grid = *beat / (ts->wGridsPerBeat ? ts->wGridsPerBeat : 0x100);
+}
+static HRESULT WINAPI pf_time2rhythm(IDirectMusicPerformance8 *i, MUSIC_TIME t, DMUS_TIMESIGNATURE *ts, WORD *m, BYTE *b, BYTE *g, short *o)
+{
+    if (IsBadReadPtr(ts, 8) || IsBadWritePtr(m, 2) || IsBadWritePtr(b, 1) || IsBadWritePtr(g, 1) || IsBadWritePtr(o, 2)) return E_POINTER;
+    int beat, grid;
+    ts_units(ts, &beat, &grid);
+    if (!ts->bBeatsPerMeasure || !grid) return E_INVALIDARG;
+    int bar = ts->bBeatsPerMeasure * beat, rel = t - ts->mtTime, inbar = rel % bar, inbeat = inbar % beat;
+    *m = (WORD)(rel / bar);
+    *b = (BYTE)(inbar / beat);
+    *g = (BYTE)(inbeat / grid);
+    *o = (short)(inbeat % grid);
+    if (grid >> 1 < *o) {               /* more than half a grid: the next grid, negative offset */
+        *o = (short)(*o - grid);
+        if (++*g == ts->wGridsPerBeat) {
+            *g = 0;
+            if (++*b == ts->bBeatsPerMeasure) { *b = 0; ++*m; }
+        }
+    }
+    return S_OK;
+}
+static HRESULT WINAPI pf_rhythm2time(IDirectMusicPerformance8 *i, WORD m, BYTE b, BYTE g, short o, DMUS_TIMESIGNATURE *ts, MUSIC_TIME *t)
+{
+    if (IsBadReadPtr(ts, 8) || IsBadWritePtr(t, 4)) return E_POINTER;
+    int beat, grid;
+    ts_units(ts, &beat, &grid);
+    *t = (MUSIC_TIME)((uint32_t)g * (uint32_t)grid + (uint32_t)m * ts->bBeatsPerMeasure * (uint32_t)beat + (uint32_t)b * beat + o + ts->mtTime);
+    return S_OK;
+}
 static HRESULT WINAPI pf_createstdpath(IDirectMusicPerformance8 *i, DWORD type, DWORD npch, BOOL act, IDirectMusicAudioPath **out);
 static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **pdm, IDirectSound **pds, HWND w, DWORD type, DWORD npch,
                                    DWORD flags, DMUS_AUDIOPARAMS *params)
@@ -1232,7 +1310,18 @@ static HRESULT WINAPI pf_stopex(IDirectMusicPerformance8 *i, IUnknown *obj, __in
     LOG_CALL("music: Performance::StopEx(%p) -> %08x", (void *)obj, hr);
     return hr;
 }
-static HRESULT WINAPI pf_clonepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *s, DMUS_PMSG **d) { return rm_notimpl(__func__); }
+/* 773056f8: AllocPMsg(dwSize), a copy, and a reference on each interface in it */
+static HRESULT WINAPI pf_clonepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *s, DMUS_PMSG **d)
+{
+    if (!d || !s) return E_POINTER;
+    HRESULT hr = IDirectMusicPerformance8_AllocPMsg(i, s->dwSize, d);
+    if (FAILED(hr)) return hr;
+    memcpy(*d, s, s->dwSize);
+    if (s->punkUser) IUnknown_AddRef(s->punkUser);
+    if (s->pTool) IDirectMusicTool_AddRef(s->pTool);
+    if (s->pGraph) IDirectMusicGraph_AddRef(s->pGraph);
+    return S_OK;
+}
 static HRESULT WINAPI pf_createpath(IDirectMusicPerformance8 *i, IUnknown *cfg, BOOL act, IDirectMusicAudioPath **out)
 {
     LOG_INFO("music: CreateAudioPath from a configuration: using a standard stereo + reverb path");

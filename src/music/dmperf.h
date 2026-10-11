@@ -94,6 +94,10 @@ void dm_segstate_unref(dm_segstate *ss);
 void **dm_segstate_wrapper(dm_segstate *ss);
 dm_segment *dm_segstate_segment(dm_segstate *ss);   /* NULL once the state has left the performance */
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);
+mtime_t dm_segstate_seek(dm_segstate *ss);
+dm_segstate *dm_perf_get_segstate(dm_perf *pf, mtime_t t);
+int dm_perf_pchannel_info(dm_perf *pf, uint32_t pch, int *port, uint32_t *group, uint32_t *chan);
+int dm_perf_adjust_time(dm_perf *pf, rtime_t rt);
 /* instrument download for a segment's band tracks (IDirectMusicSegment::Download / Unload) */
 int dm_segment_download(dm_perf *pf, dm_segment *seg);
 int dm_segment_unload(dm_perf *pf, dm_segment *seg);

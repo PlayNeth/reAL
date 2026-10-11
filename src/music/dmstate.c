@@ -64,6 +64,33 @@ void **dm_segstate_wrapper(dm_segstate *ss) { return &ss->wrapper; }
 dm_segment *dm_segstate_segment(dm_segstate *ss) { return ss->seg; }
 
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt) { *mt = ss->mtstart; return DM_OK; }
+mtime_t dm_segstate_seek(dm_segstate *ss) { return ss->segpos; }           /* GetSeek 77315f67 (+0x6c) */
+
+/* 773156d6: perf time t in the state's own time, unrolling loops; nonzero when outside the segment */
+static int ss_outside(const dm_segstate *s, mtime_t t)
+{
+    mtime_t pos = t - s->mtstart + s->startpoint, span = s->loopend - s->loopstart;
+    for (uint32_t k = 0; s->loopend <= pos && k < s->repeats && span > 0; k++) pos -= span;   /* span: guard added */
+    return pos < 0 || s->length <= pos;
+}
+
+/* GetSegmentState 77304d68 / 77304c92: the primary segment state playing at music time t.  Among the finished
+ * ones (list 6), the first that spans t, else the last that started by t; a playing one (list 3, then the queued
+ * list 0) that has t inside it wins. */
+dm_segstate *dm_perf_get_segstate(dm_perf *pf, mtime_t t)
+{
+    dm_segstate *found = NULL;
+    for (dm_segstate *s = pf->lists[6]; s; s = s->lnext) {
+        if (t < s->mtstart) continue;
+        found = s;
+        if (!(s->mtlast < t)) break;
+    }
+    for (dm_segstate *s = pf->lists[3]; s; s = s->lnext) if (!ss_outside(s, t)) return s;
+    if (found) return found;
+    for (dm_segstate *s = pf->lists[0]; s; s = s->lnext) if (!ss_outside(s, t)) return s;
+    return NULL;
+}
+
 
 /* 77311cea + 77315351 */
 static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags, dm_audiopath *ap)
