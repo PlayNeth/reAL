@@ -102,6 +102,7 @@ struct dm_pmsg {
     uint32_t voice;         /* +0x2c */
     uint32_t group;         /* +0x30 */
     void *user;             /* +0x34 punkUser (a segment state for notifications) */
+    int userref;            /* user holds a reference (released when the message is freed) */
     /* NOTE */
     mtime_t n_dur;          /* +0x38 */
     uint16_t n_musicval;    /* +0x3c */
@@ -190,7 +191,11 @@ typedef struct dm_track {
     dm_guid clsid;
     uint32_t position, group, config, priority;
     void *data;
+    int notify;             /* AddNotificationType accepted (time signature track: GUID_NOTIFICATION_MEASUREANDBEAT) */
 } dm_track;
+
+/* a segment's notification types (dmime 7731322f): fromperf = added because the performance has it */
+typedef struct { dm_guid g; int fromperf; } dm_ntype;
 
 typedef struct dm_segment {
     int refs;
@@ -201,7 +206,21 @@ typedef struct dm_segment {
     uint32_t *pchs; int npchs;
     uint32_t version;
     char name[64];
+    dm_ntype *ntypes; int nntypes;
+    void *wrapper;          /* the COM object (weak) */
 } dm_segment;
+
+/* notification types (dmusici.h) */
+static const dm_guid GUID_NOTIFICATION_SEGMENT_ = { 0xd2ac2899, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid GUID_NOTIFICATION_MEASUREANDBEAT_ = { 0xd2ac289a, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid GUID_NOTIFICATION_PERFORMANCE_ = { 0x81f75bc5, 0x4e5d, 0x11d2, { 0xbc, 0xc7, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb } };
+/* DMUS_NOTIFICATION_* options */
+enum { NOTIF_SEGSTART = 0, NOTIF_SEGEND, NOTIF_SEGALMOSTEND, NOTIF_SEGLOOP, NOTIF_SEGABORT };
+enum { NOTIF_MUSICSTARTED = 0, NOTIF_MUSICSTOPPED, NOTIF_MUSICALMOSTEND };
+/* IDirectMusicSegment::AddNotificationType / RemoveNotificationType (fromperf: on behalf of the performance) */
+int dm_segment_add_notification(dm_segment *s, const dm_guid *g, int fromperf);
+int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf);
+int dm_segment_has_notification(const dm_segment *s, const dm_guid *g);
 
 /* segment loading: resolve a DLS reference (DMRF) of a band instrument; NULL guid/file means the default GM set */
 typedef dm_collection *(*dm_getcoll_fn)(void *ctx, const dm_guid *guid, const char *file);

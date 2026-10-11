@@ -77,6 +77,11 @@ int dm_perf_stop(dm_perf *pf, dm_segment *seg, dm_segstate *ss, mtime_t mt, uint
 int dm_perf_is_playing(dm_perf *pf, dm_segment *seg, dm_segstate *ss);
 void dm_perf_get_time(dm_perf *pf, rtime_t *rt, mtime_t *mt);
 void dm_segstate_release(dm_segstate *ss);
+/* references for other holders (the COM layer's wrapper object, kept in *dm_segstate_wrapper()) */
+void dm_segstate_addref(dm_segstate *ss);
+void dm_segstate_unref(dm_segstate *ss);
+void **dm_segstate_wrapper(dm_segstate *ss);
+dm_segment *dm_segstate_segment(dm_segstate *ss);   /* NULL once the state has left the performance */
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);
 /* instrument download for a segment's band tracks (IDirectMusicSegment::Download / Unload) */
 int dm_segment_download(dm_perf *pf, dm_segment *seg);
@@ -98,6 +103,16 @@ int dm_perf_stop_audiopath(dm_perf *pf, dm_audiopath *ap, mtime_t mt, uint32_t f
 void dm_perf_set_app_precision(dm_perf *pf, int extended);
 /* fixes of the original's flaws (off by default, for comparison against it) */
 #define DM_FIX_FIRST_TEMPO 1    /* a primary segment started from silence plays its first piece at its own tempo */
+#define DM_FIX_MEASURE_NUMBER 2 /* measure/beat notifications count measures across time signature changes (the
+                                 * original divides the time by the current measure length, so the count jumps) */
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
+
+/* notifications (AddNotificationType, RemoveNotificationType, SetNotificationHandle, GetNotificationPMsg, FreePMsg).
+ * A notification's user is its segment state (or NULL); dm_perf_free_pmsg releases it. */
+int dm_perf_add_notification_type(dm_perf *pf, const dm_guid *g);
+int dm_perf_remove_notification_type(dm_perf *pf, const dm_guid *g);
+void dm_perf_set_notification_handle(dm_perf *pf, void (*cb)(void *ctx), void *ctx, rtime_t rtmin);
+dm_pmsg *dm_perf_get_notification(dm_perf *pf);
+int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p);
 
 #endif

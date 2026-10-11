@@ -563,6 +563,30 @@ static void dump_tmap(void *perf, const char *when)
     }
 }
 
+/* DMGT_NOTIFY=<file>: request notifications (DMGT_NTYPES letters s/p/m, default all) and log every one delivered:
+ * "<rt> <mt> <type> <option> <field1> <field2> <state> <vtrack>" (as test_perf TP_NOTIFY) */
+static FILE *g_nf;
+static IUnknown *g_nss1, *g_nss2;
+static void drain_notifications(IDirectMusicPerformance8 *perf)
+{
+    DMUS_NOTIFICATION_PMSG *m;
+    while (g_nf && IDirectMusicPerformance8_GetNotificationPMsg(perf, &m) == S_OK) {
+        const char *ty = IsEqualGUID(&m->guidNotificationType, &GUID_NOTIFICATION_SEGMENT) ? "SEGMENT" :
+                         IsEqualGUID(&m->guidNotificationType, &GUID_NOTIFICATION_MEASUREANDBEAT) ? "MEASUREANDBEAT" :
+                         IsEqualGUID(&m->guidNotificationType, &GUID_NOTIFICATION_PERFORMANCE) ? "PERFORMANCE" : "OTHER";
+        const char *us = !m->punkUser ? "-" : m->punkUser == g_nss1 ? "s1" : m->punkUser == g_nss2 ? "s2" : "s?";
+        fprintf(g_nf, "%lld %ld %s %lu %lu %lu %s %lu\n", m->rtTime, m->mtTime, ty, m->dwNotificationOption, m->dwField1,
+                m->dwField2, us, m->dwVirtualTrackID);
+        IDirectMusicPerformance8_FreePMsg(perf, (DMUS_PMSG *)m);
+    }
+}
+static IUnknown *unk_of(void *o)
+{
+    IUnknown *u = NULL;
+    if (o && SUCCEEDED(IUnknown_QueryInterface((IUnknown *)o, &IID_IUnknown, (void **)&u))) IUnknown_Release(u);
+    return u;
+}
+
 static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
 {
     IDirectMusicLoader8 *loader;
@@ -636,9 +660,17 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         }
     }
     g_ev = fopen(out, "w");
+    if (getenv("DMGT_NOTIFY")) {
+        const char *ty = getenv("DMGT_NTYPES") ? getenv("DMGT_NTYPES") : "spm";
+        g_nf = fopen(getenv("DMGT_NOTIFY"), "w");
+        if (strchr(ty, 's')) IDirectMusicPerformance8_AddNotificationType(perf, &GUID_NOTIFICATION_SEGMENT);
+        if (strchr(ty, 'p')) IDirectMusicPerformance8_AddNotificationType(perf, &GUID_NOTIFICATION_PERFORMANCE);
+        if (strchr(ty, 'm')) IDirectMusicPerformance8_AddNotificationType(perf, &GUID_NOTIFICATION_MEASUREANDBEAT);
+    }
     IDirectMusicSegmentState *st;
     if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg, NULL, NULL, flags, 0, &st, NULL, (IUnknown *)apath)))
         die("PlaySegmentEx", hr);
+    g_nss1 = unk_of(st);
     /* DMGT_STOP=<ms>: Stop(segment, state, 0, 0) then StopEx both, as MC2 does; DMGT_NEXT=<ms>:<segment>: then play
      * another segment with the same flags */
     DWORD stop_ms = getenv("DMGT_STOP") ? atoi(getenv("DMGT_STOP")) : 0, next_ms = 0;
@@ -671,10 +703,11 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
             IDirectMusicSegmentState *st2;
             if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg2, NULL, NULL, flags, 0, &st2, NULL, (IUnknown *)apath)))
                 die("PlaySegmentEx 2", hr);
+            g_nss2 = unk_of(st2);
             dump_tmap(perf, "next");
         }
         if (t && t % 1000 == 0) { char w[16]; sprintf(w, "t%lu", t); dump_tmap(perf, w); }
-        if (g_vtime) { v_step(10000); continue; }
+        if (g_vtime) { v_step(10000); drain_notifications(perf); continue; }
         g_now += 10000;
         Sleep(t < 50 ? 5 : (getenv("DMGT_SLEEP") ? atoi(getenv("DMGT_SLEEP")) : 1));
     }
@@ -686,6 +719,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     EnterCriticalSection(&g_evcs);
     fprintf(g_ev, "# start mt %ld rt %lld\n", mt, rt);
     fclose(g_ev); g_ev = NULL;
+    if (g_nf) fclose(g_nf);
     LeaveCriticalSection(&g_evcs);
     fprintf(stderr, "segment start mt %ld rt %lld\n", mt, rt);
     IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);

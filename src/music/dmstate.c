@@ -46,7 +46,22 @@ static void ss_destroy(dm_segstate *ss)
 
 static void ss_unref(dm_segstate *ss) { if (--ss->refs <= 0) ss_destroy(ss); }
 
+/* 77316457: a finished state leaves the performance: its tracks, segment and audiopath go now (a later Stop on it,
+ * or anything else, finds nothing to do); the application's reference keeps the empty object */
+static void ss_shutdown(dm_segstate *ss)
+{
+    for (int i = 0; i < ss->ntr; i++) track_endplay(ss->perf, &ss->tr[i]);
+    free(ss->tr); ss->tr = NULL; ss->ntr = 0;
+    dm_segment_release(ss->seg); ss->seg = NULL;
+    if (ss->audiopath) { dm_audiopath_release(ss->audiopath); ss->audiopath = NULL; }
+    ss_unref(ss);
+}
+
 void dm_segstate_release(dm_segstate *ss) { if (ss && !ss->released) { ss->released = 1; ss_unref(ss); } }
+void dm_segstate_addref(dm_segstate *ss) { ss->refs++; }
+void dm_segstate_unref(dm_segstate *ss) { ss_unref(ss); }
+void **dm_segstate_wrapper(dm_segstate *ss) { return &ss->wrapper; }
+dm_segment *dm_segstate_segment(dm_segstate *ss) { return ss->seg; }
 
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt) { *mt = ss->mtstart; return DM_OK; }
 
@@ -127,6 +142,7 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
     int hr = DM_OK;
     mtime_t n, t, pos;
     if (ss->trackflags & TF_START) {
+        ss_notify(pf, ss, NOTIF_SEGSTART, ss->mtoffset);
         ss->segpos = ss->startpoint;
         ss->rtoffset = M2R(pf, ss->mtoffset) - ss->rtstartpoint;
         ss->rtend = M2R(pf, ss->mtoffset) + ss->rtlength - ss->rtstartpoint;
@@ -150,6 +166,7 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
     n = LIMIT() - ss->segpos;
     if (len < n) n = len;
     if (n < 1) goto end;
+    if (ss->ntr == 0) goto end;
     pos = ss->mtoffset + ss->segpos;
     if (primary_start_after(pf, pos, &t) == 0 && t < pos + n) n = t - pos;
     if (control_start_at(pf, pos, &t) == 0) {
@@ -200,12 +217,19 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
             if (t == pos) ss->trackflags |= TF_DIRTY;
             else if (pos + n < t) n = t - pos;      /* inverted in the original */
         }
+        ss_notify(pf, ss, NOTIF_SEGLOOP, ss->segpos + ss->mtoffset);
         rtdelta = M2R(pf, ss->mtlast + n) - ss->rtlast;
         if (!more) goto out;
     }
 #undef LIMIT
 end:
     hr = DMUS_S_END;
+    {   /* SEGEND at the end, SEGALMOSTEND now (GetTime) */
+        mtime_t now;
+        ss_notify(pf, ss, NOTIF_SEGEND, ss->mtoffset + ss->segpos);
+        dm_perf_get_time(pf, NULL, &now);
+        ss_notify(pf, ss, NOTIF_SEGALMOSTEND, now);
+    }
 out:
     ss->trackflags &= ~TF_DIRTY;
     pf->cfgplaying = 0; pf->ssplaying = NULL;
@@ -233,6 +257,7 @@ static int ss_abort2(dm_perf *pf, dm_segstate *ss, mtime_t mt, int noinv)
     ss->rtlast = M2R(pf, mt);
     if ((!ss->started || mt < ss->mtend) && (ss->mtabort == 0 || mt < ss->mtabort)) {
         ss->mtabort = mt;
+        ss_notify(pf, ss, NOTIF_SEGABORT, mt);
         return 0;
     }
     return 1;
@@ -306,7 +331,7 @@ static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
         if (ss->mtstart < pf->target) {
             ss->started = 1;
             ss_firststart(pf, ss, 0);
-            if (pf->stopped) pf->stopped = 0;
+            if (pf->stopped) { pf->stopped = 0; perf_notify(pf, NOTIF_MUSICSTARTED, ss->mtstart, NULL); }
             if (pf->target - ss->mtlast >= 50) {
                 hr = ss_play(pf, ss, 50);
                 run_early(pf);
@@ -328,10 +353,18 @@ static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
     }
     if (hr == DMUS_S_END || (ss->mtstop != 0 && ss->mtstop <= ss->mtlast)) {
         if (ss->mtstop != 0 && ss->mtstop == ss->mtlast) ss_abort(pf, ss, ss->mtstop - 1);
-        if (k == 3) { list_unlink(pf, 3, ss); list_insert(pf, 6, ss); track_control(pf); }
+        mtime_t last = ss->mtlast;
+        if (k == 3) {
+            list_unlink(pf, 3, ss); list_insert(pf, 6, ss);
+            if (!pf->lists[3] && pf->dxver >= 8) { mtime_t now; dm_perf_get_time(pf, NULL, &now); perf_notify(pf, NOTIF_MUSICALMOSTEND, now, ss); }
+            track_control(pf);
+        }
         else if (k == 4) { list_unlink(pf, 4, ss); list_insert(pf, ss->mtstop == ss->mtlast ? 9 : 7, ss); }
         else { list_unlink(pf, k, ss); list_insert(pf, 8, ss); }
-        if (!pf->lists[3] && !pf->lists[5] && !pf->lists[0] && !pf->lists[2] && !pf->lists[4] && !pf->lists[1]) pf->stopped = 1;
+        if (!pf->lists[3] && !pf->lists[5] && !pf->lists[0] && !pf->lists[2] && !pf->lists[4] && !pf->lists[1]) {
+            pf->stopped = 1;
+            perf_notify(pf, NOTIF_MUSICSTOPPED, last, NULL);
+        }
     }
     pf->inside_c7c8 = 0;
 }
@@ -363,10 +396,13 @@ static void invalidate(dm_perf *pf, mtime_t mt, uint32_t flags)
     if (l && t < l->mtlast) { list_unlink(pf, 6, l); list_insert(pf, 3, l); }
     for (int k = 3; k < 6; k++)
         for (dm_segstate *s = pf->lists[k]; s; s = s->lnext)
-            if (s->started && !(s->segflags & 2) && t < s->mtlast) {
-                if (t < s->mtstart) { s->started = 0; s->mtlast = s->mtstart; }
-                else s->mtlast = t;
-                ss_seek(s, s->mtlast);
+            if (s->started && !(s->segflags & 2)) {
+                if (k == 3 && t <= s->mtstart) ss_notify(pf, s, NOTIF_SEGSTART, s->mtstart);
+                if (t < s->mtlast) {
+                    if (t < s->mtstart) { s->started = 0; s->mtlast = s->mtstart; }
+                    else s->mtlast = t;
+                    ss_seek(s, s->mtlast);
+                }
             }
     if (pf->ops.signal) pf->ops.signal(pf->ctx, DM_THREAD_TRANSPORT);
 }
@@ -542,6 +578,10 @@ int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm
         else { mtime_t m = R2M(pf, q); if (ss->i64start < m) ss->i64start = m; }
     }
     if (out) { ss->refs++; *out = ss; } else ss->released = 1;
+    static const dm_guid null = { 0 };       /* the segment takes the performance's notification types */
+    dm_segment_remove_notification(seg, &null, 1);
+    for (int i = 0; i < pf->nntypes; i++) dm_segment_add_notification(seg, &pf->ntypes[i], 1);
+    drop_musicstopped(pf);
     if (!(flags & SEGF_SECONDARY)) start_primary(pf, ss);
     else start_secondary(pf, ss);
     if (pf->ops.signal) pf->ops.signal(pf->ctx, DM_THREAD_TRANSPORT);
@@ -557,7 +597,12 @@ static void stop_state(dm_perf *pf, dm_segstate *ss, mtime_t mt, int flush)
         ss->mtend = mt + 1;
     }
     tempo_rebuild(pf, ss, mt, 1);
-    int k = list_find(pf, ss);
+    int k = list_find(pf, ss), ab = 0;
+    if (k == 3 && !pf->lists[3]->lnext && pf->dxver >= 8) {       /* the last primary goes */
+        mtime_t now;
+        dm_perf_get_time(pf, NULL, &now);
+        perf_notify(pf, NOTIF_MUSICALMOSTEND, now, ss);
+    }
     if (k >= 3 && k <= 8) {
         rtime_t rt = M2R(pf, mt);
         if (mt <= ss->mtlast) {
@@ -568,17 +613,20 @@ static void stop_state(dm_perf *pf, dm_segstate *ss, mtime_t mt, int flush)
             if (!(ss->flags & SEGF_CONTROL)) { if (!(ss->flags & SEGF_SECONDARY)) flush_queue(pf, 0, &pf->tmap, rt, rt, 0); }
             else invalidate(pf, mt, 0);
         }
-        ss_abort(pf, ss, mt);
+        ab = ss_abort(pf, ss, mt);
         k = list_find(pf, ss);
         if (!(ss->flags & SEGF_CONTROL)) { if (k >= 3 && k <= 5) { list_unlink(pf, k, ss); list_insert(pf, k + 3, ss); } }
         else { list_unlink(pf, k, ss); list_insert(pf, 9, ss); ss_mark_dirty_all(pf); }
     } else if (k >= 0 && k <= 2) {
-        ss_abort(pf, ss, mt);
+        ab = ss_abort(pf, ss, mt);
         list_unlink(pf, k, ss);
         tempo_rebuild(pf, ss, mt, 1);
         list_insert(pf, 9, ss);
     }
-    if (!pf->lists[3] && !pf->lists[5] && !pf->lists[0] && !pf->lists[2] && !pf->lists[4] && !pf->lists[1]) pf->stopped = 1;
+    if (!pf->lists[3] && !pf->lists[5] && !pf->lists[0] && !pf->lists[2] && !pf->lists[4] && !pf->lists[1]) {
+        pf->stopped = 1;
+        if (ab != 1) perf_notify(pf, NOTIF_MUSICSTOPPED, mt, NULL);
+    }
 }
 
 /* Stop 7730e080 (StopEx 77304b26 calls it with the segment or the state): seg and/or ss, mt 0 = as soon as possible */
@@ -698,10 +746,10 @@ uint32_t dm_perf_transport(dm_perf *pf)
     for (int k = 6; k < 10; k++)
         for (dm_segstate *s = pf->lists[k], *nx; s; s = nx) {
             nx = s->lnext;
-            if (s->rtlast < now - 10000000 && !s->inplay) { list_unlink(pf, k, s); ss_unref(s); }
+            if (s->rtlast < now - 10000000 && !s->inplay) { list_unlink(pf, k, s); ss_shutdown(s); }
         }
     dm_pmsg *n;
-    while ((n = pf->notif.head) && n->rt < now - 20000000) { q_pop(&pf->notif); pm_free(pf, n); }
+    while ((n = pf->notif.head) && n->rt < now - pf->notif_min) { q_pop(&pf->notif); pm_free(pf, n); }
     return 100;
 }
 

@@ -382,5 +382,65 @@ void dm_segment_release(dm_segment *s)
 {
     if (!s || --s->refs > 0) return;
     for (int i = 0; i < s->ntracks; i++) free_track(&s->tracks[i]);
-    free(s->tracks); free(s->pchs); free(s);
+    free(s->tracks); free(s->pchs); free(s->ntypes); free(s);
+}
+
+/* ------------------------------------------------------------------ notification types (dmime 77311fd1, 7731322f,
+ * 7731204d); tracks take the ones they generate (77311fff / 77312026: Track::AddNotificationType) */
+static const dm_guid GUID_Null = { 0 };
+
+static int track_add_notification(dm_track *t, const dm_guid *g)
+{
+    if (t->kind == TRK_TIMESIG && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { t->notify = 1; return DM_OK; }   /* 7731d267 */
+    return DM_FALSE;
+}
+static int track_remove_notification(dm_track *t, const dm_guid *g)
+{
+    if (t->kind == TRK_TIMESIG && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { t->notify = 0; return DM_OK; }   /* 7731d2a9 */
+    return DM_FALSE;
+}
+
+static int ntype_find(const dm_segment *s, const dm_guid *g)
+{
+    for (int i = 0; i < s->nntypes; i++) if (guid_eq(&s->ntypes[i].g, g)) return i;
+    return -1;
+}
+
+int dm_segment_has_notification(const dm_segment *s, const dm_guid *g) { return ntype_find(s, g) >= 0; }
+
+int dm_segment_add_notification(dm_segment *s, const dm_guid *g, int fromperf)
+{
+    int i = ntype_find(s, g);
+    if (i >= 0) {
+        if (s->ntypes[i].fromperf == fromperf) return DM_FALSE;
+        s->ntypes[i].fromperf = 0;          /* asked for by both: the application's stays */
+        return DM_OK;
+    }
+    dm_ntype *n = realloc(s->ntypes, (s->nntypes + 1) * sizeof(*n));
+    if (!n) return DM_E_OUTOFMEMORY;
+    s->ntypes = n;
+    s->ntypes[s->nntypes].g = *g; s->ntypes[s->nntypes].fromperf = fromperf;
+    s->nntypes++;
+    for (int t = 0; t < s->ntracks; t++) track_add_notification(&s->tracks[t], g);
+    return DM_OK;
+}
+
+/* GUID_NULL: every type (with fromperf, only the performance's: the application's own stay) */
+int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf)
+{
+    if (guid_eq(g, &GUID_Null)) {
+        int k = 0;
+        for (int i = 0; i < s->nntypes; i++) {
+            if (s->ntypes[i].fromperf == 0 && fromperf) { s->ntypes[k++] = s->ntypes[i]; continue; }
+            for (int t = 0; t < s->ntracks; t++) track_remove_notification(&s->tracks[t], &s->ntypes[i].g);
+        }
+        s->nntypes = k;
+        return DM_OK;
+    }
+    int i = ntype_find(s, g);
+    if (i < 0) return DM_FALSE;
+    memmove(&s->ntypes[i], &s->ntypes[i + 1], (s->nntypes - i - 1) * sizeof(*s->ntypes));
+    s->nntypes--;
+    for (int t = 0; t < s->ntracks; t++) track_remove_notification(&s->tracks[t], g);
+    return DM_OK;
 }

@@ -243,7 +243,7 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     if (!h->syn || !h->dls || !h->rev || !h->dry || !h->wet) { dm_host_free(h); return NULL; }
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
-    if (h->pf) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO);
+    if (h->pf) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER);
     dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload };
     dm_perf_add_port(h->pf, &po, h);
     /* start both buffers in the same mixer period so they stay sample-aligned */

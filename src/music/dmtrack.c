@@ -257,7 +257,53 @@ static int tempo_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
 }
 
 /* ------------------------------------------------------------------ time signature track */
-typedef struct { int cur; mtime_t prevend, lastsig; int active; uint8_t beat, bpm; } tsstate;
+typedef struct { int cur; mtime_t prevend, lastsig; int active; uint8_t beat, bpm; int32_t measbase; } tsstate;
+
+/* the measure number at item i (DM_FIX_MEASURE_NUMBER): every signature starts a new measure; 4/4 before the first */
+static int32_t ts_measure_base(const dm_tstrack *T, int i)
+{
+    int32_t mb = 0;
+    mtime_t last = 0;
+    uint8_t beat = 4, bpm = 4;
+    for (int k = 0; k <= i && k < T->n; k++) {
+        if (T->items[k].mt > last && beat && bpm) {
+            int32_t ml = (int32_t)(0xc00u / beat) * bpm;
+            mb += (T->items[k].mt - last + ml - 1) / ml;
+        }
+        last = T->items[k].mt; beat = T->items[k].beat; bpm = T->items[k].bpm;
+    }
+    return mb;
+}
+
+/* 7731d2eb: GUID_NOTIFICATION_MEASUREANDBEAT on every beat in [from, to) under the signature in effect; dwField1 the
+ * beat in the measure, dwField2 the measure (counted from time 0 with the current signature, as the original) */
+static mtime_t ts_notify(dm_perf *pf, dm_segstate *ss, sstrack *e, tsstate *S, mtime_t from, mtime_t to, mtime_t off)
+{
+    if (!(S->lastsig < to)) return from;
+    if (from < S->lastsig) from = S->lastsig;
+    if (!S->beat || !S->bpm) return to;            /* the original divides by zero */
+    int32_t beatlen = (int32_t)(0xc00u / S->beat);
+    mtime_t d = from - S->lastsig;
+    if (d) d = ((d - 1) / beatlen + 1) * beatlen;
+    mtime_t t = S->lastsig + d;
+    uint8_t beat = (uint8_t)(((t - S->lastsig) / beatlen) % (int32_t)S->bpm);
+    int32_t measure = t / (int32_t)(S->bpm * beatlen);
+    if (pf->fixes & DM_FIX_MEASURE_NUMBER)      /* measures counted across signature changes */
+        measure = S->measbase + (t - S->lastsig) / (int32_t)(S->bpm * beatlen);
+    for (; t < to; t += beatlen) {
+        dm_pmsg *m = pm_alloc(pf, 0x58);
+        if (m) {
+            m->type = PT_NOTIFICATION; m->mt = t + off; m->flags = PF_MUSICTIME | PF_TOOL_ATTIME; m->pch = 0;
+            m->user = ss; m->userref = 1; ss->refs++;
+            m->nf_guid = GUID_NOTIFICATION_MEASUREANDBEAT_; m->nf_option = 0;
+            m->nf_field1 = beat; m->nf_field2 = (uint32_t)measure;
+            m->group = 0xffffffff; m->vpch = e->vid;
+            stamp_send(pf, ss, m);
+        }
+        if (++beat >= S->bpm) { measure++; beat = 0; }
+    }
+    return to;
+}
 
 static int ts_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
 {
@@ -265,6 +311,8 @@ static int ts_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtim
     tsstate *S = e->state;
     if (!S) return DM_OK;
     int seek = flags & TF_SEEK;
+    int notify = e->t->notify && !(flags & TF_NOTIFY_OFF);
+    mtime_t nfrom = start;                      /* notifications from the start as asked (before the -768) */
     if (start == 0 && (flags & TF_START)) start = -768;
     if (seek || S->prevend != start) {        /* 7731d08f */
         if (T->n) {
@@ -281,18 +329,23 @@ static int ts_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtim
         const dm_tsitem *p = &T->items[S->cur];
         if (end <= p->mt) break;
         if (p->mt < start && !seek) break;
-        if (S->active && !(flags & TF_PLAY_OFF)) {
-            dm_pmsg *m = pm_alloc(pf, 0x40);
-            if (m) {
-                m->mt = (p->mt < start ? start : p->mt) + off;
-                m->ts_bpm = p->bpm; m->ts_beat = p->beat; m->ts_grids = p->grids;
-                m->flags |= PF_MUSICTIME; m->vpch = e->vid; m->type = PT_TIMESIG; m->group = 0xffffffff;
-                stamp_send(pf, ss, m);
+        if (S->active) {
+            if (!(flags & TF_PLAY_OFF)) {
+                dm_pmsg *m = pm_alloc(pf, 0x40);
+                if (m) {
+                    m->mt = (p->mt < start ? start : p->mt) + off;
+                    m->ts_bpm = p->bpm; m->ts_beat = p->beat; m->ts_grids = p->grids;
+                    m->flags |= PF_MUSICTIME; m->vpch = e->vid; m->type = PT_TIMESIG; m->group = 0xffffffff;
+                    stamp_send(pf, ss, m);
+                }
             }
+            if (notify && nfrom < p->mt) nfrom = ts_notify(pf, ss, e, S, nfrom, p->mt, off);
         }
+        S->measbase = ts_measure_base(T, S->cur);
         S->beat = p->beat; S->bpm = p->bpm; S->lastsig = p->mt;
         S->cur = S->cur + 1 < T->n ? S->cur + 1 : -1;
     }
+    if (S->active && notify && nfrom < end) ts_notify(pf, ss, e, S, nfrom, end, off);
     return DM_OK;
 }
 

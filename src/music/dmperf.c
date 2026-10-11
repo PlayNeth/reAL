@@ -67,6 +67,7 @@ struct dm_segstate {
     int canstop;                                /* +0x100 */
     int inplay, retire;                         /* +0x104 +0x108 */
     int released;                               /* the application's reference is gone */
+    void *wrapper;                              /* the COM object (weak) */
 };
 
 struct dm_audiopath {
@@ -108,6 +109,9 @@ struct dm_perf {
     int xprec, appxprec;        /* extended precision now / in application threads */
     dm_pmsg *pool;
     uint32_t fixes;             /* DM_FIX_* departures from the original */
+    dm_guid *ntypes; int nntypes;               /* +0x100 AddNotificationType list */
+    rtime_t notif_min;                          /* +0xf8 how long delivered notifications are kept */
+    void (*notify_cb)(void *ctx); void *notify_ctx;     /* +0xf0 the notification event */
 };
 
 static uint32_t g_trackid;                      /* 7732b1b0 */
@@ -138,11 +142,16 @@ static dm_pmsg *pm_alloc(dm_perf *pf, uint32_t size)
     return p;
 }
 
+static void ss_unref(dm_segstate *ss);
+static int guid_same(const dm_guid *a, const dm_guid *b) { return !memcmp(a, b, sizeof(*a)); }
+
 static int pm_free(dm_perf *pf, dm_pmsg *p)
 {
     if ((p->hflags & 0xFFFF0) != HF_MAGIC || (p->hflags & HF_INQUEUE)) return DMUS_E_CANNOT_FREE;
     free(p->sx_data);
     p->sx_data = NULL;
+    if (p->userref && p->user) ss_unref(p->user);       /* FreePMsg releases punkUser */
+    p->user = NULL; p->userref = 0;
     p->hflags = 0xDEAD0;
     p->next = pf->pool;
     pf->pool = p;
@@ -157,6 +166,7 @@ static dm_pmsg *pm_clone(dm_perf *pf, const dm_pmsg *s)
     *p = *s;
     p->next = NULL; p->hflags = hf; p->rtlast = 0;
     if (s->sx_data) { p->sx_data = malloc(s->sx_len); if (p->sx_data) memcpy(p->sx_data, s->sx_data, s->sx_len); }
+    if (p->userref && p->user) ((dm_segstate *)p->user)->refs++;
     return p;
 }
 
@@ -631,12 +641,13 @@ static void tempo_pmsg(dm_perf *pf, dm_pmsg *p)
 /* 77304c92: the primary state playing at mt */
 static dm_segstate *primary_at(dm_perf *pf, mtime_t mt)
 {
-    for (dm_segstate *s = pf->lists[6]; s; s = s->lnext) if (s->mtstart <= mt && mt <= s->mtlast) return s;
-    for (dm_segstate *s = pf->lists[3]; s; s = s->lnext) {
-        mtime_t t = mt, o; uint32_t l;
-        if (s->mtstart <= mt && !ss_fold(s, &t, &o, &l)) return s;
-    }
-    for (dm_segstate *s = pf->lists[0]; s; s = s->lnext) if (s->mtstart <= mt) return s;
+    dm_segstate *r = NULL;
+    mtime_t t, o; uint32_t l;
+    for (dm_segstate *s = pf->lists[6]; s; s = s->lnext) if (s->mtstart <= mt && mt <= s->mtlast) { r = s; break; }
+    /* a playing primary takes precedence over a finished one that ends at mt */
+    for (dm_segstate *s = pf->lists[3]; s; s = s->lnext) { t = mt; if (!ss_fold(s, &t, &o, &l)) return s; }
+    if (r) return r;
+    for (dm_segstate *s = pf->lists[0]; s; s = s->lnext) { t = mt; if (!ss_fold(s, &t, &o, &l)) return s; }
     return NULL;
 }
 
@@ -1199,7 +1210,10 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
     rtime_t rt = p->rt;
     if (pf->horizon > rt + 50000000) {
         switch (p->type) {
-        case PT_NOTIFICATION: break;
+        case PT_NOTIFICATION:   /* late: only MUSICSTOPPED and SEGEND of these two kinds still go out */
+            if (guid_same(&p->nf_guid, &GUID_NOTIFICATION_PERFORMANCE_) && p->nf_option != NOTIF_MUSICSTOPPED) return DMUS_S_FREE;
+            if (guid_same(&p->nf_guid, &GUID_NOTIFICATION_SEGMENT_) && p->nf_option != NOTIF_SEGEND) return DMUS_S_FREE;
+            break;
         case PT_NOTE: if (p->n_flags & NOTEF_NOTEON) return DMUS_S_FREE; break;
         default: return DMUS_S_FREE;
         }
@@ -1233,6 +1247,7 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
         if (!(p->flags & PF_TOOL_ATTIME)) { p->flags = (p->flags & ~0xcu) | PF_TOOL_ATTIME; return DMUS_S_REQUEUE; }
         p->tool = 0;
         q_insert(&pf->notif, p);
+        if (pf->notify_cb) pf->notify_cb(pf->notify_ctx);
         return DM_OK;
     }
     if (p->type == PT_TIMESIG) {
@@ -1453,6 +1468,100 @@ static void run_early(dm_perf *pf)
     }
 }
 
+/* ------------------------------------------------------------------ notifications */
+static int perf_has_ntype(dm_perf *pf, const dm_guid *g)    /* 77305d75 */
+{
+    for (int i = 0; i < pf->nntypes; i++) if (guid_same(&pf->ntypes[i], g)) return 1;
+    return 0;
+}
+
+/* 7730a5d3 AddNotificationType: also to the segment of every state (77305ca3) */
+int dm_perf_add_notification_type(dm_perf *pf, const dm_guid *g)
+{
+    if (perf_has_ntype(pf, g)) return DM_FALSE;
+    dm_guid *n = realloc(pf->ntypes, (pf->nntypes + 1) * sizeof(*n));
+    if (!n) return DM_E_OUTOFMEMORY;
+    pf->ntypes = n;
+    pf->ntypes[pf->nntypes++] = *g;
+    for (int k = 0; k < 9; k++)
+        for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) dm_segment_add_notification(s->seg, g, 1);
+    return DM_OK;
+}
+
+/* 77305da6 RemoveNotificationType (GUID_NULL: all); the segments lose the type too (77305d0c) */
+int dm_perf_remove_notification_type(dm_perf *pf, const dm_guid *g)
+{
+    static const dm_guid null = { 0 };
+    if (guid_same(g, &null)) {
+        while (pf->nntypes) {
+            dm_guid t = pf->ntypes[0];
+            memmove(pf->ntypes, pf->ntypes + 1, (pf->nntypes - 1) * sizeof(*pf->ntypes));
+            pf->nntypes--;
+            for (int k = 0; k < 9; k++)
+                for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) dm_segment_remove_notification(s->seg, &t, 1);
+        }
+        return DM_OK;
+    }
+    int i;
+    for (i = 0; i < pf->nntypes && !guid_same(&pf->ntypes[i], g); i++) ;
+    if (i == pf->nntypes) return DM_FALSE;
+    for (int k = 0; k < 9; k++)
+        for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) dm_segment_remove_notification(s->seg, g, 1);
+    memmove(&pf->ntypes[i], &pf->ntypes[i + 1], (pf->nntypes - i - 1) * sizeof(*pf->ntypes));
+    pf->nntypes--;
+    return DM_OK;
+}
+
+/* 77305bf6 SetNotificationHandle: cb is called (SetEvent) whenever a notification is delivered; rtmin 0 keeps the
+ * current retention (default 2 s) */
+void dm_perf_set_notification_handle(dm_perf *pf, void (*cb)(void *ctx), void *ctx, rtime_t rtmin)
+{
+    pf->notify_cb = cb; pf->notify_ctx = ctx;
+    if (rtmin) pf->notif_min = rtmin;
+}
+
+/* 77305c42 GetNotificationPMsg: the oldest delivered notification (the caller frees it), NULL if none */
+dm_pmsg *dm_perf_get_notification(dm_perf *pf) { return q_pop(&pf->notif); }
+
+int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p) { return p ? pm_free(pf, p) : DM_E_POINTER; }
+
+/* 77309199: a GUID_NOTIFICATION_PERFORMANCE message at mt (through the performance's graph) */
+static void perf_notify(dm_perf *pf, uint32_t option, mtime_t mt, dm_segstate *ss)
+{
+    if (!perf_has_ntype(pf, &GUID_NOTIFICATION_PERFORMANCE_)) return;
+    dm_pmsg *m = pm_alloc(pf, 0x58);
+    if (!m) return;
+    m->type = PT_NOTIFICATION; m->mt = mt; m->flags = PF_MUSICTIME | PF_TOOL_ATTIME; m->group = 0xffffffff;
+    m->nf_guid = GUID_NOTIFICATION_PERFORMANCE_; m->nf_option = option;
+    if (ss) { m->user = ss; m->userref = 1; ss->refs++; }
+    perf_stamp(pf, m);
+    if (send_pmsg(pf, m) < 0) pm_free(pf, m);
+}
+
+/* 77315748: a GUID_NOTIFICATION_SEGMENT message at mt, if the state's segment has the type (through its graph) */
+static void ss_notify(dm_perf *pf, dm_segstate *ss, uint32_t option, mtime_t mt)
+{
+    if (!dm_segment_has_notification(ss->seg, &GUID_NOTIFICATION_SEGMENT_)) return;
+    dm_pmsg *m = pm_alloc(pf, 0x58);
+    if (!m) return;
+    m->type = PT_NOTIFICATION; m->mt = mt; m->flags = PF_MUSICTIME | PF_TOOL_ATTIME; m->group = 0xffffffff;
+    m->nf_guid = GUID_NOTIFICATION_SEGMENT_; m->nf_option = option;
+    m->user = ss; m->userref = 1; ss->refs++;
+    stamp_send(pf, ss, m);
+}
+
+/* 77309fcc: a pending MUSICSTOPPED goes when a segment is played */
+static void drop_musicstopped(dm_perf *pf)
+{
+    for (dm_pmsg *p = pf->ontime.head, *nx; p; p = nx) {
+        nx = p->next;
+        if (p->type == PT_NOTIFICATION && guid_same(&p->nf_guid, &GUID_NOTIFICATION_PERFORMANCE_) && p->nf_option == NOTIF_MUSICSTOPPED) {
+            if (q_remove(&pf->ontime, p)) pm_free(pf, p);
+            pf->stopped = 0;
+        }
+    }
+}
+
 #include "dmtrack.c"
 #include "dmstate.c"
 
@@ -1548,6 +1657,7 @@ dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx)
     pf->ops = *ops; pf->ctx = ctx;
     pf->bumper = 500000; pf->bumper_ms = 50; pf->prepare_ms = 1000; pf->period = 10;
     pf->master = 1.0f; pf->dxver = 8; pf->stopped = 1;
+    pf->notif_min = 20000000;
     pf->rtbase = clock_now(pf);
     pf->horizon = pf->rtbase;
     return pf;
@@ -1570,6 +1680,7 @@ void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms) { pf->bumper_ms = ms; p
 uint32_t dm_perf_get_bumper_length(dm_perf *pf) { return pf->bumper_ms; }
 void dm_perf_set_app_precision(dm_perf *pf, int extended) { pf->appxprec = extended; }
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes) { pf->fixes = fixes; }
+
 
 static void free_queue(dm_perf *pf, dm_queue *q)
 {

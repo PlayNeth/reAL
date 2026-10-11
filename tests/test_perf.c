@@ -9,6 +9,22 @@
 
 static int64_t g_now = 100000000;
 static FILE *g_out;
+/* TP_NOTIFY=<file>: request notifications (TP_NTYPES letters: s segment, p performance, m measure/beat; default all)
+ * and log every delivered one: "<rt> <mt> <type> <option> <field1> <field2> <state> <vtrack>" */
+static FILE *g_nf;
+static dm_segstate *g_ss1, *g_ss2;
+static void drain_notifications(dm_perf *pf)
+{
+    dm_pmsg *m;
+    while (g_nf && (m = dm_perf_get_notification(pf))) {
+        const char *ty = m->nf_guid.d1 == 0xd2ac2899 ? "SEGMENT" : m->nf_guid.d1 == 0xd2ac289a ? "MEASUREANDBEAT" :
+                         m->nf_guid.d1 == 0x81f75bc5 ? "PERFORMANCE" : "OTHER";
+        const char *us = !m->user ? "-" : m->user == g_ss1 ? "s1" : m->user == g_ss2 ? "s2" : "s?";
+        fprintf(g_nf, "%lld %d %s %u %u %u %s %u\n", (long long)m->rt, m->mt, ty, m->nf_option, m->nf_field1, m->nf_field2, us,
+                m->vpch);
+        dm_perf_free_pmsg(pf, m);
+    }
+}
 static int g_sig[2];
 
 static rtime_t h_clock(void *c) { return g_now; }
@@ -98,8 +114,19 @@ int main(int argc, char **argv)
     dm_perf_assign_block(pf, 0, port, 1);
     g_sig[0] = g_sig[1] = 0;
     dm_segment_download(pf, seg);       /* as dmgt: Segment::Download before playing */
+    if (getenv("TP_NOTIFY")) {
+        static const dm_guid gs = { 0xd2ac2899, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+        static const dm_guid gm = { 0xd2ac289a, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+        static const dm_guid gp = { 0x81f75bc5, 0x4e5d, 0x11d2, { 0xbc, 0xc7, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb } };
+        const char *ty = getenv("TP_NTYPES") ? getenv("TP_NTYPES") : "spm";
+        g_nf = fopen(getenv("TP_NOTIFY"), "w");
+        if (strchr(ty, 's')) dm_perf_add_notification_type(pf, &gs);
+        if (strchr(ty, 'p')) dm_perf_add_notification_type(pf, &gp);
+        if (strchr(ty, 'm')) dm_perf_add_notification_type(pf, &gm);
+    }
     dm_segstate *ss;
     int hr = dm_perf_play(pf, seg, flags, 0, NULL, &ss);
+    g_ss1 = ss;
     if (hr < 0) { fprintf(stderr, "play %08x\n", hr); return 1; }
     /* TP_STOP=<ms>: stop the segment (as dmgt DMGT_STOP); TP_NEXT=<ms>:<segment>: play a second segment */
     int stop_ms = getenv("TP_STOP") ? atoi(getenv("TP_STOP")) : -1, next_ms = -1;
@@ -120,10 +147,11 @@ int main(int argc, char **argv)
         for (int phase = 0; phase < 2; phase++) {
             if (phase == 0 && t) g_now += 10000;
             if (phase == 1) {
+                drain_notifications(pf);
                 if (t == stop_ms) {      /* as MC2: Stop(segment, state), StopEx(segment), StopEx(state) */
                     dm_perf_stop(pf, seg, ss, 0, 0); dm_perf_stop(pf, seg, NULL, 0, 0); dm_perf_stop(pf, NULL, ss, 0, 0);
                 }
-                if (t == next_ms && seg2) { dm_segstate *s2; dm_perf_play(pf, seg2, flags, 0, NULL, &s2); }
+                if (t == next_ms && seg2) { dm_segstate *s2; dm_perf_play(pf, seg2, flags, 0, NULL, &s2); g_ss2 = s2; }
             }
             for (int pass = 0; pass < 8; pass++) {
                 int ran = 0;
@@ -145,6 +173,7 @@ int main(int argc, char **argv)
     dm_segstate_start_time(ss, &mt);
     dm_perf_m2r(pf, mt, &rt);
     fprintf(g_out, "# start mt %d rt %lld\n", mt, (long long)rt);
+    if (g_nf) fclose(g_nf);
     { void dm_perf_debug_tmap(dm_perf *); if (getenv("TP_TMAP")) dm_perf_debug_tmap(pf); }
     if (getenv("TP_M2R")) { rtime_t r2; dm_perf_m2r(pf, atoi(getenv("TP_M2R")), &r2); fprintf(stderr, "m2r(%s) = %lld\n", getenv("TP_M2R"), (long long)r2); }
     fclose(g_out);
