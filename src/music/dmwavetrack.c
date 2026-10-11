@@ -403,7 +403,8 @@ static int wt_play(dm_perf *pf, dm_segstate *ss, sstrack *e, int64_t start, int6
     uint32_t restart = flags & (TF_LOOP | TF_START);
     if (restart) S->vartime = 0;
     /* GUID_Variations (DMUS_WAVETRACKF_SYNC_VAR) has no source here: 7732519c falls back to choosing them all */
-    if (((T->flags & 1) && (S->vartime == 0 || (start <= S->vartime && S->vartime < end))) || restart)
+    int sync = (T->flags & 1) && !(pf->fixes & DM_FIX_WAVE_SYNCVAR);
+    if ((sync && (S->vartime == 0 || (start <= S->vartime && S->vartime < end))) || restart)
         ws_select_all(pf, T, S);
     if (S->version != T->version) {
         for (uint32_t i = 0; i < S->nvoices; i++) wv_release(pf, S->voices[i]);
@@ -444,7 +445,12 @@ static int wt_play(dm_perf *pf, dm_segstate *ss, sstrack *e, int64_t start, int6
                     mtime_t sm = R2M(pf, irt + so);
                     dur = it->dur;
                     if ((int64_t)imt + off < (int64_t)sm) dur -= wt_scale((int64_t)sm - imt - off, -it->pitch);
-                    if (imt < s0) {     /* the item began before this piece (M2R of off + 2 start is the original's) */
+                    if (imt < s0 && (pf->fixes & DM_FIX_WAVE_SEEK)) {
+                        /* into the wave by the time since the item began (in the wave's own time), same end */
+                        so += wt_scale(M2R(pf, o + s0) - irt, it->pitch);
+                        dur = (int64_t)imt + dur - s0;
+                        imt = s0;
+                    } else if (imt < s0) {     /* the item began before this piece (M2R of off + 2 start is the original's) */
                         rtime_t r64 = M2R(pf, o + s0 * 2), r5c = M2R(pf, s0 + o + imt);
                         so += wt_scale(r64 - r5c, it->pitch);
                         imt = s0;

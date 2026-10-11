@@ -43,6 +43,13 @@ int msynth_stop_voice(msynth *s, int64_t t, uint32_t voiceid);
 /* IDirectMusicSynth8::Refresh: a streaming wave buffer (download type 5) has been refilled */
 int msynth_refresh(msynth *s, uint32_t dlid);
 
+/* fixes of the original's flaws (off by default, for comparison against it) */
+#define MS_FIX_WAVE_END 1       /* a one-shot wave voice plays its last sample (the original stops two short of the
+                                 * buffer's end, guard sample included) */
+#define MS_FIX_WAVE_PASTEND 2   /* a wave voice started past the end of a wave that does not loop plays nothing (the
+                                 * original starts it over from the beginning) */
+void msynth_set_fixes(msynth *s, uint32_t fixes);
+
 /* options matching the synth's environment: MMX mixing paths (default on, as on any CPU with MMX) */
 void msynth_set_mmx(msynth *s, int on);
 /* overall gain in millibels (GUID_DMUS_PROP_Volume; the synth's own default is +600, DirectMusic's port sets 0) */

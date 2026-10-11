@@ -214,6 +214,9 @@ typedef struct dm_wave {
 typedef int (*dm_wave_decoder)(const uint8_t *wfx, uint32_t wfxlen, const uint8_t *in, uint32_t inlen,
                                uint8_t **out, uint32_t *outlen, uint16_t *ch, uint32_t *rate, uint16_t *bits);
 void dm_wave_set_decoder(dm_wave_decoder fn);
+/* the length of a compressed wave without a 'fact' chunk from its decoded samples (dswave counts compressed blocks,
+ * which decides streaming and a .wav segment's length wrongly) */
+void dm_wave_set_fix_length(int on);
 dm_wave *dm_wave_load(const void *data, size_t size);
 void dm_wave_addref(dm_wave *w);
 void dm_wave_release(dm_wave *w);

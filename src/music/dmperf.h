@@ -119,6 +119,10 @@ void dm_perf_set_app_precision(dm_perf *pf, int extended);
 #define DM_FIX_FIRST_TEMPO 1    /* a primary segment started from silence plays its first piece at its own tempo */
 #define DM_FIX_MEASURE_NUMBER 2 /* measure/beat notifications count measures across time signature changes (the
                                  * original divides the time by the current measure length, so the count jumps) */
+#define DM_FIX_WAVE_SEEK 4      /* a wave item entered after it began (a seek or start inside it) picks up at the right
+                                 * point and keeps its end (the original mixes up the times: off + 2 x start, ...) */
+#define DM_FIX_WAVE_SYNCVAR 8   /* a wave track that follows another track's variations, with none to follow, chooses
+                                 * them once per start or loop (the original chooses again on every play pass) */
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
 /* the transport thread's srand(time(NULL)) (wave track variations and random volume/pitch) */
 void dm_perf_set_seed(dm_perf *pf, uint32_t seed);

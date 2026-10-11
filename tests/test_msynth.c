@@ -32,6 +32,7 @@ int main(int argc, char **argv)
     int voices = getenv("MS_VOICES") ? atoi(getenv("MS_VOICES")) : 64;
     msynth *s = msynth_new(rate, voices, 1, 1);
     if (getenv("MS_NOMMX")) msynth_set_mmx(s, 0);
+    if (getenv("MS_FIX")) msynth_set_fixes(s, strtoul(getenv("MS_FIX"), NULL, 0));
     msynth_set_gain(s, getenv("MS_GAIN") ? atoi(getenv("MS_GAIN")) : 0);
     int ndl = 0;
     for (long p = 0; p + 8 <= n;) {

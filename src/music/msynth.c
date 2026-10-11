@@ -380,6 +380,7 @@ struct msynth {
     uint32_t rate;          /* +a0 */
     int stereo;             /* +a4 */
     int mmx;                /* +268 */
+    uint32_t fixes;         /* MS_FIX_* */
     ms_cl **cl;             /* +244 */
     uint32_t ncl;           /* +248 */
     uint32_t seq;           /* DAT_77498b64 */
@@ -1410,6 +1411,7 @@ static int da_mix(v_da *d, int16_t **bufs, uint32_t nbuf, int stereo, uint32_t n
             if (d->node && d->node->w && (int32_t)d->node->w->len - 1 <= (m.end >> 12)) {
                 ms_bufnode *nx = d->node->next ? d->node->next : d->artic->bufs;
                 m.end = ((int32_t)d->node->w->len - (nx && nx->w->valid ? 1 : 2)) * 0x1000;
+                if ((s->fixes & MS_FIX_WAVE_END) && !(nx && nx->w->valid)) m.end += 0x1000;     /* through the last sample */
             }
             m.looplen = 0;
             startpos = d->pos;
@@ -2233,6 +2235,7 @@ void msynth_read(msynth *s, int16_t **bufs, const uint32_t *busids, const uint32
 }
 
 void msynth_set_mmx(msynth *s, int on) { s->mmx = on; }
+void msynth_set_fixes(msynth *s, uint32_t fixes) { s->fixes = fixes; }
 
 void msynth_set_gain(msynth *s, int32_t mb)    /* GUID_DMUS_PROP_Volume: 774846d0 */
 {
@@ -2337,7 +2340,8 @@ static void da_start_wave(v_da *d, msynth *s, ms_wartic *a, int32_t pitch, uint6
         if (ls < start) {
             if (!d->oneshot) {
                 if (ll) d->pos64 = (int64_t)((((start - ls) % ll) + ls) << 12);
-            } else if ((start >> 32) || w->len < (uint32_t)start) d->pos64 = 0;
+            } else if ((start >> 32) || w->len < (uint32_t)start)
+                d->pos64 = (s->fixes & MS_FIX_WAVE_PASTEND) ? (int64_t)w->len << 12 : 0;   /* past the end: nothing */
         }
     }
     d->pos = (int32_t)d->pos64;

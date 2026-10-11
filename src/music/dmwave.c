@@ -15,6 +15,8 @@ static uint16_t u16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 
 static dm_wave_decoder g_decode;
 void dm_wave_set_decoder(dm_wave_decoder fn) { g_decode = fn; }
+static int g_fixlen;
+void dm_wave_set_fix_length(int on) { g_fixlen = on; }
 
 /* 6c782777: the length in milliseconds (IDirectSoundWave private GetLength): frames of the file's own format (the
  * 'fact' count for a compressed file; without one, the data size over the block size, which for a compressed file
@@ -112,6 +114,7 @@ dm_wave *dm_wave_load(const void *data, size_t size)
         uint32_t fr = ch * (bits / 8);
         uint32_t frames = pcmlen / fr, skip = w->skip < frames ? w->skip : frames;
         w->frames = frames - skip;
+        if (g_fixlen && !fact) { w->fileframes = frames; w->filerate = rate; }
         w->data = malloc(w->frames * fr + 1);
         if (!w->data) { free(pcm); free(w); return NULL; }
         memcpy(w->data, pcm + skip * fr, w->frames * fr);
