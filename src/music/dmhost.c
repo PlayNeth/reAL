@@ -361,12 +361,13 @@ dm_collection *dm_collection_from_file(const char *path, int gm)
                 size_t dn = 0;
                 int ni = 0;
                 void *d = sf2_to_dls(b, size, &dn, &ni);
+                free(b);                    /* the SoundFont's samples are in d now: no need for both in memory */
+                b = NULL;
                 if (d) {
                     LOG_INFO("music: %s is a SoundFont: %d presets converted to DLS (%lu KB)", full, ni, (unsigned long)(dn >> 10));
-                    c = dls_load(d, dn, gm);
-                    free(d);
-                }
-            } else c = dls_load(b, size, gm);
+                    c = dls_load_owned(d, dn, gm);
+                } else if (dn) LOG_INFO("music: %s: not enough memory to convert the SoundFont (%lu KB needed)", full, (unsigned long)(dn >> 10));
+            } else { c = dls_load_owned(b, size, gm); b = NULL; }
         }
         free(b);
         CloseHandle(f);

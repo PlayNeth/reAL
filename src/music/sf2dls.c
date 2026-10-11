@@ -157,15 +157,19 @@ static void apply_zone(gens *g, const sf_gen *list, int from, int to, int relati
 }
 
 /* ------------------------------------------------------------------ output buffer */
-typedef struct { uint8_t *b; size_t n, cap; } out;
+/* written in two passes: the first only measures (b NULL, measure set), the second fills a buffer of the exact size
+ * (a 32-bit game has no room for growing a several-hundred-MB buffer by doubling) */
+typedef struct { uint8_t *b; size_t n, cap; int measure, failed; } out;
 
 static void put(out *o, const void *p, size_t n)
 {
+    if (o->measure) { o->n += n; return; }
+    if (o->failed) return;
     if (o->n + n > o->cap) {
         size_t c = o->cap ? o->cap : 65536;
         while (c < o->n + n) c *= 2;
         uint8_t *nb = realloc(o->b, c);
-        if (!nb) return;
+        if (!nb) { o->failed = 1; return; }
         o->b = nb; o->cap = c;
     }
     if (p) memcpy(o->b + o->n, p, n); else memset(o->b + o->n, 0, n);
@@ -306,11 +310,30 @@ static void write_region(out *o, const sf2 *f, const region *r)
     close_chunk(o, rg);
 }
 
+static int emit(out *op, sf2 *fp);
+
 void *sf2_to_dls(const void *data, size_t size, size_t *outsize, int *ninstr)
 {
     sf2 f;
     if (!parse_sf2(&f, data, size)) { free_sf2(&f); return NULL; }
+    out m = { 0 };
+    m.measure = 1;
+    emit(&m, &f);
     out o = { 0 };
+    o.b = malloc(m.n ? m.n : 1);
+    o.cap = m.n;
+    int ninst = o.b ? emit(&o, &f) : 0;
+    free_sf2(&f);
+    if (!o.b || o.failed || o.n != m.n) { free(o.b); if (outsize) *outsize = m.n; return NULL; }
+    *outsize = o.n;
+    if (ninstr) *ninstr = ninst;
+    return o.b;
+}
+
+static int emit(out *op, sf2 *fp)
+{
+    out o = *op;
+    sf2 f = *fp;
     wavelist wl = { 0 };
     size_t riff = open_list(&o, FCC('R','I','F','F'), FCC('D','L','S',' '));
     size_t colh = o.n;
@@ -427,9 +450,7 @@ void *sf2_to_dls(const void *data, size_t size, size_t *outsize, int *ninstr)
     close_chunk(&o, wvpl);
     close_chunk(&o, riff);
     if (o.b) { uint32_t n = (uint32_t)ninst; memcpy(o.b + colh + 8, &n, 4); }
-    free(rs); free(wl.k); free_sf2(&f);
-    if (!o.b) return NULL;
-    *outsize = o.n;
-    if (ninstr) *ninstr = ninst;
-    return o.b;
+    free(rs); free(wl.k);
+    *op = o;
+    return ninst;
 }

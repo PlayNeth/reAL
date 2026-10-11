@@ -127,9 +127,18 @@ static void load_instrument(dm_collection *col, rd r)
 
 dm_collection *dls_load(const void *data, size_t size, int gm)
 {
+    void *copy = malloc(size ? size : 1);
+    if (!copy) return NULL;
+    memcpy(copy, data, size);
+    return dls_load_owned(copy, size, gm);
+}
+
+/* as dls_load, taking over a malloc'd buffer (freed with the collection, or now on failure) */
+dm_collection *dls_load_owned(void *data, size_t size, int gm)
+{
     dm_collection *col = calloc(1, sizeof(*col));
-    if (!col || !(col->data = malloc(size ? size : 1))) { free(col); return NULL; }
-    memcpy(col->data, data, size);
+    if (!col) { free(data); return NULL; }
+    col->data = data;
     col->gm = gm;
     rd f = { col->data, col->data + size }, r;
     uint32_t id, t;

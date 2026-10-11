@@ -5,6 +5,7 @@
 #include "dmi.h"
 
 dm_collection *dls_load(const void *data, size_t size, int gm);   /* gm: the default GM set (instrument flag) */
+dm_collection *dls_load_owned(void *data, size_t size, int gm);   /* takes over a malloc'd buffer */
 void dls_free(dm_collection *c);
 int dls_count(const dm_collection *c);
 int dls_enum(const dm_collection *c, int i, uint32_t *patch, const char **name);
