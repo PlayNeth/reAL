@@ -883,3 +883,10 @@ int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n)
     free(add);
     return DM_OK;
 }
+
+/* the index-th track of the class among a state's tracks (GetObjectInPath DMUS_PATH_SEGMENT_TRACK) */
+dm_track *dm_segstate_track(dm_segstate *ss, const dm_guid *clsid, uint32_t index)
+{
+    sstrack *e = ss_track_by_class(ss, clsid, 0xffffffff, index);
+    return e ? e->t : NULL;
+}

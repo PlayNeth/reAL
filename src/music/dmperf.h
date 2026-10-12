@@ -113,6 +113,7 @@ typedef struct { dm_perf *pf; dm_audiopath *ap; } dm_dltarget;
 /* SetTrackConfig: segment 7731245b (tracks by class; GUID_NULL refused), segment state 77315d52 (GUID_All_Objects
  * matches every class); config = (config & ~off) | on.  SetPChannelsUsed 7731281d: PChannels added to the list. */
 int dm_segment_set_trackconfig(dm_segment *s, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off);
+dm_track *dm_segstate_track(dm_segstate *ss, const dm_guid *clsid, uint32_t index);
 int dm_segstate_set_trackconfig(dm_segstate *ss, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off);
 int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n);
 /* a track object's own IsParamSupported / GetParam / SetParam / Add/RemoveNotificationType */

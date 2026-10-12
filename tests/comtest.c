@@ -434,6 +434,46 @@ static void tracks(void)
     IDirectMusicLoader8_ClearCache(loader, &CLSID_DirectMusicSegment);
 }
 
+static void stobj(void)
+{
+    printf("state getobject\n");
+    IDirectMusicSegment8 *s = load("bells1.sgt");
+    if (!s) return;
+    IDirectMusicSegmentState *ss = NULL;
+    IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)s, NULL, NULL, 0, 0, &ss, NULL, NULL);
+    IDirectMusicSegmentState8 *s8 = NULL;
+    IDirectMusicSegmentState_QueryInterface(ss, &IID_IDirectMusicSegmentState8, (void **)&s8);
+    void *o = NULL; HRESULT hr;
+    struct { DWORD pch, stage, buf; const GUID *g; DWORD n; const GUID *iid; const char *what; } c[] = {
+        { 0, DMUS_PATH_SEGMENT, 0, &GUID_NULL_, 0, &IID_IDirectMusicSegment8, "segment" },
+        { 0, DMUS_PATH_SEGMENT, 0, &GUID_NULL_, 1, &IID_IDirectMusicSegment8, "segment 1" },
+        { 1, DMUS_PATH_SEGMENT, 0, &GUID_NULL_, 0, &IID_IDirectMusicSegment8, "segment pch 1" },
+        { 0, DMUS_PATH_SEGMENT, 1, &GUID_NULL_, 0, &IID_IDirectMusicSegment8, "segment buf 1" },
+        { 0, DMUS_PATH_SEGMENT, 0, &GUID_NULL_, 0, &IID_IDirectMusicPerformance8, "segment as perf" },
+        { 0, DMUS_PATH_SEGMENT_TRACK, 0, &clsid_tempotrack_, 0, &IID_IDirectMusicTrack, "tempo track" },
+        { 0, DMUS_PATH_SEGMENT_TRACK, 0, &clsid_tempotrack_, 1, &IID_IDirectMusicTrack, "tempo track 1" },
+        { 0, DMUS_PATH_SEGMENT_TRACK, 0, &guid_allobjects_, 2, &IID_IDirectMusicTrack8, "track 2" },
+        { 0, DMUS_PATH_SEGMENT_TRACK, 0, &GUID_NULL_, 0, &IID_IDirectMusicTrack8, "track null guid" },
+        { 0, DMUS_PATH_PERFORMANCE, 0, &GUID_NULL_, 0, &IID_IDirectMusicPerformance8, "performance" },
+        { 0, DMUS_PATH_PERFORMANCE, 0, &GUID_NULL_, 1, &IID_IDirectMusicPerformance8, "performance 1" },
+        { 0, DMUS_PATH_BUFFER, 0, &GUID_NULL_, 0, &IID_IDirectSoundBuffer8, "buffer" },
+        { 0, DMUS_PATH_AUDIOPATH, 0, &GUID_NULL_, 0, &IID_IDirectMusicAudioPath, "audiopath" },
+        { 0, DMUS_PATH_PORT, 0, &GUID_NULL_, 0, &IID_IDirectMusicPort, "port" },
+        { 0, 0x9999, 0, &GUID_NULL_, 0, &IID_IUnknown, "bad stage" },
+    };
+    for (unsigned k = 0; k < sizeof(c) / sizeof(c[0]); k++) {
+        o = (void *)1;
+        hr = IDirectMusicSegmentState8_GetObjectInPath(s8, c[k].pch, c[k].stage, c[k].buf, c[k].g, c[k].n, c[k].iid, &o);
+        printf("  %s %08lx %s\n", c[k].what, hr, o ? "obj" : "null");
+        if (SUCCEEDED(hr) && o) IUnknown_Release((IUnknown *)o);
+    }
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    Sleep(200);
+    IDirectMusicSegmentState8_Release(s8);
+    IDirectMusicSegmentState_Release(ss);
+    IDirectMusicSegment8_Release(s);
+}
+
 static void perfparams(void)
 {
     DMUS_TEMPO_PARAM tp; DMUS_TIMESIGNATURE ts; MUSIC_TIME next, now;
@@ -499,6 +539,7 @@ int main(int argc, char **argv)
     trackcfg();
     sendpmsg();
     tracks();
+    stobj();
     smfdl("fe_hard_04.sgt");
     smfdl("bells1.sgt");
     IDirectMusicPerformance8_CloseDown(perf);

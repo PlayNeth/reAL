@@ -48,6 +48,7 @@ typedef struct {
     rm_segment *seg;                        /* may be NULL (a state first met in a notification) */
     rm_perf *perf;
     BOOL lazy;                              /* made for a notification: holds an ordinary reference */
+    IDirectMusicAudioPath *path;            /* the audiopath it plays on (the default one when none was given) */
 } rm_state;
 
 typedef struct {
@@ -782,9 +783,13 @@ static rm_track *unsafe_track(IUnknown *u)
 static HRESULT WINAPI trk_qi(IDirectMusicTrack8 *i, REFIID riid, void **out)
 {
     if (!out) return E_POINTER;
-    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicTrack) || IsEqualIID(riid, &IID_IDirectMusicTrack8)) *out = i;
-    else if (IsEqualIID(riid, &IID_IPersistStream) || IsEqualIID(riid, &IID_IPersist)) *out = &trk(i)->IPersistStream_iface;
-    else return rm_noiface(__func__, riid, out);
+    /* dmime's tracks: IDirectMusicTrack8 except the time signature track's (7731cc26); IPersist only on dmband's */
+    int kind = trk(i)->t->kind;
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicTrack) ||
+        (IsEqualIID(riid, &IID_IDirectMusicTrack8) && kind != TRK_TIMESIG)) *out = i;
+    else if (IsEqualIID(riid, &IID_IPersistStream) || (IsEqualIID(riid, &IID_IPersist) && kind == TRK_BAND))
+        *out = &trk(i)->IPersistStream_iface;
+    else { *out = NULL; return E_NOINTERFACE; }
     InterlockedIncrement(&trk(i)->ref);
     return S_OK;
 }
@@ -1019,6 +1024,7 @@ static ULONG WINAPI st_release(IDirectMusicSegmentState8 *i)
             dm_host_unlock(s->perf->host);
         }
         if (s->seg) IDirectMusicSegment8_Release(&s->seg->IDirectMusicSegment8_iface);
+        if (s->path) IDirectMusicAudioPath_Release(s->path);
         IDirectMusicPerformance8_Release(&s->perf->IDirectMusicPerformance8_iface);
         free(s);
     }
@@ -1059,10 +1065,40 @@ static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DW
     if (s->perf->host) dm_host_unlock(s->perf->host);
     return hr;
 }
+/* 773161ad: the segment, its tracks (GUID_All_Objects: any class), the performance; anything further down the path
+ * from the state's audiopath.  The segment's and performance's graphs and tools are not available. */
+static IDirectMusicTrack8 *track_object(dm_track *t);
 static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
 {
-    if (o) *o = NULL;
-    return DMUS_E_NOT_FOUND;
+    rm_state *s = sst(i);
+    if (!o || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
+    *o = NULL;
+    if (buf && (stage < DMUS_PATH_BUFFER || stage > 0x7fff)) return DMUS_E_NOT_FOUND;
+    HRESULT hr = DMUS_E_NOT_FOUND;
+    switch (stage) {
+    case DMUS_PATH_SEGMENT:
+        if (s->seg && !n && !pch) hr = IDirectMusicSegment8_QueryInterface(&s->seg->IDirectMusicSegment8_iface, iid, o);
+        break;
+    case DMUS_PATH_SEGMENT_TRACK: {
+        if (pch || !g) break;
+        dm_track *t = NULL;
+        if (s->perf->host) dm_host_lock(s->perf->host);
+        t = dm_segstate_track(s->ss, (const dm_guid *)g, n);
+        IDirectMusicTrack8 *to = t ? track_object(t) : NULL;
+        if (s->perf->host) dm_host_unlock(s->perf->host);
+        if (to) { hr = IDirectMusicTrack8_QueryInterface(to, iid, o); IDirectMusicTrack8_Release(to); }
+        break;
+    }
+    case DMUS_PATH_SEGMENT_GRAPH: case DMUS_PATH_SEGMENT_TOOL: case DMUS_PATH_PERFORMANCE_GRAPH: case DMUS_PATH_PERFORMANCE_TOOL:
+        break;
+    case DMUS_PATH_PERFORMANCE:
+        if (!n && !pch) hr = IDirectMusicPerformance8_QueryInterface(&s->perf->IDirectMusicPerformance8_iface, iid, o);
+        break;
+    default:
+        if (s->path) hr = IDirectMusicAudioPath_GetObjectInPath(s->path, pch, stage, buf, g, n, iid, o);
+        break;
+    }
+    return hr;
 }
 static IDirectMusicSegmentState8Vtbl st_vtbl = { st_qi, st_addref, st_release, st_getrepeats, st_getsegment, st_getstart,
     st_getseek, st_getstartpoint, st_settrackcfg, st_getobj };
@@ -1168,9 +1204,15 @@ static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage
             return reverb_object(a->perf, iid, o);
         return DMUS_E_NOT_FOUND;
     }
-    char b1[64];
-    LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s) not supported", (unsigned long)stage, guidstr(iid, b1));
-    return DMUS_E_NOT_FOUND;
+    switch (stage) {        /* stages an audiopath knows (its own and the performance's graphs and tools, the port, ...) */
+    case DMUS_PATH_AUDIOPATH_GRAPH: case DMUS_PATH_AUDIOPATH_TOOL: case DMUS_PATH_PERFORMANCE_GRAPH: case DMUS_PATH_PERFORMANCE_TOOL:
+    case DMUS_PATH_PORT: case 0x5000: case DMUS_PATH_MIXIN_BUFFER: case DMUS_PATH_MIXIN_BUFFER_DMO: {
+        char b1[64];
+        LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s) not supported", (unsigned long)stage, guidstr(iid, b1));
+        return DMUS_E_NOT_FOUND;
+    }
+    }
+    return E_INVALIDARG;
 }
 static HRESULT WINAPI ap_activate(IDirectMusicAudioPath *i, BOOL on)
 {
@@ -1772,6 +1814,8 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     s->ss = ss;
     s->seg = g; IDirectMusicSegment8_AddRef(&g->IDirectMusicSegment8_iface);
     s->perf = p; IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
+    rm_path *pa = a ? a : p->defpath;
+    if (pa) { s->path = &pa->IDirectMusicAudioPath_iface; IDirectMusicAudioPath_AddRef(s->path); }
     dm_host_lock(p->host);
     *dm_segstate_wrapper(ss) = s;
     dm_host_unlock(p->host);
