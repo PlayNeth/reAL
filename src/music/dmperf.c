@@ -4,6 +4,7 @@
  * Comments give the original function addresses (dmime image base 0x77300000, dmband 0x77200000) and offsets.  The
  * code keeps the original's arithmetic, orderings and quirks: event times and their order at the port depend on them. */
 #include "dmperf.h"
+#include "dmdls.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -391,20 +392,49 @@ static void tempo_add(dm_perf *pf, double tempo, mtime_t mt, rtime_t rt)
 }
 
 /* ------------------------------------------------------------------ parameters (GetParam) */
-enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND };
 typedef struct { double tempo; mtime_t t; mtime_t rel; uint8_t last; } privtempo;
-typedef struct { mtime_t t; uint8_t bpm, beat; uint16_t grids; } timesig;
-typedef struct { mtime_t t; double tempo; } tempoparam;
+typedef struct { mtime_t t; uint8_t bpm, beat; uint16_t grids; } timesig;     /* DMUS_TIMESIGNATURE */
+typedef struct { mtime_t t; double tempo; } tempoparam;                       /* DMUS_TEMPO_PARAM */
 
-static int track_supports(const dm_track *t, int prm)
+/* IsParamSupported: tempo 7731bcb1, time signature 7731ce8c, band (dmband) 77201858, wave 77324502.  A tempo or time
+ * signature track enabled or disabled by SetParam supports only the switch back (and, enabled, its parameter). */
+static int track_isparam(const dm_track *t, int prm)
 {
     switch (t->kind) {
-    case TRK_TEMPO: return prm == PRM_TEMPO || prm == PRM_PRIVTEMPO;
-    case TRK_TIMESIG: return prm == PRM_TIMESIG;
-    case TRK_BAND: return prm == PRM_BAND;
+    case TRK_TEMPO: {
+        const dm_tempotrack *T = t->data;
+        if (prm != PRM_DISABLETEMPO && prm != PRM_TEMPO && prm != PRM_PRIVTEMPO && prm != PRM_ENABLETEMPO)
+            return DMUS_E_TYPE_UNSUPPORTED;
+        if (!T->setbyparam) return DM_OK;
+        if (!T->active) return prm == PRM_ENABLETEMPO ? DM_OK : DMUS_E_TYPE_DISABLED;
+        return prm == PRM_ENABLETEMPO ? DMUS_E_TYPE_DISABLED : DM_OK;
     }
-    return 0;
+    case TRK_TIMESIG: {
+        const dm_tstrack *T = t->data;
+        if (prm != PRM_DISABLETIMESIG && prm != PRM_TIMESIG && prm != PRM_ENABLETIMESIG) return DMUS_E_TYPE_UNSUPPORTED;
+        if (!T->setbyparam) return DM_OK;
+        if (!T->active) return prm == PRM_ENABLETIMESIG ? DM_OK : DMUS_E_TYPE_DISABLED;
+        return prm == PRM_ENABLETIMESIG ? DMUS_E_TYPE_DISABLED : DM_OK;
+    }
+    case TRK_BAND:
+        switch (prm) {
+        case PRM_DOWNLOAD: case PRM_UNLOAD: case PRM_DOWNLOAD_AP: case PRM_UNLOAD_AP: case PRM_ENABLE_AUTODL:
+        case PRM_DISABLE_AUTODL: case PRM_CLEARBANDS: case PRM_IBAND: case PRM_BANDPARAM: case PRM_SMF: case PRM_CONNECTDLS:
+            return DM_OK;
+        }
+        return DMUS_E_TYPE_UNSUPPORTED;
+    case TRK_WAVE:
+        switch (prm) {
+        case PRM_DOWNLOAD: case PRM_DOWNLOAD_AP: case PRM_UNLOAD_AP: case PRM_ENABLE_AUTODL: case PRM_DISABLE_AUTODL:
+        case PRM_WAVEPRIV: case PRM_UNLOAD:
+            return DM_OK;
+        }
+        return DMUS_E_TYPE_UNSUPPORTED;
+    case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 77307918 */
+    }
+    return DMUS_E_TYPE_UNSUPPORTED;
 }
+static int track_supports(const dm_track *t, int prm) { return prm == PRM_ANY || track_isparam(t, prm) == DM_OK; }
 
 /* a track's GetParam (tempo 7731bfc8, time signature 7731d0ea); *next relative, 0 = none */
 static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data)
@@ -443,22 +473,40 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
         if (next) *next = i < ts->n ? ts->items[i].mt - mt : 0;
         return DM_OK;
     }
-    return DMUS_E_TRACK_NOT_FOUND;
+    if (t->kind == TRK_SEQ || t->kind == TRK_SYSEX) return DM_E_NOTIMPL;    /* 7730790b */
+    return DMUS_E_GET_UNSUPPORTED;      /* (BandParam would need band objects; the wave track's is private) */
 }
 
-/* the segment's GetParam (7731215a): first track in group that supports it; IDirectMusicTrack-only tracks (time
- * signature) get *next clamped to the segment end */
+/* 77311a65: the index-th track (after `after`) in the group that supports the parameter; GetParam takes only
+ * control-enabled tracks (anycfg 0), SetParam any */
+static dm_track *seg_findtrack(dm_segment *s, dm_track *after, int prm, uint32_t group, uint32_t index, int anycfg)
+{
+    for (int i = after ? (int)(after - s->tracks) + 1 : 0; i < s->ntracks; i++) {
+        dm_track *t = &s->tracks[i];
+        if (!(t->group & group) || (!anycfg && !(t->config & 8)) || !track_supports(t, prm)) continue;
+        if (!index) return t;
+        index--;
+    }
+    return NULL;
+}
+
+/* the segment's GetParam (7731215a): DM_SEG_ANYTRACK tries the next track while one answers NOT_FOUND;
+ * IDirectMusicTrack-only tracks (time signature) get *next clamped to the segment end */
 static int seg_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
 {
-    for (int i = 0; i < s->ntracks; i++) {
-        dm_track *t = &s->tracks[i];
-        if (!(t->group & group) || !track_supports(t, prm)) continue;
-        if (index--) continue;
-        int hr = track_getparam(t, prm, mt, next, data);
+    int any = index == DM_SEG_ANYTRACK, hr = DMUS_E_TRACK_NOT_FOUND;
+    dm_track *t = seg_findtrack(s, NULL, prm, group, any ? 0 : index, 0);
+    while (t) {
+        hr = track_getparam(t, prm, mt, next, data);
         if (t->kind == TRK_TIMESIG && next && (*next == 0 || s->length - mt < *next)) *next = s->length - mt;
-        return hr;
+        if (!any || hr != DMUS_E_NOT_FOUND) break;
+        t = seg_findtrack(s, t, prm, group, 0, 0);
     }
-    return DMUS_E_NOT_FOUND;
+    return hr;
+}
+int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
+{
+    return seg_getparam(s, prm, group, index, mt, next, data);
 }
 
 /* 773156d6: performance time -> segment time (folded into the loop with the full repeat count) */
@@ -488,50 +536,91 @@ static int ss_getparam(dm_segstate *ss, int prm, uint32_t group, uint32_t index,
 
 /* 77306acd: the performance's GetParam: control states (list 7, then 4) first, then the primary, then fallbacks */
 static dm_segstate *primary_at(dm_perf *pf, mtime_t mt);
-static int perf_getparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
+/* one segment state's answer for perf_getparam, with the loop bookkeeping the original keeps for *next */
+typedef struct { mtime_t segt, loopend, length; uint32_t left; } pgctx;
+static int pg_try(dm_segstate *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data, pgctx *c, int need_inside)
+{
+    mtime_t t = mt, off; uint32_t loops;
+    int out = ss_fold(s, &t, &off, &loops);
+    c->segt = t;
+    if (out && need_inside) return DMUS_E_NOT_FOUND;
+    c->loopend = s->loopend; c->length = s->length; c->left = s->repeats - loops;
+    return ss_getparam(s, prm, group, index, t, next, data);
+}
+
+/* 77306acd (GetParam) / 773069c2 (GetParamEx): control states (list 7, then 4) first, then the primary, then the
+ * fallbacks.  For GetParamEx the asking track's state `ctx` comes first with DMUS_TRACKCONFIG_OVERRIDE_ALL (1),
+ * before the primary with OVERRIDE_PRIMARY (2), after it with FALLBACK (4). */
+static int perf_getparam_ex(dm_perf *pf, dm_segstate *ctx, uint32_t cflags, int prm, uint32_t group, uint32_t index,
+                            mtime_t mt, mtime_t *next, void *data)
 {
     int hr = DMUS_E_NOT_FOUND;
-    mtime_t segt = 0, off, loopend = 0, length = 0;
-    uint32_t loops, left = 0;
+    pgctx c = { 0, 0, 0, 0 };
     if (next) *next = 0;
-    int found = 0;
-    for (int k = 0; k < 2 && !found; k++)
-        for (dm_segstate *s = pf->lists[k ? 4 : 7]; s; s = s->lnext) {
-            segt = mt;
-            if (ss_fold(s, &segt, &off, &loops)) continue;
-            hr = ss_getparam(s, prm, group, index, segt, next, data);
-            if (hr >= 0) { loopend = s->loopend; length = s->length; left = s->repeats - loops; found = 1; break; }
-        }
-    if (!found) {
-        dm_segstate *p = primary_at(pf, mt);
-        segt = mt;
-        if (p) {
-            ss_fold(p, &segt, &off, &loops);
-            loopend = p->loopend; length = p->length; left = p->repeats - loops;
-            hr = ss_getparam(p, prm, group, index, segt, next, data);
-        }
-        if (hr < 0) {
-            if (next) *next = (left == 0 || loopend <= segt) ? length - segt : loopend - segt;
-            if (prm == PRM_PRIVTEMPO || prm == PRM_TEMPO) {
-                dm_pmsg *e = pf->tmap.head;
-                if (e) {
-                    while (e->next && e->next->mt <= mt) e = e->next;
-                    if (prm == PRM_TEMPO) { tempoparam *o = data; o->t = e->mt - mt; o->tempo = e->tempo; }
-                    else { privtempo *o = data; o->t = e->mt - mt; o->tempo = e->tempo; }
-                    if (next) *next = 0;
-                    hr = DM_FALSE;
-                }
-            } else if (prm == PRM_TIMESIG) {
-                /* 77304559: the time signature list's entry; default 4/4 */
-                timesig *o = data;
-                o->t = -mt; o->bpm = 4; o->beat = 4; o->grids = 4;
-                hr = DM_OK;
-            }
-            return hr;
-        }
+    if (ctx && (cflags & 1)) {
+        pgctx t;
+        int r = pg_try(ctx, prm, group, index, mt, next, data, &t, 1);
+        if (r >= 0) { c = t; hr = r; goto done; }
     }
-    if (next && left && loopend - segt < *next && segt <= loopend) *next = loopend - segt;
+    for (int k = 0; k < 2; k++)
+        for (dm_segstate *s = pf->lists[k ? 4 : 7]; s; s = s->lnext) {
+            pgctx t;
+            int r = pg_try(s, prm, group, index, mt, next, data, &t, 1);
+            if (r >= 0) { c = t; hr = r; goto done; }
+        }
+    if (ctx && (cflags & 2)) {
+        pgctx t;
+        int r = pg_try(ctx, prm, group, index, mt, next, data, &t, 1);
+        if (r >= 0) { c = t; hr = r; goto done; }
+    }
+    dm_segstate *p = primary_at(pf, mt);
+    c.segt = mt;
+    if (p) {
+        hr = pg_try(p, prm, group, index, mt, next, data, &c, 0);
+        if (hr >= 0) goto done;
+    }
+    if (ctx && (cflags & 4)) {
+        pgctx t = c;
+        int r = pg_try(ctx, prm, group, index, mt, next, data, &t, 1);
+        if (r >= 0) { c = t; hr = r; goto done; }
+        c.segt = t.segt;
+    }
+    if (next) *next = (c.left == 0 || c.loopend <= c.segt) ? c.length - c.segt : c.loopend - c.segt;
+    if (prm == PRM_PRIVTEMPO || prm == PRM_TEMPO) {
+        dm_pmsg *e = pf->tmap.head;
+        if (e) {
+            while (e->next && e->next->mt <= mt) e = e->next;
+            if (prm == PRM_TEMPO) { tempoparam *o = data; o->t = e->mt - mt; o->tempo = e->tempo; }
+            else { privtempo *o = data; o->t = e->mt - mt; o->tempo = e->tempo; }
+            if (next) *next = 0;
+            hr = DM_FALSE;
+        }
+    } else if (prm == PRM_TIMESIG) {
+        /* 77304559: the time signature list's entry; default 4/4 */
+        timesig *o = data;
+        o->t = -mt; o->bpm = 4; o->beat = 4; o->grids = 4;
+        hr = DM_OK;
+    }
     return hr;
+done:
+    if (next && c.left && c.loopend - c.segt < *next && c.segt <= c.loopend) *next = c.loopend - c.segt;
+    return hr;
+}
+static int perf_getparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
+{
+    return perf_getparam_ex(pf, NULL, 0, prm, group, index, mt, next, data);
+}
+
+int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
+{
+    dm_segstate *ctx = NULL;
+    uint32_t cf = 0;
+    if (trackid)
+        for (int k = 0; k < 9 && !ctx; k++)
+            for (dm_segstate *s = pf->lists[k]; s && !ctx; s = s->lnext)
+                for (int i = 0; i < s->ntr; i++) if (s->tr[i].vid == trackid) { ctx = s; cf = s->tr[i].cfg & 7; break; }
+    if ((prm == PRM_TEMPO || prm == PRM_TIMESIG) && !data) return DM_E_POINTER;
+    return perf_getparam_ex(pf, ctx, cf, prm, group, index, mt, next, data);
 }
 
 /* 7730bed9: fill the tempo map from the tempo parameter (control segments, primary) ahead of time */

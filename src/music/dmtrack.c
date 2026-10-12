@@ -214,7 +214,7 @@ static int seq_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
 }
 
 /* ------------------------------------------------------------------ tempo track */
-typedef struct { mtime_t prevend; int cur; int active; } tempostate;
+typedef struct { mtime_t prevend; int cur; int active; uint32_t version; } tempostate;
 
 static void tempo_seek(const dm_tempotrack *T, tempostate *S, mtime_t start, int getprev)
 {
@@ -236,6 +236,7 @@ static int tempo_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     int seek = flags & TF_SEEK, hr = DMUS_S_END;
     if (start == 0 && (flags & TF_START)) start = -768;
     if (S->cur < 0 && flags == 0) return DM_FALSE;
+    if (S->version != T->version) { S->version = T->version; S->cur = -1; }   /* SetParam changed the tempos */
     if (S->cur < 0) { if (!T->n) return DMUS_S_END; S->cur = 0; }
     if (seek || S->prevend != start) tempo_seek(T, S, start, !(!seek && (flags & TF_DIRTY)));
     S->prevend = end;
@@ -397,18 +398,18 @@ static void band_send_inst(dm_perf *pf, dm_segstate *ss, sstrack *e, dm_band *b,
     dm_pmsg tpl;
     memset(&tpl, 0, sizeof(tpl));
     tpl.mt = t + off; tpl.flags = PF_MUSICTIME; tpl.pch = in->pch; tpl.vpch = S->vid; tpl.group = b->groupbits;
-    uint32_t f = in->flags;
+    uint32_t f = in->flags, patch = in->smf ? in->sendpatch : in->patch;
 #define BALLOC(sz, ty) dm_pmsg *m = pm_alloc(pf, sz); if (!m) return; { uint32_t hf = m->hflags; *m = tpl; m->hflags = hf; m->size = sz; m->type = ty; }
     if (f & 1) {
         uint32_t bank = 0;
         if (f & 2) {
             if (f & 8) bank = in->assign & 0x7f7f00;
             else {
-                bank = in->patch & 0x7f7f00;
+                bank = patch & 0x7f7f00;
                 if (f & 0x400) bank = 0;         /* XG instrument on a port without XG hardware (dmsynth) */
             }
         }
-        uint32_t v = bank | (((f & 8) ? in->assign : in->patch) & 0x7f);
+        uint32_t v = bank | (((f & 8) ? in->assign : patch) & 0x7f);
         BALLOC(0x40, PT_PATCH);
         m->m_status = v & 0x7f; m->m_b1 = (v >> 16) & 0x7f; m->m_b2 = (v >> 8) & 0x7f;
         stamp_send(pf, ss, m);
@@ -505,7 +506,8 @@ static int inst_download(dm_perf *pf, dm_inst *in, int mode)
         in->patch = (int32_t)in->patch < 0 ? 0 : (in->patch & 0x7f);
         h = po->ops.download(po->ctx, in->coll, in->patch, (in->flags & 8) != 0, in->assign, nr ? ranges : NULL, nr, &hr);
     }
-    if (!h) return hr < 0 ? hr : DM_E_FAIL;
+    /* the collection's GetInstrument answers DMUS_E_INVALIDPATCH for a patch it does not have */
+    if (!h) return hr == DMUS_E_NOT_FOUND ? (int32_t)0x88781114 : hr < 0 ? hr : DM_E_FAIL;
     dm_dlrec *r = calloc(1, sizeof(*r));
     if (!r) { po->ops.unload(po->ctx, h); return DM_E_OUTOFMEMORY; }
     r->dl = h; r->port = (int)pi; r->refs = 1; r->next = in->dl; in->dl = r;
@@ -540,6 +542,182 @@ static int bandtrack_download(dm_perf *pf, dm_bandtrack *T, int unload)
 
 #include "dmwavetrack.c"
 
+/* ------------------------------------------------------------------ track SetParam */
+/* dmband 772042e1: a band's download.  No instruments: S_FALSE; some failed: DMUS_S_PARTIALDOWNLOAD, or the last
+ * failure when none worked; DMUS_E_NOT_INIT (a PChannel without a port) stops at once. */
+#define DM_S_PARTIALDOWNLOAD 0x08781092
+static int band_download(dm_perf *pf, dm_band *b)
+{
+    if (!b->ninst) return DM_FALSE;
+    int ok = 0, lastfail = 0, hr = DM_OK;
+    for (int k = 0; k < b->ninst; k++) {
+        int r = inst_download(pf, &b->inst[k], b->mode);
+        hr = r;
+        if (r < 0) { if (r == DMUS_E_NOT_INIT) break; lastfail = r; hr = DM_FALSE; }
+        else ok++;
+    }
+    if (lastfail < 0) hr = (hr == DMUS_E_NOT_INIT || !ok) ? lastfail : DM_S_PARTIALDOWNLOAD;
+    return hr;
+}
+static void band_unload(dm_perf *pf, dm_band *b) { for (int k = 0; k < b->ninst; k++) inst_unload(pf, &b->inst[k]); }
+
+static void band_free(dm_band *b)
+{
+    for (int k = 0; k < b->ninst; k++) for (dm_dlrec *r = b->inst[k].dl, *n; r; r = n) { n = r->next; free(r); }
+    free(b->inst); free(b);
+}
+
+/* dmband 77202230: the band track's SetParam */
+static int bandtrack_setparam(dm_bandtrack *T, int prm, void *data)
+{
+    dm_dltarget *dt = data;
+    if (!data && prm != PRM_ENABLE_AUTODL && prm != PRM_DISABLE_AUTODL && prm != PRM_CLEARBANDS && prm != PRM_SMF)
+        return DM_E_POINTER;
+    switch (prm) {
+    case PRM_DOWNLOAD_AP: {
+        int hr = DM_OK, ok = 0, lastfail = 0;
+        for (int i = 0; i < T->nbands; i++) {
+            hr = band_download(dt->pf, T->bands[i]);
+            if (hr >= 0) ok++; else lastfail = hr;
+        }
+        if (lastfail < 0 && ok) hr = DM_FALSE;
+        return hr;
+    }
+    case PRM_DOWNLOAD: {
+        int hr = DM_OK;
+        for (int i = 0; i < T->nbands; i++) if (band_download(dt->pf, T->bands[i]) != DM_OK) hr = DM_FALSE;
+        return hr;
+    }
+    case PRM_UNLOAD: case PRM_UNLOAD_AP:
+        for (int i = 0; i < T->nbands; i++) band_unload(dt->pf, T->bands[i]);
+        return DM_OK;
+    case PRM_ENABLE_AUTODL: T->autodl = 1; T->lockautodl = 1; return DM_OK;
+    case PRM_DISABLE_AUTODL: T->autodl = 0; T->lockautodl = 1; return DM_OK;
+    case PRM_CLEARBANDS:
+        for (int i = 0; i < T->nbands; i++) band_free(T->bands[i]);
+        T->nbands = 0;
+        return DM_OK;
+    case PRM_SMF:
+        /* dmband 77204024: GM program numbers (the bank dropped; a drum band keeps bank 127) */
+        for (int i = 0; i < T->nbands; i++)
+            for (int k = 0; k < T->bands[i]->ninst; k++) {
+                dm_inst *in = &T->bands[i]->inst[k];
+                uint32_t p = in->patch, n = p & 0x7f;
+                if (T->bands[i]->mode == 4 && (p & 0xff0000) == 0x7f0000) n |= 0x7f0000;
+                if (!in->smf) { in->smf = 1; in->sendpatch = p; }
+                in->patch = n | (p & 0x80000000u);
+                in->notinfile = 0;      /* a MIDI file's default instruments are sent and downloaded from now on */
+            }
+        return DM_OK;
+    case PRM_CONNECTDLS: {
+        /* dmband 7720408c: instruments without a collection take this one; the others move to it when it has their
+         * instrument (a GM/GS band's PChannel 9 looked up as drums) */
+        dm_collection *c = data;
+        for (int i = 0; i < T->nbands; i++)
+            for (int k = 0; k < T->bands[i]->ninst; k++) {
+                dm_inst *in = &T->bands[i]->inst[k];
+                if (!in->coll) { in->coll = c; continue; }
+                int mode = T->bands[i]->mode;
+                if (mode != 0 && mode != 4 && in->pch == 9) in->patch |= 0x80000000u;
+                if (dls_find(c, in->patch) >= 0) in->coll = c;
+            }
+        return DM_OK;
+    }
+    case PRM_IBAND: case PRM_BANDPARAM:
+        return DMUS_E_SET_UNSUPPORTED;      /* would need band objects (not implemented) */
+    }
+    return DMUS_E_TYPE_UNSUPPORTED;
+}
+
+/* 773277ab: the wave track's SetParam */
+static int wavetrack_setparam(dm_wavetrack *T, int prm, void *data)
+{
+    dm_dltarget *dt = data;
+    if (!data && prm != PRM_ENABLE_AUTODL && prm != PRM_DISABLE_AUTODL) return DM_E_POINTER;
+    switch (prm) {
+    case PRM_DOWNLOAD: return wt_download(dt->pf, T, NULL, 0);
+    case PRM_DOWNLOAD_AP: return wt_download(dt->pf, T, dt->ap, 0);
+    case PRM_UNLOAD: wt_download(dt->pf, T, NULL, 1); return DM_OK;
+    case PRM_UNLOAD_AP: wt_download(dt->pf, T, dt->ap, 1); return DM_OK;
+    case PRM_ENABLE_AUTODL: T->autodl = 1; T->autodl_set = 1; return DM_OK;
+    case PRM_DISABLE_AUTODL: T->autodl = 0; T->autodl_set = 1; return DM_OK;
+    }
+    return DMUS_E_TYPE_UNSUPPORTED;
+}
+
+/* tempo 7731c483: enable / disable (sticky: the first call decides even over the segment's flags); a tempo at the
+ * time given, replacing one at the same time, while enabled.  Time signature 7731d1e0: enable / disable only. */
+static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
+{
+    switch (t->kind) {
+    case TRK_TEMPO: {
+        dm_tempotrack *T = t->data;
+        if (prm == PRM_DISABLETEMPO) {
+            if (T->setbyparam && !T->active) return DMUS_E_TYPE_DISABLED;
+            T->setbyparam = 1; T->active = 0; return DM_OK;
+        }
+        if (prm == PRM_ENABLETEMPO) {
+            if (T->setbyparam && T->active) return DMUS_E_TYPE_DISABLED;
+            T->setbyparam = 1; T->active = 1; return DM_OK;
+        }
+        if (prm != PRM_TEMPO) return DMUS_E_SET_UNSUPPORTED;
+        if (!T->active) return DMUS_E_TYPE_DISABLED;
+        if (!data) return DM_E_POINTER;
+        int i = 0;
+        while (i < T->n && T->items[i].mt < mt) i++;
+        if (i < T->n && T->items[i].mt == mt) T->items[i].tempo = ((const tempoparam *)data)->tempo;
+        else {
+            dm_tempoitem *n = realloc(T->items, (T->n + 1) * sizeof(*n));
+            if (!n) return DM_E_OUTOFMEMORY;
+            memmove(n + i + 1, n + i, (T->n - i) * sizeof(*n));
+            n[i].mt = mt; n[i].tempo = ((const tempoparam *)data)->tempo;
+            T->items = n; T->n++;
+        }
+        T->version++;
+        return DM_OK;
+    }
+    case TRK_TIMESIG: {
+        dm_tstrack *T = t->data;
+        if (prm == PRM_ENABLETIMESIG) {
+            if (T->setbyparam && T->active) return DMUS_E_TYPE_DISABLED;
+            T->setbyparam = 1; T->active = 1; return DM_OK;
+        }
+        if (prm == PRM_DISABLETIMESIG) {
+            if (T->setbyparam && !T->active) return DMUS_E_TYPE_DISABLED;
+            T->setbyparam = 1; T->active = 0; return DM_OK;
+        }
+        return DMUS_E_SET_UNSUPPORTED;
+    }
+    case TRK_BAND: return bandtrack_setparam(t->data, prm, data);
+    case TRK_WAVE: return wavetrack_setparam(t->data, prm, data);
+    case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 7732465d */
+    }
+    return DMUS_E_SET_UNSUPPORTED;
+}
+
+/* 77312290: the segment's SetParam on the index-th supporting track in the group, or on all of them
+ * (DM_SEG_ALLTRACKS); the last track's result */
+int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data)
+{
+    int hr = DMUS_E_TRACK_NOT_FOUND;
+    uint32_t last = index, i = index == DM_SEG_ALLTRACKS ? 0 : index;
+    for (dm_track *t; (t = seg_findtrack(s, NULL, prm, group, i, 1)); ) {
+        hr = track_setparam(t, prm, mt, data);
+        if (++i > last) break;
+    }
+    return hr;
+}
+
+/* 77306fbf: the performance's SetParam goes to the primary segment playing at mt, in that segment's time */
+int dm_perf_setparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data)
+{
+    dm_segstate *ss = primary_at(pf, mt);
+    if (!ss) return DMUS_E_NOT_FOUND;
+    mtime_t off; uint32_t loops;
+    ss_fold(ss, &mt, &off, &loops);
+    return dm_segment_setparam(ss->seg, prm, group, index, mt, data);
+}
+
 int dm_segment_download(dm_perf *pf, dm_segment *seg) { return dm_segment_download_ap(pf, seg, NULL); }
 int dm_segment_unload(dm_perf *pf, dm_segment *seg) { return dm_segment_unload_ap(pf, seg, NULL); }
 
@@ -563,7 +741,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         const dm_tempotrack *T = e->t->data;
         tempostate *S = calloc(1, sizeof(*S));
         if (!S) break;
-        S->cur = T->n ? 0 : -1;
+        S->cur = T->n ? 0 : -1; S->version = T->version;
         S->active = T->setbyparam ? T->active : ((flags & SEGF_CONTROL) || !(flags & SEGF_SECONDARY));
         e->state = S;
         break;

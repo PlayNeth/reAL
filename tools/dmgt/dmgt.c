@@ -784,6 +784,10 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     IDirectMusicSegment8 *sg;
     if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&sg)))
         die("load segment", hr);
+    if (getenv("DMGT_SMF")) {      /* SetParam(GUID_StandardMIDIFile), as games playing MIDI files do */
+        static const GUID smf = { 0x06621075, 0xe92e, 0x11d1, { 0xa8, 0xc5, 0x00, 0xc0, 0x4f, 0xa3, 0x72, 0x6e } };
+        fprintf(stderr, "SetParam(StandardMIDIFile): %08lx\n", (unsigned long)IDirectMusicSegment8_SetParam(sg, &smf, 0xffffffff, 0, 0, NULL));
+    }
     if (FAILED(hr = IDirectMusicSegment8_Download(sg, (IUnknown *)perf))) fprintf(stderr, "Download: %08lx\n", (unsigned long)hr);
     if (getenv("DMGT_VTBL")) {
         fprintf(stderr, "vtbl performance %p segment %p\n", *(void **)perf, *(void **)sg);

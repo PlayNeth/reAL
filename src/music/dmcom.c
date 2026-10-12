@@ -1,7 +1,7 @@
 /* reAL-Music: the DirectMusic COM objects a game creates (dmloader/dmime/dmusic classes), backed by the ported
  * performance engine.  Covers what DirectMusic games built on segments use: the loader (files, memory, streams, the
  * default GM collection), the performance (Init/InitAudio, standard audiopaths, PlaySegment(Ex), Stop(Ex), IsPlaying,
- * time conversion, global parameters), segments, segment states and audiopaths (Activate, SetVolume).  Ports, tools,
+ * time conversion, global and track parameters), segments, segment states and audiopaths (Activate, SetVolume).  Ports, tools,
  * styles, scripts and notifications are not implemented. */
 #include "../real.h"
 #include <dmusici.h>
@@ -268,6 +268,11 @@ static HRESULT WINAPI col_enum(IDirectMusicCollection *i, DWORD n, DWORD *patch,
     return S_OK;
 }
 static IDirectMusicCollectionVtbl col_vtbl = { col_qi, col_addref, col_release, col_getinst, col_enum };
+static rm_collection *col_of(IUnknown *u)
+{
+    IDirectMusicCollection *c = (IDirectMusicCollection *)u;
+    return c && c->lpVtbl == &col_vtbl ? col(c) : NULL;
+}
 
 static rm_collection *colo(IDirectMusicObject *i) { return impl_from(i, rm_collection, IDirectMusicObject_iface); }
 static HRESULT WINAPI colo_qi(IDirectMusicObject *i, REFIID r, void **o) { return col_qi(&colo(i)->IDirectMusicCollection_iface, r, o); }
@@ -355,12 +360,103 @@ static HRESULT seg_notif(IDirectMusicSegment8 *i, REFGUID g, int add)
 }
 static HRESULT WINAPI seg_addnotif(IDirectMusicSegment8 *i, REFGUID g) { return seg_notif(i, g, 1); }
 static HRESULT WINAPI seg_remnotif(IDirectMusicSegment8 *i, REFGUID g) { return seg_notif(i, g, 0); }
-static HRESULT WINAPI seg_getparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *p) { return DMUS_E_GET_UNSUPPORTED; }
+/* ------------------------------------------------------------------ Get/SetParam */
+#define DMG(n, a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) static const GUID n = { a, b, c, { d0, d1, d2, d3, d4, d5, d6, d7 } }
+DMG(G_TempoParam, 0xd2ac28a5, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_TimeSignature, 0xd2ac28a4, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_EnableTempo, 0x45fc707e, 0x1db4, 0x11d2, 0xbc, 0xac, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb);
+DMG(G_DisableTempo, 0x45fc707d, 0x1db4, 0x11d2, 0xbc, 0xac, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb);
+DMG(G_EnableTimeSig, 0x45fc707c, 0x1db4, 0x11d2, 0xbc, 0xac, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb);
+DMG(G_DisableTimeSig, 0x45fc707b, 0x1db4, 0x11d2, 0xbc, 0xac, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb);
+DMG(G_Download, 0xd2ac28a7, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_Unload, 0xd2ac28a8, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_DownloadToAudioPath, 0x9f2c0341, 0xc5c4, 0x11d3, 0x9b, 0xd1, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+DMG(G_UnloadFromAudioPath, 0x9f2c0342, 0xc5c4, 0x11d3, 0x9b, 0xd1, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+DMG(G_EnableAutoDownload, 0xd2ac28a9, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_DisableAutoDownload, 0xd2ac28aa, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_ClearAllBands, 0xd2ac28ab, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_IDirectMusicBand, 0xd2ac28ac, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_BandParam, 0x02bb1938, 0xcb8b, 0x11d2, 0x8b, 0xb9, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6);
+DMG(G_StandardMIDIFile, 0x06621075, 0xe92e, 0x11d1, 0xa8, 0xc5, 0x00, 0xc0, 0x4f, 0xa3, 0x72, 0x6e);
+DMG(G_ConnectToDLSCollection, 0x1db1ae6b, 0xe92e, 0x11d1, 0xa8, 0xc5, 0x00, 0xc0, 0x4f, 0xa3, 0x72, 0x6e);
+DMG(G_MuteParam, 0xd2ac28af, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_PrivateTempo, 0xe8dbd832, 0xbcf0, 0x4c8c, 0xa0, 0x75, 0xa3, 0xf1, 0x5e, 0x67, 0xfd, 0x63);
+static const struct { const GUID *g; int prm; } s_params[] = {
+    { &G_TempoParam, PRM_TEMPO }, { &G_TimeSignature, PRM_TIMESIG }, { &G_EnableTempo, PRM_ENABLETEMPO },
+    { &G_DisableTempo, PRM_DISABLETEMPO }, { &G_EnableTimeSig, PRM_ENABLETIMESIG }, { &G_DisableTimeSig, PRM_DISABLETIMESIG },
+    { &G_Download, PRM_DOWNLOAD }, { &G_Unload, PRM_UNLOAD }, { &G_DownloadToAudioPath, PRM_DOWNLOAD_AP },
+    { &G_UnloadFromAudioPath, PRM_UNLOAD_AP }, { &G_EnableAutoDownload, PRM_ENABLE_AUTODL },
+    { &G_DisableAutoDownload, PRM_DISABLE_AUTODL }, { &G_ClearAllBands, PRM_CLEARBANDS }, { &G_IDirectMusicBand, PRM_IBAND },
+    { &G_BandParam, PRM_BANDPARAM }, { &G_StandardMIDIFile, PRM_SMF }, { &G_ConnectToDLSCollection, PRM_CONNECTDLS },
+    { &G_MuteParam, PRM_MUTE }, { &G_PrivateTempo, PRM_PRIVTEMPO }, { &GUID_NULL, PRM_ANY },
+};
+static int prm_of(REFGUID g)
+{
+    for (size_t k = 0; k < sizeof(s_params) / sizeof(s_params[0]); k++) if (IsEqualGUID(g, s_params[k].g)) return s_params[k].prm;
+    return PRM_OTHER;
+}
+static int prm_takes_target(int prm)
+{
+    return prm == PRM_DOWNLOAD || prm == PRM_UNLOAD || prm == PRM_DOWNLOAD_AP || prm == PRM_UNLOAD_AP;
+}
+static rm_collection *col_of(IUnknown *u);
+static rm_perf *perf_from_unknown(IUnknown *u);
+static rm_path *unsafe_path(IUnknown *u);
+
+/* the engine data a SetParam passes: a performance / audiopath for the download parameters (the host to lock comes
+ * from it), a collection for ConnectToDLSCollection; *h = the host to lock (the last performance created when the
+ * parameter names none) */
+static HRESULT prm_data(int prm, void *p, dm_dltarget *dt, void **data, dm_host **h)
+{
+    *data = p;
+    *h = g_lastperf ? g_lastperf->host : NULL;
+    if (prm_takes_target(prm)) {
+        if (!p) return E_POINTER;
+        rm_perf *pf = perf_from_unknown(p);
+        if (!pf || !pf->host) return E_NOINTERFACE;
+        rm_path *a = unsafe_path(p);
+        dt->pf = dm_host_perf(pf->host); dt->ap = a ? a->ap : NULL;
+        *data = dt; *h = pf->host;
+    } else if (prm == PRM_CONNECTDLS) {
+        if (!p) return E_POINTER;
+        rm_collection *c = col_of(p);
+        if (!c || !c->c) return E_NOINTERFACE;
+        *data = c->c;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI seg_getparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *p)
+{
+    char b[64];
+    if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
+    if (!sgm(i)->seg) return DMUS_E_TRACK_NOT_FOUND;
+    int prm = prm_of(g);
+    if ((prm == PRM_TEMPO || prm == PRM_TIMESIG) && !p) return E_POINTER;
+    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
+    mtime_t next = nx ? *nx : 0;      /* untouched when no track answers */
+    if (h) dm_host_lock(h);
+    int hr = dm_segment_getparam(sgm(i)->seg, prm, gb, n, t, nx ? &next : NULL, p);
+    if (h) dm_host_unlock(h);
+    if (nx) *nx = next;
+    LOG_CALL("music: Segment::GetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, hr);
+    return hr;
+}
 static HRESULT WINAPI seg_setparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, void *p)
 {
     char b[64];
-    LOG_CALL("music: Segment::SetParam(%s) ignored", guidstr(g, b));
-    return S_OK;
+    if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
+    if (!sgm(i)->seg) return DMUS_E_TRACK_NOT_FOUND;
+    int prm = prm_of(g);
+    dm_dltarget dt; void *data; dm_host *h;
+    HRESULT hr = prm_data(prm, p, &dt, &data, &h);
+    if (FAILED(hr)) return hr;
+    if (h) dm_host_lock(h);
+    hr = dm_segment_setparam(sgm(i)->seg, prm, gb, n, t, data);
+    if (h) dm_host_unlock(h);
+    if (prm == PRM_OTHER || prm == PRM_IBAND || prm == PRM_BANDPARAM) LOG_INFO("music: Segment::SetParam(%s) -> %08x (not supported)", guidstr(g, b), (unsigned)hr);
+    else LOG_CALL("music: Segment::SetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, (unsigned)hr);
+    return hr;
 }
 static HRESULT WINAPI seg_clone(IDirectMusicSegment8 *i, MUSIC_TIME a, MUSIC_TIME b, IDirectMusicSegment **o) { if (o) *o = NULL; return rm_notimpl(__func__); }
 static HRESULT WINAPI seg_setstart(IDirectMusicSegment8 *i, MUSIC_TIME t)
@@ -392,26 +488,21 @@ static HRESULT WINAPI seg_getapconfig(IDirectMusicSegment8 *i, IUnknown **c) { i
 static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c) { return rm_notimpl(__func__); }
 static rm_perf *perf_from_unknown(IUnknown *u);
 static rm_path *unsafe_path(IUnknown *u);
+/* 77312338 / 773123e7: SetParam(GUID_DownloadToAudioPath / GUID_UnloadFromAudioPath) on every track; a segment
+ * without such tracks succeeds */
 static HRESULT WINAPI seg_download(IDirectMusicSegment8 *i, IUnknown *target)
 {
-    rm_perf *p = perf_from_unknown(target);
-    if (!p || !p->host || !sgm(i)->seg) return E_INVALIDARG;
-    rm_path *a = unsafe_path(target);
-    dm_host_lock(p->host);
-    int hr = dm_segment_download_ap(dm_host_perf(p->host), sgm(i)->seg, a ? a->ap : NULL);
-    dm_host_unlock(p->host);
-    LOG_CALL("music: Segment::Download -> %08x", hr);
-    return hr < 0 ? DMUS_S_PARTIALDOWNLOAD : S_OK;
+    if (!target) return E_POINTER;
+    HRESULT hr = seg_setparam(i, &G_DownloadToAudioPath, 0xffffffff, DM_SEG_ALLTRACKS, 0, target);
+    if (hr == DMUS_E_TRACK_NOT_FOUND) hr = S_OK;
+    LOG_CALL("music: Segment::Download -> %08x", (unsigned)hr);
+    return hr;
 }
 static HRESULT WINAPI seg_unload(IDirectMusicSegment8 *i, IUnknown *target)
 {
-    rm_perf *p = perf_from_unknown(target);
-    if (!p || !p->host || !sgm(i)->seg) return E_INVALIDARG;
-    rm_path *a = unsafe_path(target);
-    dm_host_lock(p->host);
-    dm_segment_unload_ap(dm_host_perf(p->host), sgm(i)->seg, a ? a->ap : NULL);
-    dm_host_unlock(p->host);
-    return S_OK;
+    if (!target) return E_POINTER;
+    HRESULT hr = seg_setparam(i, &G_UnloadFromAudioPath, 0xffffffff, DM_SEG_ALLTRACKS, 0, target);
+    return hr == DMUS_E_TRACK_NOT_FOUND ? S_OK : hr;
 }
 static IDirectMusicSegment8Vtbl seg_vtbl = { seg_qi, seg_addref, seg_release, seg_getlength, seg_setlength, seg_getrepeats,
     seg_setrepeats, seg_getres, seg_setres, seg_gettrack, seg_gettrackgroup, seg_inserttrack, seg_removetrack, seg_initplay,
@@ -1143,8 +1234,40 @@ static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirect
 static HRESULT WINAPI pf_downloadinst(IDirectMusicPerformance8 *i, IDirectMusicInstrument *in, DWORD pch, IDirectMusicDownloadedInstrument **d,
                                       DMUS_NOTERANGE *r, DWORD n, IDirectMusicPort **port, DWORD *g, DWORD *c) { return rm_notimpl(__func__); }
 static HRESULT WINAPI pf_invalidate(IDirectMusicPerformance8 *i, MUSIC_TIME t, DWORD f) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_invalidate(dm_host_perf(p->host), t, f)); return S_OK; }
-static HRESULT WINAPI pf_getparam(IDirectMusicPerformance8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp) { return DMUS_E_NOT_FOUND; }
-static HRESULT WINAPI pf_setparam(IDirectMusicPerformance8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, void *pp) { return DMUS_E_SET_UNSUPPORTED; }
+/* 77306acd / 773069c2: GetParam(Ex) through the playing segment states; 77306fbf: SetParam to the primary segment */
+static HRESULT pf_getparam_any(IDirectMusicPerformance8 *i, REFGUID g, DWORD id, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp)
+{
+    rm_perf *p = prf(i);
+    if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
+    if (!p->host) return DMUS_E_NO_MASTER_CLOCK;
+    int prm = prm_of(g), hr;
+    mtime_t next = 0;
+    dm_host_lock(p->host);
+    hr = dm_perf_getparam(dm_host_perf(p->host), prm, id, gb, n, t, nx ? &next : NULL, pp);
+    dm_host_unlock(p->host);
+    if (nx) *nx = next;
+    return hr;
+}
+static HRESULT WINAPI pf_getparam(IDirectMusicPerformance8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp)
+{
+    return pf_getparam_any(i, g, 0, gb, n, t, nx, pp);
+}
+static HRESULT WINAPI pf_setparam(IDirectMusicPerformance8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, void *pp)
+{
+    rm_perf *p = prf(i);
+    char b[64];
+    if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
+    if (!p->host) return DMUS_E_NO_MASTER_CLOCK;
+    int prm = prm_of(g);
+    dm_dltarget dt; void *data; dm_host *h;
+    HRESULT hr = prm_data(prm, pp, &dt, &data, &h);
+    if (FAILED(hr)) return hr;
+    dm_host_lock(p->host);
+    hr = dm_perf_setparam(dm_host_perf(p->host), prm, gb, n, t, data);
+    dm_host_unlock(p->host);
+    LOG_CALL("music: Performance::SetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, (unsigned)hr);
+    return hr;
+}
 static HRESULT WINAPI pf_getglobal(IDirectMusicPerformance8 *i, REFGUID g, void *v, DWORD sz)
 {
     rm_perf *p = prf(i);
@@ -1371,7 +1494,10 @@ static HRESULT WINAPI pf_getdefpath(IDirectMusicPerformance8 *i, IDirectMusicAud
     IDirectMusicAudioPath_AddRef(*out);
     return S_OK;
 }
-static HRESULT WINAPI pf_getparamex(IDirectMusicPerformance8 *i, REFGUID g, DWORD id, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp) { return DMUS_E_NOT_FOUND; }
+static HRESULT WINAPI pf_getparamex(IDirectMusicPerformance8 *i, REFGUID g, DWORD id, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp)
+{
+    return pf_getparam_any(i, g, id, gb, n, t, nx, pp);
+}
 
 static IDirectMusicPerformance8Vtbl pf_vtbl = { pf_qi, pf_addref, pf_release, pf_init, pf_playsegment, pf_stop, pf_getsegstate,
     pf_setprepare, pf_getprepare, pf_setbumper, pf_getbumper, pf_sendpmsg, pf_m2r, pf_r2m, pf_isplaying, pf_gettime,

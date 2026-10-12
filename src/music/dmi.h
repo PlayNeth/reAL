@@ -26,6 +26,7 @@ typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } dm_guid;
 #endif
 #define DM_E_FAIL           ((int32_t)0x80004005)
 #define DM_E_POINTER        ((int32_t)0x80004003)
+#define DM_E_NOTIMPL        ((int32_t)0x80004001)
 #define DM_E_INVALIDARG     ((int32_t)0x80070057)
 #define DM_E_OUTOFMEMORY    ((int32_t)0x8007000e)
 #ifndef DMUS_E_NOT_FOUND
@@ -36,6 +37,18 @@ typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } dm_guid;
 #endif
 #ifndef DMUS_E_TYPE_DISABLED
 #define DMUS_E_TYPE_DISABLED ((int32_t)0x88781163)
+#endif
+#ifndef DMUS_E_TYPE_UNSUPPORTED
+#define DMUS_E_TYPE_UNSUPPORTED ((int32_t)0x88781164)
+#endif
+#ifndef DMUS_E_SET_UNSUPPORTED
+#define DMUS_E_SET_UNSUPPORTED ((int32_t)0x88781123)
+#endif
+#ifndef DMUS_E_GET_UNSUPPORTED
+#define DMUS_E_GET_UNSUPPORTED ((int32_t)0x88781124)
+#endif
+#ifndef DMUS_E_NO_MASTER_CLOCK
+#define DMUS_E_NO_MASTER_CLOCK ((int32_t)0x88781170)
 #endif
 #ifndef DMUS_E_TRACK_NOT_FOUND
 #define DMUS_E_TRACK_NOT_FOUND ((int32_t)0x88781166)
@@ -168,7 +181,7 @@ typedef struct {
 } dm_seqtrack;
 
 typedef struct { mtime_t mt; double tempo; } dm_tempoitem;
-typedef struct { dm_tempoitem *items; int n; int active, setbyparam; } dm_tempotrack;
+typedef struct { dm_tempoitem *items; int n; int active, setbyparam; uint32_t version; } dm_tempotrack;
 
 typedef struct { mtime_t mt; uint8_t bpm, beat; uint16_t grids; } dm_tsitem;
 typedef struct { dm_tsitem *items; int n; int active, setbyparam; } dm_tstrack;
@@ -182,7 +195,8 @@ typedef struct {
     int16_t pbrange;
     dm_collection *coll;
     dm_dlrec *dl;
-    int notinfile;                      /* MIDI file import: a default instrument, sent but not downloaded */
+    int notinfile;                      /* MIDI file import: a default instrument, neither sent nor downloaded */
+    int smf; uint32_t sendpatch;        /* GUID_StandardMIDIFile: downloads take the GM program, the band still sends sendpatch */
 } dm_inst;
 typedef struct dm_band {
     mtime_t logical, physical;

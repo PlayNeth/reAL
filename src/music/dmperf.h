@@ -99,6 +99,21 @@ dm_segstate *dm_perf_get_segstate(dm_perf *pf, mtime_t t);
 int dm_perf_pchannel_info(dm_perf *pf, uint32_t pch, int *port, uint32_t *group, uint32_t *chan);
 int dm_perf_adjust_time(dm_perf *pf, rtime_t rt);
 /* instrument download for a segment's band tracks (IDirectMusicSegment::Download / Unload) */
+/* Get/SetParam.  The parameter GUIDs the engine's tracks know (the COM layer maps GUIDs to these); PRM_ANY is
+ * GUID_NULL (every track), PRM_OTHER any other GUID.  Data layouts are DirectMusic's: DMUS_TEMPO_PARAM for
+ * PRM_TEMPO, DMUS_TIMESIGNATURE for PRM_TIMESIG; download parameters take a dm_dltarget, PRM_CONNECTDLS a
+ * dm_collection. */
+enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND,
+       PRM_ENABLETEMPO, PRM_DISABLETEMPO, PRM_ENABLETIMESIG, PRM_DISABLETIMESIG,
+       PRM_DOWNLOAD, PRM_UNLOAD, PRM_DOWNLOAD_AP, PRM_UNLOAD_AP, PRM_ENABLE_AUTODL, PRM_DISABLE_AUTODL,
+       PRM_CLEARBANDS, PRM_IBAND, PRM_BANDPARAM, PRM_SMF, PRM_CONNECTDLS, PRM_WAVEPRIV, PRM_ANY, PRM_OTHER };
+typedef struct { dm_perf *pf; dm_audiopath *ap; } dm_dltarget;
+#define DM_SEG_ANYTRACK 0x80000000u
+#define DM_SEG_ALLTRACKS 0x80000000u
+int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
+int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
+int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
+int dm_perf_setparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
 int dm_segment_download(dm_perf *pf, dm_segment *seg);
 int dm_segment_unload(dm_perf *pf, dm_segment *seg);
 /* the same through an audiopath (GUID_DownloadToAudioPath / GUID_UnloadFromAudioPath: its PChannels) */

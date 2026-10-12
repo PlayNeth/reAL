@@ -30,7 +30,9 @@ int main(int argc, char **argv)
     IDirectMusicLoader8_SetSearchDirectory(loader, &GUID_DirectMusicAllTypes, wdir, FALSE);
     hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, wfile, (void **)&seg);
     printf("load %s %08lx\n", file, hr); if (FAILED(hr)) return 1;
-    IDirectMusicSegment8_SetParam(seg, &GUID_StandardMIDIFile, 0xffffffff, 0, 0, NULL);
+    const char *ext = strrchr(file, '.');
+    if (ext && (!_stricmp(ext, ".mid") || !_stricmp(ext, ".midi") || !_stricmp(ext, ".rmi")))     /* as games do for MIDI files */
+        IDirectMusicSegment8_SetParam(seg, &GUID_StandardMIDIFile, 0xffffffff, 0, 0, NULL);
     MUSIC_TIME len = 0; IDirectMusicSegment8_GetLength(seg, &len);
     printf("length %ld\n", (long)len);
     hr = IDirectMusicSegment8_Download(seg, (IUnknown *)perf);
