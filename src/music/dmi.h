@@ -318,6 +318,8 @@ enum { NOTIF_MUSICSTARTED = 0, NOTIF_MUSICSTOPPED, NOTIF_MUSICALMOSTEND };
 int dm_segment_add_notification(dm_segment *s, const dm_guid *g, int fromperf);
 int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf);
 int dm_segment_has_notification(const dm_segment *s, const dm_guid *g);
+int dm_track_add_notification(dm_track *t, const dm_guid *g);      /* a track's own (S_FALSE: not one it sends) */
+int dm_track_remove_notification(dm_track *t, const dm_guid *g);
 
 /* segment loading: resolve a DLS reference (DMRF) of a band instrument; NULL guid/file means the default GM set */
 typedef dm_collection *(*dm_getcoll_fn)(void *ctx, const dm_guid *guid, const char *file);
@@ -334,6 +336,11 @@ int dm_is_midi(const void *data, size_t size);
 dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data);
 void dm_track_addref(dm_track *t);
 void dm_track_release(dm_track *t);
+/* Clone: a track's data in [start, end) moved to 0 (77..: per kind); a segment's tracks cloned (77313a27).
+ * dm_set_clone_fix: keep what the original's clones lose (wave item ranges, a band carried over without a later band) */
+dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr);
+dm_segment *dm_segment_clone(const dm_segment *s, mtime_t start, mtime_t end, int *hr);
+void dm_set_clone_fix(int on);
 /* insert in segment track order (position, then sysex before band before the rest); takes over one reference */
 void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority);
 void dm_segment_release(dm_segment *s);

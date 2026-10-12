@@ -420,6 +420,7 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
                                           DM_FIX_WAVE_SYNCVAR | DM_FIX_STATE_TRACKCONFIG);
     if (!fixes) msynth_set_fixes(h->syn, 0);
     dm_wave_set_fix_length(fixes);
+    dm_set_clone_fix(fixes);
     dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign,
                       port_wave_download, port_wave_unload, port_voice_alloc, port_voice_play, port_voice_stop, port_voice_free };
     dm_perf_add_port(h->pf, &po, h);

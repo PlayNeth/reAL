@@ -115,6 +115,10 @@ typedef struct { dm_perf *pf; dm_audiopath *ap; } dm_dltarget;
 int dm_segment_set_trackconfig(dm_segment *s, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off);
 int dm_segstate_set_trackconfig(dm_segstate *ss, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off);
 int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n);
+/* a track object's own IsParamSupported / GetParam / SetParam / Add/RemoveNotificationType */
+int dm_track_isparam(const dm_track *t, int prm);
+int dm_track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data);
+int dm_track_setparam(dm_track *t, int prm, mtime_t mt, void *data);
 int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
 int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
 int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);

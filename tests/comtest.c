@@ -339,6 +339,101 @@ static void sendpmsg(void)
     Sleep(1500);
 }
 
+static void pr_class(const char *what, IUnknown *t)
+{
+    IPersistStream *ps = NULL; CLSID c; memset(&c, 0, sizeof(c));
+    HRESULT hr = t ? IUnknown_QueryInterface(t, &IID_IPersistStream, (void **)&ps) : E_POINTER;
+    if (SUCCEEDED(hr)) { hr = IPersistStream_GetClassID(ps, &c); IPersistStream_Release(ps); }
+    printf("  %s class %08lx {%08lx-%04x}\n", what, hr, c.Data1, c.Data2);
+}
+static void listtracks(const char *what, IDirectMusicSegment8 *s)
+{
+    printf("  %s:", what);
+    for (DWORD k = 0; k < 20; k++) {
+        IDirectMusicTrack *t = NULL;
+        if (FAILED(IDirectMusicSegment8_GetTrack(s, &GUID_NULL_, 0xffffffff, k, &t))) break;
+        IPersistStream *ps = NULL; CLSID c; memset(&c, 0, sizeof(c));
+        if (SUCCEEDED(IDirectMusicTrack_QueryInterface(t, &IID_IPersistStream, (void **)&ps))) { IPersistStream_GetClassID(ps, &c); IPersistStream_Release(ps); }
+        DWORD g = 0; IDirectMusicSegment8_GetTrackGroup(s, t, &g);
+        printf(" %08lx/%lx", c.Data1, g);
+        IDirectMusicTrack_Release(t);
+    }
+    MUSIC_TIME len = 0; IDirectMusicSegment8_GetLength(s, &len);
+    printf(" len %ld\n", len);
+}
+static void tracks(void)
+{
+    printf("tracks\n");
+    WCHAR w[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, "bells1.sgt", -1, w, MAX_PATH);
+    IDirectMusicSegment8 *s = NULL, *s2 = load("fe_hard_04.sgt");
+    IDirectMusicLoader8_ClearCache(loader, &CLSID_DirectMusicSegment);
+    if (FAILED(IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&s)) || !s2) return;
+    listtracks("bells1", s);
+    IDirectMusicTrack *t = NULL, *t2 = NULL;
+    printf("  get tempo %08lx\n", IDirectMusicSegment8_GetTrack(s, &clsid_tempotrack_, 0xffffffff, 0, &t));
+    printf("  get tempo 1 %08lx\n", IDirectMusicSegment8_GetTrack(s, &clsid_tempotrack_, 0xffffffff, 1, &t2));
+    printf("  get bogus %08lx\n", IDirectMusicSegment8_GetTrack(s, &guid_bogus, 0xffffffff, 0, &t2));
+    printf("  get group 0 %08lx\n", IDirectMusicSegment8_GetTrack(s, &GUID_NULL_, 0, 0, &t2));
+    printf("  get NULL %08lx\n", IDirectMusicSegment8_GetTrack(s, &GUID_NULL_, 0xffffffff, 0, NULL));
+    if (!t) return;
+    pr_class("tempo", (IUnknown *)t);
+    DWORD g = 77;
+    printf("  group %08lx %lu\n", IDirectMusicSegment8_GetTrackGroup(s, t, &g), g);
+    g = 77;
+    printf("  group other seg %08lx %lu\n", IDirectMusicSegment8_GetTrackGroup(s2, t, &g), g);
+    IDirectMusicTrack8 *t8 = NULL;
+    printf("  qi track8 %08lx\n", IDirectMusicTrack_QueryInterface(t, &IID_IDirectMusicTrack8, (void **)&t8));
+    const GUID *gs[] = { &GUID_TempoParam_, &GUID_TimeSignature_, &GUID_EnableTempo_, &GUID_DisableTempo_, &GUID_Download_, &GUID_NULL_, &guid_bogus };
+    for (unsigned k = 0; k < 7; k++) printf("  isparam %u %08lx\n", k, IDirectMusicTrack_IsParamSupported(t, gs[k]));
+    DMUS_TEMPO_PARAM tp; MUSIC_TIME next = -7;
+    HRESULT hr = IDirectMusicTrack_GetParam(t, &GUID_TempoParam_, 0, &next, &tp);
+    printf("  track tempo %08lx next %ld tempo %.3f\n", hr, next, SUCCEEDED(hr) ? tp.dblTempo : 0.0);
+    REFERENCE_TIME rn = -7;
+    hr = IDirectMusicTrack8_GetParamEx(t8, &GUID_TempoParam_, 50000, &rn, &tp, NULL, 1);
+    printf("  track tempo ex clock %08lx next %lld\n", hr, rn);
+    printf("  remove %08lx\n", IDirectMusicSegment8_RemoveTrack(s, t));
+    printf("  remove again %08lx\n", IDirectMusicSegment8_RemoveTrack(s, t));
+    next = -7; printf("  seg tempo after remove %08lx\n", IDirectMusicSegment8_GetParam(s, &GUID_TempoParam_, 0xffffffff, 0, 0, &next, &tp));
+    printf("  insert group 0 %08lx\n", IDirectMusicSegment8_InsertTrack(s, t, 0));
+    printf("  insert %08lx\n", IDirectMusicSegment8_InsertTrack(s, t, 2));
+    listtracks("after insert", s);
+    printf("  insert into fe_hard %08lx\n", IDirectMusicSegment8_InsertTrack(s2, t, 4));
+    listtracks("fe_hard", s2);
+    IDirectMusicTrack *c = NULL;
+    printf("  clone bad %08lx\n", IDirectMusicTrack_Clone(t, 100, 50, &c));
+    printf("  clone neg %08lx\n", IDirectMusicTrack_Clone(t, -1, 50, &c));
+    hr = IDirectMusicTrack_Clone(t, 0, 0, &c);
+    printf("  clone 0 0 %08lx\n", hr);
+    if (c) { next = -7; hr = IDirectMusicTrack_GetParam(c, &GUID_TempoParam_, 0, &next, &tp); printf("  clone tempo %08lx next %ld\n", hr, next); IDirectMusicTrack_Release(c); c = NULL; }
+    printf("  remove from fe_hard %08lx\n", IDirectMusicSegment8_RemoveTrack(s2, t));
+    if (t8) IDirectMusicTrack8_Release(t8);
+    IDirectMusicTrack_Release(t);
+    static const long ranges[][2] = { { 0, 0 }, { 768, 3072 }, { 3072, 768 }, { 1000, 0 }, { -5, 2000 }, { 0, 99999999 }, { 99999999, 0 }, { 1536, 1536 } };
+    for (unsigned k = 0; k < 8; k++) {
+        IDirectMusicSegment *cs = NULL;
+        hr = IDirectMusicSegment8_Clone(s2, ranges[k][0], ranges[k][1], &cs);
+        printf("  clone fe_hard %ld %ld: %08lx\n", ranges[k][0], ranges[k][1], hr);
+        if (!cs) continue;
+        IDirectMusicSegment8 *c8 = NULL;
+        IDirectMusicSegment_QueryInterface(cs, &IID_IDirectMusicSegment8, (void **)&c8);
+        listtracks("  clone", c8);
+        DMUS_TIMESIGNATURE ts; next = -7;
+        hr = IDirectMusicSegment8_GetParam(c8, &GUID_TimeSignature_, 0xffffffff, 0, 0, &next, &ts);
+        printf("    ts %08lx next %ld %u/%u\n", hr, next, SUCCEEDED(hr) ? ts.bBeatsPerMeasure : 0, SUCCEEDED(hr) ? ts.bBeat : 0);
+        next = -7; hr = IDirectMusicSegment8_GetParam(c8, &GUID_TempoParam_, 0xffffffff, 0, 0, &next, &tp);
+        printf("    tempo %08lx next %ld %.3f\n", hr, next, SUCCEEDED(hr) ? tp.dblTempo : 0.0);
+        DWORD rep = 0; MUSIC_TIME ls = 0, le = 0, sp = 0;
+        IDirectMusicSegment8_GetRepeats(c8, &rep); IDirectMusicSegment8_GetLoopPoints(c8, &ls, &le); IDirectMusicSegment8_GetStartPoint(c8, &sp);
+        printf("    repeats %lu loop %ld %ld start %ld\n", rep, ls, le, sp);
+        IDirectMusicSegment8_Release(c8);
+        IDirectMusicSegment_Release(cs);
+    }
+    IDirectMusicSegment8_Release(s);
+    IDirectMusicSegment8_Release(s2);
+    IDirectMusicLoader8_ClearCache(loader, &CLSID_DirectMusicSegment);
+}
+
 static void perfparams(void)
 {
     DMUS_TEMPO_PARAM tp; DMUS_TIMESIGNATURE ts; MUSIC_TIME next, now;
@@ -403,6 +498,7 @@ int main(int argc, char **argv)
     perfparams();
     trackcfg();
     sendpmsg();
+    tracks();
     smfdl("fe_hard_04.sgt");
     smfdl("bells1.sgt");
     IDirectMusicPerformance8_CloseDown(perf);

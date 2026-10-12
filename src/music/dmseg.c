@@ -445,6 +445,37 @@ void dm_track_release(dm_track *t)
     if (t && __sync_sub_and_fetch(&t->refs, 1) <= 0) { free_track(t); free(t); }
 }
 
+int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n);
+/* the track's Init as it goes into a segment: its PChannels to the segment's list (sequence 77319662, band 77201983,
+ * wave 77326edc); a wave track sorts its items again, by logical time or, in clock time, by time (its merge sort takes
+ * the later of two equal items first, so a second sort can swap them) */
+static void track_init(dm_segment *s, dm_segtrack *e)
+{
+    dm_track *t = e->t;
+    if (!t->data) return;
+    switch (t->kind) {
+    case TRK_SEQ: { dm_seqtrack *q = t->data; if (q->npchs && q->pchs) dm_segment_add_pchannels(s, q->pchs, q->npchs); break; }
+    case TRK_WAVE: {
+        dm_wavetrack *w = t->data;
+        if (w->nparts && w->pchs) dm_segment_add_pchannels(s, w->pchs, w->nparts);
+        dm_wavetrack_sort(w, (e->config & 0x40) != 0);
+        break;
+    }
+    case TRK_BAND: {
+        dm_bandtrack *b = t->data;
+        uint32_t n = 0;
+        for (int k = 0; k < b->nbands; k++) n += b->bands[k]->ninst;
+        if (!n) break;
+        uint32_t *p = malloc(n * sizeof(*p)), j = 0;
+        if (!p) break;
+        for (int k = 0; k < b->nbands; k++) for (int i = 0; i < b->bands[k]->ninst; i++) p[j++] = b->bands[k]->inst[i].pch;
+        dm_segment_add_pchannels(s, p, n);
+        free(p);
+        break;
+    }
+    }
+}
+
 /* in segment track order (77311b2c / 773112d8) */
 void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority)
 {
@@ -457,6 +488,8 @@ void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint
     memmove(s->tracks + i + 1, s->tracks + i, (s->ntracks - i) * sizeof(*s->tracks));
     s->tracks[i] = e;
     s->ntracks++;
+    track_init(s, &s->tracks[i]);
+    for (int k = 0; k < s->nntypes; k++) dm_track_add_notification(t, &s->ntypes[k].g);
 }
 
 typedef struct { int kind; dm_guid clsid; uint32_t position, group, config, priority; void *data; } ldtrack;
@@ -489,8 +522,7 @@ static void load_track(dm_segment *s, rd r, dm_getcoll_fn getcoll, dm_getwave_fn
             else if (guid_eq(&t.clsid, &CLSID_SysExTrack) && id == FCC('s','y','e','x')) { t.kind = TRK_SYSEX; t.data = load_sysex(c); }
             else if (guid_eq(&t.clsid, &CLSID_WaveTrack) && id == FCC('L','I','S','T') && type == FCC('w','a','v','t')) {
                 t.kind = TRK_WAVE; t.data = load_wavetrack(c, getwave, ctx);
-                if (t.data) dm_wavetrack_sort(t.data, (t.config & 0x40) != 0);
-                else t.kind = TRK_OTHER;
+                if (!t.data) t.kind = TRK_OTHER;
             }
             else t.kind = TRK_OTHER;
             dm_track *o = dm_track_new(t.kind, &t.clsid, t.data);
@@ -591,6 +623,268 @@ static void free_track(dm_track *t)
     }
 }
 
+/* ------------------------------------------------------------------ Clone (IDirectMusicTrack::Clone, Segment::Clone) */
+static int g_clonefix;
+void dm_set_clone_fix(int on) { g_clonefix = on; }
+
+/* the item in effect at the start of a clone: the last one before start, none when one is exactly at start
+ * (tempo 7731c619, time signature 7731d82d) */
+#define CARRY_PREV(arr, n, field, start, end, out, nout, T) do { \
+    int prev_ = -1, i_; \
+    for (i_ = 0; i_ < (n); i_++) { \
+        if ((arr)[i_].field < (start)) { if (prev_ != -2) prev_ = i_; continue; } \
+        if ((arr)[i_].field >= (end)) break; \
+        if ((arr)[i_].field == (start)) prev_ = -2; \
+    } \
+    if (prev_ >= 0) { (out)[(nout)] = (arr)[prev_]; (out)[(nout)].field = 0; (nout)++; } \
+    for (i_ = 0; i_ < (n); i_++) { \
+        if ((arr)[i_].field < (start)) continue; \
+        if ((arr)[i_].field >= (end)) break; \
+        (out)[(nout)] = (arr)[i_]; (out)[(nout)].field -= (start); (nout)++; \
+    } \
+} while (0)
+
+static void *clone_tempo(const dm_tempotrack *t, mtime_t start, mtime_t end)
+{
+    dm_tempotrack *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    c->active = t->active; c->setbyparam = t->setbyparam;
+    if (t->n) {
+        c->items = malloc((t->n + 1) * sizeof(*c->items));
+        if (!c->items) { free(c); return NULL; }
+        CARRY_PREV(t->items, t->n, mt, start, end, c->items, c->n, dm_tempoitem);
+    }
+    return c;
+}
+static void *clone_timesig(const dm_tstrack *t, mtime_t start, mtime_t end)
+{
+    dm_tstrack *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    c->active = t->active; c->setbyparam = t->setbyparam;
+    if (t->n) {
+        c->items = malloc((t->n + 1) * sizeof(*c->items));
+        if (!c->items) { free(c); return NULL; }
+        CARRY_PREV(t->items, t->n, mt, start, end, c->items, c->n, dm_tsitem);
+    }
+    return c;
+}
+/* 7731b7c4: the items from start until the first at or after end */
+static void *clone_sysex(const dm_sysextrack *t, mtime_t start, mtime_t end)
+{
+    dm_sysextrack *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    if (t->n && !(c->items = calloc(t->n, sizeof(*c->items)))) { free(c); return NULL; }
+    for (int i = 0; i < t->n; i++) {
+        const dm_sysexitem *it = &t->items[i];
+        if (it->mt < start) continue;
+        if (it->mt >= end) break;
+        if (!it->len) continue;
+        dm_sysexitem *o = &c->items[c->n];
+        if (!(o->data = malloc(it->len))) continue;
+        memcpy(o->data, it->data, it->len);
+        o->len = it->len; o->mt = it->mt - start;
+        c->n++;
+    }
+    return c;
+}
+/* 7731aa7b: every part, with its events and curves from start until the first at or after end; the part list ends up
+ * in the original's order: each new part goes to the front and the whole list is reversed after each one */
+static void *clone_seq(const dm_seqtrack *t, mtime_t start, mtime_t end)
+{
+    dm_seqtrack *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    if (t->npchs) {
+        c->pchs = malloc(t->npchs * sizeof(*c->pchs));
+        if (c->pchs) { memcpy(c->pchs, t->pchs, t->npchs * sizeof(*c->pchs)); c->npchs = t->npchs; }
+    }
+    if (!t->nparts) return c;
+    c->parts = calloc(t->nparts, sizeof(*c->parts));
+    if (!c->parts) return c;
+    for (int k = 0; k < t->nparts; k++) {
+        const dm_seqpart *sp = &t->parts[k];
+        dm_seqpart np = { sp->pch, NULL, 0, NULL, 0 };
+        if (sp->nev) np.ev = malloc(sp->nev * sizeof(*np.ev));
+        for (int i = 0; np.ev && i < sp->nev; i++) {
+            if (sp->ev[i].mt < start) continue;
+            if (sp->ev[i].mt >= end) break;
+            np.ev[np.nev] = sp->ev[i]; np.ev[np.nev].mt -= start; np.nev++;
+        }
+        if (sp->ncv) np.cv = malloc(sp->ncv * sizeof(*np.cv));
+        for (int i = 0; np.cv && i < sp->ncv; i++) {
+            if (sp->cv[i].start < start) continue;
+            if (sp->cv[i].start >= end) break;
+            np.cv[np.ncv] = sp->cv[i]; np.cv[np.ncv].start -= start; np.ncv++;
+        }
+        /* push front, then reverse the list */
+        memmove(c->parts + 1, c->parts, c->nparts * sizeof(*c->parts));
+        c->parts[0] = np; c->nparts++;
+        for (int i = 0, j = c->nparts - 1; i < j; i++, j--) { dm_seqpart x = c->parts[i]; c->parts[i] = c->parts[j]; c->parts[j] = x; }
+    }
+    return c;
+}
+/* 77328a7d / 7732887c / 7732819c: every part; its items starting in [start, end) (end 0: no end), moved by start.
+ * The original leaves out an item's random volume and pitch ranges and its no-preroll flag (kept with the clone fix)
+ * and keeps its logical time unmoved. */
+static void *clone_wave(const dm_wavetrack *t, mtime_t start, mtime_t end)
+{
+    dm_wavetrack *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    c->vol = t->vol; c->flags = t->flags;
+    dm_wavepart **pt = &c->parts;
+    for (const dm_wavepart *sp = t->parts; sp; sp = sp->next) {
+        dm_wavepart *np = calloc(1, sizeof(*np));
+        if (!np) break;
+        np->pch = sp->pch; np->index = sp->index; np->vol = sp->vol; np->variations = sp->variations;
+        np->lock = sp->lock; np->flags = sp->flags;
+        dm_waveitem **pi = &np->items;
+        for (const dm_waveitem *it = sp->items; it; it = it->next) {
+            int32_t lo = (int32_t)it->rt;
+            if (!(start <= lo && (end == 0 || lo < end))) continue;
+            dm_waveitem *ni = calloc(1, sizeof(*ni));
+            if (!ni) break;
+            ni->rt = it->rt - start;
+            ni->vol = it->vol; ni->pitch = it->pitch; ni->variations = it->variations; ni->startoff = it->startoff;
+            ni->dur = it->dur; ni->logical = it->logical; ni->flags = it->flags; ni->wave = it->wave; dm_wave_addref(ni->wave);
+            ni->streaming = it->streaming; ni->loopstart = it->loopstart; ni->loopend = it->loopend;
+            if (g_clonefix) { ni->volrange = it->volrange; ni->pitchrange = it->pitchrange; ni->nopreroll = it->nopreroll; }
+            dm_dlnode **pd = &ni->dls;      /* 77325719: the same downloads (the list comes out reversed) */
+            for (const dm_dlnode *d = it->dls; d; d = d->next) {
+                dm_dlnode *nd = calloc(1, sizeof(*nd));
+                if (!nd) break;
+                nd->dl = d->dl; nd->next = *pd; *pd = nd;
+            }
+            *pi = ni; pi = &ni->next;
+        }
+        *pt = np; pt = &np->next;
+    }
+    for (dm_wavepart *p = c->parts; p; p = p->next) c->nparts++;
+    if (c->nparts) {
+        c->pchs = calloc(c->nparts, sizeof(uint32_t));
+        if (c->flags & 2) { c->persistvar = calloc(c->nparts, 4); c->persistused = calloc(c->nparts, 4); }
+        uint32_t i = 0;
+        for (dm_wavepart *p = c->parts; p; p = p->next, i++) {
+            if (c->pchs) c->pchs[i] = p->pch;
+            for (dm_waveitem *it = p->items; it; it = it->next) it->index = (int32_t)c->nitems++;
+        }
+    }
+    return c;
+}
+/* dmband 772038cd: an instrument added to a band goes to the front of its list; the copy leaves out the priority,
+ * pitch bend range and the MIDI-file state (kept with the clone fix) */
+static void inst_copy(dm_inst *d, const dm_inst *s)
+{
+    memset(d, 0, sizeof(*d));
+    d->patch = s->patch; d->assign = s->assign; d->pan = s->pan; d->vol = s->vol; d->transpose = s->transpose;
+    d->pch = s->pch; d->flags = s->flags; memcpy(d->ranges, s->ranges, sizeof(d->ranges)); d->coll = s->coll;
+    if (g_clonefix) { d->priority = s->priority; d->pbrange = s->pbrange; d->notinfile = s->notinfile; d->smf = s->smf; d->sendpatch = s->sendpatch; }
+}
+static dm_band *band_copy(const dm_band *b)        /* 77202d94's copy of a band: instruments re-added, so reversed */
+{
+    dm_band *n = calloc(1, sizeof(*n));
+    if (!n) return NULL;
+    *n = *b;
+    n->inst = NULL; n->ninst = 0;
+    if (b->ninst) {
+        if (!(n->inst = malloc(b->ninst * sizeof(*n->inst)))) { free(n); return NULL; }
+        for (int k = 0; k < b->ninst; k++) inst_copy(&n->inst[b->ninst - 1 - k], &b->inst[k]);
+        n->ninst = b->ninst;
+    }
+    return n;
+}
+/* dmband 77202d94: from start > 0, one band at 0 with each PChannel's latest instrument before start (made only when
+ * a band follows at or after start: without one the original drops them; kept with the clone fix), then the bands
+ * in [start, end) moved by start */
+static void *clone_band(const dm_bandtrack *t, mtime_t start, mtime_t end)
+{
+    dm_bandtrack *c = calloc(1, sizeof(*c));
+    if (!c) return NULL;
+    if (start > 0) {
+        const dm_inst **latest = NULL; int nl = 0, cap = 0, mode = 0, k;
+        for (k = 0; k < t->nbands; k++) {
+            const dm_band *b = t->bands[k];
+            if (start <= b->logical) break;
+            for (int j = 0; j < b->ninst; j++) {
+                int f;
+                for (f = 0; f < nl; f++) if (latest[f]->pch == b->inst[j].pch) { latest[f] = &b->inst[j]; break; }
+                if (f == nl) {
+                    if (nl == cap) { cap = cap ? cap * 2 : 16; const dm_inst **x = realloc(latest, cap * sizeof(*x)); if (!x) break; latest = x; }
+                    memmove(latest + 1, latest, nl * sizeof(*latest));     /* new PChannels go to the front */
+                    latest[0] = &b->inst[j]; nl++;
+                    mode = b->mode;
+                }
+            }
+        }
+        if (nl && (k < t->nbands || g_clonefix)) {
+            dm_band *m = calloc(1, sizeof(*m));
+            if (m && (m->inst = malloc(nl * sizeof(*m->inst)))) {
+                for (int j = 0; j < nl; j++) inst_copy(&m->inst[nl - 1 - j], latest[j]);
+                m->ninst = nl;
+                m->logical = 0;
+                m->physical = (k < t->nbands && t->bands[k]->physical <= start) ? t->bands[k]->physical - start - 1 : -1;
+                m->groupbits = 0xffffffff; m->mode = mode;
+                band_add(c, m);
+            } else free(m);
+        }
+        free(latest);
+    }
+    for (int k = 0; k < t->nbands; k++) {
+        const dm_band *b = t->bands[k];
+        if (!((start == 0 || start <= b->logical) && b->logical < end)) continue;
+        dm_band *n = band_copy(b);
+        if (!n) continue;
+        n->logical -= start; n->physical -= start;
+        band_add(c, n);
+    }
+    return c;
+}
+
+dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
+{
+    *hr = DM_OK;
+    if (start < 0 || end < start) { *hr = DM_E_INVALIDARG; return NULL; }
+    void *d = NULL;
+    switch (t->kind) {
+    case TRK_TEMPO: d = clone_tempo(t->data, start, end); break;
+    case TRK_TIMESIG: d = clone_timesig(t->data, start, end); break;
+    case TRK_SYSEX: d = clone_sysex(t->data, start, end); break;
+    case TRK_SEQ: d = clone_seq(t->data, start, end); break;
+    case TRK_WAVE: d = clone_wave(t->data, start, end); break;
+    case TRK_BAND: d = clone_band(t->data, start, end); break;
+    default: break;                 /* a track kind the engine does not play: a copy without data */
+    }
+    if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }
+    dm_track *c = dm_track_new(t->kind, &t->clsid, d);
+    if (!c) { dm_track tmp = { .kind = t->kind, .data = d }; free_track(&tmp); *hr = DM_E_OUTOFMEMORY; }
+    return c;
+}
+
+/* 77313a27: the range clamped as the original does (an end before the start or past the length becomes the length,
+ * as does an end of 0 from 0; a start outside the segment becomes 0); the segment's settings copied, length
+ * end - start, each track cloned into the same entry (a track that fails: S_FALSE) */
+dm_segment *dm_segment_clone(const dm_segment *s, mtime_t start, mtime_t end, int *hr)
+{
+    *hr = DM_OK;
+    if (end < start || s->length < end) end = s->length;
+    if (end == 0 && start == 0) end = s->length;
+    if (start < 0 || s->length < start) start = 0;
+    dm_segment *c = calloc(1, sizeof(*c));
+    if (!c) { *hr = DM_E_OUTOFMEMORY; return NULL; }
+    c->refs = 1;
+    c->repeats = s->repeats; c->resolution = s->resolution; c->ioflags = s->ioflags;
+    c->rtlength = s->rtlength; c->rtloopstart = s->rtloopstart; c->rtloopend = s->rtloopend; c->rtplaystart = s->rtplaystart;
+    c->length = end - start; c->playstart = s->playstart; c->loopstart = s->loopstart; c->loopend = s->loopend;
+    memcpy(c->name, s->name, sizeof(c->name));
+    if (s->npchs && (c->pchs = malloc(s->npchs * sizeof(*c->pchs)))) { memcpy(c->pchs, s->pchs, s->npchs * sizeof(*c->pchs)); c->npchs = s->npchs; }
+    for (int i = 0; i < s->ntracks; i++) {
+        const dm_segtrack *e = &s->tracks[i];
+        int r;
+        dm_track *t = dm_track_clone(e->t, start, end, &r);
+        if (!t) { *hr = DM_FALSE; continue; }
+        dm_segment_insert_track(c, t, e->position, e->group, e->config, e->priority);
+    }
+    return c;
+}
+
 void dm_segment_release(dm_segment *s)
 {
     if (!s || --s->refs > 0) return;
@@ -602,12 +896,12 @@ void dm_segment_release(dm_segment *s)
  * 7731204d); tracks take the ones they generate (77311fff / 77312026: Track::AddNotificationType) */
 static const dm_guid GUID_Null = { 0 };
 
-static int track_add_notification(dm_track *t, const dm_guid *g)
+int dm_track_add_notification(dm_track *t, const dm_guid *g)
 {
     if (t->kind == TRK_TIMESIG && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { t->notify = 1; return DM_OK; }   /* 7731d267 */
     return DM_FALSE;
 }
-static int track_remove_notification(dm_track *t, const dm_guid *g)
+int dm_track_remove_notification(dm_track *t, const dm_guid *g)
 {
     if (t->kind == TRK_TIMESIG && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { t->notify = 0; return DM_OK; }   /* 7731d2a9 */
     return DM_FALSE;
@@ -634,7 +928,7 @@ int dm_segment_add_notification(dm_segment *s, const dm_guid *g, int fromperf)
     s->ntypes = n;
     s->ntypes[s->nntypes].g = *g; s->ntypes[s->nntypes].fromperf = fromperf;
     s->nntypes++;
-    for (int t = 0; t < s->ntracks; t++) track_add_notification(s->tracks[t].t, g);
+    for (int t = 0; t < s->ntracks; t++) dm_track_add_notification(s->tracks[t].t, g);
     return DM_OK;
 }
 
@@ -645,7 +939,7 @@ int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf
         int k = 0;
         for (int i = 0; i < s->nntypes; i++) {
             if (s->ntypes[i].fromperf == 0 && fromperf) { s->ntypes[k++] = s->ntypes[i]; continue; }
-            for (int t = 0; t < s->ntracks; t++) track_remove_notification(s->tracks[t].t, &s->ntypes[i].g);
+            for (int t = 0; t < s->ntracks; t++) dm_track_remove_notification(s->tracks[t].t, &s->ntypes[i].g);
         }
         s->nntypes = k;
         return DM_OK;
@@ -654,6 +948,6 @@ int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf
     if (i < 0) return DM_FALSE;
     memmove(&s->ntypes[i], &s->ntypes[i + 1], (s->nntypes - i - 1) * sizeof(*s->ntypes));
     s->nntypes--;
-    for (int t = 0; t < s->ntracks; t++) track_remove_notification(s->tracks[t].t, g);
+    for (int t = 0; t < s->ntracks; t++) dm_track_remove_notification(s->tracks[t].t, g);
     return DM_OK;
 }

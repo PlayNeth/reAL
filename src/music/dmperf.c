@@ -504,6 +504,8 @@ static int seg_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, 
     }
     return hr;
 }
+int dm_track_isparam(const dm_track *t, int prm) { return track_isparam(t, prm); }
+int dm_track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data) { return track_getparam(t, prm, mt, next, data); }
 int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
 {
     return seg_getparam(s, prm, group, index, mt, next, data);

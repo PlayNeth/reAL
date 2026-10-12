@@ -695,6 +695,8 @@ static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
     return DMUS_E_SET_UNSUPPORTED;
 }
 
+int dm_track_setparam(dm_track *t, int prm, mtime_t mt, void *data) { return track_setparam(t, prm, mt, data); }
+
 /* 77312290: the segment's SetParam on the index-th supporting track in the group, or on all of them
  * (DM_SEG_ALLTRACKS); the last track's result */
 int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data)

@@ -167,6 +167,14 @@ int main(int argc, char **argv)
     dm_perf_assign_block(pf, 0, port, 1);
     g_sig[0] = g_sig[1] = 0;
     if (getenv("TP_SMF")) dm_segment_setparam(seg, PRM_SMF, 0xffffffff, 0, 0, NULL);    /* as dmgt with DMGT_SMF */
+    if (getenv("TP_CLONE")) {       /* as dmgt with DMGT_CLONE */
+        long a = 0, b = 0; int hr;
+        sscanf(getenv("TP_CLONE"), "%ld:%ld", &a, &b);
+        if (getenv("TP_CLONEFIX")) dm_set_clone_fix(1);
+        dm_segment *c = dm_segment_clone(seg, a, b, &hr);
+        fprintf(stderr, "clone(%ld, %ld): %08x\n", a, b, hr);
+        if (c) { dm_segment_release(seg); seg = c; }
+    }
     dm_segment_download(pf, seg);       /* as dmgt: Segment::Download before playing */
     if (getenv("TP_NOTIFY")) {
         static const dm_guid gs = { 0xd2ac2899, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
