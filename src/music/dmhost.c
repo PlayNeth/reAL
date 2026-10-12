@@ -358,6 +358,7 @@ static DWORD WINAPI transport_thread(LPVOID p)
     while (!h->stop) {
         EnterCriticalSection(&h->lock);
         uint32_t ms = dm_perf_transport(h->pf);
+        dm_perf_run_app_tools(h->pf);       /* application tools run here, with the lock let go around each */
         LeaveCriticalSection(&h->lock);
         WaitForMultipleObjects(2, w, FALSE, ms);
     }
@@ -373,6 +374,7 @@ static DWORD WINAPI realtime_thread(LPVOID p)
     while (!h->stop) {
         EnterCriticalSection(&h->lock);
         uint32_t ms = dm_perf_realtime(h->pf);
+        dm_perf_run_app_tools(h->pf);
         LeaveCriticalSection(&h->lock);
         WaitForMultipleObjects(2, w, FALSE, ms);
     }

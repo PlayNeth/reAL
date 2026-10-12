@@ -431,6 +431,7 @@ static const struct { const CLSID *clsid; const char *dll; } s_music_classes[] =
     { &CLSID_DirectMusicLoader, "dmloader.dll" },
     { &CLSID_DirectMusicPerformance, "dmime.dll" },
     { &CLSID_DirectMusicSegment, "dmime.dll" },
+    { &CLSID_DirectMusicGraph, "dmime.dll" },
     { &CLSID_DirectMusic, "dmusic.dll" },
     { &s_CLSID_DirectSoundWave, "dswave.dll" },
 };

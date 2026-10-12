@@ -59,6 +59,12 @@ typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } dm_guid;
 #ifndef DMUS_E_ALREADY_SENT
 #define DMUS_E_ALREADY_SENT ((int32_t)0x88781204)
 #endif
+#ifndef DMUS_S_LAST_TOOL
+#define DMUS_S_LAST_TOOL    0x08781211
+#endif
+#ifndef DMUS_E_AUDIOPATH_INACTIVE
+#define DMUS_E_AUDIOPATH_INACTIVE ((int32_t)0x88781229)
+#endif
 #ifndef DMUS_E_CANNOT_FREE
 #define DMUS_E_CANNOT_FREE  ((int32_t)0x88781205)
 #endif
@@ -110,7 +116,7 @@ struct dm_pmsg {
     uint32_t flags;         /* +0x14 */
     uint32_t pch;           /* +0x18 */
     uint32_t vpch;          /* +0x1c virtual track id */
-    int tool;               /* +0x20 pTool: 0 none, 1 the performance's output tool */
+    int tool;               /* +0x20 pTool: 0 none, 1 the performance's output tool, 2 an application's tool (in ext) */
     uint32_t type;          /* +0x28 */
     uint32_t voice;         /* +0x2c */
     uint32_t group;         /* +0x30 */
@@ -158,6 +164,9 @@ struct dm_pmsg {
     int32_t w_pitch;        /* +0x50 */
     uint8_t w_flags;        /* +0x54 DMUS_WAVEF_* */
     struct dm_wvoice *w_voice;      /* punkUser: the port's voice */
+    /* the application's view of the message (the host's DMUS_PMSG, with pTool, pGraph and data the engine does not
+     * keep): made when the message first reaches the application, freed with it (dm_toolops) */
+    void *ext;
 };
 #define WAVEF_OFF 1
 #define WAVEF_STREAMING 2

@@ -70,6 +70,7 @@ struct dm_segstate {
     int inplay, retire;                         /* +0x104 +0x108 */
     int released;                               /* the application's reference is gone */
     void *wrapper;                              /* the COM object (weak) */
+    void *graph;                                /* +0x34 its tool graph (the host's; a clone of the segment's) */
 };
 
 struct dm_audiopath {
@@ -80,6 +81,8 @@ struct dm_audiopath {
     uint32_t *virt, *real; uint32_t n;          /* +0x38 +0x3c +0x40 */
     rtime_t volend;                             /* +0x10 end of the last volume ramp */
     dm_audiopath *next;
+    void *graph;                                /* +0x48 its tool graph (the host's) */
+    void *wrapper;                              /* the COM object (weak) */
 };
 
 #define NLISTS 10
@@ -118,6 +121,9 @@ struct dm_perf {
     uint32_t rnd, rndapp;                       /* rand() of the transport thread (srand(time) at its start 7730eb7f)
                                                  * and of the application thread (seed 1) */
     int apprand;                                /* running in the application thread (PlaySegment) */
+    dm_toolops tops; void *tctx;                /* tool graphs and application tools (the host's) */
+    void *graph;                                /* +0x24 the application's tool graph (SetGraph) */
+    dm_pmsg *apphead, *apptail;                 /* messages waiting for an application tool's ProcessPMsg */
 };
 
 static uint32_t g_trackid;                      /* 7732b1b0 */
@@ -164,6 +170,7 @@ static int pm_free(dm_perf *pf, dm_pmsg *p)
     if (p->userref && p->user) ss_unref(p->user);       /* FreePMsg releases punkUser */
     p->user = NULL; p->userref = 0;
     if (p->w_voice) { wv_release(pf, p->w_voice); p->w_voice = NULL; }
+    if (p->ext) { if (pf->tops.free_ext) pf->tops.free_ext(pf->tctx, p); p->ext = NULL; }
     p->hflags = 0xDEAD0;
     p->next = pf->pool;
     pf->pool = p;
@@ -180,6 +187,8 @@ static dm_pmsg *pm_clone(dm_perf *pf, const dm_pmsg *s)
     if (s->sx_data) { p->sx_data = malloc(s->sx_len); if (p->sx_data) memcpy(p->sx_data, s->sx_data, s->sx_len); }
     if (p->userref && p->user) ((dm_segstate *)p->user)->refs++;
     if (p->w_voice) p->w_voice->refs++;
+    p->ext = NULL;
+    if (s->ext && pf->tops.clone_ext) pf->tops.clone_ext(pf->tctx, p, s);
     return p;
 }
 
@@ -817,18 +826,32 @@ static int send_pmsg(dm_perf *pf, dm_pmsg *p)
     return DM_OK;
 }
 
-/* the graph chain ends in the performance's StampPMsg 77307925: no tools, so the output tool from the near queue */
-static void perf_stamp(dm_perf *pf, dm_pmsg *p)
+/* 77307925: the performance's StampPMsg.  Through the application's graph (SetGraph) first: a tool there takes the
+ * message, which comes back here when the tool stamps it again (pGraph is the performance's graph).  After the last
+ * tool, the output tool from the near queue. */
+static int perf_stamp(dm_perf *pf, dm_pmsg *p)
 {
+    if (pf->graph && pf->tops.stamp && pf->tops.stamp(pf->tctx, pf->graph, DM_GRAPH_PERF, pf, p) == DM_OK) {
+        p->tool = 2;
+        return DM_OK;
+    }
+    if (p->ext && pf->tops.unstamp) pf->tops.unstamp(pf->tctx, p);
     p->flags = (p->flags & ~0x14u) | PF_TOOL_QUEUE;
     p->tool = 1;
+    return DM_OK;
 }
 
-/* 7731efc2: the audiopath's StampPMsg: virtual to performance PChannels; a broadcast to the audiopath is cloned to
- * every PChannel of the path (the original takes the first); notes on an inactive path are killed */
+/* 7731ef40: the audiopath's StampPMsg: its graph first (on virtual PChannels), then virtual to performance PChannels
+ * and the performance's; a broadcast to the audiopath is cloned to every PChannel of the path (the original takes
+ * the first); notes on an inactive path are killed */
 static int ap_stamp(dm_perf *pf, dm_audiopath *ap, dm_pmsg *p)
 {
-    if (!ap->active && (p->type == PT_NOTE || p->type == PT_WAVE)) { p->pch = PCH_KILL_ME; return -1; }
+    if (!ap->active && (p->type == PT_NOTE || p->type == PT_WAVE)) { p->pch = PCH_KILL_ME; return DMUS_E_AUDIOPATH_INACTIVE; }
+    if (ap->graph && pf->tops.stamp) {
+        int hr = pf->tops.stamp(pf->tctx, ap->graph, DM_GRAPH_AUDIOPATH, ap, p);
+        if (hr == DM_OK) { p->tool = 2; return hr; }
+        if (hr >= 0 && hr != DMUS_S_LAST_TOOL) return hr;
+    }
     if (p->pch == PCH_BROADCAST_AUDIOPATH) {
         for (uint32_t i = 1; i < ap->n; i++) {
             uint32_t r = ap->real[i];
@@ -845,13 +868,37 @@ static int ap_stamp(dm_perf *pf, dm_audiopath *ap, dm_pmsg *p)
         for (i = 0; i < ap->n; i++) if (ap->virt[i] == p->pch) { p->pch = ap->real[i]; break; }
         if (i == ap->n && p->type != PT_NOTIFICATION && p->pch < 0xfffffffcu) p->pch = PCH_KILL_ME;
     }
-    perf_stamp(pf, p);
-    return 0;
+    return perf_stamp(pf, p);
+}
+
+/* 77315fdd: the segment state's StampPMsg: its graph (a clone of the segment's), a broadcast to the segment cloned to
+ * the segment's PChannels, then the audiopath's or the performance's */
+static int ss_stamp(dm_perf *pf, dm_segstate *ss, dm_pmsg *p)
+{
+    if (ss->graph && pf->tops.stamp) {
+        int hr = pf->tops.stamp(pf->tctx, ss->graph, DM_GRAPH_STATE, ss, p);
+        if (hr == DM_OK) { p->tool = 2; return hr; }
+        if (hr >= 0 && (pf->dxver == 0 || hr != DMUS_S_LAST_TOOL)) return hr;
+    }
+    if (p->pch == PCH_BROADCAST_SEGMENT && ss->seg) {
+        dm_segment *g = ss->seg;
+        for (int i = 1; i < g->npchs; i++) {
+            uint32_t r = g->pchs[i];
+            if (r >= 0xfffffffcu || (p->type == PT_TRANSPOSE && (r & 0xf) == 9)) continue;
+            dm_pmsg *c = pm_clone(pf, p);
+            if (!c) continue;
+            c->pch = r;
+            int hr = ss->audiopath ? ap_stamp(pf, ss->audiopath, c) : perf_stamp(pf, c);
+            if (hr < 0 || send_pmsg(pf, c) < 0) pm_free(pf, c);
+        }
+        p->pch = (g->npchs && g->pchs[0] < 0xfffffffcu) ? g->pchs[0] : PCH_KILL_ME;
+    }
+    return ss->audiopath ? ap_stamp(pf, ss->audiopath, p) : perf_stamp(pf, p);
 }
 
 static void stamp_pmsg(dm_perf *pf, dm_segstate *ss, dm_pmsg *p)
 {
-    if (ss && ss->audiopath) ap_stamp(pf, ss->audiopath, p);
+    if (ss) ss_stamp(pf, ss, p);
     else perf_stamp(pf, p);
 }
 
@@ -1409,6 +1456,7 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
 /* 7730bd7b: the tool's Flush */
 static void tool_flush(dm_perf *pf, dm_pmsg *p, rtime_t rt)
 {
+    if (p->tool == 2) { if (pf->tops.flush) pf->tops.flush(pf->tctx, p, rt); return; }
     if (p->type == PT_NOTE) { if (!(p->n_flags & NOTEF_NOTEON)) note_out(pf, p, rt); }
     else if (p->type == PT_CURVE) { if (p->c_flags & CURVEF_RESET) curve_out(pf, p, rt); }
     else if (p->type == PT_WAVE) { if (p->w_flags & WAVEF_OFF) wave_out(pf, p, rt); }
@@ -1547,13 +1595,37 @@ static dm_pmsg *pick_due(dm_perf *pf)
     return NULL;
 }
 
+/* a message for an application tool waits for dm_perf_run_app_tools (the tool runs without the engine's lock) */
+static void app_defer(dm_perf *pf, dm_pmsg *p)
+{
+    p->rtlast = p->rt;
+    p->next = NULL;
+    if (pf->apptail) pf->apptail->next = p; else pf->apphead = p;
+    pf->apptail = p;
+}
+
 static void run_pmsg(dm_perf *pf, dm_pmsg *p)
 {
     if (!p->tool) p->tool = 1;
+    if (p->tool == 2) { app_defer(pf, p); return; }
     p->rtlast = p->rt;
     int hr = process_pmsg(pf, p);
     if (hr != DM_OK) {
         if (hr != DMUS_S_REQUEUE || send_pmsg(pf, p) < 0) pm_free(pf, p);
+    }
+}
+
+/* the realtime and transport threads' ProcessPMsg of an application's tool (77309396 ff.): S_OK, the tool keeps the
+ * message; DMUS_S_REQUEUE, it goes back to the queues; anything else frees it */
+void dm_perf_run_app_tools(dm_perf *pf)
+{
+    dm_pmsg *p;
+    while ((p = pf->apphead)) {
+        pf->apphead = p->next;
+        if (!pf->apphead) pf->apptail = NULL;
+        p->next = NULL;
+        int hr = pf->tops.process ? pf->tops.process(pf->tctx, p) : DMUS_S_FREE;
+        if (hr != DM_OK && (hr != DMUS_S_REQUEUE || send_pmsg(pf, p) < 0)) pm_free(pf, p);
     }
 }
 
@@ -1589,6 +1661,8 @@ static void run_early(dm_perf *pf)
             p->tool = 1;
             p->flags = (p->flags & ~0x14u) | PF_TOOL_QUEUE;
             if (send_pmsg(pf, p) < 0) pm_free(pf, p);
+        } else if (p->tool == 2) {
+            app_defer(pf, p);
         } else {
             p->rtlast = p->rt;
             int hr = process_pmsg(pf, p);
@@ -1660,6 +1734,41 @@ int dm_perf_send_pmsg(dm_perf *pf, dm_pmsg *p)
 }
 
 int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p) { return p ? pm_free(pf, p) : DM_E_POINTER; }
+int dm_perf_send_pmsg_keep(dm_perf *pf, dm_pmsg *p) { return send_pmsg(pf, p); }
+dm_pmsg *dm_perf_clone_pmsg(dm_perf *pf, const dm_pmsg *p) { return pm_clone(pf, p); }
+
+/* ------------------------------------------------------------------ tool graphs */
+void dm_perf_set_toolops(dm_perf *pf, const dm_toolops *ops, void *ctx)
+{
+    if (ops) pf->tops = *ops; else memset(&pf->tops, 0, sizeof(pf->tops));
+    pf->tctx = ctx;
+}
+static void graph_drop(dm_perf *pf, void *g) { if (g && pf->tops.graph_release) pf->tops.graph_release(pf->tctx, g); }
+void dm_perf_set_graph(dm_perf *pf, void *graph) { void *o = pf->graph; pf->graph = graph; graph_drop(pf, o); }
+void *dm_perf_get_graph(dm_perf *pf) { return pf->graph; }
+void dm_segstate_set_graph(dm_segstate *ss, void *graph) { void *o = ss->graph; ss->graph = graph; graph_drop(ss->perf, o); }
+void *dm_segstate_get_graph(dm_segstate *ss) { return ss->graph; }
+dm_audiopath *dm_segstate_audiopath(dm_segstate *ss) { return ss->audiopath; }
+void dm_audiopath_set_graph(dm_audiopath *ap, void *graph) { void *o = ap->graph; ap->graph = graph; graph_drop(ap->pf, o); }
+void *dm_audiopath_get_graph(dm_audiopath *ap) { return ap->graph; }
+void **dm_audiopath_wrapper(dm_audiopath *ap) { return &ap->wrapper; }
+/* CloseDown: the messages the application has seen go now (they hold its objects) */
+void dm_perf_drop_app_messages(dm_perf *pf)
+{
+    dm_queue *qs[] = { &pf->early, &pf->nearq, &pf->ontime, &pf->notif };
+    for (int k = 0; k < 4; k++)
+        for (dm_pmsg *p = qs[k]->head, *nx; p; p = nx) {
+            nx = p->next;
+            if (p->ext && q_remove(qs[k], p)) pm_free(pf, p);
+        }
+    while (pf->apphead) { dm_pmsg *p = pf->apphead; pf->apphead = p->next; pm_free(pf, p); }
+    pf->apptail = NULL;
+}
+int dm_perf_stamp(dm_perf *pf, dm_pmsg *p) { return perf_stamp(pf, p); }
+int dm_segstate_stamp(dm_segstate *ss, dm_pmsg *p) { return ss_stamp(ss->perf, ss, p); }
+int dm_audiopath_stamp(dm_audiopath *ap, dm_pmsg *p) { return ap_stamp(ap->pf, ap, p); }
+int dm_perf_output_process(dm_perf *pf, dm_pmsg *p) { p->rtlast = p->rt; return process_pmsg(pf, p); }
+void dm_perf_output_flush(dm_perf *pf, dm_pmsg *p, rtime_t rt) { int t = p->tool; p->tool = 1; tool_flush(pf, p, rt); p->tool = t; }
 
 /* 77309199: a GUID_NOTIFICATION_PERFORMANCE message at mt (through the performance's graph) */
 static void perf_notify(dm_perf *pf, uint32_t option, mtime_t mt, dm_segstate *ss)
@@ -1683,6 +1792,17 @@ static void ss_notify(dm_perf *pf, dm_segstate *ss, uint32_t option, mtime_t mt)
     m->type = PT_NOTIFICATION; m->mt = mt; m->flags = PF_MUSICTIME | PF_TOOL_ATTIME; m->group = 0xffffffff;
     m->nf_guid = GUID_NOTIFICATION_SEGMENT_; m->nf_option = option;
     m->user = ss; m->userref = 1; ss->refs++;
+    stamp_send(pf, ss, m);
+}
+
+/* 77315831: a DMUS_PMSGT_DIRTY message at mt through the state's graph (what tools hold is out of date), after the
+ * start, the end and an abort; not from a secondary segment that is not a control one */
+static void ss_dirty(dm_perf *pf, dm_segstate *ss, mtime_t mt)
+{
+    if ((ss->flags & SEGF_SECONDARY) && !(ss->flags & SEGF_CONTROL)) return;
+    dm_pmsg *m = pm_alloc(pf, 0x38);
+    if (!m) return;
+    m->type = PT_DIRTY; m->mt = mt; m->flags = PF_MUSICTIME | PF_TOOL_IMMEDIATE; m->group = 0xffffffff;
     stamp_send(pf, ss, m);
 }
 
@@ -1729,6 +1849,7 @@ void dm_audiopath_release(dm_audiopath *ap)
     dm_perf *pf = ap->pf;
     for (dm_audiopath **pp = &pf->paths; *pp; pp = &(*pp)->next) if (*pp == ap) { *pp = ap->next; break; }
     if (pf->defpath == ap) pf->defpath = NULL;
+    graph_drop(pf, ap->graph);
     free(ap->virt); free(ap->real); free(ap);
 }
 
@@ -1830,11 +1951,24 @@ static void free_queue(dm_perf *pf, dm_queue *q)
 void dm_perf_free(dm_perf *pf)
 {
     if (!pf) return;
+    /* the states still playing go, whatever holds them; held while the messages naming them go first (a
+     * notification's state reference) */
+    int nss = 0;
+    for (int k = 0; k < NLISTS; k++) for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) nss++;
+    dm_segstate **ssv = nss ? malloc(nss * sizeof(*ssv)) : NULL;
+    nss = 0;
     for (int k = 0; k < NLISTS; k++)
-        while (pf->lists[k]) { dm_segstate *s = pf->lists[k]; pf->lists[k] = s->lnext; ss_destroy(s); }
-    while (pf->paths) { dm_audiopath *ap = pf->paths; pf->paths = ap->next; free(ap->virt); free(ap->real); free(ap); }
+        while (pf->lists[k]) {
+            dm_segstate *s = pf->lists[k]; pf->lists[k] = s->lnext;
+            if (ssv) { s->refs++; ssv[nss++] = s; } else ss_destroy(s);
+        }
     free_queue(pf, &pf->early); free_queue(pf, &pf->nearq); free_queue(pf, &pf->ontime); free_queue(pf, &pf->tmap);
     free_queue(pf, &pf->thist); free_queue(pf, &pf->notif); free_queue(pf, &pf->tsq);
+    while (pf->apphead) { dm_pmsg *p = pf->apphead; pf->apphead = p->next; pm_free(pf, p); }
+    for (int i = 0; i < nss; i++) ss_destroy(ssv[i]);
+    free(ssv);
+    while (pf->paths) { dm_audiopath *ap = pf->paths; pf->paths = ap->next; graph_drop(pf, ap->graph); free(ap->virt); free(ap->real); free(ap); }
+    graph_drop(pf, pf->graph); pf->graph = NULL;
     while (pf->pool) { dm_pmsg *p = pf->pool; pf->pool = p->next; free(p); }
     while (pf->blocks) {
         pchblock *b = pf->blocks; pf->blocks = b->next;

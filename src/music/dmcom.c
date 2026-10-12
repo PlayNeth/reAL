@@ -1,14 +1,17 @@
 /* reAL-Music: the DirectMusic COM objects a game creates (dmloader/dmime/dmusic classes), backed by the ported
  * performance engine.  Covers what DirectMusic games built on segments use: the loader (files, memory, streams, the
  * default GM collection), the performance (Init/InitAudio, standard audiopaths, PlaySegment(Ex), Stop(Ex), IsPlaying,
- * time conversion, global and track parameters), segments, segment states and audiopaths (Activate, SetVolume).  Ports, tools,
- * styles, scripts and notifications are not implemented. */
+ * time conversion, global and track parameters, messages and notifications), segments, segment states and audiopaths
+ * (Activate, SetVolume), and tool graphs with application tools (the graph object itself is dmgraph.c).  Ports,
+ * styles and scripts are not implemented. */
 #include "../real.h"
 #include <dmusici.h>
 #include <string.h>
 #include <stdio.h>
 #include "dmhost.h"
 #include "dmcom.h"
+#include "dmgraph.h"
+#include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
 
@@ -39,20 +42,24 @@ typedef struct {
     dm_segment *seg;
     DMUS_OBJECTDESC desc;
     rm_loader *loader;                      /* for references while loading from a stream (weak) */
+    IDirectMusicGraph *graph;               /* +0x44 SetGraph (a segment state starts with a clone of it) */
 } rm_segment;
 
 typedef struct {
     IDirectMusicSegmentState8 IDirectMusicSegmentState8_iface;
+    IDirectMusicGraph IDirectMusicGraph_iface;  /* +0x04 its StampPMsg: the state's graph, then the path's */
     LONG ref;
     dm_segstate *ss;
     rm_segment *seg;                        /* may be NULL (a state first met in a notification) */
     rm_perf *perf;
     BOOL lazy;                              /* made for a notification: holds an ordinary reference */
     IDirectMusicAudioPath *path;            /* the audiopath it plays on (the default one when none was given) */
+    int xref;                               /* further engine references it drops when it goes */
 } rm_state;
 
 typedef struct {
     IDirectMusicAudioPath IDirectMusicAudioPath_iface;
+    IDirectMusicGraph IDirectMusicGraph_iface;  /* +0x04 its StampPMsg: the path's graph, then the performance's */
     LONG ref;
     dm_audiopath *ap;
     rm_perf *perf;
@@ -62,6 +69,8 @@ typedef struct {
 
 struct rm_perf {
     IDirectMusicPerformance8 IDirectMusicPerformance8_iface;
+    IDirectMusicTool IDirectMusicTool_iface;    /* +0x04 the output tool */
+    IDirectMusicGraph IDirectMusicGraph_iface;  /* +0x08 its StampPMsg: the application's graph, then the output tool */
     LONG ref;
     dm_host *host;
     DSFXWavesReverb revparams;              /* the shared reverb's parameters as last set */
@@ -301,6 +310,7 @@ static rm_collection *new_collection(dm_collection *c)
 
 /* ------------------------------------------------------------------ segments */
 static IDirectMusicSegment8Vtbl seg_vtbl;
+static dm_host *any_host(void);
 static rm_segment *sgm(IDirectMusicSegment8 *i) { return impl_from(i, rm_segment, IDirectMusicSegment8_iface); }
 static rm_segment *unsafe_segment(IUnknown *u)
 {
@@ -331,7 +341,12 @@ static ULONG WINAPI seg_release(IDirectMusicSegment8 *i)
     rm_segment *s = sgm(i);
     LONG r = InterlockedDecrement(&s->ref);
     LOG_CALL("music: Segment::Release(%p) -> %ld", (void *)i, (long)r);
-    if (!r) { if (s->seg && s->seg->wrapper == s) s->seg->wrapper = NULL; dm_segment_release(s->seg); free(s); }
+    if (!r) {
+        if (s->seg && s->seg->wrapper == s) s->seg->wrapper = NULL;
+        dm_segment_release(s->seg);
+        if (s->graph) IDirectMusicGraph_Release(s->graph);
+        free(s);
+    }
     return r;
 }
 static HRESULT WINAPI seg_getlength(IDirectMusicSegment8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; *t = sgm(i)->seg ? sgm(i)->seg->length : 0; return S_OK; }
@@ -345,8 +360,31 @@ static HRESULT WINAPI seg_gettrackgroup(IDirectMusicSegment8 *i, IDirectMusicTra
 static HRESULT WINAPI seg_inserttrack(IDirectMusicSegment8 *i, IDirectMusicTrack *t, DWORD g);
 static HRESULT WINAPI seg_removetrack(IDirectMusicSegment8 *i, IDirectMusicTrack *t);
 static HRESULT WINAPI seg_initplay(IDirectMusicSegment8 *i, IDirectMusicSegmentState **s, IDirectMusicPerformance *p, DWORD f) { return rm_notimpl(__func__); }
-static HRESULT WINAPI seg_getgraph(IDirectMusicSegment8 *i, IDirectMusicGraph **g) { if (g) *g = NULL; return DMUS_E_NOT_FOUND; }
-static HRESULT WINAPI seg_setgraph(IDirectMusicSegment8 *i, IDirectMusicGraph *g) { return rm_notimpl(__func__); }
+/* 77311edc GetGraph, 77311f48 SetGraph: a segment state starts with a clone of the graph (tops_state_graph) */
+static HRESULT WINAPI seg_getgraph(IDirectMusicSegment8 *i, IDirectMusicGraph **g)
+{
+    if (IsBadWritePtr(g, sizeof(*g))) return E_POINTER;
+    rm_segment *s = sgm(i);
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    IDirectMusicGraph *x = s->graph;
+    if (x) { *g = x; IDirectMusicGraph_AddRef(x); }
+    if (h) dm_host_unlock(h);
+    return x ? S_OK : DMUS_E_NOT_FOUND;
+}
+static HRESULT WINAPI seg_setgraph(IDirectMusicSegment8 *i, IDirectMusicGraph *g)
+{
+    if (g && (IsBadReadPtr(g, 4) || IsBadReadPtr(*(void **)g, 4) || IsBadCodePtr(**(FARPROC **)g))) return E_POINTER;
+    rm_segment *s = sgm(i);
+    if (g) IDirectMusicGraph_AddRef(g);
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    IDirectMusicGraph *o = s->graph;
+    s->graph = g;
+    if (h) dm_host_unlock(h);
+    if (o) IDirectMusicGraph_Release(o);
+    return S_OK;
+}
 /* the segment's notification types are read by the performance thread: changed under the performance lock */
 static rm_perf *g_lastperf;
 static HRESULT seg_notif(IDirectMusicSegment8 *i, REFGUID g, int add)
@@ -560,17 +598,51 @@ static ULONG WINAPI sgp_addref(IPersistStream *i) { return seg_addref(&sgp(i)->I
 static ULONG WINAPI sgp_release(IPersistStream *i) { return seg_release(&sgp(i)->IDirectMusicSegment8_iface); }
 static HRESULT WINAPI sgp_getclass(IPersistStream *i, CLSID *c) { if (!c) return E_POINTER; *c = CLSID_DirectMusicSegment; return S_OK; }
 static HRESULT WINAPI sgp_isdirty(IPersistStream *i) { return S_FALSE; }
+/* 77314148 / 77312ab9: a segment file's tool graph (a 'DMTG' form in the 'DMSG' form): a new graph loads it (its
+ * tools are created by class, so they must be registered) and becomes the segment's; if it fails, so does the
+ * segment's Load */
+static IDirectMusicGraph *segment_graph_from_data(const BYTE *b, DWORD n, HRESULT *res)
+{
+    *res = S_OK;
+    if (n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMSG", 4)) return NULL;
+    DWORD end = 8 + *(const DWORD *)(b + 4);
+    if (end > n) end = n;
+    for (DWORD off = 12; off + 12 <= end; ) {
+        DWORD sz = *(const DWORD *)(b + off + 4);
+        if (!memcmp(b + off, "RIFF", 4) && !memcmp(b + off + 8, "DMTG", 4) && off + 8 + sz <= end) {
+            IDirectMusicGraph *g = NULL;
+            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, 8 + sz);
+            IStream *st = NULL;
+            if (!hg || FAILED(rm_graph_create(&IID_IDirectMusicGraph, (void **)&g))) { if (hg) GlobalFree(hg); return NULL; }
+            memcpy(GlobalLock(hg), b + off, 8 + sz);
+            GlobalUnlock(hg);
+            if (SUCCEEDED(CreateStreamOnHGlobal(hg, TRUE, &st))) {
+                HRESULT hr = rm_graph_load(g, st);
+                if (FAILED(hr)) LOG_INFO("music: a segment's tool graph: Load %08lx", hr);
+                *res = hr;
+                IStream_Release(st);
+            } else GlobalFree(hg);
+            return g;
+        }
+        off += 8 + sz + (sz & 1);
+    }
+    return NULL;
+}
 static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
 {
     rm_segment *s = sgp(i);
     BYTE *b; DWORD n;
     if (!read_stream(st, &b, &n)) return E_FAIL;
     dm_segment *g = segment_from_data(b, n, s->loader);
+    HRESULT ghr;
+    IDirectMusicGraph *gr = g ? segment_graph_from_data(b, n, &ghr) : NULL;
     free(b);
     if (!g) return DMUS_E_UNSUPPORTED_STREAM;
+    if (gr && FAILED(ghr)) { IDirectMusicGraph_Release(gr); dm_segment_release(g); return ghr; }
     if (s->seg) { if (s->seg->wrapper == s) s->seg->wrapper = NULL; dm_segment_release(s->seg); }
     s->seg = g;
     g->wrapper = s;
+    if (gr) { if (s->graph) IDirectMusicGraph_Release(s->graph); s->graph = gr; }
     s->desc.dwValidData |= DMUS_OBJ_LOADED;
     return S_OK;
 }
@@ -986,11 +1058,13 @@ static HRESULT WINAPI seg_clone(IDirectMusicSegment8 *i, MUSIC_TIME a, MUSIC_TIM
     if (!c) { *o = NULL; return hr; }
     rm_segment *n = new_segment(c);
     if (!n) { dm_segment_release(c); *o = NULL; return E_OUTOFMEMORY; }
+    if ((n->graph = sgm(i)->graph)) IDirectMusicGraph_AddRef(n->graph);     /* 77313acd: the same graph */
     *o = (IDirectMusicSegment *)&n->IDirectMusicSegment8_iface;
     return hr;
 }
 /* ------------------------------------------------------------------ segment states */
 static IDirectMusicSegmentState8Vtbl st_vtbl;
+static IDirectMusicGraphVtbl stg_vtbl;
 static rm_state *sst(IDirectMusicSegmentState8 *i) { return impl_from(i, rm_state, IDirectMusicSegmentState8_iface); }
 static rm_state *unsafe_state(IUnknown *u)
 {
@@ -1007,6 +1081,7 @@ static HRESULT WINAPI st_qi(IDirectMusicSegmentState8 *i, REFIID riid, void **ou
 {
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicSegmentState) ||
         IsEqualIID(riid, &IID_IDirectMusicSegmentState8)) { *out = i; InterlockedIncrement(&sst(i)->ref); return S_OK; }
+    if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &sst(i)->IDirectMusicGraph_iface; InterlockedIncrement(&sst(i)->ref); return S_OK; }
     return rm_noiface(__func__, riid, out);
 }
 static ULONG WINAPI st_addref(IDirectMusicSegmentState8 *i) { return InterlockedIncrement(&sst(i)->ref); }
@@ -1021,6 +1096,7 @@ static ULONG WINAPI st_release(IDirectMusicSegmentState8 *i)
             void **w = dm_segstate_wrapper(s->ss);
             if (*w == s) *w = NULL;
             if (s->lazy) dm_segstate_unref(s->ss); else dm_segstate_release(s->ss);
+            while (s->xref-- > 0) dm_segstate_unref(s->ss);
             dm_host_unlock(s->perf->host);
         }
         if (s->seg) IDirectMusicSegment8_Release(&s->seg->IDirectMusicSegment8_iface);
@@ -1065,8 +1141,10 @@ static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DW
     if (s->perf->host) dm_host_unlock(s->perf->host);
     return hr;
 }
-/* 773161ad: the segment, its tracks (GUID_All_Objects: any class), the performance; anything further down the path
- * from the state's audiopath.  The segment's and performance's graphs and tools are not available. */
+/* 773161ad: the segment, its tracks (GUID_All_Objects: any class), the state's graph and its tools (the graph made
+ * empty when it has none), the performance with its graph and tools; anything further down the path from the
+ * state's audiopath */
+static IDirectMusicGraph *perf_graph(rm_perf *p);
 static IDirectMusicTrack8 *track_object(dm_track *t);
 static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
 {
@@ -1089,8 +1167,27 @@ static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD s
         if (to) { hr = IDirectMusicTrack8_QueryInterface(to, iid, o); IDirectMusicTrack8_Release(to); }
         break;
     }
-    case DMUS_PATH_SEGMENT_GRAPH: case DMUS_PATH_SEGMENT_TOOL: case DMUS_PATH_PERFORMANCE_GRAPH: case DMUS_PATH_PERFORMANCE_TOOL:
+    case DMUS_PATH_SEGMENT_GRAPH: case DMUS_PATH_SEGMENT_TOOL: {
+        if (stage == DMUS_PATH_SEGMENT_GRAPH && (n || pch)) break;
+        if (!s->perf->host) break;
+        dm_host_lock(s->perf->host);
+        IDirectMusicGraph *gr = dm_segstate_get_graph(s->ss);
+        if (!gr && SUCCEEDED(rm_graph_create(&IID_IDirectMusicGraph, (void **)&gr))) dm_segstate_set_graph(s->ss, gr);
+        if (gr) IDirectMusicGraph_AddRef(gr);
+        dm_host_unlock(s->perf->host);
+        if (!gr) { hr = E_OUTOFMEMORY; break; }
+        hr = stage == DMUS_PATH_SEGMENT_GRAPH ? IDirectMusicGraph_QueryInterface(gr, iid, o) : rm_graph_find_tool(gr, pch, g, n, iid, o);
+        IDirectMusicGraph_Release(gr);
         break;
+    }
+    case DMUS_PATH_PERFORMANCE_GRAPH: case DMUS_PATH_PERFORMANCE_TOOL: {
+        if (stage == DMUS_PATH_PERFORMANCE_GRAPH && (n || pch)) break;
+        IDirectMusicGraph *gr = perf_graph(s->perf);
+        if (!gr) break;
+        hr = stage == DMUS_PATH_PERFORMANCE_GRAPH ? IDirectMusicGraph_QueryInterface(gr, iid, o) : rm_graph_find_tool(gr, pch, g, n, iid, o);
+        IDirectMusicGraph_Release(gr);
+        break;
+    }
     case DMUS_PATH_PERFORMANCE:
         if (!n && !pch) hr = IDirectMusicPerformance8_QueryInterface(&s->perf->IDirectMusicPerformance8_iface, iid, o);
         break;
@@ -1102,6 +1199,24 @@ static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD s
 }
 static IDirectMusicSegmentState8Vtbl st_vtbl = { st_qi, st_addref, st_release, st_getrepeats, st_getsegment, st_getstart,
     st_getseek, st_getstartpoint, st_settrackcfg, st_getobj };
+
+/* the state's graph interface (vtable 0x77301f1c): StampPMsg 77315fdd; the tool methods are not there */
+static HRESULT owner_stamp(rm_perf *p, DMUS_PMSG *m, int owner, void *obj);
+static HRESULT WINAPI gx_insert(IDirectMusicGraph *i, IDirectMusicTool *t, DWORD *pch, DWORD n, LONG index);
+static HRESULT WINAPI gx_gettool(IDirectMusicGraph *i, DWORD index, IDirectMusicTool **t);
+static HRESULT WINAPI gx_remove(IDirectMusicGraph *i, IDirectMusicTool *t);
+static rm_state *sgr(IDirectMusicGraph *i) { return impl_from(i, rm_state, IDirectMusicGraph_iface); }
+static HRESULT WINAPI stg_qi(IDirectMusicGraph *i, REFIID r, void **o) { return st_qi(&sgr(i)->IDirectMusicSegmentState8_iface, r, o); }
+static ULONG WINAPI stg_addref(IDirectMusicGraph *i) { return st_addref(&sgr(i)->IDirectMusicSegmentState8_iface); }
+static ULONG WINAPI stg_release(IDirectMusicGraph *i) { return st_release(&sgr(i)->IDirectMusicSegmentState8_iface); }
+static HRESULT WINAPI stg_stamp(IDirectMusicGraph *i, DMUS_PMSG *m)
+{
+    rm_state *s = sgr(i);
+    if (!m || IsBadWritePtr(m, sizeof(DMUS_PMSG))) return E_POINTER;
+    if (!s->perf->host) return DMUS_E_NOT_INIT;
+    return owner_stamp(s->perf, m, DM_GRAPH_STATE, s->ss);
+}
+static IDirectMusicGraphVtbl stg_vtbl = { stg_qi, stg_addref, stg_release, stg_stamp, gx_insert, gx_gettool, gx_remove };
 
 /* ------------------------------------------------------------------ the shared reverb's DMO interface */
 typedef struct { IDirectSoundFXWavesReverb8 iface; LONG ref; rm_perf *perf; } rm_reverb;
@@ -1163,6 +1278,7 @@ static rm_path *unsafe_path(IUnknown *u)
 static HRESULT WINAPI ap_qi(IDirectMusicAudioPath *i, REFIID riid, void **out)
 {
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicAudioPath)) { *out = i; InterlockedIncrement(&apt(i)->ref); return S_OK; }
+    if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &apt(i)->IDirectMusicGraph_iface; InterlockedIncrement(&apt(i)->ref); return S_OK; }
     return rm_noiface(__func__, riid, out);
 }
 static ULONG WINAPI ap_addref(IDirectMusicAudioPath *i) { return InterlockedIncrement(&apt(i)->ref); }
@@ -1173,8 +1289,12 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
     LOG_CALL("music: AudioPath::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
         if (a->perf->host) {
-            dm_host_lock(a->perf->host); dm_audiopath_release(a->ap); dm_host_unlock(a->perf->host);
-            dm_host_path_close(a->perf->host, a->buf, a->nbuf);
+            dm_host_lock(a->perf->host);
+            void **w = dm_audiopath_wrapper(a->ap);
+            if (*w == a) *w = NULL;
+            dm_audiopath_release(a->ap);
+            dm_host_unlock(a->perf->host);
+            if (a->nbuf) dm_host_path_close(a->perf->host, a->buf, a->nbuf);
         }
         IDirectMusicPerformance8_Release(&a->perf->IDirectMusicPerformance8_iface);
         free(a);
@@ -1204,8 +1324,38 @@ static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage
             return reverb_object(a->perf, iid, o);
         return DMUS_E_NOT_FOUND;
     }
-    switch (stage) {        /* stages an audiopath knows (its own and the performance's graphs and tools, the port, ...) */
-    case DMUS_PATH_AUDIOPATH_GRAPH: case DMUS_PATH_AUDIOPATH_TOOL: case DMUS_PATH_PERFORMANCE_GRAPH: case DMUS_PATH_PERFORMANCE_TOOL:
+    if (stage == DMUS_PATH_AUDIOPATH_GRAPH || stage == DMUS_PATH_AUDIOPATH_TOOL) {
+        /* its graph: made empty for the graph stage if it has none, not for the tool stage */
+        if (stage == DMUS_PATH_AUDIOPATH_GRAPH && (n || pch)) return DMUS_E_NOT_FOUND;
+        if (!a->perf->host) return DMUS_E_NOT_FOUND;
+        dm_host_lock(a->perf->host);
+        IDirectMusicGraph *gr = dm_audiopath_get_graph(a->ap);
+        if (!gr && stage == DMUS_PATH_AUDIOPATH_GRAPH && SUCCEEDED(rm_graph_create(&IID_IDirectMusicGraph, (void **)&gr)))
+            dm_audiopath_set_graph(a->ap, gr);
+        if (gr) IDirectMusicGraph_AddRef(gr);
+        dm_host_unlock(a->perf->host);
+        if (!gr) return stage == DMUS_PATH_AUDIOPATH_GRAPH ? E_OUTOFMEMORY : DMUS_E_NOT_FOUND;
+        HRESULT hr = stage == DMUS_PATH_AUDIOPATH_GRAPH ? IDirectMusicGraph_QueryInterface(gr, iid, o) : rm_graph_find_tool(gr, pch, g, n, iid, o);
+        IDirectMusicGraph_Release(gr);
+        return hr;
+    }
+    if (stage == DMUS_PATH_PERFORMANCE_GRAPH || stage == DMUS_PATH_PERFORMANCE_TOOL) {
+        /* the performance's graph (made empty if it has none); its tools by the path's PChannel turned into the
+         * performance's */
+        if (stage == DMUS_PATH_PERFORMANCE_GRAPH && (n || pch)) return DMUS_E_NOT_FOUND;
+        IDirectMusicGraph *gr = perf_graph(a->perf);
+        if (!gr) return DMUS_E_NOT_FOUND;
+        HRESULT hr;
+        if (stage == DMUS_PATH_PERFORMANCE_GRAPH) hr = IDirectMusicGraph_QueryInterface(gr, iid, o);
+        else {
+            uint32_t r;
+            if (dm_audiopath_convert(a->ap, pch, &r) >= 0) pch = r;
+            hr = rm_graph_find_tool(gr, pch, g, n, iid, o);
+        }
+        IDirectMusicGraph_Release(gr);
+        return hr;
+    }
+    switch (stage) {        /* stages an audiopath knows that are not here (the port, mix-in buffers, ...) */
     case DMUS_PATH_PORT: case 0x5000: case DMUS_PATH_MIXIN_BUFFER: case DMUS_PATH_MIXIN_BUFFER_DMO: {
         char b1[64];
         LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s) not supported", (unsigned long)stage, guidstr(iid, b1));
@@ -1243,14 +1393,32 @@ static HRESULT WINAPI ap_convert(IDirectMusicAudioPath *i, DWORD in, DWORD *out)
 }
 static IDirectMusicAudioPathVtbl ap_vtbl = { ap_qi, ap_addref, ap_release, ap_getobj, ap_activate, ap_setvolume, ap_convert };
 
+/* the path's graph interface (vtable 0x7730219c): StampPMsg 7731ef40 */
+static rm_path *agr(IDirectMusicGraph *i) { return impl_from(i, rm_path, IDirectMusicGraph_iface); }
+static HRESULT WINAPI apg_qi(IDirectMusicGraph *i, REFIID r, void **o) { return ap_qi(&agr(i)->IDirectMusicAudioPath_iface, r, o); }
+static ULONG WINAPI apg_addref(IDirectMusicGraph *i) { return ap_addref(&agr(i)->IDirectMusicAudioPath_iface); }
+static ULONG WINAPI apg_release(IDirectMusicGraph *i) { return ap_release(&agr(i)->IDirectMusicAudioPath_iface); }
+static HRESULT WINAPI apg_stamp(IDirectMusicGraph *i, DMUS_PMSG *m)
+{
+    rm_path *a = agr(i);
+    if (IsBadWritePtr(m, sizeof(DMUS_PMSG))) return E_POINTER;
+    if (!a->perf->host) return DMUS_E_NOT_INIT;
+    return owner_stamp(a->perf, m, DM_GRAPH_AUDIOPATH, a->ap);
+}
+static IDirectMusicGraphVtbl apg_vtbl = { apg_qi, apg_addref, apg_release, apg_stamp, gx_insert, gx_gettool, gx_remove };
+
+/* takes over a reference on ap; the path's object unless it has one */
 static rm_path *new_path(rm_perf *p, dm_audiopath *ap)
 {
     rm_path *a = calloc(1, sizeof(*a));
     if (!a) return NULL;
     a->IDirectMusicAudioPath_iface.lpVtbl = &ap_vtbl;
+    a->IDirectMusicGraph_iface.lpVtbl = &apg_vtbl;
     a->ref = 1;
     a->ap = ap;
     a->perf = p;
+    void **w = dm_audiopath_wrapper(ap);
+    if (!*w) *w = a;
     IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
     return a;
 }
@@ -1280,6 +1448,9 @@ static HRESULT WINAPI pf_qi(IDirectMusicPerformance8 *i, REFIID riid, void **out
         IsEqualIID(riid, &IID_IDirectMusicPerformance2) || IsEqualIID(riid, &IID_IDirectMusicPerformance8)) {
         *out = i; InterlockedIncrement(&prf(i)->ref); return S_OK;
     }
+    /* 77303eb4: the output tool and the graph (+4, +8) */
+    if (IsEqualIID(riid, &IID_IDirectMusicTool)) { *out = &prf(i)->IDirectMusicTool_iface; InterlockedIncrement(&prf(i)->ref); return S_OK; }
+    if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &prf(i)->IDirectMusicGraph_iface; InterlockedIncrement(&prf(i)->ref); return S_OK; }
     char b[64];
     LOG_INFO("music: Performance::QueryInterface(%s): no", guidstr(riid, b));
     *out = NULL;
@@ -1293,7 +1464,10 @@ static void pf_closedown(rm_perf *p)
     if (p->defpath) { rm_path *a = p->defpath; p->defpath = NULL; IDirectMusicAudioPath_Release(&a->IDirectMusicAudioPath_iface); }
     if (p->host) {
         dm_host_lock(p->host);
-        dm_perf_stop(dm_host_perf(p->host), NULL, NULL, 0, 0);
+        dm_perf *pf = dm_host_perf(p->host);
+        dm_perf_stop(pf, NULL, NULL, 0, 0);
+        dm_perf_drop_app_messages(pf);
+        dm_perf_set_graph(pf, NULL);
         dm_host_unlock(p->host);
     }
 }
@@ -1314,6 +1488,7 @@ static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
     return r;
 }
 
+static const dm_toolops s_toolops;
 static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
 {
     if (p->host) return S_OK;
@@ -1322,6 +1497,9 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     p->revparams.fInGain = 0; p->revparams.fReverbMix = 0; p->revparams.fReverbTime = 1000; p->revparams.fHighFreqRTRatio = 0.001f;
     if (!s_clockperf) s_clockperf = p;
     g_lastperf = p;
+    dm_host_lock(p->host);
+    dm_perf_set_toolops(dm_host_perf(p->host), &s_toolops, p);
+    dm_host_unlock(p->host);
     return S_OK;
 }
 
@@ -1397,10 +1575,14 @@ static HRESULT WINAPI pf_gettime(IDirectMusicPerformance8 *i, REFERENCE_TIME *rt
     return S_OK;
 }
 /* ------------------------------------------------------------------ messages the application holds
- * AllocPMsg / GetNotificationPMsg hand out blocks with a private header in front; FreePMsg releases the interfaces in
- * them (pTool, pGraph, punkUser, as dmime's FreePMsg) and the block */
+ * Every DMUS_PMSG the application gets from us is a block with a private header in front.  A message the engine
+ * handed out (to a tool, or as a notification) is the engine message's application view: the header names the
+ * engine message, which names the view (dm_pmsg.ext).  The view is current while the application has the message
+ * (pm_to_com when it is handed out), the engine's fields while the engine has it (pm_from_com when it comes back:
+ * SendPMsg, StampPMsg, a tool's DMUS_S_REQUEUE).  An AllocPMsg / ClonePMsg block gets its engine message when it
+ * is first sent or stamped.  FreePMsg releases the interfaces in it (pTool, pGraph, punkUser, as dmime's FreePMsg). */
 #define RM_PMSG_MAGIC 0x6d50526dUL
-typedef struct { DWORD magic, size; } rm_pmsghdr;
+typedef struct { DWORD magic, size; dm_pmsg *e; DWORD pad; } rm_pmsghdr;
 static DMUS_PMSG *pmsg_new(ULONG cb)
 {
     rm_pmsghdr *h = calloc(1, sizeof(*h) + cb);
@@ -1423,37 +1605,264 @@ static HRESULT WINAPI pf_allocpmsg(IDirectMusicPerformance8 *i, ULONG cb, DMUS_P
     if (cb < sizeof(DMUS_PMSG)) return E_INVALIDARG;
     return (*m = pmsg_new(cb)) ? S_OK : E_OUTOFMEMORY;
 }
-static HRESULT WINAPI pf_freepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m)
+/* the performance's own tool and graph interfaces are not counted (a message naming them would keep the
+ * performance alive): pft_addref / pfg_addref */
+static void pmsg_drop_ifaces(DMUS_PMSG *m)
 {
-    rm_pmsghdr *h = pmsg_hdr(m);
-    if (!h) return m ? DMUS_E_CANNOT_FREE : E_POINTER;
     if (m->pTool) IDirectMusicTool_Release(m->pTool);
     if (m->pGraph) IDirectMusicGraph_Release(m->pGraph);
     if (m->punkUser) IUnknown_Release(m->punkUser);
-    h->magic = 0;
-    free(h);
-    return S_OK;
+    m->pTool = NULL; m->pGraph = NULL; m->punkUser = NULL;
 }
 
-/* a sent message's memory is kept a while (marked sent: SendPMsg / FreePMsg on it fail as on a queued one), so an
+/* a freed message's memory is kept a while (marked: SendPMsg / FreePMsg on it fail as on a queued one), so an
  * application that still touches it right after sending does not write into freed memory */
 static DMUS_PMSG *s_retired[256];
 static LONG s_retpos;
 static void pmsg_retire(DMUS_PMSG *m)
 {
-    rm_pmsghdr *h = pmsg_hdr(m);
-    if (m->pTool) { IDirectMusicTool_Release(m->pTool); m->pTool = NULL; }
-    if (m->pGraph) { IDirectMusicGraph_Release(m->pGraph); m->pGraph = NULL; }
-    if (m->punkUser) { IUnknown_Release(m->punkUser); m->punkUser = NULL; }
-    h->magic = 0;
+    rm_pmsghdr *h = (rm_pmsghdr *)m - 1;
+    pmsg_drop_ifaces(m);
+    h->magic = 0; h->e = NULL;
     LONG k = InterlockedIncrement(&s_retpos) & 255;
     DMUS_PMSG *old = (DMUS_PMSG *)InterlockedExchangePointer((void **)&s_retired[k], m);
     if (old) free((rm_pmsghdr *)old - 1);
 }
 
-/* 77304e7e SendPMsg: the application's message, copied into an engine message of its type, goes into the queues
- * (the performance owns it from here: the application's copy is freed).  Without a tool of ours it plays through the
- * output tool, as a message stamped by the performance's graph. */
+static ULONG type_size(DWORD t)
+{
+    switch (t) {
+    case DMUS_PMSGT_MIDI: return sizeof(DMUS_MIDI_PMSG);
+    case DMUS_PMSGT_NOTE: return sizeof(DMUS_NOTE_PMSG);
+    case DMUS_PMSGT_SYSEX: return sizeof(DMUS_SYSEX_PMSG);
+    case DMUS_PMSGT_NOTIFICATION: return sizeof(DMUS_NOTIFICATION_PMSG);
+    case DMUS_PMSGT_TEMPO: return sizeof(DMUS_TEMPO_PMSG);
+    case DMUS_PMSGT_CURVE: return sizeof(DMUS_CURVE_PMSG);
+    case DMUS_PMSGT_TIMESIG: return sizeof(DMUS_TIMESIG_PMSG);
+    case DMUS_PMSGT_PATCH: return sizeof(DMUS_PATCH_PMSG);
+    case DMUS_PMSGT_TRANSPOSE: return sizeof(DMUS_TRANSPOSE_PMSG);
+    case DMUS_PMSGT_CHANNEL_PRIORITY: return sizeof(DMUS_CHANNEL_PRIORITY_PMSG);
+    case DMUS_PMSGT_WAVE: return sizeof(DMUS_WAVE_PMSG);
+    default: return sizeof(DMUS_PMSG);
+    }
+}
+
+static IUnknown *state_object(rm_perf *p, dm_segstate *ss);
+
+/* the engine's fields into the application's view (its type's fields if it is large enough for them) */
+static void pm_to_com(rm_perf *p, const dm_pmsg *e, DMUS_PMSG *m)
+{
+    rm_pmsghdr *hh = pmsg_hdr(m);
+    ULONG cap = hh ? hh->size : m->dwSize;
+    m->dwSize = e->size;
+    m->rtTime = e->rt; m->mtTime = e->mt; m->dwFlags = e->flags; m->dwPChannel = e->pch; m->dwVirtualTrackID = e->vpch;
+    m->dwType = e->type; m->dwVoiceID = e->voice; m->dwGroupID = e->group;
+    if (e->tool == 1) {
+        if (m->pTool != &p->IDirectMusicTool_iface) {
+            if (m->pTool) IDirectMusicTool_Release(m->pTool);
+            m->pTool = &p->IDirectMusicTool_iface;
+        }
+    } else if (e->tool == 0 && m->pTool) { IDirectMusicTool_Release(m->pTool); m->pTool = NULL; }
+    if (!m->punkUser && e->user && e->userref) m->punkUser = state_object(p, e->user);
+    if (cap < type_size(e->type) && e->type != DMUS_PMSGT_SYSEX) return;
+    switch (e->type) {
+    case DMUS_PMSGT_MIDI: { DMUS_MIDI_PMSG *x = (DMUS_MIDI_PMSG *)m; x->bStatus = e->m_status; x->bByte1 = e->m_b1; x->bByte2 = e->m_b2; break; }
+    case DMUS_PMSGT_NOTE: {
+        DMUS_NOTE_PMSG *x = (DMUS_NOTE_PMSG *)m;
+        x->mtDuration = e->n_dur; x->wMusicValue = e->n_musicval; x->wMeasure = e->n_measure; x->nOffset = e->n_offset;
+        x->bBeat = e->n_beat; x->bGrid = e->n_grid; x->bVelocity = e->n_vel; x->bFlags = e->n_flags; x->bTimeRange = e->n_timerange;
+        x->bDurRange = e->n_durrange; x->bVelRange = e->n_velrange; x->bPlayModeFlags = e->n_playmode; x->bSubChordLevel = e->n_subchord;
+        x->bMidiValue = e->n_midival; x->cTranspose = e->n_transpose;
+        break;
+    }
+    case DMUS_PMSGT_SYSEX: {
+        DMUS_SYSEX_PMSG *x = (DMUS_SYSEX_PMSG *)m;
+        if (cap < FIELD_OFFSET(DMUS_SYSEX_PMSG, abData)) break;
+        x->dwLen = e->sx_len;
+        if (e->sx_data && FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) + e->sx_len <= cap) memcpy(x->abData, e->sx_data, e->sx_len);
+        break;
+    }
+    case DMUS_PMSGT_NOTIFICATION: {
+        DMUS_NOTIFICATION_PMSG *x = (DMUS_NOTIFICATION_PMSG *)m;
+        memcpy(&x->guidNotificationType, &e->nf_guid, sizeof(GUID));
+        x->dwNotificationOption = e->nf_option; x->dwField1 = e->nf_field1; x->dwField2 = e->nf_field2;
+        break;
+    }
+    case DMUS_PMSGT_TEMPO: ((DMUS_TEMPO_PMSG *)m)->dblTempo = e->tempo; break;
+    case DMUS_PMSGT_CURVE: {
+        DMUS_CURVE_PMSG *x = (DMUS_CURVE_PMSG *)m;
+        x->mtDuration = e->c_dur; x->mtOriginalStart = e->c_origstart; x->mtResetDuration = e->c_resetdur;
+        x->nStartValue = e->c_start; x->nEndValue = e->c_end; x->nResetValue = e->c_reset; x->wMeasure = e->c_measure;
+        x->nOffset = e->c_offset; x->bBeat = e->c_beat; x->bGrid = e->c_grid; x->bType = e->c_type; x->bCurveShape = e->c_shape;
+        x->bCCData = e->c_cc; x->bFlags = e->c_flags; x->wParamType = e->c_param; x->wMergeIndex = e->c_merge;
+        break;
+    }
+    case DMUS_PMSGT_TIMESIG: {
+        DMUS_TIMESIG_PMSG *x = (DMUS_TIMESIG_PMSG *)m;
+        x->bBeatsPerMeasure = e->ts_bpm; x->bBeat = e->ts_beat; x->wGridsPerBeat = e->ts_grids;
+        break;
+    }
+    case DMUS_PMSGT_PATCH: { DMUS_PATCH_PMSG *x = (DMUS_PATCH_PMSG *)m; x->byInstrument = e->m_status; x->byMSB = e->m_b1; x->byLSB = e->m_b2; break; }
+    case DMUS_PMSGT_TRANSPOSE: { DMUS_TRANSPOSE_PMSG *x = (DMUS_TRANSPOSE_PMSG *)m; x->nTranspose = e->t_transpose; x->wMergeIndex = e->t_merge; break; }
+    case DMUS_PMSGT_CHANNEL_PRIORITY: ((DMUS_CHANNEL_PRIORITY_PMSG *)m)->dwChannelPriority = e->priority; break;
+    case DMUS_PMSGT_WAVE: {
+        DMUS_WAVE_PMSG *x = (DMUS_WAVE_PMSG *)m;
+        x->rtStartOffset = e->w_startoff; x->rtDuration = e->w_dur; x->lOffset = e->w_offset; x->lVolume = e->w_vol;
+        x->lPitch = e->w_pitch; x->bFlags = e->w_flags;
+        break;
+    }
+    default: break;
+    }
+}
+
+/* the application's message into the engine's (77304e7e's checks: a message too small for its type is refused) */
+static HRESULT pm_from_com_type(const DMUS_PMSG *m, dm_pmsg *e);
+static HRESULT pm_from_com(rm_perf *p, const DMUS_PMSG *m, dm_pmsg *e)
+{
+    e->size = m->dwSize;
+    e->rt = m->rtTime; e->mt = m->mtTime; e->flags = m->dwFlags; e->pch = m->dwPChannel; e->vpch = m->dwVirtualTrackID;
+    e->type = m->dwType; e->voice = m->dwVoiceID; e->group = m->dwGroupID;
+    e->tool = !m->pTool ? 0 : m->pTool == &p->IDirectMusicTool_iface ? 1 : 2;
+    return pm_from_com_type(m, e);
+}
+/* the same where the original does not look at the type's fields (StampPMsg, a tool's ProcessPMsg): one too small
+ * keeps the engine's */
+static void pm_from_com_loose(rm_perf *p, const DMUS_PMSG *m, dm_pmsg *e)
+{
+    pm_from_com(p, m, e);       /* the header always; a type's fields only when they are all there */
+}
+static HRESULT pm_from_com_type(const DMUS_PMSG *m, dm_pmsg *e)
+{
+    switch (m->dwType) {
+    case DMUS_PMSGT_MIDI: if (m->dwSize >= sizeof(DMUS_MIDI_PMSG)) { const DMUS_MIDI_PMSG *x = (const DMUS_MIDI_PMSG *)m; e->m_status = x->bStatus; e->m_b1 = x->bByte1; e->m_b2 = x->bByte2; } else return E_INVALIDARG; break;
+    case DMUS_PMSGT_NOTE:
+        if (m->dwSize >= sizeof(DMUS_NOTE_PMSG)) {
+            const DMUS_NOTE_PMSG *x = (const DMUS_NOTE_PMSG *)m;
+            e->n_dur = x->mtDuration; e->n_musicval = x->wMusicValue; e->n_measure = x->wMeasure; e->n_offset = x->nOffset;
+            e->n_beat = x->bBeat; e->n_grid = x->bGrid; e->n_vel = x->bVelocity; e->n_flags = x->bFlags; e->n_timerange = x->bTimeRange;
+            e->n_durrange = x->bDurRange; e->n_velrange = x->bVelRange; e->n_playmode = x->bPlayModeFlags; e->n_subchord = x->bSubChordLevel;
+            e->n_midival = x->bMidiValue; e->n_transpose = x->cTranspose;
+        } else return E_INVALIDARG;
+        break;
+    case DMUS_PMSGT_SYSEX: {
+        const DMUS_SYSEX_PMSG *x = (const DMUS_SYSEX_PMSG *)m;
+        if (m->dwSize < FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) || x->dwLen > m->dwSize - FIELD_OFFSET(DMUS_SYSEX_PMSG, abData)) return E_INVALIDARG;
+        uint8_t *d = NULL;
+        if (x->dwLen && !(d = malloc(x->dwLen))) return E_OUTOFMEMORY;
+        if (d) memcpy(d, x->abData, x->dwLen);
+        free(e->sx_data);
+        e->sx_data = d; e->sx_len = x->dwLen;
+        break;
+    }
+    case DMUS_PMSGT_NOTIFICATION:
+        if (m->dwSize >= sizeof(DMUS_NOTIFICATION_PMSG)) {
+            const DMUS_NOTIFICATION_PMSG *x = (const DMUS_NOTIFICATION_PMSG *)m;
+            memcpy(&e->nf_guid, &x->guidNotificationType, sizeof(e->nf_guid));
+            e->nf_option = x->dwNotificationOption; e->nf_field1 = x->dwField1; e->nf_field2 = x->dwField2;
+        } else return E_INVALIDARG;
+        break;
+    case DMUS_PMSGT_TEMPO: if (m->dwSize >= sizeof(DMUS_TEMPO_PMSG)) e->tempo = ((const DMUS_TEMPO_PMSG *)m)->dblTempo; else return E_INVALIDARG; break;
+    case DMUS_PMSGT_CURVE:
+        if (m->dwSize >= FIELD_OFFSET(DMUS_CURVE_PMSG, wParamType)) {
+            const DMUS_CURVE_PMSG *x = (const DMUS_CURVE_PMSG *)m;
+            e->c_dur = x->mtDuration; e->c_origstart = x->mtOriginalStart; e->c_resetdur = x->mtResetDuration;
+            e->c_start = x->nStartValue; e->c_end = x->nEndValue; e->c_reset = x->nResetValue; e->c_measure = x->wMeasure;
+            e->c_offset = x->nOffset; e->c_beat = x->bBeat; e->c_grid = x->bGrid; e->c_type = x->bType; e->c_shape = x->bCurveShape;
+            e->c_cc = x->bCCData; e->c_flags = x->bFlags;
+            if (m->dwSize >= sizeof(DMUS_CURVE_PMSG)) { e->c_param = x->wParamType; e->c_merge = x->wMergeIndex; }
+        } else return E_INVALIDARG;
+        break;
+    case DMUS_PMSGT_TIMESIG:
+        if (m->dwSize >= sizeof(DMUS_TIMESIG_PMSG)) {
+            const DMUS_TIMESIG_PMSG *x = (const DMUS_TIMESIG_PMSG *)m;
+            e->ts_bpm = x->bBeatsPerMeasure; e->ts_beat = x->bBeat; e->ts_grids = x->wGridsPerBeat;
+        } else return E_INVALIDARG;
+        break;
+    case DMUS_PMSGT_PATCH: if (m->dwSize >= sizeof(DMUS_PATCH_PMSG)) { const DMUS_PATCH_PMSG *x = (const DMUS_PATCH_PMSG *)m; e->m_status = x->byInstrument; e->m_b1 = x->byMSB; e->m_b2 = x->byLSB; } else return E_INVALIDARG; break;
+    case DMUS_PMSGT_TRANSPOSE:
+        if (m->dwSize >= FIELD_OFFSET(DMUS_TRANSPOSE_PMSG, wMergeIndex)) {
+            const DMUS_TRANSPOSE_PMSG *x = (const DMUS_TRANSPOSE_PMSG *)m;
+            e->t_transpose = x->nTranspose;
+            if (m->dwSize >= sizeof(*x)) e->t_merge = x->wMergeIndex;
+        } else return E_INVALIDARG;
+        break;
+    case DMUS_PMSGT_CHANNEL_PRIORITY: if (m->dwSize >= sizeof(DMUS_CHANNEL_PRIORITY_PMSG)) e->priority = ((const DMUS_CHANNEL_PRIORITY_PMSG *)m)->dwChannelPriority; else return E_INVALIDARG; break;
+    case DMUS_PMSGT_WAVE: {
+        /* the wave track's own: its engine message has the port's voice (an application's has none to play) */
+        if (!e->w_voice || m->dwSize < sizeof(DMUS_WAVE_PMSG)) return E_INVALIDARG;
+        const DMUS_WAVE_PMSG *x = (const DMUS_WAVE_PMSG *)m;
+        e->w_startoff = x->rtStartOffset; e->w_dur = x->rtDuration; e->w_offset = x->lOffset; e->w_vol = x->lVolume;
+        e->w_pitch = x->lPitch; e->w_flags = x->bFlags;
+        break;
+    }
+    default: break;                                         /* stop, dirty, lyrics, user: no data the engine reads */
+    }
+    return S_OK;
+}
+
+/* the application's view of an engine message (made the first time), current */
+static DMUS_PMSG *pm_view(rm_perf *p, dm_pmsg *e)
+{
+    DMUS_PMSG *m = e->ext;
+    if (!m) {
+        ULONG n = type_size(e->type);
+        if (e->type == DMUS_PMSGT_SYSEX && FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) + e->sx_len > n) n = FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) + e->sx_len;
+        if (e->size > n) n = e->size;
+        if (!(m = pmsg_new(n))) return NULL;
+        ((rm_pmsghdr *)m - 1)->e = e;
+        e->ext = m;
+    }
+    pm_to_com(p, e, m);
+    return m;
+}
+
+/* the engine message behind an application's message: its own, or (keep) a new one that stays with it; a message
+ * that is not ours gets a new one that does not (*temp, the caller frees it with pm_untemp) */
+static dm_pmsg *pm_engine(rm_perf *p, dm_perf *pf, DMUS_PMSG *m, BOOL strict, BOOL *temp, HRESULT *hr)
+{
+    rm_pmsghdr *h = pmsg_hdr(m);
+    dm_pmsg *e = h ? h->e : NULL;
+    *temp = FALSE;
+    *hr = S_OK;
+    if (e) {
+        if (strict) *hr = pm_from_com(p, m, e); else pm_from_com_loose(p, m, e);
+        return e;
+    }
+    if (!(e = dm_perf_alloc_pmsg(pf, m->dwSize))) { *hr = E_OUTOFMEMORY; return NULL; }
+    if (strict) {
+        if (FAILED(*hr = pm_from_com(p, m, e))) { dm_perf_free_pmsg(pf, e); return NULL; }
+    } else pm_from_com_loose(p, m, e);
+    e->ext = m;
+    if (h) h->e = e; else *temp = TRUE;
+    return e;
+}
+static void pm_untemp(dm_perf *pf, dm_pmsg *e) { e->ext = NULL; dm_perf_free_pmsg(pf, e); }
+static void pm_unlink(dm_perf *pf, DMUS_PMSG *m, dm_pmsg *e)       /* an engine message the application's goes without */
+{
+    rm_pmsghdr *h = pmsg_hdr(m);
+    if (h) h->e = NULL;
+    e->ext = NULL;
+    dm_perf_free_pmsg(pf, e);
+}
+
+static HRESULT WINAPI pf_freepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m)
+{
+    rm_perf *p = prf(i);
+    rm_pmsghdr *h = pmsg_hdr(m);
+    if (!h) return m ? DMUS_E_CANNOT_FREE : E_POINTER;
+    if (h->e && p->host) {
+        dm_host_lock(p->host);
+        HRESULT hr = h->e ? dm_perf_free_pmsg(dm_host_perf(p->host), h->e) : S_OK;    /* the view goes with it */
+        dm_host_unlock(p->host);
+        return hr;
+    }
+    pmsg_drop_ifaces(m);
+    h->magic = 0;
+    free(h);
+    return S_OK;
+}
+
+/* 77304e7e SendPMsg: the message goes into the queues (the performance owns it from here) */
 static HRESULT WINAPI pf_sendpmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m)
 {
     rm_perf *p = prf(i);
@@ -1464,74 +1873,206 @@ static HRESULT WINAPI pf_sendpmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m)
     if (m->dwType == 0xfffffff0) return pf_freepmsg(i, m);
     dm_host_lock(p->host);
     dm_perf *pf = dm_host_perf(p->host);
-    dm_pmsg *e = dm_perf_alloc_pmsg(pf, m->dwSize);
-    HRESULT hr = E_OUTOFMEMORY;
+    BOOL fresh = !h->e, temp;
+    HRESULT hr;
+    dm_pmsg *e = pm_engine(p, pf, m, TRUE, &temp, &hr);
     if (e) {
-        e->rt = m->rtTime; e->mt = m->mtTime; e->flags = m->dwFlags; e->pch = m->dwPChannel; e->vpch = m->dwVirtualTrackID;
-        e->type = m->dwType; e->voice = m->dwVoiceID; e->group = m->dwGroupID;
-        hr = S_OK;
-        switch (m->dwType) {
-        case DMUS_PMSGT_MIDI: if (m->dwSize >= sizeof(DMUS_MIDI_PMSG)) { DMUS_MIDI_PMSG *x = (DMUS_MIDI_PMSG *)m; e->m_status = x->bStatus; e->m_b1 = x->bByte1; e->m_b2 = x->bByte2; } else hr = E_INVALIDARG; break;
-        case DMUS_PMSGT_NOTE:
-            if (m->dwSize >= sizeof(DMUS_NOTE_PMSG)) {
-                DMUS_NOTE_PMSG *x = (DMUS_NOTE_PMSG *)m;
-                e->n_dur = x->mtDuration; e->n_musicval = x->wMusicValue; e->n_measure = x->wMeasure; e->n_offset = x->nOffset;
-                e->n_beat = x->bBeat; e->n_grid = x->bGrid; e->n_vel = x->bVelocity; e->n_flags = x->bFlags; e->n_timerange = x->bTimeRange;
-                e->n_durrange = x->bDurRange; e->n_velrange = x->bVelRange; e->n_playmode = x->bPlayModeFlags; e->n_subchord = x->bSubChordLevel;
-                e->n_midival = x->bMidiValue; e->n_transpose = x->cTranspose;
-            } else hr = E_INVALIDARG;
-            break;
-        case DMUS_PMSGT_SYSEX: {
-            DMUS_SYSEX_PMSG *x = (DMUS_SYSEX_PMSG *)m;
-            if (m->dwSize < FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) || x->dwLen > m->dwSize - FIELD_OFFSET(DMUS_SYSEX_PMSG, abData)) { hr = E_INVALIDARG; break; }
-            e->sx_len = x->dwLen;
-            if (x->dwLen && !(e->sx_data = malloc(x->dwLen))) { hr = E_OUTOFMEMORY; break; }
-            memcpy(e->sx_data, x->abData, x->dwLen);
-            break;
-        }
-        case DMUS_PMSGT_NOTIFICATION:
-            if (m->dwSize >= sizeof(DMUS_NOTIFICATION_PMSG)) {
-                DMUS_NOTIFICATION_PMSG *x = (DMUS_NOTIFICATION_PMSG *)m;
-                memcpy(&e->nf_guid, &x->guidNotificationType, sizeof(e->nf_guid));
-                e->nf_option = x->dwNotificationOption; e->nf_field1 = x->dwField1; e->nf_field2 = x->dwField2;
-            } else hr = E_INVALIDARG;
-            break;
-        case DMUS_PMSGT_TEMPO: if (m->dwSize >= sizeof(DMUS_TEMPO_PMSG)) e->tempo = ((DMUS_TEMPO_PMSG *)m)->dblTempo; else hr = E_INVALIDARG; break;
-        case DMUS_PMSGT_CURVE:
-            if (m->dwSize >= FIELD_OFFSET(DMUS_CURVE_PMSG, wParamType)) {
-                DMUS_CURVE_PMSG *x = (DMUS_CURVE_PMSG *)m;
-                e->c_dur = x->mtDuration; e->c_origstart = x->mtOriginalStart; e->c_resetdur = x->mtResetDuration;
-                e->c_start = x->nStartValue; e->c_end = x->nEndValue; e->c_reset = x->nResetValue; e->c_measure = x->wMeasure;
-                e->c_offset = x->nOffset; e->c_beat = x->bBeat; e->c_grid = x->bGrid; e->c_type = x->bType; e->c_shape = x->bCurveShape;
-                e->c_cc = x->bCCData; e->c_flags = x->bFlags;
-                if (m->dwSize >= sizeof(DMUS_CURVE_PMSG)) { e->c_param = x->wParamType; e->c_merge = x->wMergeIndex; }
-            } else hr = E_INVALIDARG;
-            break;
-        case DMUS_PMSGT_TIMESIG:
-            if (m->dwSize >= sizeof(DMUS_TIMESIG_PMSG)) {
-                DMUS_TIMESIG_PMSG *x = (DMUS_TIMESIG_PMSG *)m;
-                e->ts_bpm = x->bBeatsPerMeasure; e->ts_beat = x->bBeat; e->ts_grids = x->wGridsPerBeat;
-            } else hr = E_INVALIDARG;
-            break;
-        case DMUS_PMSGT_PATCH: if (m->dwSize >= sizeof(DMUS_PATCH_PMSG)) { DMUS_PATCH_PMSG *x = (DMUS_PATCH_PMSG *)m; e->m_status = x->byInstrument; e->m_b1 = x->byMSB; e->m_b2 = x->byLSB; } else hr = E_INVALIDARG; break;
-        case DMUS_PMSGT_TRANSPOSE:
-            if (m->dwSize >= FIELD_OFFSET(DMUS_TRANSPOSE_PMSG, wMergeIndex)) {
-                DMUS_TRANSPOSE_PMSG *x = (DMUS_TRANSPOSE_PMSG *)m;
-                e->t_transpose = x->nTranspose;
-                if (m->dwSize >= sizeof(*x)) e->t_merge = x->wMergeIndex;
-            } else hr = E_INVALIDARG;
-            break;
-        case DMUS_PMSGT_CHANNEL_PRIORITY: if (m->dwSize >= sizeof(DMUS_CHANNEL_PRIORITY_PMSG)) e->priority = ((DMUS_CHANNEL_PRIORITY_PMSG *)m)->dwChannelPriority; else hr = E_INVALIDARG; break;
-        case DMUS_PMSGT_WAVE: hr = E_INVALIDARG; break;          /* the wave track's own; it needs the port's voice */
-        default: break;                                         /* stop, dirty, lyrics, user: no data the engine reads */
-        }
-        if (FAILED(hr)) { dm_perf_free_pmsg(pf, e); e = NULL; }
+        hr = dm_perf_send_pmsg_keep(pf, e);
+        if (FAILED(hr) && fresh && h->magic == RM_PMSG_MAGIC && h->e == e) pm_unlink(pf, m, e);   /* still the application's */
     }
-    if (e) hr = dm_perf_send_pmsg(pf, e);
     dm_host_unlock(p->host);
-    if (SUCCEEDED(hr)) pmsg_retire(m);              /* the performance has it now */
     return hr;
 }
+
+/* ------------------------------------------------------------------ tool graphs (the engine's dm_toolops) */
+static rm_path *new_path(rm_perf *p, dm_audiopath *ap);
+static rm_state *state_of(rm_perf *p, dm_segstate *ss);
+
+/* the graph interface of a graph's owner (one reference) */
+static IDirectMusicGraph *owner_graph(rm_perf *p, int owner, void *obj)
+{
+    if (owner == DM_GRAPH_PERF) return &p->IDirectMusicGraph_iface;
+    if (owner == DM_GRAPH_STATE) {
+        rm_state *s = state_of(p, obj);
+        return s ? &s->IDirectMusicGraph_iface : NULL;
+    }
+    void **w = dm_audiopath_wrapper(obj);
+    rm_path *a = *w;
+    if (a) { InterlockedIncrement(&a->ref); return &a->IDirectMusicGraph_iface; }
+    dm_audiopath_addref(obj);                   /* a path the application let go of: a new object for it */
+    if (!(a = new_path(p, obj))) { dm_audiopath_release(obj); return NULL; }
+    *w = a;
+    return &a->IDirectMusicGraph_iface;
+}
+
+static int tops_stamp(void *ctx, void *graph, int owner, void *obj, dm_pmsg *e)
+{
+    rm_perf *p = ctx;
+    DMUS_PMSG *m = pm_view(p, e);
+    if (!m) return E_OUTOFMEMORY;
+    HRESULT hr = IDirectMusicGraph_StampPMsg((IDirectMusicGraph *)graph, m);
+    if (hr == S_OK) {
+        IDirectMusicGraph *g = owner_graph(p, owner, obj);
+        if (m->pGraph != g) {
+            if (m->pGraph) IDirectMusicGraph_Release(m->pGraph);
+            m->pGraph = g;
+        } else if (g) IDirectMusicGraph_Release(g);
+        e->flags = m->dwFlags;
+    }
+    return hr;
+}
+static void tops_unstamp(void *ctx, dm_pmsg *e)
+{
+    DMUS_PMSG *m = e->ext;
+    if (m->pGraph) { IDirectMusicGraph_Release(m->pGraph); m->pGraph = NULL; }
+    if (m->pTool) { IDirectMusicTool_Release(m->pTool); m->pTool = NULL; }
+}
+/* 77309396: ProcessPMsg, called with the engine let go (the tool may call back into the performance) */
+static int tops_process(void *ctx, dm_pmsg *e)
+{
+    rm_perf *p = ctx;
+    DMUS_PMSG *m = pm_view(p, e);
+    IDirectMusicTool *t = m ? m->pTool : NULL;
+    if (!t) return DMUS_S_FREE;
+    IDirectMusicTool_AddRef(t);
+    dm_host_unlock(p->host);
+    HRESULT hr = IDirectMusicTool_ProcessPMsg(t, (IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, m);
+    dm_host_lock(p->host);
+    IDirectMusicTool_Release(t);
+    if (hr == DMUS_S_REQUEUE && pmsg_hdr(m)) pm_from_com_loose(p, m, e);
+    return hr;
+}
+static void tops_flush(void *ctx, dm_pmsg *e, rtime_t rt)
+{
+    rm_perf *p = ctx;
+    DMUS_PMSG *m = pm_view(p, e);
+    if (m && m->pTool) IDirectMusicTool_Flush(m->pTool, (IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, m, rt);
+}
+static void tops_clone_ext(void *ctx, dm_pmsg *d, const dm_pmsg *s)
+{
+    DMUS_PMSG *sm = s->ext;
+    ULONG n = sm->dwSize;
+    rm_pmsghdr *sh = pmsg_hdr(sm);
+    if (sh && sh->size > n) n = sh->size;
+    DMUS_PMSG *m = pmsg_new(n);
+    if (!m) return;
+    memcpy(m, sm, sh ? sh->size : sm->dwSize);
+    if (m->pTool) IDirectMusicTool_AddRef(m->pTool);
+    if (m->pGraph) IDirectMusicGraph_AddRef(m->pGraph);
+    if (m->punkUser) IUnknown_AddRef(m->punkUser);
+    ((rm_pmsghdr *)m - 1)->e = d;
+    d->ext = m;
+}
+static void tops_free_ext(void *ctx, dm_pmsg *e) { pmsg_retire(e->ext); }
+static void *tops_state_graph(void *ctx, dm_segstate *ss)
+{
+    dm_segment *g = dm_segstate_segment(ss);
+    rm_segment *s = g ? g->wrapper : NULL;
+    IDirectMusicGraph *sg = s ? s->graph : NULL, *c = NULL;
+    if (sg) rm_graph_clone(sg, &c);             /* 77311d79: through the graph's private Clone */
+    return c;
+}
+static void tops_graph_release(void *ctx, void *g) { IDirectMusicGraph_Release((IDirectMusicGraph *)g); }
+static const dm_toolops s_toolops = { tops_stamp, tops_unstamp, tops_process, tops_flush, tops_clone_ext, tops_free_ext,
+                                      tops_state_graph, tops_graph_release };
+
+/* the StampPMsg of the performance's, a state's and an audiopath's graph interfaces on any message */
+static HRESULT owner_stamp(rm_perf *p, DMUS_PMSG *m, int owner, void *obj)
+{
+    dm_host_lock(p->host);
+    dm_perf *pf = dm_host_perf(p->host);
+    BOOL temp;
+    HRESULT hr;
+    dm_pmsg *e = pm_engine(p, pf, m, FALSE, &temp, &hr);
+    if (e) {
+        hr = owner == DM_GRAPH_PERF ? dm_perf_stamp(pf, e) : owner == DM_GRAPH_STATE ? dm_segstate_stamp(obj, e) : dm_audiopath_stamp(obj, e);
+        pm_to_com(p, e, m);
+        if (temp) pm_untemp(pf, e);
+    }
+    dm_host_unlock(p->host);
+    return hr;
+}
+
+static HRESULT WINAPI gx_insert(IDirectMusicGraph *i, IDirectMusicTool *t, DWORD *pch, DWORD n, LONG index) { return E_NOTIMPL; }
+static HRESULT WINAPI gx_gettool(IDirectMusicGraph *i, DWORD index, IDirectMusicTool **t) { return E_NOTIMPL; }
+static HRESULT WINAPI gx_remove(IDirectMusicGraph *i, IDirectMusicTool *t) { return E_NOTIMPL; }
+
+/* the performance's graph interface (77307925): not counted (see self_iface) */
+static rm_perf *pgr(IDirectMusicGraph *i) { return impl_from(i, rm_perf, IDirectMusicGraph_iface); }
+static HRESULT WINAPI pf_qi(IDirectMusicPerformance8 *i, REFIID riid, void **out);
+static HRESULT WINAPI pfg_qi(IDirectMusicGraph *i, REFIID r, void **o) { return pf_qi(&pgr(i)->IDirectMusicPerformance8_iface, r, o); }
+static ULONG WINAPI pfg_addref(IDirectMusicGraph *i) { return 2; }
+static ULONG WINAPI pfg_release(IDirectMusicGraph *i) { return 1; }
+static HRESULT WINAPI pfg_stamp(IDirectMusicGraph *i, DMUS_PMSG *m)
+{
+    rm_perf *p = pgr(i);
+    if (!m || IsBadWritePtr(m, sizeof(DWORD))) return E_POINTER;
+    if (!p->host) {                             /* no engine yet: straight to the output tool */
+        if (m->pGraph) { IDirectMusicGraph_Release(m->pGraph); m->pGraph = NULL; }
+        if (m->pTool) IDirectMusicTool_Release(m->pTool);
+        m->dwFlags = (m->dwFlags & ~(DMUS_PMSGF_TOOL_IMMEDIATE | DMUS_PMSGF_TOOL_ATTIME)) | DMUS_PMSGF_TOOL_QUEUE;
+        m->pTool = &p->IDirectMusicTool_iface;
+        return S_OK;
+    }
+    return owner_stamp(p, m, DM_GRAPH_PERF, NULL);
+}
+static IDirectMusicGraphVtbl pfg_vtbl = { pfg_qi, pfg_addref, pfg_release, pfg_stamp, gx_insert, gx_gettool, gx_remove };
+
+/* the performance's output tool interface (0x77301290): not counted either */
+static rm_perf *ptl(IDirectMusicTool *i) { return impl_from(i, rm_perf, IDirectMusicTool_iface); }
+static HRESULT WINAPI pft_qi(IDirectMusicTool *i, REFIID r, void **o) { return pf_qi(&ptl(i)->IDirectMusicPerformance8_iface, r, o); }
+static ULONG WINAPI pft_addref(IDirectMusicTool *i) { return 2; }
+static ULONG WINAPI pft_release(IDirectMusicTool *i) { return 1; }
+static HRESULT WINAPI pft_init(IDirectMusicTool *i, IDirectMusicGraph *g) { return E_NOTIMPL; }
+static HRESULT WINAPI pft_deliv(IDirectMusicTool *i, DWORD *d)      /* 773078a3 */
+{
+    if (IsBadWritePtr(d, sizeof(*d))) return E_POINTER;
+    *d = DMUS_PMSGF_TOOL_IMMEDIATE;
+    return S_OK;
+}
+static HRESULT WINAPI pft_ntypes(IDirectMusicTool *i, DWORD *n)     /* 773078d2 */
+{
+    if (IsBadWritePtr(n, sizeof(*n))) return E_POINTER;
+    *n = 0;
+    return S_OK;
+}
+static HRESULT WINAPI pft_types(IDirectMusicTool *i, DWORD **t, DWORD n) { return E_NOTIMPL; }
+static HRESULT WINAPI pft_process(IDirectMusicTool *i, IDirectMusicPerformance *perf, DMUS_PMSG *m)
+{
+    rm_perf *p = ptl(i);
+    if (!m || IsBadWritePtr(m, sizeof(DMUS_PMSG))) return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    dm_host_lock(p->host);
+    dm_perf *pf = dm_host_perf(p->host);
+    BOOL temp;
+    HRESULT hr;
+    dm_pmsg *e = pm_engine(p, pf, m, FALSE, &temp, &hr);
+    if (e) {
+        hr = dm_perf_output_process(pf, e);
+        pm_to_com(p, e, m);
+        if (temp) pm_untemp(pf, e);
+    }
+    dm_host_unlock(p->host);
+    return hr;
+}
+static HRESULT WINAPI pft_flush(IDirectMusicTool *i, IDirectMusicPerformance *perf, DMUS_PMSG *m, REFERENCE_TIME rt)
+{
+    rm_perf *p = ptl(i);
+    if (!m || IsBadWritePtr(m, sizeof(DMUS_PMSG))) return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    dm_host_lock(p->host);
+    dm_perf *pf = dm_host_perf(p->host);
+    BOOL temp;
+    HRESULT hr;
+    dm_pmsg *e = pm_engine(p, pf, m, FALSE, &temp, &hr);
+    if (e) {
+        dm_perf_output_flush(pf, e, rt);
+        if (temp) pm_untemp(pf, e);
+    }
+    dm_host_unlock(p->host);
+    return hr;
+}
+static IDirectMusicToolVtbl pft_vtbl = { pft_qi, pft_addref, pft_release, pft_init, pft_deliv, pft_ntypes, pft_types, pft_process, pft_flush };
 
 /* the COM object of a segment state (made on demand for a state the application never got, call with the lock) */
 static IUnknown *state_object(rm_perf *p, dm_segstate *ss)
@@ -1541,16 +2082,58 @@ static IUnknown *state_object(rm_perf *p, dm_segstate *ss)
     if (s) { InterlockedIncrement(&s->ref); return (IUnknown *)&s->IDirectMusicSegmentState8_iface; }
     if (!(s = calloc(1, sizeof(*s)))) return NULL;
     s->IDirectMusicSegmentState8_iface.lpVtbl = &st_vtbl;
+    s->IDirectMusicGraph_iface.lpVtbl = &stg_vtbl;
     s->ref = 1; s->ss = ss; s->lazy = TRUE;
     dm_segstate_addref(ss);
     dm_segment *g = dm_segstate_segment(ss);
     if (g && g->wrapper) { s->seg = g->wrapper; IDirectMusicSegment8_AddRef(&s->seg->IDirectMusicSegment8_iface); }
     s->perf = p; IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
+    dm_audiopath *ap = dm_segstate_audiopath(ss);
+    rm_path *a = ap ? *dm_audiopath_wrapper(ap) : NULL;
+    if (a) { s->path = &a->IDirectMusicAudioPath_iface; IDirectMusicAudioPath_AddRef(s->path); }
     *w = s;
     return (IUnknown *)&s->IDirectMusicSegmentState8_iface;
 }
-static HRESULT WINAPI pf_getgraph(IDirectMusicPerformance8 *i, IDirectMusicGraph **g) { if (g) *g = NULL; return DMUS_E_NOT_FOUND; }
-static HRESULT WINAPI pf_setgraph(IDirectMusicPerformance8 *i, IDirectMusicGraph *g) { return rm_notimpl(__func__); }
+static rm_state *state_of(rm_perf *p, dm_segstate *ss)
+{
+    IUnknown *u = state_object(p, ss);
+    return u ? sst((IDirectMusicSegmentState8 *)u) : NULL;
+}
+/* 77305a93 GetGraph, 77305b61 SetGraph: refused before Init (DX8) */
+static HRESULT WINAPI pf_getgraph(IDirectMusicPerformance8 *i, IDirectMusicGraph **g)
+{
+    rm_perf *p = prf(i);
+    if (IsBadWritePtr(g, sizeof(*g))) return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    dm_host_lock(p->host);
+    IDirectMusicGraph *x = dm_perf_get_graph(dm_host_perf(p->host));
+    if (x) { *g = x; IDirectMusicGraph_AddRef(x); }
+    dm_host_unlock(p->host);
+    return x ? S_OK : DMUS_E_NOT_FOUND;
+}
+static HRESULT WINAPI pf_setgraph(IDirectMusicPerformance8 *i, IDirectMusicGraph *g)
+{
+    rm_perf *p = prf(i);
+    if (g && (IsBadReadPtr(g, 4) || IsBadReadPtr(*(void **)g, 4) || IsBadCodePtr(**(FARPROC **)g))) return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    if (g) IDirectMusicGraph_AddRef(g);
+    dm_host_lock(p->host);
+    dm_perf_set_graph(dm_host_perf(p->host), g);
+    dm_host_unlock(p->host);
+    return S_OK;
+}
+/* 77305b0d: the performance's graph, made empty if it has none (GetObjectInPath's performance stages) */
+static IDirectMusicGraph *perf_graph(rm_perf *p)
+{
+    if (!p->host) return NULL;
+    dm_host_lock(p->host);
+    dm_perf *pf = dm_host_perf(p->host);
+    IDirectMusicGraph *g = dm_perf_get_graph(pf);
+    if (!g && SUCCEEDED(rm_graph_create(&IID_IDirectMusicGraph, (void **)&g))) dm_perf_set_graph(pf, g);
+    if (g) IDirectMusicGraph_AddRef(g);
+    dm_host_unlock(p->host);
+    return g;
+}
 /* ------------------------------------------------------------------ notifications */
 static void notify_event(void *ctx) { rm_perf *p = ctx; if (p->notify) SetEvent(p->notify); }
 static HRESULT WINAPI pf_setnotif(IDirectMusicPerformance8 *i, HANDLE h, REFERENCE_TIME t)
@@ -1807,9 +2390,26 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     dm_host_unlock(p->host);
     LOG_CALL("music: PlaySegment(%s, flags %lx, %lld) -> %08x", g->seg->name, (unsigned long)flags, (long long)start, hr);
     if (hr < 0) return hr;
-    rm_state *s = calloc(1, sizeof(*s));
+    dm_host_lock(p->host);
+    rm_state *s = *dm_segstate_wrapper(ss);
+    if (s) {        /* made on demand already (a tool or notification met the state first): it is the application's now */
+        InterlockedIncrement(&s->ref);
+        if (s->lazy) { s->lazy = FALSE; s->xref++; }    /* it holds the play's reference now, and still its own */
+        else dm_segstate_release(ss);
+        if (!s->path) {
+            rm_path *pa = a ? a : p->defpath;
+            if (pa) { s->path = &pa->IDirectMusicAudioPath_iface; IDirectMusicAudioPath_AddRef(s->path); }
+        }
+        dm_host_unlock(p->host);
+        if (out) *out = (IDirectMusicSegmentState *)&s->IDirectMusicSegmentState8_iface;
+        else IDirectMusicSegmentState8_Release(&s->IDirectMusicSegmentState8_iface);
+        return S_OK;
+    }
+    dm_host_unlock(p->host);
+    s = calloc(1, sizeof(*s));
     if (!s) { dm_host_lock(p->host); dm_segstate_release(ss); dm_host_unlock(p->host); return E_OUTOFMEMORY; }
     s->IDirectMusicSegmentState8_iface.lpVtbl = &st_vtbl;
+    s->IDirectMusicGraph_iface.lpVtbl = &stg_vtbl;
     s->ref = 1;
     s->ss = ss;
     s->seg = g; IDirectMusicSegment8_AddRef(&g->IDirectMusicSegment8_iface);
@@ -2101,10 +2701,14 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
     } else return DMUS_E_LOADER_NOFILENAME;
     if (!data) return E_OUTOFMEMORY;
     dm_segment *sgt = segment_from_data(data, size, l);
+    HRESULT ghr = S_OK;
+    IDirectMusicGraph *gr = sgt ? segment_graph_from_data(data, size, &ghr) : NULL;
     free(data);
     if (!sgt) return DMUS_E_UNSUPPORTED_STREAM;
+    if (gr && FAILED(ghr)) { IDirectMusicGraph_Release(gr); dm_segment_release(sgt); return ghr; }
     rm_segment *s = new_segment(sgt);
-    if (!s) { dm_segment_release(sgt); return E_OUTOFMEMORY; }
+    if (!s) { if (gr) IDirectMusicGraph_Release(gr); dm_segment_release(sgt); return E_OUTOFMEMORY; }
+    s->graph = gr;
     s->loader = l;
     if (path[0]) { lstrcpynW(s->desc.wszFileName, path, DMUS_MAX_FILENAME); s->desc.dwValidData |= DMUS_OBJ_FILENAME | DMUS_OBJ_FULLPATH; }
     if (g) { s->desc.guidObject = *g; s->desc.dwValidData |= DMUS_OBJ_OBJECT; }
@@ -2209,6 +2813,8 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         rm_perf *p = calloc(1, sizeof(*p));
         if (!p) return E_OUTOFMEMORY;
         p->IDirectMusicPerformance8_iface.lpVtbl = &pf_vtbl;
+        p->IDirectMusicTool_iface.lpVtbl = &pft_vtbl;
+        p->IDirectMusicGraph_iface.lpVtbl = &pfg_vtbl;
         p->ref = 1;
         HRESULT hr = pf_qi(&p->IDirectMusicPerformance8_iface, riid, out);
         pf_release(&p->IDirectMusicPerformance8_iface);
@@ -2221,6 +2827,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         seg_release(&s->IDirectMusicSegment8_iface);
         return hr;
     }
+    if (IsEqualCLSID(clsid, &CLSID_DirectMusicGraph)) return rm_graph_create(riid, out);
     if (IsEqualCLSID(clsid, &CLSID_DirectMusic)) {
         IDirectMusic8 *d = new_dmusic();
         if (!d) return E_OUTOFMEMORY;
@@ -2235,5 +2842,6 @@ BOOL rm_handles(REFCLSID clsid)
 {
     return IsEqualCLSID(clsid, &CLSID_DirectMusicLoader) || IsEqualCLSID(clsid, &CLSID_DirectMusicPerformance) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
+           IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave);
 }

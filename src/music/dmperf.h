@@ -169,5 +169,51 @@ dm_pmsg *dm_perf_get_notification(dm_perf *pf);
 dm_pmsg *dm_perf_alloc_pmsg(dm_perf *pf, uint32_t size);
 int dm_perf_send_pmsg(dm_perf *pf, dm_pmsg *p);
 int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p);
+/* SendPMsg for a message the application keeps on failure (an application message: the host frees its own copy) */
+int dm_perf_send_pmsg_keep(dm_perf *pf, dm_pmsg *p);
+dm_pmsg *dm_perf_clone_pmsg(dm_perf *pf, const dm_pmsg *p);
+
+/* tool graphs and application tools (dmime's CGraph and IDirectMusicTool).  The graphs are the host's objects; the
+ * engine knows them as opaque pointers and calls the host to stamp a message through one.  A message stamped to an
+ * application tool (tool 2) is handed to the host's process() outside the engine lock: the host threads call
+ * dm_perf_run_app_tools() after each pass.  A message the application sees gets an application view (ext), which
+ * the host keeps in step with the engine's fields. */
+enum { DM_GRAPH_PERF, DM_GRAPH_STATE, DM_GRAPH_AUDIOPATH };
+typedef struct {
+    /* graph->StampPMsg on the message's application view; on S_OK the view's pGraph becomes the owner's graph
+     * interface and the engine's flags and tool follow the view */
+    int (*stamp)(void *ctx, void *graph, int owner, void *obj, dm_pmsg *p);
+    /* the message goes to the output tool: the view drops pTool and pGraph */
+    void (*unstamp)(void *ctx, dm_pmsg *p);
+    /* an application tool's ProcessPMsg (called with the engine unlocked) and Flush (locked) */
+    int (*process)(void *ctx, dm_pmsg *p);
+    void (*flush)(void *ctx, dm_pmsg *p, rtime_t rt);
+    /* views: a clone's copy (dst->ext is NULL on entry), and the view of a freed message */
+    void (*clone_ext)(void *ctx, dm_pmsg *dst, const dm_pmsg *src);
+    void (*free_ext)(void *ctx, dm_pmsg *p);
+    /* the graph a new segment state starts with (a clone of its segment's; one reference) and a graph reference let go */
+    void *(*state_graph)(void *ctx, dm_segstate *ss);
+    void (*graph_release)(void *ctx, void *graph);
+} dm_toolops;
+void dm_perf_set_toolops(dm_perf *pf, const dm_toolops *ops, void *ctx);
+/* the graphs: the setters take over one reference (released through graph_release), the getters lend theirs */
+void dm_perf_set_graph(dm_perf *pf, void *graph);
+void *dm_perf_get_graph(dm_perf *pf);
+void dm_segstate_set_graph(dm_segstate *ss, void *graph);
+void *dm_segstate_get_graph(dm_segstate *ss);
+void dm_audiopath_set_graph(dm_audiopath *ap, void *graph);
+void *dm_audiopath_get_graph(dm_audiopath *ap);
+dm_audiopath *dm_segstate_audiopath(dm_segstate *ss);
+void **dm_audiopath_wrapper(dm_audiopath *ap);  /* the COM object (weak) */
+void dm_perf_drop_app_messages(dm_perf *pf);
+/* the StampPMsg of the performance's, a segment state's and an audiopath's own graph interfaces */
+int dm_perf_stamp(dm_perf *pf, dm_pmsg *p);
+int dm_segstate_stamp(dm_segstate *ss, dm_pmsg *p);
+int dm_audiopath_stamp(dm_audiopath *ap, dm_pmsg *p);
+/* the output tool's ProcessPMsg and Flush (the performance's IDirectMusicTool) */
+int dm_perf_output_process(dm_perf *pf, dm_pmsg *p);
+void dm_perf_output_flush(dm_perf *pf, dm_pmsg *p, rtime_t rt);
+/* hand the messages waiting for application tools to them (host threads, with the engine locked once) */
+void dm_perf_run_app_tools(dm_perf *pf);
 
 #endif

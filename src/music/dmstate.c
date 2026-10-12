@@ -41,6 +41,7 @@ static void ss_destroy(dm_segstate *ss)
     free(ss->tr);
     dm_segment_release(ss->seg);
     if (ss->audiopath) dm_audiopath_release(ss->audiopath);
+    graph_drop(ss->perf, ss->graph);
     free(ss);
 }
 
@@ -120,6 +121,7 @@ static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags, dm_a
     ss->repeatsleft = ss->repeats;
     ss->audiopath = ap;                     /* known to the tracks' InitPlay (the wave track asks for it) */
     if (ap) dm_audiopath_addref(ap);
+    if (pf->tops.state_graph) ss->graph = pf->tops.state_graph(pf->tctx, ss);  /* 77311d79: a clone of the segment's */
     for (int i = 0; i < ss->ntr; i++) {
         uint32_t id = ++g_trackid;
         if (!ss->firstid) ss->firstid = id;
@@ -173,6 +175,7 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
     mtime_t n, t, pos;
     if (ss->trackflags & TF_START) {
         ss_notify(pf, ss, NOTIF_SEGSTART, ss->mtoffset);
+        ss_dirty(pf, ss, ss->segpos + ss->mtoffset);
         ss->segpos = ss->startpoint;
         ss->rtoffset = M2R(pf, ss->mtoffset) - ss->rtstartpoint;
         ss->rtend = M2R(pf, ss->mtoffset) + ss->rtlength - ss->rtstartpoint;
@@ -263,6 +266,7 @@ end:
         ss_notify(pf, ss, NOTIF_SEGEND, ss->mtoffset + ss->segpos);
         dm_perf_get_time(pf, NULL, &now);
         ss_notify(pf, ss, NOTIF_SEGALMOSTEND, now);
+        ss_dirty(pf, ss, ss->segpos + ss->mtoffset);
     }
 out:
     ss->trackflags &= ~TF_DIRTY;
@@ -292,6 +296,7 @@ static int ss_abort2(dm_perf *pf, dm_segstate *ss, mtime_t mt, int noinv)
     if ((!ss->started || mt < ss->mtend) && (ss->mtabort == 0 || mt < ss->mtabort)) {
         ss->mtabort = mt;
         ss_notify(pf, ss, NOTIF_SEGABORT, mt);
+        ss_dirty(pf, ss, ss->segpos + ss->mtoffset);
         return 0;
     }
     return 1;
@@ -431,7 +436,7 @@ static void invalidate(dm_perf *pf, mtime_t mt, uint32_t flags)
     for (int k = 3; k < 6; k++)
         for (dm_segstate *s = pf->lists[k]; s; s = s->lnext)
             if (s->started && !(s->segflags & 2)) {
-                if (k == 3 && t <= s->mtstart) ss_notify(pf, s, NOTIF_SEGSTART, s->mtstart);
+                if (k == 3 && t <= s->mtstart) { ss_notify(pf, s, NOTIF_SEGSTART, s->mtstart); ss_dirty(pf, s, s->segpos + s->mtoffset); }
                 if (t < s->mtlast) {
                     if (t < s->mtstart) { s->started = 0; s->mtlast = s->mtstart; }
                     else s->mtlast = t;
