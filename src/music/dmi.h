@@ -276,13 +276,20 @@ typedef struct dm_wavetrack {
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE };
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
+/* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */
 typedef struct dm_track {
+    int refs;
     int kind;
     dm_guid clsid;
-    uint32_t position, group, config, priority;
     void *data;
     int notify;             /* AddNotificationType accepted (time signature track: GUID_NOTIFICATION_MEASUREANDBEAT) */
+    void *wrapper;          /* the COM object (weak) */
 } dm_track;
+/* a segment's entry for a track (dmime's track list item): the segment's own group, config, position, priority */
+typedef struct dm_segtrack {
+    dm_track *t;
+    uint32_t position, group, config, priority;
+} dm_segtrack;
 
 /* a segment's notification types (dmime 7731322f): fromperf = added because the performance has it */
 typedef struct { dm_guid g; int fromperf; } dm_ntype;
@@ -292,7 +299,7 @@ typedef struct dm_segment {
     uint32_t repeats, resolution, ioflags;
     rtime_t rtlength, rtloopstart, rtloopend, rtplaystart;
     mtime_t length, playstart, loopstart, loopend;
-    dm_track *tracks; int ntracks;     /* segment track order */
+    dm_segtrack *tracks; int ntracks;  /* segment track order */
     uint32_t *pchs; int npchs;
     uint32_t version;
     char name[64];
@@ -323,7 +330,12 @@ dm_segment *dm_segment_from_wave(dm_wave *w);
 dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 int dm_is_midi(const void *data, size_t size);
 /* dmseg.c internals the MIDI importer builds on */
-void dm_segment_insert_track(dm_segment *s, const dm_track *t);
+/* a new track object of the kind with its data (one reference); add / drop references */
+dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data);
+void dm_track_addref(dm_track *t);
+void dm_track_release(dm_track *t);
+/* insert in segment track order (position, then sysex before band before the rest); takes over one reference */
+void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority);
 void dm_segment_release(dm_segment *s);
 
 #endif

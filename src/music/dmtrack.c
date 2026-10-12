@@ -701,8 +701,8 @@ int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, 
 {
     int hr = DMUS_E_TRACK_NOT_FOUND;
     uint32_t last = index, i = index == DM_SEG_ALLTRACKS ? 0 : index;
-    for (dm_track *t; (t = seg_findtrack(s, NULL, prm, group, i, 1)); ) {
-        hr = track_setparam(t, prm, mt, data);
+    for (dm_segtrack *t; (t = seg_findtrack(s, NULL, prm, group, i, 1)); ) {
+        hr = track_setparam(t->t, prm, mt, data);
         if (++i > last) break;
     }
     return hr;

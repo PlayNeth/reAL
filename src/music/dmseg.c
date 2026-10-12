@@ -420,30 +420,49 @@ static void free_wavetrack(dm_wavetrack *t)
 /* ------------------------------------------------------------------ segment (77313c61, track list 7731330a) */
 /* 773112d8: a new track goes before the first one with a higher position; at equal positions a SysEx track goes
  * first, then a band track (before anything but a SysEx track) */
-static int track_before(const dm_track *n, const dm_track *e)
+static int track_before(const dm_segtrack *n, const dm_segtrack *e)
 {
     if (n->position < e->position) return 1;
     if (n->position == e->position) {
-        if (guid_eq(&n->clsid, &CLSID_SysExTrack)) return 1;
-        if (guid_eq(&n->clsid, &CLSID_BandTrack) && !guid_eq(&e->clsid, &CLSID_SysExTrack)) return 1;
+        if (guid_eq(&n->t->clsid, &CLSID_SysExTrack)) return 1;
+        if (guid_eq(&n->t->clsid, &CLSID_BandTrack) && !guid_eq(&e->t->clsid, &CLSID_SysExTrack)) return 1;
     }
     return 0;
 }
 
-/* in segment track order */
-void dm_segment_insert_track(dm_segment *s, const dm_track *t)
+dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data)
 {
+    dm_track *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    t->refs = 1; t->kind = kind; t->data = data;
+    if (clsid) t->clsid = *clsid;
+    return t;
+}
+void dm_track_addref(dm_track *t) { if (t) __sync_add_and_fetch(&t->refs, 1); }
+static void free_track(dm_track *t);
+void dm_track_release(dm_track *t)
+{
+    if (t && __sync_sub_and_fetch(&t->refs, 1) <= 0) { free_track(t); free(t); }
+}
+
+/* in segment track order (77311b2c / 773112d8) */
+void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority)
+{
+    dm_segtrack e = { t, position, group, config, priority };
     int i = 0;
-    while (i < s->ntracks && !track_before(t, &s->tracks[i])) i++;
-    s->tracks = realloc(s->tracks, (s->ntracks + 1) * sizeof(*s->tracks));
+    while (i < s->ntracks && !track_before(&e, &s->tracks[i])) i++;
+    dm_segtrack *n = realloc(s->tracks, (s->ntracks + 1) * sizeof(*s->tracks));
+    if (!n) { dm_track_release(t); return; }
+    s->tracks = n;
     memmove(s->tracks + i + 1, s->tracks + i, (s->ntracks - i) * sizeof(*s->tracks));
-    s->tracks[i] = *t;
+    s->tracks[i] = e;
     s->ntracks++;
 }
 
+typedef struct { int kind; dm_guid clsid; uint32_t position, group, config, priority; void *data; } ldtrack;
 static void load_track(dm_segment *s, rd r, dm_getcoll_fn getcoll, dm_getwave_fn getwave, void *ctx)
 {
-    dm_track t;
+    ldtrack t;
     memset(&t, 0, sizeof(t));
     t.config = 0x38;
     uint32_t ckid = 0, fcc = 0, id, type;
@@ -474,7 +493,8 @@ static void load_track(dm_segment *s, rd r, dm_getcoll_fn getcoll, dm_getwave_fn
                 else t.kind = TRK_OTHER;
             }
             else t.kind = TRK_OTHER;
-            dm_segment_insert_track(s, &t);
+            dm_track *o = dm_track_new(t.kind, &t.clsid, t.data);
+            if (o) dm_segment_insert_track(s, o, t.position, t.group, t.config, t.priority);
             return;
         }
     }
@@ -538,10 +558,8 @@ dm_segment *dm_segment_from_wave(dm_wave *w)
     it->index = 0; t->nitems = 1;
     s->rtlength = (int64_t)ms * 10000;
     s->ioflags = 1;                     /* DMUS_SEGIOF_REFLENGTH */
-    dm_track tr;
-    memset(&tr, 0, sizeof(tr));
-    tr.kind = TRK_WAVE; tr.clsid = CLSID_WaveTrack; tr.group = 1; tr.config = 0x78; tr.data = t;
-    dm_segment_insert_track(s, &tr);
+    dm_track *o = dm_track_new(TRK_WAVE, &CLSID_WaveTrack, t);
+    if (o) dm_segment_insert_track(s, o, 0, 1, 0x78, 0);
     snprintf(s->name, sizeof(s->name), "%s", w->name);
     return s;
 }
@@ -576,7 +594,7 @@ static void free_track(dm_track *t)
 void dm_segment_release(dm_segment *s)
 {
     if (!s || --s->refs > 0) return;
-    for (int i = 0; i < s->ntracks; i++) free_track(&s->tracks[i]);
+    for (int i = 0; i < s->ntracks; i++) dm_track_release(s->tracks[i].t);
     free(s->tracks); free(s->pchs); free(s->ntypes); free(s);
 }
 
@@ -616,7 +634,7 @@ int dm_segment_add_notification(dm_segment *s, const dm_guid *g, int fromperf)
     s->ntypes = n;
     s->ntypes[s->nntypes].g = *g; s->ntypes[s->nntypes].fromperf = fromperf;
     s->nntypes++;
-    for (int t = 0; t < s->ntracks; t++) track_add_notification(&s->tracks[t], g);
+    for (int t = 0; t < s->ntracks; t++) track_add_notification(s->tracks[t].t, g);
     return DM_OK;
 }
 
@@ -627,7 +645,7 @@ int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf
         int k = 0;
         for (int i = 0; i < s->nntypes; i++) {
             if (s->ntypes[i].fromperf == 0 && fromperf) { s->ntypes[k++] = s->ntypes[i]; continue; }
-            for (int t = 0; t < s->ntracks; t++) track_remove_notification(&s->tracks[t], &s->ntypes[i].g);
+            for (int t = 0; t < s->ntracks; t++) track_remove_notification(s->tracks[t].t, &s->ntypes[i].g);
         }
         s->nntypes = k;
         return DM_OK;
@@ -636,6 +654,6 @@ int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf
     if (i < 0) return DM_FALSE;
     memmove(&s->ntypes[i], &s->ntypes[i + 1], (s->nntypes - i - 1) * sizeof(*s->ntypes));
     s->nntypes--;
-    for (int t = 0; t < s->ntracks; t++) track_remove_notification(&s->tracks[t], g);
+    for (int t = 0; t < s->ntracks; t++) track_remove_notification(s->tracks[t].t, g);
     return DM_OK;
 }

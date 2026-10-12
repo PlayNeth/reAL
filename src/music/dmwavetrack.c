@@ -537,8 +537,8 @@ int dm_segment_download_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap)
     int hr = DM_OK;
     for (int i = 0; i < seg->ntracks; i++) {
         int r = DM_OK;
-        if (seg->tracks[i].kind == TRK_BAND) r = bandtrack_download(pf, seg->tracks[i].data, 0);
-        else if (seg->tracks[i].kind == TRK_WAVE) r = wt_download(pf, seg->tracks[i].data, ap, 0);
+        if (seg->tracks[i].t->kind == TRK_BAND) r = bandtrack_download(pf, seg->tracks[i].t->data, 0);
+        else if (seg->tracks[i].t->kind == TRK_WAVE) r = wt_download(pf, seg->tracks[i].t->data, ap, 0);
         if (r < 0) hr = r;
     }
     return hr;
@@ -547,8 +547,8 @@ int dm_segment_download_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap)
 int dm_segment_unload_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap)
 {
     for (int i = 0; i < seg->ntracks; i++) {
-        if (seg->tracks[i].kind == TRK_BAND) bandtrack_download(pf, seg->tracks[i].data, 1);
-        else if (seg->tracks[i].kind == TRK_WAVE) wt_download(pf, seg->tracks[i].data, ap, 1);
+        if (seg->tracks[i].t->kind == TRK_BAND) bandtrack_download(pf, seg->tracks[i].t->data, 1);
+        else if (seg->tracks[i].t->kind == TRK_WAVE) wt_download(pf, seg->tracks[i].t->data, ap, 1);
     }
     return DM_OK;
 }

@@ -479,11 +479,11 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
 
 /* 77311a65: the index-th track (after `after`) in the group that supports the parameter; GetParam takes only
  * control-enabled tracks (anycfg 0), SetParam any */
-static dm_track *seg_findtrack(dm_segment *s, dm_track *after, int prm, uint32_t group, uint32_t index, int anycfg)
+static dm_segtrack *seg_findtrack(dm_segment *s, dm_segtrack *after, int prm, uint32_t group, uint32_t index, int anycfg)
 {
     for (int i = after ? (int)(after - s->tracks) + 1 : 0; i < s->ntracks; i++) {
-        dm_track *t = &s->tracks[i];
-        if (!(t->group & group) || (!anycfg && !(t->config & 8)) || !track_supports(t, prm)) continue;
+        dm_segtrack *t = &s->tracks[i];
+        if (!(t->group & group) || (!anycfg && !(t->config & 8)) || !track_supports(t->t, prm)) continue;
         if (!index) return t;
         index--;
     }
@@ -495,10 +495,10 @@ static dm_track *seg_findtrack(dm_segment *s, dm_track *after, int prm, uint32_t
 static int seg_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
 {
     int any = index == DM_SEG_ANYTRACK, hr = DMUS_E_TRACK_NOT_FOUND;
-    dm_track *t = seg_findtrack(s, NULL, prm, group, any ? 0 : index, 0);
+    dm_segtrack *t = seg_findtrack(s, NULL, prm, group, any ? 0 : index, 0);
     while (t) {
-        hr = track_getparam(t, prm, mt, next, data);
-        if (t->kind == TRK_TIMESIG && next && (*next == 0 || s->length - mt < *next)) *next = s->length - mt;
+        hr = track_getparam(t->t, prm, mt, next, data);
+        if (t->t->kind == TRK_TIMESIG && next && (*next == 0 || s->length - mt < *next)) *next = s->length - mt;
         if (!any || hr != DMUS_E_NOT_FOUND) break;
         t = seg_findtrack(s, t, prm, group, 0, 0);
     }
@@ -707,7 +707,7 @@ static void flush_queue(dm_perf *pf, uint32_t vid, dm_queue *q, rtime_t cut, rti
 /* 7731318f: does the segment have a control-enabled track that supports the tempo parameter */
 static int seg_has_tempo(dm_segment *s)
 {
-    for (int i = 0; i < s->ntracks; i++) if ((s->tracks[i].config & 8) && track_supports(&s->tracks[i], PRM_TEMPO)) return 1;
+    for (int i = 0; i < s->ntracks; i++) if ((s->tracks[i].config & 8) && track_supports(s->tracks[i].t, PRM_TEMPO)) return 1;
     return 0;
 }
 

@@ -37,7 +37,7 @@ static int list_find(dm_perf *pf, dm_segstate *s)
 /* ------------------------------------------------------------------ segment state objects */
 static void ss_destroy(dm_segstate *ss)
 {
-    for (int i = 0; i < ss->ntr; i++) track_endplay(ss->perf, &ss->tr[i]);
+    for (int i = 0; i < ss->ntr; i++) { track_endplay(ss->perf, &ss->tr[i]); dm_track_release(ss->tr[i].t); }
     free(ss->tr);
     dm_segment_release(ss->seg);
     if (ss->audiopath) dm_audiopath_release(ss->audiopath);
@@ -50,7 +50,7 @@ static void ss_unref(dm_segstate *ss) { if (--ss->refs <= 0) ss_destroy(ss); }
  * or anything else, finds nothing to do); the application's reference keeps the empty object */
 static void ss_shutdown(dm_segstate *ss)
 {
-    for (int i = 0; i < ss->ntr; i++) track_endplay(ss->perf, &ss->tr[i]);
+    for (int i = 0; i < ss->ntr; i++) { track_endplay(ss->perf, &ss->tr[i]); dm_track_release(ss->tr[i].t); }
     free(ss->tr); ss->tr = NULL; ss->ntr = 0;
     dm_segment_release(ss->seg); ss->seg = NULL;
     if (ss->audiopath) { dm_audiopath_release(ss->audiopath); ss->audiopath = NULL; }
@@ -103,7 +103,8 @@ static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags, dm_a
     ss->tr = calloc(seg->ntracks ? seg->ntracks : 1, sizeof(*ss->tr));
     ss->ntr = seg->ntracks;
     for (int i = 0; i < seg->ntracks; i++) {
-        ss->tr[i].t = &seg->tracks[i]; ss->tr[i].cfg = seg->tracks[i].config; ss->tr[i].group = seg->tracks[i].group;
+        ss->tr[i].t = seg->tracks[i].t; dm_track_addref(ss->tr[i].t);
+        ss->tr[i].cfg = seg->tracks[i].config; ss->tr[i].group = seg->tracks[i].group;
     }
     ss->loopstart = seg->loopstart; ss->loopend = seg->loopend; ss->repeats = seg->repeats; ss->length = seg->length;
     ss->startpoint = seg->playstart; ss->rtlength = seg->rtlength; ss->rtloopstart = seg->rtloopstart;
@@ -818,11 +819,11 @@ static const dm_guid DM_GUID_ALL_OBJECTS_ = { 0xaa114de5, 0xc262, 0x4169, { 0xa1
 static int geq(const dm_guid *a, const dm_guid *b) { return !memcmp(a, b, sizeof(*a)); }
 
 /* 77311975: the index-th track of the class (GUID_NULL: any) in the group */
-static dm_track *seg_track_by_class(dm_segment *s, const dm_guid *c, uint32_t group, uint32_t index)
+static dm_segtrack *seg_track_by_class(dm_segment *s, const dm_guid *c, uint32_t group, uint32_t index)
 {
     for (int i = 0; i < s->ntracks; i++) {
-        dm_track *t = &s->tracks[i];
-        if (!(t->group & group) || !(geq(c, &DM_GUID_NULL_) || geq(c, &t->clsid))) continue;
+        dm_segtrack *t = &s->tracks[i];
+        if (!(t->group & group) || !(geq(c, &DM_GUID_NULL_) || geq(c, &t->t->clsid))) continue;
         if (!index) return t;
         index--;
     }
@@ -833,7 +834,7 @@ int dm_segment_set_trackconfig(dm_segment *s, const dm_guid *clsid, uint32_t gro
     if (geq(clsid, &DM_GUID_NULL_)) return DM_E_INVALIDARG;
     int hr = DMUS_E_TRACK_NOT_FOUND;
     uint32_t last = index, i = index == DM_SEG_ALLTRACKS ? 0 : index;
-    for (dm_track *t = seg_track_by_class(s, clsid, group, i); t; t = seg_track_by_class(s, clsid, group, i)) {
+    for (dm_segtrack *t = seg_track_by_class(s, clsid, group, i); t; t = seg_track_by_class(s, clsid, group, i)) {
         hr = DM_OK;
         t->config = (t->config & ~off) | on;
         if (++i > last) break;

@@ -645,10 +645,8 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
         for (modeitem *m = s->modes ? s->modes : &def; m; m = m->next)
             for (int i = 0; i < bt->nbands; i++)
                 if (m->t <= bt->bands[i]->logical && (!m->next || bt->bands[i]->logical < m->next->t)) bt->bands[i]->mode = m->mode;
-        dm_track t;
-        memset(&t, 0, sizeof(t));
-        t.kind = TRK_BAND; t.clsid = CLSID_BandTrack; t.group = 1; t.config = 0x38; t.data = bt;
-        dm_segment_insert_track(seg, &t);
+        dm_track *t = dm_track_new(TRK_BAND, &CLSID_BandTrack, bt);
+        if (t) dm_segment_insert_track(seg, t, 0, 1, 0x38, 0);
         /* the length: whole measures of the last signature */
         uint8_t beat = s->tsbeat ? s->tsbeat : 4, bpm = s->tsbpm ? s->tsbpm : 4;
         int32_t m = s->tstime;
