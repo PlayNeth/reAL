@@ -110,6 +110,11 @@ enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND,
 typedef struct { dm_perf *pf; dm_audiopath *ap; } dm_dltarget;
 #define DM_SEG_ANYTRACK 0x80000000u
 #define DM_SEG_ALLTRACKS 0x80000000u
+/* SetTrackConfig: segment 7731245b (tracks by class; GUID_NULL refused), segment state 77315d52 (GUID_All_Objects
+ * matches every class); config = (config & ~off) | on.  SetPChannelsUsed 7731281d: PChannels added to the list. */
+int dm_segment_set_trackconfig(dm_segment *s, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off);
+int dm_segstate_set_trackconfig(dm_segstate *ss, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off);
+int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n);
 int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
 int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
 int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
@@ -142,6 +147,8 @@ void dm_perf_set_app_precision(dm_perf *pf, int extended);
                                  * point and keeps its end (the original mixes up the times: off + 2 x start, ...) */
 #define DM_FIX_WAVE_SYNCVAR 8   /* a wave track that follows another track's variations, with none to follow, chooses
                                  * them once per start or loop (the original chooses again on every play pass) */
+#define DM_FIX_STATE_TRACKCONFIG 16  /* SegmentState::SetTrackConfig with DMUS_SEG_ALLTRACKS changes every matching track
+                                 * (the original looks up the track with the unchanged index: none for ALLTRACKS) */
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
 /* the transport thread's srand(time(NULL)) (wave track variations and random volume/pitch) */
 void dm_perf_set_seed(dm_perf *pf, uint32_t seed);

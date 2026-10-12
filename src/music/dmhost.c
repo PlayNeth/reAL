@@ -414,8 +414,12 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->nextbus = 0x1000;
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
-    if (h->pf) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER | DM_FIX_WAVE_SEEK | DM_FIX_WAVE_SYNCVAR);
-    dm_wave_set_fix_length(1);
+    /* fixes of Microsoft's flaws: on, except for comparison runs (REAL_MUSIC_NOFIXES in the environment) */
+    int fixes = !GetEnvironmentVariableA("REAL_MUSIC_NOFIXES", NULL, 0);
+    if (h->pf && fixes) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER | DM_FIX_WAVE_SEEK |
+                                          DM_FIX_WAVE_SYNCVAR | DM_FIX_STATE_TRACKCONFIG);
+    if (!fixes) msynth_set_fixes(h->syn, 0);
+    dm_wave_set_fix_length(fixes);
     dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign,
                       port_wave_download, port_wave_unload, port_voice_alloc, port_voice_play, port_voice_stop, port_voice_free };
     dm_perf_add_port(h->pf, &po, h);

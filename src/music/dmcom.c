@@ -482,8 +482,28 @@ static HRESULT WINAPI seg_getloop(IDirectMusicSegment8 *i, MUSIC_TIME *a, MUSIC_
     *a = sgm(i)->seg ? sgm(i)->seg->loopstart : 0; *b = sgm(i)->seg ? sgm(i)->seg->loopend : 0;
     return S_OK;
 }
-static HRESULT WINAPI seg_setpch(IDirectMusicSegment8 *i, DWORD n, DWORD *p) { return S_OK; }
-static HRESULT WINAPI seg_settrackcfg(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off) { return S_OK; }
+static HRESULT WINAPI seg_setpch(IDirectMusicSegment8 *i, DWORD n, DWORD *p)
+{
+    if (!n) return S_OK;
+    if (!p) return E_INVALIDARG;
+    if (IsBadReadPtr(p, n * sizeof(DWORD))) return E_POINTER;
+    if (!sgm(i)->seg) return S_OK;
+    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
+    if (h) dm_host_lock(h);
+    HRESULT hr = dm_segment_add_pchannels(sgm(i)->seg, (const uint32_t *)p, n);
+    if (h) dm_host_unlock(h);
+    return hr;
+}
+static HRESULT WINAPI seg_settrackcfg(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off)
+{
+    if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
+    if (!sgm(i)->seg) return DMUS_E_TRACK_NOT_FOUND;
+    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
+    if (h) dm_host_lock(h);
+    HRESULT hr = dm_segment_set_trackconfig(sgm(i)->seg, (const dm_guid *)g, gb, n, on, off);
+    if (h) dm_host_unlock(h);
+    return hr;
+}
 static HRESULT WINAPI seg_getapconfig(IDirectMusicSegment8 *i, IUnknown **c) { if (c) *c = NULL; return DMUS_E_NO_AUDIOPATH_CONFIG; }
 static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c) { return rm_notimpl(__func__); }
 static rm_perf *perf_from_unknown(IUnknown *u);
@@ -787,7 +807,15 @@ static HRESULT WINAPI st_getseek(IDirectMusicSegmentState8 *i, MUSIC_TIME *t)
     return S_OK;
 }
 static HRESULT WINAPI st_getstartpoint(IDirectMusicSegmentState8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; *t = sst(i)->seg && sst(i)->seg->seg ? sst(i)->seg->seg->playstart : 0; return S_OK; }
-static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off) { return S_OK; }
+static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off)
+{
+    rm_state *s = sst(i);
+    if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
+    if (s->perf->host) dm_host_lock(s->perf->host);
+    HRESULT hr = dm_segstate_set_trackconfig(s->ss, (const dm_guid *)g, gb, n, on, off);
+    if (s->perf->host) dm_host_unlock(s->perf->host);
+    return hr;
+}
 static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
 {
     if (o) *o = NULL;

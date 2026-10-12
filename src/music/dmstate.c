@@ -811,3 +811,74 @@ int dm_perf_stop_audiopath(dm_perf *pf, dm_audiopath *ap, mtime_t mt, uint32_t f
     for (int i = 0; i < n; i++) dm_perf_stop(pf, NULL, v[i], mt, flags);
     return DM_OK;
 }
+
+/* ------------------------------------------------------------------ SetTrackConfig / SetPChannelsUsed */
+static const dm_guid DM_GUID_NULL_ = { 0, 0, 0, { 0 } };
+static const dm_guid DM_GUID_ALL_OBJECTS_ = { 0xaa114de5, 0xc262, 0x4169, { 0xa1, 0xc8, 0x23, 0xd6, 0x98, 0xcc, 0x73, 0xb5 } };
+static int geq(const dm_guid *a, const dm_guid *b) { return !memcmp(a, b, sizeof(*a)); }
+
+/* 77311975: the index-th track of the class (GUID_NULL: any) in the group */
+static dm_track *seg_track_by_class(dm_segment *s, const dm_guid *c, uint32_t group, uint32_t index)
+{
+    for (int i = 0; i < s->ntracks; i++) {
+        dm_track *t = &s->tracks[i];
+        if (!(t->group & group) || !(geq(c, &DM_GUID_NULL_) || geq(c, &t->clsid))) continue;
+        if (!index) return t;
+        index--;
+    }
+    return NULL;
+}
+int dm_segment_set_trackconfig(dm_segment *s, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off)
+{
+    if (geq(clsid, &DM_GUID_NULL_)) return DM_E_INVALIDARG;
+    int hr = DMUS_E_TRACK_NOT_FOUND;
+    uint32_t last = index, i = index == DM_SEG_ALLTRACKS ? 0 : index;
+    for (dm_track *t = seg_track_by_class(s, clsid, group, i); t; t = seg_track_by_class(s, clsid, group, i)) {
+        hr = DM_OK;
+        t->config = (t->config & ~off) | on;
+        if (++i > last) break;
+    }
+    return hr;
+}
+
+/* 77315d02: the same over a state's tracks (GUID_All_Objects: any class) */
+static sstrack *ss_track_by_class(dm_segstate *ss, const dm_guid *c, uint32_t group, uint32_t index)
+{
+    for (int i = 0; i < ss->ntr; i++) {
+        sstrack *e = &ss->tr[i];
+        if (!(e->group & group) || !(geq(c, &DM_GUID_ALL_OBJECTS_) || geq(c, &e->t->clsid))) continue;
+        if (!index) return e;
+        index--;
+    }
+    return NULL;
+}
+int dm_segstate_set_trackconfig(dm_segstate *ss, const dm_guid *clsid, uint32_t group, uint32_t index, uint32_t on, uint32_t off)
+{
+    if (geq(clsid, &DM_GUID_NULL_)) return DM_E_INVALIDARG;
+    int hr = DMUS_E_TRACK_NOT_FOUND, fix = ss->perf && (ss->perf->fixes & DM_FIX_STATE_TRACKCONFIG);
+    uint32_t last = index, i = index == DM_SEG_ALLTRACKS ? 0 : index;
+    /* the original looks up with the index as given every time */
+    for (sstrack *e = ss_track_by_class(ss, clsid, group, fix ? i : index); e; e = ss_track_by_class(ss, clsid, group, fix ? i : index)) {
+        hr = DM_OK;
+        e->cfg = (e->cfg & ~off) | on;
+        if (++i > last) break;
+    }
+    return hr;
+}
+
+int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n)
+{
+    uint32_t *add = malloc((n ? n : 1) * sizeof(*add)), k = 0;
+    if (!add) return DM_E_OUTOFMEMORY;
+    for (uint32_t i = 0; i < n; i++) {
+        int have = 0;
+        for (int j = 0; j < s->npchs && !have; j++) have = s->pchs[j] == pch[i];
+        if (!have) add[k++] = pch[i];
+    }
+    uint32_t *all = realloc(s->pchs, (s->npchs + k ? s->npchs + k : 1) * sizeof(*all));
+    if (!all) { free(add); return DM_E_OUTOFMEMORY; }
+    memcpy(all + s->npchs, add, k * sizeof(*all));
+    s->pchs = all; s->npchs += k;
+    free(add);
+    return DM_OK;
+}

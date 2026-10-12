@@ -263,6 +263,45 @@ static void smfdl(const char *name)
     IDirectMusicLoader8_ClearCache(loader, &CLSID_DirectMusicSegment);
 }
 
+static const GUID clsid_tempotrack_ = { 0xd2ac2885, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const GUID clsid_tstrack_ = { 0xd2ac2888, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const GUID guid_allobjects_ = { 0xaa114de5, 0xc262, 0x4169, { 0xa1, 0xc8, 0x23, 0xd6, 0x98, 0xcc, 0x73, 0xb5 } };
+static void trackcfg(void)
+{
+    IDirectMusicSegment8 *s = load("fe_hard_04.sgt");
+    if (!s) return;
+    DMUS_TEMPO_PARAM tp; MUSIC_TIME next;
+    printf("trackcfg\n");
+    printf("  null %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &GUID_NULL_, 0xffffffff, 0, 0, 0));
+    printf("  allobjects %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &guid_allobjects_, 0xffffffff, 0, 0, 0));
+    printf("  bogus %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &guid_bogus, 0xffffffff, 0, 0, 0));
+    printf("  tempo off control %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &clsid_tempotrack_, 0xffffffff, 0, 0, DMUS_TRACKCONFIG_CONTROL_ENABLED));
+    printf("  get tempo %08lx\n", IDirectMusicSegment8_GetParam(s, &GUID_TempoParam_, 0xffffffff, 0, 0, &next, &tp));
+    printf("  tempo index 1 %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &clsid_tempotrack_, 0xffffffff, 1, DMUS_TRACKCONFIG_CONTROL_ENABLED, 0));
+    printf("  tempo group 2 %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &clsid_tempotrack_, 2, 0, DMUS_TRACKCONFIG_CONTROL_ENABLED, 0));
+    printf("  tempo all on %08lx\n", IDirectMusicSegment8_SetTrackConfig(s, &clsid_tempotrack_, 0xffffffff, DMUS_SEG_ALLTRACKS, DMUS_TRACKCONFIG_CONTROL_ENABLED, 0));
+    printf("  get tempo %08lx\n", IDirectMusicSegment8_GetParam(s, &GUID_TempoParam_, 0xffffffff, 0, 0, &next, &tp));
+    DWORD pch[] = { 5, 6, 5, 200 };
+    printf("  pchannels %08lx %08lx %08lx\n", IDirectMusicSegment8_SetPChannelsUsed(s, 4, pch), IDirectMusicSegment8_SetPChannelsUsed(s, 0, NULL),
+           IDirectMusicSegment8_SetPChannelsUsed(s, 2, NULL));
+    IDirectMusicSegmentState *ss = NULL;
+    IDirectMusicPerformance8_PlaySegment(perf, (IDirectMusicSegment *)s, 0, 0, &ss);
+    IDirectMusicSegmentState8 *s8 = NULL;
+    IDirectMusicSegmentState_QueryInterface(ss, &IID_IDirectMusicSegmentState8, (void **)&s8);
+    printf("  state null %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &GUID_NULL_, 0xffffffff, 0, 0, 0));
+    printf("  state tempo %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &clsid_tempotrack_, 0xffffffff, 0, 0, 0));
+    printf("  state tempo 1 %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &clsid_tempotrack_, 0xffffffff, 1, 0, 0));
+    printf("  state allobjects %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &guid_allobjects_, 0xffffffff, 0, 0, 0));
+    printf("  state allobjects 3 %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &guid_allobjects_, 0xffffffff, 3, 0, 0));
+    printf("  state all tracks %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &guid_allobjects_, 0xffffffff, DMUS_SEG_ALLTRACKS, 0, 0));
+    printf("  state ts %08lx\n", IDirectMusicSegmentState8_SetTrackConfig(s8, &clsid_tstrack_, 0xffffffff, 0, 0, 0));
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    Sleep(200);
+    IDirectMusicSegmentState8_Release(s8);
+    IDirectMusicSegmentState_Release(ss);
+    IDirectMusicSegment8_Release(s);
+}
+
 static void perfparams(void)
 {
     DMUS_TEMPO_PARAM tp; DMUS_TIMESIGNATURE ts; MUSIC_TIME next, now;
@@ -325,6 +364,7 @@ int main(int argc, char **argv)
     segparams("fe_hard_04.sgt");
     segparams("bells1.sgt");
     perfparams();
+    trackcfg();
     smfdl("fe_hard_04.sgt");
     smfdl("bells1.sgt");
     IDirectMusicPerformance8_CloseDown(perf);
