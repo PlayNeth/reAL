@@ -1649,6 +1649,13 @@ void dm_perf_set_notification_handle(dm_perf *pf, void (*cb)(void *ctx), void *c
 
 /* 77305c42 GetNotificationPMsg: the oldest delivered notification (the caller frees it), NULL if none */
 dm_pmsg *dm_perf_get_notification(dm_perf *pf) { return q_pop(&pf->notif); }
+dm_pmsg *dm_perf_alloc_pmsg(dm_perf *pf, uint32_t size) { return pm_alloc(pf, size); }
+int dm_perf_send_pmsg(dm_perf *pf, dm_pmsg *p)
+{
+    int hr = send_pmsg(pf, p);
+    if (hr < 0) pm_free(pf, p);
+    return hr;
+}
 
 int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p) { return p ? pm_free(pf, p) : DM_E_POINTER; }
 

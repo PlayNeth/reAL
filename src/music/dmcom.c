@@ -1092,7 +1092,7 @@ static HRESULT WINAPI pf_setprepare(IDirectMusicPerformance8 *i, DWORD ms) { rm_
 static HRESULT WINAPI pf_getprepare(IDirectMusicPerformance8 *i, DWORD *ms) { rm_perf *p = prf(i); if (!ms) return E_POINTER; PERF_LOCKED(p, *ms = dm_perf_get_prepare_time(dm_host_perf(p->host))); return S_OK; }
 static HRESULT WINAPI pf_setbumper(IDirectMusicPerformance8 *i, DWORD ms) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_set_bumper_length(dm_host_perf(p->host), ms)); return S_OK; }
 static HRESULT WINAPI pf_getbumper(IDirectMusicPerformance8 *i, DWORD *ms) { rm_perf *p = prf(i); if (!ms) return E_POINTER; PERF_LOCKED(p, *ms = dm_perf_get_bumper_length(dm_host_perf(p->host))); return S_OK; }
-static HRESULT WINAPI pf_sendpmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m) { return rm_notimpl(__func__); }
+static HRESULT WINAPI pf_sendpmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m);
 static HRESULT WINAPI pf_m2r(IDirectMusicPerformance8 *i, MUSIC_TIME mt, REFERENCE_TIME *rt) { rm_perf *p = prf(i); if (!rt) return E_POINTER; PERF_LOCKED(p, dm_perf_m2r(dm_host_perf(p->host), mt, rt)); return S_OK; }
 static HRESULT WINAPI pf_r2m(IDirectMusicPerformance8 *i, REFERENCE_TIME rt, MUSIC_TIME *mt) { rm_perf *p = prf(i); if (!mt) return E_POINTER; PERF_LOCKED(p, dm_perf_r2m(dm_host_perf(p->host), rt, (mtime_t *)mt)); return S_OK; }
 static HRESULT WINAPI pf_isplaying(IDirectMusicPerformance8 *i, IDirectMusicSegment *s, IDirectMusicSegmentState *st)
@@ -1148,6 +1148,104 @@ static HRESULT WINAPI pf_freepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m)
     h->magic = 0;
     free(h);
     return S_OK;
+}
+
+/* a sent message's memory is kept a while (marked sent: SendPMsg / FreePMsg on it fail as on a queued one), so an
+ * application that still touches it right after sending does not write into freed memory */
+static DMUS_PMSG *s_retired[256];
+static LONG s_retpos;
+static void pmsg_retire(DMUS_PMSG *m)
+{
+    rm_pmsghdr *h = pmsg_hdr(m);
+    if (m->pTool) { IDirectMusicTool_Release(m->pTool); m->pTool = NULL; }
+    if (m->pGraph) { IDirectMusicGraph_Release(m->pGraph); m->pGraph = NULL; }
+    if (m->punkUser) { IUnknown_Release(m->punkUser); m->punkUser = NULL; }
+    h->magic = 0;
+    LONG k = InterlockedIncrement(&s_retpos) & 255;
+    DMUS_PMSG *old = (DMUS_PMSG *)InterlockedExchangePointer((void **)&s_retired[k], m);
+    if (old) free((rm_pmsghdr *)old - 1);
+}
+
+/* 77304e7e SendPMsg: the application's message, copied into an engine message of its type, goes into the queues
+ * (the performance owns it from here: the application's copy is freed).  Without a tool of ours it plays through the
+ * output tool, as a message stamped by the performance's graph. */
+static HRESULT WINAPI pf_sendpmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m)
+{
+    rm_perf *p = prf(i);
+    if (!m || IsBadReadPtr(m, sizeof(DMUS_PMSG))) return E_POINTER;
+    if (!p->host) return DMUS_E_NO_MASTER_CLOCK;
+    rm_pmsghdr *h = pmsg_hdr(m);
+    if (!h) return DMUS_E_ALREADY_SENT;
+    if (m->dwType == 0xfffffff0) return pf_freepmsg(i, m);
+    dm_host_lock(p->host);
+    dm_perf *pf = dm_host_perf(p->host);
+    dm_pmsg *e = dm_perf_alloc_pmsg(pf, m->dwSize);
+    HRESULT hr = E_OUTOFMEMORY;
+    if (e) {
+        e->rt = m->rtTime; e->mt = m->mtTime; e->flags = m->dwFlags; e->pch = m->dwPChannel; e->vpch = m->dwVirtualTrackID;
+        e->type = m->dwType; e->voice = m->dwVoiceID; e->group = m->dwGroupID;
+        hr = S_OK;
+        switch (m->dwType) {
+        case DMUS_PMSGT_MIDI: if (m->dwSize >= sizeof(DMUS_MIDI_PMSG)) { DMUS_MIDI_PMSG *x = (DMUS_MIDI_PMSG *)m; e->m_status = x->bStatus; e->m_b1 = x->bByte1; e->m_b2 = x->bByte2; } else hr = E_INVALIDARG; break;
+        case DMUS_PMSGT_NOTE:
+            if (m->dwSize >= sizeof(DMUS_NOTE_PMSG)) {
+                DMUS_NOTE_PMSG *x = (DMUS_NOTE_PMSG *)m;
+                e->n_dur = x->mtDuration; e->n_musicval = x->wMusicValue; e->n_measure = x->wMeasure; e->n_offset = x->nOffset;
+                e->n_beat = x->bBeat; e->n_grid = x->bGrid; e->n_vel = x->bVelocity; e->n_flags = x->bFlags; e->n_timerange = x->bTimeRange;
+                e->n_durrange = x->bDurRange; e->n_velrange = x->bVelRange; e->n_playmode = x->bPlayModeFlags; e->n_subchord = x->bSubChordLevel;
+                e->n_midival = x->bMidiValue; e->n_transpose = x->cTranspose;
+            } else hr = E_INVALIDARG;
+            break;
+        case DMUS_PMSGT_SYSEX: {
+            DMUS_SYSEX_PMSG *x = (DMUS_SYSEX_PMSG *)m;
+            if (m->dwSize < FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) || x->dwLen > m->dwSize - FIELD_OFFSET(DMUS_SYSEX_PMSG, abData)) { hr = E_INVALIDARG; break; }
+            e->sx_len = x->dwLen;
+            if (x->dwLen && !(e->sx_data = malloc(x->dwLen))) { hr = E_OUTOFMEMORY; break; }
+            memcpy(e->sx_data, x->abData, x->dwLen);
+            break;
+        }
+        case DMUS_PMSGT_NOTIFICATION:
+            if (m->dwSize >= sizeof(DMUS_NOTIFICATION_PMSG)) {
+                DMUS_NOTIFICATION_PMSG *x = (DMUS_NOTIFICATION_PMSG *)m;
+                memcpy(&e->nf_guid, &x->guidNotificationType, sizeof(e->nf_guid));
+                e->nf_option = x->dwNotificationOption; e->nf_field1 = x->dwField1; e->nf_field2 = x->dwField2;
+            } else hr = E_INVALIDARG;
+            break;
+        case DMUS_PMSGT_TEMPO: if (m->dwSize >= sizeof(DMUS_TEMPO_PMSG)) e->tempo = ((DMUS_TEMPO_PMSG *)m)->dblTempo; else hr = E_INVALIDARG; break;
+        case DMUS_PMSGT_CURVE:
+            if (m->dwSize >= FIELD_OFFSET(DMUS_CURVE_PMSG, wParamType)) {
+                DMUS_CURVE_PMSG *x = (DMUS_CURVE_PMSG *)m;
+                e->c_dur = x->mtDuration; e->c_origstart = x->mtOriginalStart; e->c_resetdur = x->mtResetDuration;
+                e->c_start = x->nStartValue; e->c_end = x->nEndValue; e->c_reset = x->nResetValue; e->c_measure = x->wMeasure;
+                e->c_offset = x->nOffset; e->c_beat = x->bBeat; e->c_grid = x->bGrid; e->c_type = x->bType; e->c_shape = x->bCurveShape;
+                e->c_cc = x->bCCData; e->c_flags = x->bFlags;
+                if (m->dwSize >= sizeof(DMUS_CURVE_PMSG)) { e->c_param = x->wParamType; e->c_merge = x->wMergeIndex; }
+            } else hr = E_INVALIDARG;
+            break;
+        case DMUS_PMSGT_TIMESIG:
+            if (m->dwSize >= sizeof(DMUS_TIMESIG_PMSG)) {
+                DMUS_TIMESIG_PMSG *x = (DMUS_TIMESIG_PMSG *)m;
+                e->ts_bpm = x->bBeatsPerMeasure; e->ts_beat = x->bBeat; e->ts_grids = x->wGridsPerBeat;
+            } else hr = E_INVALIDARG;
+            break;
+        case DMUS_PMSGT_PATCH: if (m->dwSize >= sizeof(DMUS_PATCH_PMSG)) { DMUS_PATCH_PMSG *x = (DMUS_PATCH_PMSG *)m; e->m_status = x->byInstrument; e->m_b1 = x->byMSB; e->m_b2 = x->byLSB; } else hr = E_INVALIDARG; break;
+        case DMUS_PMSGT_TRANSPOSE:
+            if (m->dwSize >= FIELD_OFFSET(DMUS_TRANSPOSE_PMSG, wMergeIndex)) {
+                DMUS_TRANSPOSE_PMSG *x = (DMUS_TRANSPOSE_PMSG *)m;
+                e->t_transpose = x->nTranspose;
+                if (m->dwSize >= sizeof(*x)) e->t_merge = x->wMergeIndex;
+            } else hr = E_INVALIDARG;
+            break;
+        case DMUS_PMSGT_CHANNEL_PRIORITY: if (m->dwSize >= sizeof(DMUS_CHANNEL_PRIORITY_PMSG)) e->priority = ((DMUS_CHANNEL_PRIORITY_PMSG *)m)->dwChannelPriority; else hr = E_INVALIDARG; break;
+        case DMUS_PMSGT_WAVE: hr = E_INVALIDARG; break;          /* the wave track's own; it needs the port's voice */
+        default: break;                                         /* stop, dirty, lyrics, user: no data the engine reads */
+        }
+        if (FAILED(hr)) { dm_perf_free_pmsg(pf, e); e = NULL; }
+    }
+    if (e) hr = dm_perf_send_pmsg(pf, e);
+    dm_host_unlock(p->host);
+    if (SUCCEEDED(hr)) pmsg_retire(m);              /* the performance has it now */
+    return hr;
 }
 
 /* the COM object of a segment state (made on demand for a state the application never got, call with the lock) */

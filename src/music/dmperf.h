@@ -159,6 +159,10 @@ int dm_perf_add_notification_type(dm_perf *pf, const dm_guid *g);
 int dm_perf_remove_notification_type(dm_perf *pf, const dm_guid *g);
 void dm_perf_set_notification_handle(dm_perf *pf, void (*cb)(void *ctx), void *ctx, rtime_t rtmin);
 dm_pmsg *dm_perf_get_notification(dm_perf *pf);
+/* SendPMsg (77304e7e): an application's message into the queues; a message without a tool goes to the output tool.
+ * dm_perf_alloc_pmsg gives a cleared message of the type's size; on failure dm_perf_send_pmsg frees it. */
+dm_pmsg *dm_perf_alloc_pmsg(dm_perf *pf, uint32_t size);
+int dm_perf_send_pmsg(dm_perf *pf, dm_pmsg *p);
 int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p);
 
 #endif

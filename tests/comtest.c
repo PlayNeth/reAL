@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <dmusici.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <dsound.h>
 
 
@@ -302,6 +303,42 @@ static void trackcfg(void)
     IDirectMusicSegment8_Release(s);
 }
 
+static void sendpmsg(void)
+{
+    printf("sendpmsg\n");
+    printf("  NULL %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, NULL));
+    BYTE *raw = calloc(1, 0x200);
+    DMUS_NOTE_PMSG *fake = (DMUS_NOTE_PMSG *)(raw + 0x80);
+    fake->dwSize = sizeof(*fake); fake->dwFlags = DMUS_PMSGF_MUSICTIME; fake->dwType = DMUS_PMSGT_NOTE;
+    printf("  not allocated %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)fake));
+    free(raw);
+    MUSIC_TIME now; IDirectMusicPerformance8_GetTime(perf, NULL, &now);
+    DMUS_NOTE_PMSG *n = NULL;
+    IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*n), (DMUS_PMSG **)&n);
+    n->mtTime = now + 2000; n->dwFlags = DMUS_PMSGF_MUSICTIME; n->dwType = DMUS_PMSGT_NOTE; n->dwPChannel = 0;
+    n->mtDuration = 400; n->bMidiValue = 60; n->bVelocity = 100; n->bFlags = DMUS_NOTEF_NOTEON;
+    printf("  note %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)n));
+    DMUS_MIDI_PMSG *mi = NULL;
+    IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*mi), (DMUS_PMSG **)&mi);
+    mi->dwType = DMUS_PMSGT_MIDI; mi->bStatus = 0xb0; mi->bByte1 = 7; mi->bByte2 = 90;
+    printf("  no time flags %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)mi));
+    mi->dwFlags = DMUS_PMSGF_MUSICTIME; mi->mtTime = 5;
+    printf("  midi at 5 %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)mi));
+    DMUS_PATCH_PMSG *pa = NULL;
+    IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*pa), (DMUS_PMSG **)&pa);
+    pa->dwType = DMUS_PMSGT_PATCH; pa->byInstrument = 40;
+    printf("  patch now %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)pa));
+    DMUS_PMSG *u = NULL;
+    IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*u), &u);
+    u->dwType = DMUS_PMSGT_USER; u->dwFlags = DMUS_PMSGF_REFTIME | DMUS_PMSGF_TOOL_IMMEDIATE; u->rtTime = 0;
+    printf("  user reftime 0 %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, u));
+    DMUS_PMSG *f = NULL;
+    IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*f), &f);
+    f->dwType = 0xfffffff0;
+    printf("  free type %08lx\n", IDirectMusicPerformance8_SendPMsg(perf, f));
+    Sleep(1500);
+}
+
 static void perfparams(void)
 {
     DMUS_TEMPO_PARAM tp; DMUS_TIMESIGNATURE ts; MUSIC_TIME next, now;
@@ -365,6 +402,7 @@ int main(int argc, char **argv)
     segparams("bells1.sgt");
     perfparams();
     trackcfg();
+    sendpmsg();
     smfdl("fe_hard_04.sgt");
     smfdl("bells1.sgt");
     IDirectMusicPerformance8_CloseDown(perf);
