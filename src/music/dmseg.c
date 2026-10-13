@@ -213,6 +213,16 @@ static void load_dmbd(dm_band *b, rd r, dm_getcoll_fn getcoll, void *ctx)
     }
 }
 
+dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx)
+{
+    dm_band *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    b->groupbits = 0xffffffff;
+    rd r = { data, (const uint8_t *)data + size };
+    load_dmbd(b, r, getcoll, ctx);
+    return b;
+}
+
 static void band_add(dm_bandtrack *t, dm_band *b)
 {
     int i = 0;

@@ -531,3 +531,400 @@ dms_mutetrack *dms_mutetrack_clone(const dms_mutetrack *T, mtime_t start, mtime_
     }
     return C;
 }
+
+/* ------------------------------------------------------------------ styles */
+static const uint8_t g_ts44[4] = { 4, 4, 4, 0 };       /* DAT_77418400 */
+static uint16_t ts_grids(const uint8_t *ts) { return (uint16_t)(ts[2] | ts[3] << 8); }
+int32_t dms_beat_clocks(const uint8_t *ts) { return ts[1] ? (int32_t)(0xc00 / ts[1]) : 0; }
+static int32_t grid_len(const uint8_t *ts) { uint16_t g = ts_grids(ts); return g ? dms_beat_clocks(ts) / g : 0; }  /* 77406240 */
+int32_t dms_grid_clocks(const uint8_t *ts, uint16_t grid)                                                         /* 7740625b */
+{
+    uint16_t g = ts_grids(ts);
+    if (!g) return grid_len(ts) * grid;
+    return dms_beat_clocks(ts) * (grid / g) + grid_len(ts) * (grid % g);
+}
+const uint8_t *dms_pattern_ts(const dms_pattern *p, const dms_style *s)
+{
+    if (p && p->ts[1]) return p->ts;
+    return s ? s->ts : g_ts44;
+}
+const uint8_t *dms_part_ts(const dms_part *pt, const dms_style *s, const dms_pattern *p)
+{
+    if (pt->ts[1]) return pt->ts;
+    return p ? dms_pattern_ts(p, s) : g_ts44;
+}
+
+void dms_style_addref(dms_style *s) { if (s) s->refs++; }
+static void part_release(dms_part *p)
+{
+    if (!p || --p->refs > 0) return;
+    for (dms_event *e = p->events, *n; e; e = n) { n = e->next; free(e); }
+    for (int v = 0; v < 32; v++) for (dms_marker *m = p->markers[v], *n; m; m = n) { n = m->next; free(m); }
+    for (dms_res *r = p->res, *n; r; r = n) { n = r->next; free(r); }
+    free(p);
+}
+static void band_free(dm_band *b) { if (b) { free(b->inst); free(b); } }
+static void pattern_release(dms_pattern *p)
+{
+    if (!p || --p->refs > 0) return;
+    free(p->rhythm);
+    for (dms_partref *r = p->prefs, *n; r; r = n) { n = r->next; part_release(r->part); free(r); }
+    for (dms_mtime *m = p->markers, *n; m; m = n) { n = m->next; free(m); }
+    band_free(p->band);
+    free(p);
+}
+void dms_style_release(dms_style *s)
+{
+    if (!s || --s->refs > 0) return;
+    for (int i = 0; i < s->nparts; i++) part_release(s->parts[i]);
+    for (int i = 0; i < s->npatterns; i++) pattern_release(s->patterns[i]);
+    for (int i = 0; i < s->nmotifs; i++) pattern_release(s->motifs[i]);
+    for (int i = 0; i < s->nbands; i++) band_free(s->bands[i]);
+    free(s->parts); free(s->patterns); free(s->motifs); free(s->bands); free(s->pchs);
+    free(s);
+}
+
+/* 77406e8a: the order of a part's events: grid, then markers first, then time offset */
+static int event_cmp(const void *a, const void *b)
+{
+    const dms_event *x = a, *y = b;
+    return x->grid < y->grid || (x->type == EV_MARKER && x->grid == y->grid) || (x->grid == y->grid && x->offset < y->offset);
+}
+void dms_style_resort(dms_style *s)
+{
+    for (int i = 0; i < s->nparts; i++) s->parts[i]->events = dms_msort(s->parts[i]->events, offsetof(dms_event, next), event_cmp);
+}
+
+static void get_guid(dm_guid *g, const uint8_t *p) { g->d1 = u32(p); g->d2 = u16(p + 4); g->d3 = u16(p + 6); memcpy(g->d4, p + 8, 8); }
+static int guid_eq(const dm_guid *a, const dm_guid *b) { return !memcmp(a, b, sizeof(*a)); }
+
+/* 774062ad: an UNFO name (at most 0x7e bytes) */
+static void read_name(uint16_t *out, size_t max, rd c)
+{
+    size_t n = (size_t)(c.e - c.p);
+    if (n > 0x7e) n = 0x7e;
+    size_t k = 0;
+    for (; k + 1 < max && 2 * k + 1 < n; k++) { out[k] = u16(c.p + 2 * k); if (!out[k]) break; }
+    out[k < max ? k : max - 1] = 0;
+}
+static void read_unfo(uint16_t *name, uint16_t *cat, rd r)
+{
+    uint32_t id, size; rd c;
+    while (next_chunk(&r, &id, &c, &size)) {
+        if (id == FCC('I','N','A','M') || id == FCC('U','N','A','M')) read_name(name, 64, c);
+        else if (cat && id == FCC('c','a','t','g')) read_name(cat, 64, c);
+    }
+}
+
+/* 7740a4b5: the style's PChannels, newest first, each once */
+static void pch_add(dms_style *s, uint32_t pch)
+{
+    for (int i = 0; i < s->npchs; i++) if (s->pchs[i] == pch) return;
+    uint32_t *n = realloc(s->pchs, (s->npchs + 1) * sizeof(*n));
+    if (!n) return;
+    memmove(n + 1, n, s->npchs * sizeof(*n));
+    n[0] = pch;
+    s->pchs = n;
+    s->npchs++;
+}
+
+/* a typed record list ('note', 'crve', 'mrkr', 'anpn', 'rsln'): records of the size given first, read up to max bytes
+ * (the rest skipped); the record buffer is kept across records as the original's locals */
+#define RECORDS(c, max, buf, body) do { \
+    uint8_t _s4[4]; if (take(&(c), _s4, 4) != 4) break; uint32_t _sz = u32(_s4), _rd = _sz, _sk = 0; \
+    if (_sz > (max)) { _rd = (max); _sk = _sz - (max); } int32_t _left = (int32_t)((c).e - (c).p); \
+    while (_left > 0) { take(&(c), buf, _rd); _left -= (int32_t)_rd; if ((uint16_t)_sk) { skip(&(c), (uint16_t)_sk); _left -= (uint16_t)_sk; } body } \
+} while (0)
+
+/* 77408e32: a 'part' list.  Returns 1 when the style already has a part with its GUID (the new one is dropped) */
+static int load_part(dms_part *pt, dms_style *s, rd r)
+{
+    uint32_t id, size; rd c;
+    while (next_chunk(&r, &id, &c, &size)) {
+        if (id == FCC('n','o','t','e')) {
+            uint8_t b[0x18] = { 0 };
+            RECORDS(c, 0x18, b, {
+                if ((int32_t)u32(b) >= 0) {
+                    dms_event *e = calloc(1, sizeof(*e));
+                    if (e) {
+                        e->type = EV_NOTE;
+                        e->grid = (int16_t)u32(b); e->var = u32(b + 4); e->dur = (int32_t)u32(b + 8);
+                        e->offset = (int16_t)u16(b + 12); e->mv = u16(b + 14); e->vel = b[16]; e->timerange = b[17];
+                        e->durrange = b[18]; e->velrange = b[19]; e->inversion = b[20]; e->playmode = b[21];
+                        e->noteflags = b[22];
+                        e->next = pt->events; pt->events = e;
+                    }
+                }
+            });
+        } else if (id == FCC('c','r','v','e')) {
+            uint8_t b[0x20] = { 0 };
+            RECORDS(c, 0x20, b, {
+                if ((int32_t)u32(b) >= 0) {
+                    dms_event *e = calloc(1, sizeof(*e));
+                    if (e) {
+                        e->type = EV_CURVE;
+                        e->grid = (int16_t)u32(b); e->var = u32(b + 4); e->dur = (int32_t)u32(b + 8);
+                        e->resetdur = (int32_t)u32(b + 12); e->offset = (int16_t)u16(b + 16);
+                        e->cstart = (int16_t)u16(b + 18); e->cend = (int16_t)u16(b + 20); e->creset = (int16_t)u16(b + 22);
+                        e->ctype = b[24]; e->shape = b[25]; e->cc = b[26]; e->cflags = b[27];
+                        e->param = u16(b + 28); e->merge = u16(b + 30);
+                        e->next = pt->events; pt->events = e;
+                    }
+                }
+            });
+        } else if (id == FCC('p','r','t','h')) {
+            uint8_t b[0xa0] = { 0 };
+            uint32_t n = size;
+            if (size > 0x9f) { s->flags |= 1; n = 0xa0; }
+            if (take(&c, b, n) != n) return -1;
+            dm_guid g;
+            get_guid(&g, b + 0x84);
+            for (int i = 0; i < s->nparts; i++) if (s->parts[i] != pt && guid_eq(&s->parts[i]->guid, &g)) return 1;
+            memcpy(pt->ts, b, 4);
+            pt->guid = g;
+            pt->measures = u16(b + 0x94);
+            pt->playmode = b[0x96]; pt->invupper = b[0x97]; pt->invlower = b[0x98];
+            pt->flags = u32(b + 0x9c);
+            for (int i = 0; i < 32; i++) {
+                uint32_t v = u32(b + 4 + 4 * i);
+                if (v == 0xffffffff) v = 0x3fffffff;
+                if ((s->flags & 1) && v == 0x3fffffff) v = 0x7fffffff;
+                pt->varchoices[i] = v;
+            }
+        } else if (id == FCC('r','s','l','n')) {
+            uint8_t b[8] = { 0 };
+            RECORDS(c, 8, b, {
+                dms_res *e = calloc(1, sizeof(*e));
+                if (e) {
+                    e->var = u32(b); e->mv = u16(b + 4); e->inversion = b[6]; e->playmode = b[7];
+                    e->next = pt->res; pt->res = e;
+                }
+            });
+        } else if (id == FCC('a','n','p','n')) {
+            uint8_t b[0xc] = { 0 };
+            RECORDS(c, 0xc, b, {
+                if ((int32_t)u32(b) >= 0) {
+                    dms_event *e = calloc(1, sizeof(*e));
+                    if (e) {
+                        e->type = EV_ANTICIPATION;
+                        e->grid = (int16_t)u32(b); e->var = u32(b + 4); e->offset = (int16_t)u16(b + 8); e->arange = b[10];
+                        e->next = pt->events; pt->events = e;
+                    }
+                }
+            });
+        } else if (id == FCC('m','r','k','r')) {
+            uint8_t b[0xa] = { 0 };
+            RECORDS(c, 0xa, b, {
+                if ((int32_t)u32(b) >= 0) {
+                    dms_event *e = calloc(1, sizeof(*e));
+                    if (e) {
+                        e->type = EV_MARKER;
+                        e->grid = (int16_t)u32(b); e->var = u32(b + 4); e->offset = 0; e->mflags = u16(b + 8);
+                        e->next = pt->events; pt->events = e;
+                    }
+                }
+            });
+        }
+    }
+    pt->events = dms_msort(pt->events, offsetof(dms_event, next), event_cmp);
+    return 0;
+}
+
+static dms_part *part_new(dms_style *s)       /* 7740b531 / 7740b215 */
+{
+    dms_part *pt = calloc(1, sizeof(*pt));
+    if (!pt) return NULL;
+    pt->refs = 1;
+    memcpy(pt->ts, s->ts, 4);       /* 7740b215: the style's signature until 'prth' */
+    pt->measures = 1;
+    pt->playmode = 10; pt->invupper = 0x7f;
+    dms_part **n = realloc(s->parts, (s->nparts + 1) * sizeof(*n));
+    if (!n) { free(pt); return NULL; }
+    s->parts = n;
+    s->parts[s->nparts++] = pt;
+    return pt;
+}
+static void part_remove(dms_style *s, dms_part *pt)    /* 7740be42 */
+{
+    for (int i = 0; i < s->nparts; i++)
+        if (s->parts[i] == pt) {
+            memmove(s->parts + i, s->parts + i + 1, (s->nparts - i - 1) * sizeof(*s->parts));
+            s->nparts--;
+            part_release(pt);
+            return;
+        }
+}
+
+/* 7740aa3b / 7740aaa0: inserted by time after the entries at the same time */
+static void marker_add(dms_marker **head, mtime_t t, uint16_t flags)
+{
+    dms_marker *m = calloc(1, sizeof(*m)), *prev = NULL, *cur = *head;
+    if (!m) return;
+    m->t = t; m->flags = flags;
+    while (cur && !(t < cur->t)) { prev = cur; cur = cur->next; }
+    if (prev) { prev->next = m; m->next = cur; } else { m->next = *head; *head = m; }
+}
+static void mtime_add(dms_mtime **head, mtime_t t)
+{
+    dms_mtime *m = calloc(1, sizeof(*m)), *prev = NULL, *cur = *head;
+    if (!m) return;
+    m->t = t;
+    while (cur && !(t < cur->t)) { prev = cur; cur = cur->next; }
+    if (prev) { prev->next = m; m->next = cur; } else { m->next = *head; *head = m; }
+}
+/* 7740b12d: a part's start markers into its per-variation lists and the pattern's (once per reference) */
+static void part_markers(dms_part *pt, dms_style *s, dms_pattern *p)
+{
+    const uint8_t *ts = dms_part_ts(pt, s, p);
+    for (dms_event *e = pt->events; e; e = e->next) {
+        if (e->type != EV_MARKER || !(e->mflags & 1)) continue;
+        mtime_t t = dms_grid_clocks(ts, (uint16_t)e->grid) + e->offset;
+        for (int v = 0; v < 32; v++) if (e->var & (1u << v)) marker_add(&pt->markers[v], t, e->mflags);
+        mtime_add(&p->markers, t);
+    }
+}
+
+/* 7740c5f3: a 'pttn' list */
+static int load_pattern(dms_pattern *p, dms_style *s, rd r, dm_getcoll_fn getcoll, void *ctx)
+{
+    uint32_t id, size; rd c;
+    while (next_chunk(&r, &id, &c, &size)) {
+        if (id == FCC('R','I','F','F')) {
+            if (c.e - c.p >= 4 && u32(c.p) == FCC('D','M','B','D')) {
+                band_free(p->band);
+                p->band = dm_band_load(c.p + 4, (size_t)(c.e - c.p - 4), getcoll, ctx);
+            }
+        } else if (id == FCC('L','I','S','T') && c.e - c.p >= 4) {
+            uint32_t type = u32(c.p);
+            rd x = { c.p + 4, c.e };
+            if (type == FCC('U','N','F','O')) read_unfo(p->name, NULL, x);
+            else if (type == FCC('p','r','e','f')) {
+                dms_partref *pr = calloc(1, sizeof(*pr));       /* 7740bfe3: appended before it is read */
+                if (!pr) return DM_E_OUTOFMEMORY;
+                pr->subchord = 1; pr->priority = 100;
+                APPEND(p->prefs, pr);
+                uint32_t xid, xs; rd y;
+                int found = 0;
+                while (next_chunk(&x, &xid, &y, &xs)) {                 /* 7740be95 */
+                    if (xid != FCC('p','r','f','c')) continue;
+                    uint8_t b[0x1c] = { 0 };
+                    uint32_t n = xs > 0x1b ? 0x1c : xs;
+                    if (take(&y, b, n) != n) return E_FAIL_;
+                    pr->random = b[0x15];
+                    pr->pch = n > 0x1b ? u32(b + 0x18) : u16(b + 0x10);
+                    pch_add(s, pr->pch);
+                    pr->lock = b[0x12]; pr->subchord = b[0x13]; pr->priority = b[0x14];
+                    dm_guid g;
+                    get_guid(&g, b);
+                    for (int i = 0; i < s->nparts; i++)
+                        if (guid_eq(&s->parts[i]->guid, &g)) { pr->part = s->parts[i]; pr->part->refs++; found = 1; break; }
+                    if (!found) return E_FAIL_;
+                }
+            } else if (type == FCC('p','a','r','t')) {
+                dms_part *pt = part_new(s);
+                if (!pt) return DM_E_OUTOFMEMORY;
+                int k = load_part(pt, s, x);
+                if (k < 0) { part_remove(s, pt); return E_FAIL_; }
+                if (k == 1) part_remove(s, pt);
+                else part_markers(pt, s, p);
+            }
+        } else if (id == FCC('p','t','n','h')) {
+            uint8_t b[16] = { 0 };
+            uint32_t n = size > 15 ? 16 : size;
+            if (take(&c, b, n) != n) return E_FAIL_;
+            memcpy(p->ts, b, 4);
+            p->groovelo = b[4]; p->groovehi = b[5]; p->embellish = u16(b + 6);
+            p->measures = u16(b + 8); p->destlo = b[10]; p->desthi = b[11];
+            p->flags = u32(b + 12);
+        } else if (id == FCC('r','h','t','m')) {
+            free(p->rhythm);
+            p->rhythm = calloc(p->measures ? p->measures : 1, 4);
+            if (!p->rhythm) return DM_E_OUTOFMEMORY;
+            for (int i = 0; i < p->measures; i++) {
+                uint8_t b[4];
+                if (take(&c, b, 4) != 4) return E_FAIL_;
+                p->rhythm[i] = u32(b);
+            }
+        } else if (id == FCC('m','t','f','s')) {
+            uint8_t b[0x14];
+            if (take(&c, b, 0x14) != 0x14) return E_FAIL_;
+            p->repeats = u32(b); p->playstart = (int32_t)u32(b + 4); p->loopstart = (int32_t)u32(b + 8);
+            p->loopend = (int32_t)u32(b + 12); p->hasmotif = 1; p->resolution = u32(b + 16);
+        }
+    }
+    return 0;
+}
+
+/* 7740cf73: the 'DMST' form */
+dms_style *dms_style_load(const uint8_t *data, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr)
+{
+    dms_style *s = calloc(1, sizeof(*s));
+    if (!s) { *hr = DM_E_OUTOFMEMORY; return NULL; }
+    s->refs = 1;
+    rd r = { data, data + n }, c;
+    uint32_t id, size;
+    int32_t res = 0;
+    int haveband = 0;
+    while (res >= 0 && next_chunk(&r, &id, &c, &size)) {
+        if (id == FCC('R','I','F','F') && c.e - c.p >= 4 && u32(c.p) == FCC('D','M','B','D')) {
+            dm_band *b = dm_band_load(c.p + 4, (size_t)(c.e - c.p - 4), getcoll, ctx);
+            if (!b) { res = E_FAIL_; break; }
+            if (!haveband) { s->defband = b; haveband = 1; }
+            dm_band **nb = realloc(s->bands, (s->nbands + 1) * sizeof(*nb));
+            if (!nb) { band_free(b); res = DM_E_OUTOFMEMORY; break; }
+            memmove(nb + 1, nb, s->nbands * sizeof(*nb));
+            nb[0] = b;
+            s->bands = nb;
+            s->nbands++;
+        } else if (id == FCC('L','I','S','T') && c.e - c.p >= 4) {
+            uint32_t type = u32(c.p);
+            rd x = { c.p + 4, c.e };
+            if (type == FCC('U','N','F','O')) read_unfo(s->name, s->category, x);
+            else if (type == FCC('p','t','t','n')) {
+                dms_pattern *p = calloc(1, sizeof(*p));
+                if (!p) { res = DM_E_OUTOFMEMORY; break; }
+                p->refs = 1;
+                memcpy(p->ts, s->ts, 4);    /* 7740c9ea: the style's signature until 'ptnh' */
+                p->groovelo = 1; p->groovehi = 100; p->destlo = 1; p->desthi = 100;
+                p->measures = 1; p->loopend = -1;
+                int k = load_pattern(p, s, x, getcoll, ctx);
+                if (k < 0) { pattern_release(p); res = k; break; }
+                int motif = (p->embellish & 0x10) != 0;
+                dms_pattern ***list = motif ? &s->motifs : &s->patterns;
+                int *cnt = motif ? &s->nmotifs : &s->npatterns;
+                dms_pattern **nl = realloc(*list, (*cnt + 1) * sizeof(*nl));
+                if (!nl) { pattern_release(p); res = DM_E_OUTOFMEMORY; break; }
+                nl[(*cnt)++] = p;
+                *list = nl;
+            } else if (type == FCC('p','a','r','t')) {
+                dms_part *pt = part_new(s);
+                if (!pt) { res = DM_E_OUTOFMEMORY; break; }
+                int k = load_part(pt, s, x);
+                if (k < 0) { part_remove(s, pt); res = E_FAIL_; break; }
+                if (k == 1) part_remove(s, pt);
+            }
+        } else if (id == FCC('g','u','i','d')) {
+            if (c.e - c.p < 16) { res = E_FAIL_; break; }
+            get_guid(&s->guid, c.p);
+            s->hasguid = 1;
+        } else if (id == FCC('s','t','y','h')) {
+            uint8_t b[12] = { 0 };
+            uint32_t k = size > 11 ? 12 : size;
+            if (take(&c, b, k) != k) { res = E_FAIL_; break; }
+            memcpy(s->ts, b, 4);
+            memcpy(&s->tempo, b + 4, 8);
+        } else if (id == FCC('v','e','r','s')) {
+            uint8_t b[8] = { 0 };
+            uint32_t k = size > 7 ? 8 : size;
+            if (take(&c, b, k) != k) { res = E_FAIL_; break; }
+            s->vers[0] = u32(b); s->vers[1] = u32(b + 4);
+        }
+    }
+    for (int i = 0; i < s->npatterns; i++)
+        for (dms_partref *pr = s->patterns[i]->prefs; pr; pr = pr->next) if (pr->part) part_markers(pr->part, s, s->patterns[i]);
+    for (int i = 0; i < s->nmotifs; i++)
+        for (dms_partref *pr = s->motifs[i]->prefs; pr; pr = pr->next) if (pr->part) part_markers(pr->part, s, s->motifs[i]);
+    *hr = res;
+    if (res < 0) { dms_style_release(s); return NULL; }
+    return s;
+}

@@ -342,6 +342,8 @@ dm_segment *dm_segment_load(const void *data, size_t size, dm_getcoll_fn getcoll
 typedef dm_wave *(*dm_getwave_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
 dm_segment *dm_segment_load_ex(const void *data, size_t size, dm_getcoll_fn getcoll, dm_getwave_fn getwave, void *ctx);
 dm_segment *dm_segment_from_wave(dm_wave *w);
+/* a band's 'DMBD' form (the data after the form type), as dmband loads it */
+dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 /* a Standard MIDI File (or RMID) as dmime imports it (dmsmf.c) */
 dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 int dm_is_midi(const void *data, size_t size);

@@ -159,3 +159,9 @@ static int sty_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
     }
     return DM_OK;
 }
+
+static int sty_getparam_state(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data)
+{
+    (void)state;
+    return sty_getparam(t, prm, mt, next, data);
+}

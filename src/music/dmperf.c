@@ -491,6 +491,14 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
     return DMUS_E_GET_UNSUPPORTED;      /* (BandParam would need band objects; the wave track's is private) */
 }
 
+/* GetParamEx with the state's data (dmime passes it to IDirectMusicTrack8 tracks) */
+static int sty_getparam_state(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data);
+static int track_getparam_ex(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data)
+{
+    if (state && t->kind >= TRK_CHORD) return sty_getparam_state(t, state, prm, mt, next, data);
+    return track_getparam(t, prm, mt, next, data);
+}
+
 /* 77311a65: the index-th track (after `after`) in the group that supports the parameter; GetParam takes only
  * control-enabled tracks (anycfg 0), SetParam any */
 static dm_segtrack *seg_findtrack(dm_segment *s, dm_segtrack *after, int prm, uint32_t group, uint32_t index, int anycfg)
@@ -539,13 +547,18 @@ static int ss_fold(dm_segstate *ss, mtime_t *t, mtime_t *off, uint32_t *loops)
 static int ss_getparam(dm_segstate *ss, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data)
 {
     int hr = DMUS_E_TRACK_NOT_FOUND;    /* the original's initial value */
+    int any = index == DM_SEG_ANYTRACK;   /* DMUS_SEG_ANYTRACK: the next track while one answers NOT_FOUND */
+    if (any) index = 0;
     for (int i = 0; i < ss->ntr; i++) {
         sstrack *e = &ss->tr[i];
         if (!(e->group & group) || !(e->cfg & 8) || !track_supports(e->t, prm)) continue;
-        if (index--) continue;
-        hr = track_getparam(e->t, prm, mt, next, data);
-        if (hr >= 0 && next && (*next == 0 || ss->length - mt < *next)) *next = ss->length - mt;
-        return hr;
+        if (index) { index--; continue; }
+        hr = track_getparam_ex(e->t, e->state, prm, mt, next, data);
+        if (hr >= 0) {
+            if (next && (*next == 0 || ss->length - mt < *next)) *next = ss->length - mt;
+            return hr;
+        }
+        if (!any || hr != DMUS_E_NOT_FOUND) return hr;
     }
     return hr;
 }
