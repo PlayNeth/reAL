@@ -4,3 +4,4 @@ __pycache__/
 *.bin
 *.npz
 *.wav
+dstrace-dsound.dll
