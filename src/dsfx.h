@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 enum { DSFX_GARGLE, DSFX_CHORUS, DSFX_FLANGER, DSFX_ECHO, DSFX_DISTORTION, DSFX_COMPRESSOR, DSFX_PARAMEQ, DSFX_WAVES,
-       DSFX_NKINDS };
+       DSFX_I3DL2, DSFX_NKINDS };
 
 #define DSFX_OK            0
 #define DSFX_FALSE         1
@@ -35,7 +35,15 @@ void dsfx_discontinuity(dsfx *f);
 /* fixes of the original's flaws (off by default, for comparison against it) */
 #define DSFX_FIX_ECHO_PANDELAY 1    /* Echo keeps PanDelay through Discontinuity (DirectSound calls it at every Play,
                                      * so in the original a PanDelay set before playing never takes effect) */
+#define DSFX_FIX_I3DL2_QUALITY 2    /* I3DL2 runs at its default quality (2) until SetQuality (the original: half rate) */
 void dsfx_set_fixes(dsfx *f, uint32_t fixes);
+/* IDirectSoundFXI3DL2Reverb's own methods (I3DL2 only: Windows XP's reverb, src/i3dl2.c) */
+int dsfx_i3dl2_set_preset(dsfx *f, uint32_t preset);
+int dsfx_i3dl2_get_preset(dsfx *f, uint32_t *preset);
+int dsfx_i3dl2_set_quality(dsfx *f, int32_t quality);
+int dsfx_i3dl2_get_quality(dsfx *f, int32_t *quality);
+void dsfx_i3dl2_object(dsfx *f, void *out);
+void dsfx_i3dl2_frame(dsfx *f, uint32_t fn, void *out);  /* debugging: a function's frame (i3dl2_frame) */       /* debugging: XP's object, 0x4c8 bytes */
 void dsfx_process(dsfx *f, void *data, uint32_t frames);
 
 #endif

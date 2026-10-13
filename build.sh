@@ -41,6 +41,10 @@ done
 o=build/obj/dsfx.o
 $CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/dsfx.c
 OBJS="$OBJS $o"
+# XP's I3DL2 reverb, translated (x87 arithmetic in long double)
+o=build/obj/i3dl2.o
+$CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/i3dl2.c
+OBJS="$OBJS $o"
 for f in $MUSIC_SRCS; do
     o=build/obj/music_$(basename "$f" .c).o
     $CC $CFLAGS_EXACT -ffp-contract=off -DDM_FPU_NATIVE -Isrc -c -o "$o" "$f"
@@ -111,7 +115,7 @@ if command -v cc >/dev/null 2>&1; then
     cc -O1 -std=gnu11 -Wall -o build/test_sf2 tests/test_sf2.c src/music/sf2dls.c src/music/dmdls.c src/music/msynth.c -lm
     cc -O2 -std=gnu11 -Wall -ffp-contract=off -o build/test_wavesrev tests/test_wavesrev.c src/music/wavesrev.c -lm
     # dsdmo's effects against dsdmo.dll itself: tools/dsfx/cmp.sh
-    cc -O1 -std=gnu11 -Wall -ffp-contract=off -Isrc -o build/test_dsfx tests/test_dsfx.c src/dsfx.c src/music/wavesrev.c -lm
+    cc -O1 -std=gnu11 -Wall -ffp-contract=off -Isrc -o build/test_dsfx tests/test_dsfx.c src/dsfx.c src/i3dl2.c src/music/wavesrev.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_msynth tests/test_msynth.c src/music/msynth.c -lm
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then

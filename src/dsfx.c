@@ -8,6 +8,7 @@
  * Parameter envelopes (IMediaParams::AddEnvelope) are not implemented. */
 #include "dsfx.h"
 #include "music/wavesrev.h"
+#include "i3dl2.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -76,6 +77,7 @@ struct dsfx {
             dline l, r;                 /* +0x21c +0x228 */
         } comp;
         struct { wavesrev *w; } waves;  /* +0x200 the reverb's state, made by Init */
+        i3dl2 *i3;                      /* XP's I3DL2 reverb (i3dl2.c) */
     } u;
 };
 
@@ -94,7 +96,8 @@ static const prange s_ranges[DSFX_NKINDS][7] = {
 };
 static const int s_nparams[DSFX_NKINDS] = { [DSFX_GARGLE] = 2, [DSFX_ECHO] = 5, [DSFX_PARAMEQ] = 3, [DSFX_CHORUS] = 7,
                                             [DSFX_FLANGER] = 7, [DSFX_DISTORTION] = 5,
-                                            [DSFX_COMPRESSOR] = 6, [DSFX_WAVES] = 4 };
+                                            [DSFX_COMPRESSOR] = 6, [DSFX_WAVES] = 4,
+                                            [DSFX_I3DL2] = 13 };
 
 int dsfx_nparams(int kind) { return kind >= 0 && kind < DSFX_NKINDS ? s_nparams[kind] : 0; }
 int dsfx_kind(const dsfx *f) { return f->kind; }
@@ -910,6 +913,10 @@ dsfx *dsfx_new(int kind)
     dsfx *f = calloc(1, sizeof(*f));
     if (!f) return NULL;
     f->kind = kind;
+    if (kind == DSFX_I3DL2) {           /* its parameters are the translated original's */
+        if (!(f->u.i3 = i3dl2_new(0))) { free(f); return NULL; }
+        return f;
+    }
     switch (kind) {
     case DSFX_GARGLE: f->u.gargle.hz = 20; f->u.gargle.shape = 0; break;
     case DSFX_ECHO: f->rate = 22050; break;                         /* 100102e3 */
@@ -932,10 +939,25 @@ void dsfx_free(dsfx *f)
     if (f->kind == DSFX_CHORUS) free(f->u.chorus.buf);
     if (f->kind == DSFX_COMPRESSOR) { free(f->u.comp.l.buf); free(f->u.comp.r.buf); }
     if (f->kind == DSFX_WAVES) wavesrev_free(f->u.waves.w);
+    if (f->kind == DSFX_I3DL2) i3dl2_free(f->u.i3);
     if (f->kind == DSFX_FLANGER) { free(f->u.flanger.l.buf); free(f->u.flanger.r.buf); free(f->u.flanger.dl.buf); free(f->u.flanger.dr.buf); }
     free(f);
 }
-void dsfx_set_fixes(dsfx *f, uint32_t fixes) { f->fixes = fixes; }
+void dsfx_set_fixes(dsfx *f, uint32_t fixes)
+{
+    if (f->kind == DSFX_I3DL2 && (fixes & DSFX_FIX_I3DL2_QUALITY) && !(f->fixes & DSFX_FIX_I3DL2_QUALITY)) {
+        uint32_t fx = I3DL2_FIX_QUALITY;    /* made again with the fix: only before anything is set */
+        i3dl2 *n = i3dl2_new(fx);
+        if (n) { i3dl2_free(f->u.i3); f->u.i3 = n; }
+    }
+    f->fixes = fixes;
+}
+int dsfx_i3dl2_set_preset(dsfx *f, uint32_t p) { return f->kind == DSFX_I3DL2 ? i3dl2_set_preset(f->u.i3, p) : DSFX_E_INVALIDARG; }
+int dsfx_i3dl2_get_preset(dsfx *f, uint32_t *p) { return f->kind == DSFX_I3DL2 ? i3dl2_get_preset(f->u.i3, p) : DSFX_E_INVALIDARG; }
+int dsfx_i3dl2_set_quality(dsfx *f, int32_t q) { return f->kind == DSFX_I3DL2 ? i3dl2_set_quality(f->u.i3, q) : DSFX_E_INVALIDARG; }
+void dsfx_i3dl2_frame(dsfx *f, uint32_t fn, void *out) { if (f->kind == DSFX_I3DL2) i3dl2_frame(f->u.i3, fn, out); }
+void dsfx_i3dl2_object(dsfx *f, void *out) { if (f->kind == DSFX_I3DL2) i3dl2_object(f->u.i3, out); }
+int dsfx_i3dl2_get_quality(dsfx *f, int32_t *q) { return f->kind == DSFX_I3DL2 ? i3dl2_get_quality(f->u.i3, q) : DSFX_E_INVALIDARG; }
 
 int dsfx_set_format(dsfx *f, unsigned tag, unsigned ch, unsigned rate, unsigned bits)
 {
@@ -943,6 +965,11 @@ int dsfx_set_format(dsfx *f, unsigned tag, unsigned ch, unsigned rate, unsigned 
     else if (tag != 3 || bits != 32) return DSFX_E_TYPE_NOT_ACCEPTED;
     if (ch != 1 && ch != 2) return DSFX_E_TYPE_NOT_ACCEPTED;
     if (f->kind == DSFX_WAVES && bits == 8) return DSFX_E_TYPE_NOT_ACCEPTED;      /* 16-bit and float only */
+    if (f->kind == DSFX_I3DL2) {
+        int hr = i3dl2_set_format(f->u.i3, tag, ch, rate, bits);
+        if (hr >= 0) { f->tag = tag; f->ch = ch; f->rate = rate; f->bits = bits; f->is8 = bits == 8; f->hasfmt = 1; }
+        return hr;
+    }
     f->tag = tag; f->ch = ch; f->rate = rate; f->bits = bits; f->is8 = bits == 8; f->hasfmt = 1;
     switch (f->kind) {
     case DSFX_GARGLE: gargle_init(f); break;
@@ -964,6 +991,7 @@ int dsfx_set_format(dsfx *f, unsigned tag, unsigned ch, unsigned rate, unsigned 
 int dsfx_set_param(dsfx *f, int i, float v)
 {
     if (i < 0 || i >= s_nparams[f->kind]) return DSFX_E_INVALIDARG;
+    if (f->kind == DSFX_I3DL2) return i3dl2_set_param(f->u.i3, i, v);
     int hr = DSFX_E_INVALIDARG;
     switch (f->kind) {
     case DSFX_GARGLE: hr = gargle_param(f, i, v); break;
@@ -978,11 +1006,15 @@ int dsfx_set_param(dsfx *f, int i, float v)
     if (hr >= 0) f->p[i] = v;
     return hr;
 }
-float dsfx_get_param(const dsfx *f, int i) { return i >= 0 && i < s_nparams[f->kind] ? f->p[i] : 0.0f; }
+float dsfx_get_param(const dsfx *f, int i)
+{
+    if (f->kind == DSFX_I3DL2) return i3dl2_get_param(f->u.i3, i);
+    return i >= 0 && i < s_nparams[f->kind] ? f->p[i] : 0.0f;
+}
 
 int dsfx_params_size(int kind)
 {
-    static const int sz[DSFX_NKINDS] = { 8, 28, 28, 20, 20, 24, 12, 16 };
+    static const int sz[DSFX_NKINDS] = { 8, 28, 28, 20, 20, 24, 12, 16, 48 };
     return kind >= 0 && kind < DSFX_NKINDS ? sz[kind] : 0;
 }
 
@@ -992,6 +1024,7 @@ int dsfx_set_all(dsfx *f, const void *params)
     const uint32_t *w = params;
     int hr = DSFX_OK;
     switch (f->kind) {
+    case DSFX_I3DL2: return i3dl2_set_all(f->u.i3, params);
     case DSFX_GARGLE:                   /* 10015ae0 */
         if ((hr = dsfx_set_param(f, 0, u2f(w[0]))) < 0) return hr;
         return dsfx_set_param(f, 1, u2f(w[1]));
@@ -1025,6 +1058,7 @@ int dsfx_get_all(const dsfx *f, void *params)
 {
     uint32_t *w = params;
     switch (f->kind) {
+    case DSFX_I3DL2: return i3dl2_get_all(((dsfx *)f)->u.i3, params);
     case DSFX_GARGLE:                   /* 10015b90 */
         w[0] = (uint32_t)ftol(f->p[0]); w[1] = (uint32_t)ftol(f->p[1]);
         return DSFX_OK;
@@ -1061,6 +1095,7 @@ void dsfx_discontinuity(dsfx *f)
     case DSFX_DISTORTION: dist_discont(f); break;
     case DSFX_COMPRESSOR: comp_discont(f); break;
     case DSFX_WAVES: waves_discont(f); break;
+    case DSFX_I3DL2: i3dl2_discontinuity(f->u.i3); break;
     }
 }
 
@@ -1076,5 +1111,6 @@ void dsfx_process(dsfx *f, void *data, uint32_t frames)
     case DSFX_DISTORTION: dist_process(f, data, frames); break;
     case DSFX_COMPRESSOR: comp_process(f, data, frames); break;
     case DSFX_WAVES: waves_process(f, data, frames); break;
+    case DSFX_I3DL2: i3dl2_process(f->u.i3, data, frames); break;
     }
 }

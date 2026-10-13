@@ -36,6 +36,7 @@ static const struct { const GUID *cls; const GUID *iid; int kind; } s_std[] = {
     { &GUID_DSFX_STANDARD_COMPRESSOR, &IID_IDirectSoundFXCompressor8, DSFX_COMPRESSOR },
     { &GUID_DSFX_STANDARD_PARAMEQ, &IID_IDirectSoundFXParamEq8, DSFX_PARAMEQ },
     { &GUID_DSFX_WAVES_REVERB, &IID_IDirectSoundFXWavesReverb8, DSFX_WAVES },
+    { &GUID_DSFX_STANDARD_I3DL2REVERB, &IID_IDirectSoundFXI3DL2Reverb8, DSFX_I3DL2 },  /* Windows XP's */
 };
 #define NSTD (sizeof(s_std) / sizeof(s_std[0]))
 
@@ -43,17 +44,21 @@ static const struct { const GUID *cls; const GUID *iid; int kind; } s_std[] = {
 static uint32_t fx_fixes(void)
 {
     if (GetEnvironmentVariableA("REAL_NOFIXES", NULL, 0) || GetEnvironmentVariableA("REAL_MUSIC_NOFIXES", NULL, 0)) return 0;
-    return DSFX_FIX_ECHO_PANDELAY;
+    return DSFX_FIX_ECHO_PANDELAY | DSFX_FIX_I3DL2_QUALITY;
 }
 
 /* ------------------------------------------------------------------ an effect object */
-/* every IDirectSoundFX* interface starts the same way; I3DL2 (hosted, not ours yet) has more */
+/* every IDirectSoundFX* interface starts the same way; IDirectSoundFXI3DL2Reverb has four methods more */
 typedef struct fxvtbl {
     HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
     ULONG (WINAPI *AddRef)(void *);
     ULONG (WINAPI *Release)(void *);
     HRESULT (WINAPI *SetAllParameters)(void *, const void *);
     HRESULT (WINAPI *GetAllParameters)(void *, void *);
+    HRESULT (WINAPI *SetPreset)(void *, DWORD);
+    HRESULT (WINAPI *GetPreset)(void *, DWORD *);
+    HRESULT (WINAPI *SetQuality)(void *, LONG);
+    HRESULT (WINAPI *GetQuality)(void *, LONG *);
 } fxvtbl;
 
 typedef struct rl_fx {
@@ -123,6 +128,55 @@ static HRESULT WINAPI fxi_GetAllParameters(void *i, void *p)
     return hr;
 }
 static const fxvtbl fxi_vtbl = { fxi_QueryInterface, fxi_AddRef, fxi_Release, fxi_SetAllParameters, fxi_GetAllParameters };
+/* IDirectSoundFXI3DL2Reverb: XP's methods check their pointers themselves (E_POINTER) */
+static HRESULT WINAPI fxi_SetPreset(void *i, DWORD p)
+{
+    rl_fx *This = from_fx(i);
+    EnterCriticalSection(&This->cs);
+    unsigned int cw = rl_fpu_enter();
+    HRESULT hr = dsfx_i3dl2_set_preset(This->fx, p);
+    rl_fpu_leave(cw);
+    LeaveCriticalSection(&This->cs);
+    LOG_CALL("FX[I3DL2]::SetPreset(%lu) -> %08lx", (unsigned long)p, (unsigned long)hr);
+    return hr;
+}
+static HRESULT WINAPI fxi_GetPreset(void *i, DWORD *p)
+{
+    rl_fx *This = from_fx(i);
+    if (!p) return E_POINTER;
+    uint32_t v = 0;
+    EnterCriticalSection(&This->cs);
+    HRESULT hr = dsfx_i3dl2_get_preset(This->fx, &v);
+    LeaveCriticalSection(&This->cs);
+    if (SUCCEEDED(hr)) *p = v;
+    return hr;
+}
+static HRESULT WINAPI fxi_SetQuality(void *i, LONG q)
+{
+    rl_fx *This = from_fx(i);
+    EnterCriticalSection(&This->cs);
+    unsigned int cw = rl_fpu_enter();
+    HRESULT hr = dsfx_i3dl2_set_quality(This->fx, q);
+    rl_fpu_leave(cw);
+    LeaveCriticalSection(&This->cs);
+    LOG_CALL("FX[I3DL2]::SetQuality(%ld) -> %08lx", (long)q, (unsigned long)hr);
+    return hr;
+}
+static HRESULT WINAPI fxi_GetQuality(void *i, LONG *q)
+{
+    rl_fx *This = from_fx(i);
+    if (!q) return E_POINTER;
+    int32_t v = 0;
+    EnterCriticalSection(&This->cs);
+    unsigned int cw = rl_fpu_enter();
+    HRESULT hr = dsfx_i3dl2_get_quality(This->fx, &v);
+    rl_fpu_leave(cw);
+    LeaveCriticalSection(&This->cs);
+    *q = v;
+    return hr;
+}
+static const fxvtbl fxi_i3dl2_vtbl = { fxi_QueryInterface, fxi_AddRef, fxi_Release, fxi_SetAllParameters,
+                                       fxi_GetAllParameters, fxi_SetPreset, fxi_GetPreset, fxi_SetQuality, fxi_GetQuality };
 
 /* IMediaObject */
 static HRESULT WINAPI mo_QueryInterface(IMediaObject *i, REFIID riid, void **out) { return fx_qi(from_mo(i), riid, out); }
@@ -356,7 +410,7 @@ static rl_fx *fx_new(int std)
     rl_fpu_leave(cw);
     if (!This->fx) { HeapFree(GetProcessHeap(), 0, This); return NULL; }
     dsfx_set_fixes(This->fx, fx_fixes());
-    This->fx_vtbl = &fxi_vtbl;
+    This->fx_vtbl = s_std[std].kind == DSFX_I3DL2 ? &fxi_i3dl2_vtbl : &fxi_vtbl;
     This->IMediaObject_iface.lpVtbl = &mo_vtbl;
     This->IMediaObjectInPlace_iface.lpVtbl = &ip_vtbl;
     This->IPersistStream_iface.lpVtbl = &ps_vtbl;

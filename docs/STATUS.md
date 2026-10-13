@@ -17,6 +17,21 @@ Ground rules carried through the project:
 **DirectSound side:** 2D/3D output, HRTF, EAX 1–4 (including ALchemy's reverb and the 11 EAX4 effects),
 Doppler, and WASAPI output.
 
+**DirectSound effects (SetFX)**
+- `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
+  GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
+  api, params, data, seq, none) matches Windows 7's dsound line for line.
+- `src/dsfx.c`: Gargle, Echo, ParamEq, Chorus, Flanger, Distortion, Compressor and Waves reverb, ported from
+  Windows 11's dsdmo (10.0.26100.5074), bit-exact. XP's versions of these differ only in rounding, except XP's Waves
+  (one frame earlier) and Distortion (about 2 dB quieter); Windows 11's are kept.
+- `src/i3dl2.c`: the I3DL2 reverb, which Windows 11's dsdmo no longer has, from XP SP3's dsdmo (5.3.2600.5512).
+  Its code is translated instruction for instruction by `tools/i3dl2/asm2c.py` (`tools/i3dl2/gen.sh` makes
+  `src/i3dl2.inc`) and runs on a small emulated 32-bit machine; bit-exact for every format, quality and preset.
+  Notes in `docs/i3dl2_notes.md`.
+- Fixes (off with `REAL_NOFIXES` / `REAL_MUSIC_NOFIXES`): Echo keeps a PanDelay set before Play
+  (`DSFX_FIX_ECHO_PANDELAY`); I3DL2 runs at the quality GetQuality reports (2) until SetQuality, where XP runs at
+  half rate (`DSFX_FIX_I3DL2_QUALITY`).
+
 **DirectMusic: playback**
 - DLS synth (dmsynth port), including wave voices and streaming.
 - Segments with sequence, band, tempo, time signature, SysEx and wave tracks.
@@ -60,10 +75,9 @@ Doppler, and WASAPI output.
 
 1. Scripts (dmscript; needs an AudioVBScript interpreter)
 2. Styles and chordmaps (dmstyle, dmcompos)
-3. Audiopath configurations (.aud / CreateAudioPath) and environmental reverb
-4. DirectSound effects (SetFX)
-5. Surround / CMSS
-6. EAX 5
+3. Audiopath configurations (.aud / CreateAudioPath) and environmental reverb (in progress)
+4. Surround / CMSS
+5. EAX 5
 
 Smaller items still open:
 - Audiopath stages for ports and mix-in buffers.
@@ -87,14 +101,22 @@ Smaller items still open:
   `tests/test_perf.c` does the same for reAL's engine.
   - Switches: `DMGT_SMF`/`TP_SMF`, `DMGT_CLONE`/`TP_CLONE`, `DMGT_WAVE`, `DMGT_APATH`, `DMGT_BUSES` and others.
   - Run both and compare the logs event by event.
+- `tools/dsfx/cmp.sh <effect> <rate> <ch> <bits> <chunk> [params]` runs a dsdmo effect (dmgt dmo) and reAL's
+  port (build/test_dsfx) on the same signal and compares samples and parameters. `DMDIR='Z:\home\user\re\dmxp'`
+  picks XP's dsdmo (needed for i3dl2); `DMO_I3DL2_QUALITY` / `DMO_I3DL2_PRESET` set those first. dmgt's
+  `DMO_DUMP`, `DMO_FRAME` and `DMO_PROBE` (a hook that saves the stack at an address) with test_dsfx's `DSFX_DUMP`
+  are how the I3DL2 translation was checked against the original.
+- `tests/comcmp.sh fxtest.exe <section>` with `FXPROBE_LOG=fxlog.txt FXPROBE_DATA=fxdata.raw FXPROBE_VERBOSE=1`
+  compares SetFX against Windows 7 (`FXTEST_ONLY` / `FXTEST_SIZES` narrow the data section to one run).
 - The Microsoft DLLs (XP dm*, dswave, dsdmo; Windows 7 dsound), the Ghidra project and the reference
   captures lived outside this repository and are not part of the zip. Keep your own copies of the Microsoft
   DLLs you supplied.
 - Setup used on 2026-10-12: Zig 0.17, Wine 9.22 in WoW64 mode (the cloud container has no 32-bit libraries), a
   null ALSA device (`pcm.!default { type null }` in `~/.asoundrc`, `Audio=alsa` in each prefix). The Microsoft
-  prefix has the XP dm* DLLs and Windows 7 dsound in `syswow64`, but Wine's own dsdmo: the XP dsdmo needs
-  msvcrt's `_libm_sse2_pow_precise`, which Wine lacks. With Wine's dsdmo, aptest's reverb DMO line differs
-  (Microsoft's side reads garbage parameters).
+  prefix has the XP dm* DLLs and Windows 7 dsound in `syswow64`, and Windows 11's dsdmo (`re/dm/dsdmo.dll`,
+  10.0.26100.5074, not XP's), patched by `tools/dsdmo/patch_dsdmo.py` to import `msvcrx.dll` (a proxy supplying
+  msvcrt's `_libm_sse2_pow_precise` and relatives, which Wine lacks). The I3DL2 class is registered (32-bit view)
+  to XP's dsdmo copied as `syswow64/dsdmoxp.dll` (`re/dmxp/dsdmo.dll`, 5.3.2600.5512).
 - With the null ALSA device, reAL's clock (which follows its output buffer) runs about 2.5 times too fast, so
   timing tests such as notiftest don't compare in that setup. The COM tests and dmgt are unaffected.
 - `dm_perf_free` used to destroy the playing segment states before freeing queued messages that still named them

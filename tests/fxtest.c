@@ -395,7 +395,7 @@ static void printlog(void)
     while (*s) {
         e = strchr(s, '\n');
         if (e) *e = 0;
-        if (!strncmp(s, "Process ", 8)) ;
+        if (!strncmp(s, "Process ", 8)) { if (getenv("FXTEST_SIZES")) printf("  probe: %s\n", s); }
         else if (!strncmp(s, "released after", 14)) printf("  probe: released\n");
         else printf("  probe: %s\n", s);
         if (!e) break;
@@ -406,6 +406,8 @@ static void printlog(void)
 
 static void run_data(const char *name, const GUID *g, const void *params, WORD tag, WORD ch, DWORD rate, WORD bits, int jump)
 {
+    char t[96]; sprintf(t, "data %s %u/%u/%lu/%u", name, tag, ch, rate, bits);
+    if (getenv("FXTEST_ONLY") && !strstr(t, getenv("FXTEST_ONLY"))) return;   /* one run (FXTEST_SIZES: its Process calls) */
     DeleteFileA("fxlog.txt"); DeleteFileA("fxdata.raw");
     HRESULT hr;
     DWORD ms = 2000;
@@ -417,7 +419,6 @@ static void run_data(const char *name, const GUID *g, const void *params, WORD t
     unsigned before = fnv(p, n);
     IDirectSoundBuffer8_Unlock(b, p, n, NULL, 0);
     const GUID *chain[2] = { g, &CLSID_FxProbe };
-    char t[96]; sprintf(t, "data %s %u/%u/%lu/%u", name, tag, ch, rate, bits);
     setfx(b, t, g ? 2 : 1, g ? chain : chain + 1, 0);
     if (g && params) {
         void **o = NULL;
@@ -538,6 +539,7 @@ static void test_data(void)
     DSFXParamEq eq = { 2000, 6, -9 };
     DSFXWavesReverb wv = { -2, -4, 1500, 0.3f };
     DSFXGargle gg = { 37, 1 };
+    DSFXI3DL2Reverb i3 = { -500, -300, 1, 2.5f, 0.7f, -800, 0.02f, 300, 0.03f, 80, 60, 3000 };
     run_data("none", NULL, NULL, 1, 2, 44100, 16, 0);
     run_data("echo", &GUID_DSFX_STANDARD_ECHO, &echo, 1, 2, 44100, 16, 0);
     run_data("echo", &GUID_DSFX_STANDARD_ECHO, &echo, 1, 1, 22050, 8, 0);
@@ -551,6 +553,10 @@ static void test_data(void)
     run_data("waves", &GUID_DSFX_WAVES_REVERB, &wv, 3, 2, 44100, 32, 0);
     run_data("gargle", &GUID_DSFX_STANDARD_GARGLE, &gg, 1, 1, 11025, 8, 0);
     run_data("gargle defaults", &GUID_DSFX_STANDARD_GARGLE, NULL, 1, 2, 44100, 16, 0);
+    run_data("i3dl2 defaults", &GUID_DSFX_STANDARD_I3DL2REVERB, NULL, 1, 2, 44100, 16, 0);
+    /* (not 8-bit at half rate: its output depends on where the Process calls fall, which is timing in DirectSound) */
+    run_data("i3dl2", &GUID_DSFX_STANDARD_I3DL2REVERB, &i3, 1, 1, 22050, 16, 0);
+    run_data("i3dl2", &GUID_DSFX_STANDARD_I3DL2REVERB, &i3, 3, 1, 48000, 32, 0);
 }
 
 int main(int argc, char **argv)

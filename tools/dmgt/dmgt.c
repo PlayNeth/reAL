@@ -968,6 +968,37 @@ static void print_params(const char *types, const DWORD *v)
     }
     fprintf(stderr, "\n");
 }
+/* DMO_PROBE=<address>:<bytes>: a hook on whole instructions (position independent, at least 5 bytes) of the loaded
+ * DLL that keeps the 0x200 bytes of stack there, the last time it runs (DMO_PROBE_OUT, written at the end) */
+static DWORD g_probe[0x80];
+static void probe_install(void)
+{
+    const char *p = getenv("DMO_PROBE");
+    if (!p) return;
+    BYTE *at = (BYTE *)(uintptr_t)strtoul(p, NULL, 16);
+    DWORD n = strtoul(strchr(p, ':') + 1, NULL, 0);
+    BYTE *st = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE), *q = st;
+    *q++ = 0x9c; *q++ = 0x60;                                   /* pushfd; pushad */
+    *q++ = 0x89; *q++ = 0xe6;                                   /* mov esi,esp */
+    *q++ = 0x83; *q++ = 0xc6; *q++ = 0x24;                      /* add esi,36 */
+    *q++ = 0xbf; *(DWORD *)q = (DWORD)(uintptr_t)g_probe; q += 4; /* mov edi,g_probe */
+    *q++ = 0xb9; *(DWORD *)q = 0x80; q += 4;                    /* mov ecx,0x80 */
+    *q++ = 0xf3; *q++ = 0xa5;                                   /* rep movsd */
+    *q++ = 0x61; *q++ = 0x9d;                                   /* popad; popfd */
+    memcpy(q, at, n); q += n;                                   /* the instructions replaced */
+    *q++ = 0xe9; *(DWORD *)q = (DWORD)(uintptr_t)(at + n) - (DWORD)(uintptr_t)(q + 4); q += 4;
+    DWORD old;
+    VirtualProtect(at, n, PAGE_EXECUTE_READWRITE, &old);
+    at[0] = 0xe9; *(DWORD *)(at + 1) = (DWORD)(uintptr_t)st - (DWORD)(uintptr_t)(at + 5);
+    for (DWORD k = 5; k < n; k++) at[k] = 0x90;
+}
+static void probe_save(void)
+{
+    if (!getenv("DMO_PROBE_OUT")) return;
+    FILE *d = fopen(getenv("DMO_PROBE_OUT"), "wb");
+    if (d) { fwrite(g_probe, 4, 0x80, d); fclose(d); }
+}
+
 static int cmd_dmo(int argc, char **argv)
 {
     int e;
@@ -978,6 +1009,7 @@ static int cmd_dmo(int argc, char **argv)
     if (FAILED(hr)) die("class", hr);
     IMediaObject *mo;
     if (FAILED(hr = IClassFactory_CreateInstance(cf, NULL, &IID_IMediaObject, (void **)&mo))) die("CreateInstance", hr);
+    probe_install();
     DWORD rate = strtoul(argv[6], NULL, 0), ch = strtoul(argv[7], NULL, 0), bits = strtoul(argv[8], NULL, 0);
     DWORD chunk = strtoul(argv[9], NULL, 0);
     WAVEFORMATEX wf = { bits == 32 ? 3 : WAVE_FORMAT_PCM, (WORD)ch, rate, rate * ch * bits / 8, (WORD)(ch * bits / 8), (WORD)bits, 0 };
@@ -1024,6 +1056,22 @@ static int cmd_dmo(int argc, char **argv)
         fprintf(stderr, "parameters"); print_params(s_fx[e].types, v);
     }
     if (!getenv("DMO_DISC_FIRST")) IMediaObject_Discontinuity(mo, 0);
+    if (getenv("DMO_FRAME")) {          /* DMO_FRAME=<function> DMO_FRAME_OUT=<file>: call it (thiscall, the object) and
+                                         * save the 0x200 bytes of stack below the call: the callee's frame as it left it */
+        typedef void (__attribute__((thiscall)) *fn_t)(void *);
+        fn_t fn = (fn_t)(uintptr_t)strtoul(getenv("DMO_FRAME"), NULL, 16);
+        static volatile DWORD frame[0x80];
+        DWORD sp;
+        __asm__ volatile("mov %%esp, %0" : "=r"(sp));
+        fn(mo);
+        for (int k = 0; k < 0x80; k++) frame[k] = ((volatile DWORD *)(uintptr_t)(sp - 0x200))[k];
+        FILE *d = fopen(getenv("DMO_FRAME_OUT"), "wb");
+        if (d) { fwrite((void *)frame, 4, 0x80, d); fclose(d); }
+    }
+    if (getenv("DMO_DUMP")) {           /* the object (IMediaObject is its first interface), DMO_DUMP_SIZE bytes */
+        FILE *d = fopen(getenv("DMO_DUMP"), "wb");
+        if (d) { fwrite(mo, 1, getenv("DMO_DUMP_SIZE") ? strtoul(getenv("DMO_DUMP_SIZE"), NULL, 0) : 0x4c8, d); fclose(d); }
+    }
     void *ip;
     if (FAILED(hr = IMediaObject_QueryInterface(mo, &IID_MOInPlace, &ip))) die("QI InPlace", hr);
     FILE *f = fopen(argv[4], "rb");
@@ -1039,6 +1087,7 @@ static int cmd_dmo(int argc, char **argv)
     }
     f = fopen(argv[5], "wb");
     fwrite(b, 1, n, f); fclose(f);
+    probe_save();
     return 0;
 }
 
