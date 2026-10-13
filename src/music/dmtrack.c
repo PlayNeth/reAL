@@ -11,6 +11,8 @@
 #define TF_PLAY_OFF 0x40
 #define TF_CLOCK 0x400
 
+#include "dmstytrack.c"
+
 /* ------------------------------------------------------------------ sequence track */
 typedef struct {
     int nparts;
@@ -691,6 +693,7 @@ static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
     case TRK_BAND: return bandtrack_setparam(t->data, prm, data);
     case TRK_WAVE: return wavetrack_setparam(t->data, prm, data);
     case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 7732465d */
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: return sty_setparam(t, prm, mt, data);
     }
     return DMUS_E_SET_UNSUPPORTED;
 }
@@ -797,6 +800,7 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_BAND: return band_play(pf, ss, e, start, end, off, flags);
     case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
     case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: return sty_play(pf, ss, e, start, end, off, flags);
     }
     return DM_OK;
 }

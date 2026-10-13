@@ -2,6 +2,7 @@
  * and band tracks, kept in the forms the original track objects keep them (dmime CSeqTrack/CTempoTrack/CTimeSigTrack
  * Load, dmband CBandTrack/CBand Load).  Other tracks (chord, command, ...) are kept as placeholders for track order. */
 #include "dmi.h"
+#include "dmsty.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -36,6 +37,9 @@ static const dm_guid CLSID_SeqTrack     = { 0xd2ac2886, 0xb39b, 0x11d1, { 0x87, 
 static const dm_guid CLSID_SysExTrack   = { 0xd2ac2887, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_TimeSigTrack = { 0xd2ac2888, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_BandTrack    = { 0xd2ac2894, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_ChordTrack   = { 0xd2ac288b, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_CommandTrack = { 0xd2ac288c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_MuteTrack    = { 0xd2ac2898, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_WaveTrack    = { 0xeed36461, 0x9ea5, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
 
 static void get_guid(dm_guid *g, const uint8_t *p)
@@ -524,6 +528,19 @@ static void load_track(dm_segment *s, rd r, dm_getcoll_fn getcoll, dm_getwave_fn
                 t.kind = TRK_WAVE; t.data = load_wavetrack(c, getwave, ctx);
                 if (!t.data) t.kind = TRK_OTHER;
             }
+            else if (guid_eq(&t.clsid, &CLSID_ChordTrack) && id == FCC('L','I','S','T') && type == FCC('c','o','r','d')) {
+                int32_t hr;
+                t.data = dms_chordtrack_load(c.p, (size_t)(c.e - c.p), &hr);
+                t.kind = t.data ? TRK_CHORD : TRK_OTHER;
+            } else if (guid_eq(&t.clsid, &CLSID_CommandTrack) && id == FCC('c','m','n','d')) {
+                int32_t hr;
+                t.data = dms_cmdtrack_load(c.p, (size_t)(c.e - c.p), &hr);
+                t.kind = t.data ? TRK_COMMAND : TRK_OTHER;
+            } else if (guid_eq(&t.clsid, &CLSID_MuteTrack) && id == FCC('m','u','t','e')) {
+                int32_t hr;
+                t.data = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr);
+                t.kind = t.data ? TRK_MUTE : TRK_OTHER;
+            }
             else t.kind = TRK_OTHER;
             dm_track *o = dm_track_new(t.kind, &t.clsid, t.data);
             if (o) dm_segment_insert_track(s, o, t.position, t.group, t.config, t.priority);
@@ -614,6 +631,9 @@ static void free_track(dm_track *t)
     }
     case TRK_TIMESIG: free(((dm_tstrack *)t->data)->items); free(t->data); break;
     case TRK_WAVE: free_wavetrack(t->data); break;
+    case TRK_CHORD: dms_chordtrack_free(t->data); break;
+    case TRK_COMMAND: dms_cmdtrack_free(t->data); break;
+    case TRK_MUTE: dms_mutetrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) { free(b->bands[i]->inst); free(b->bands[i]); }
@@ -850,10 +870,14 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_SEQ: d = clone_seq(t->data, start, end); break;
     case TRK_WAVE: d = clone_wave(t->data, start, end); break;
     case TRK_BAND: d = clone_band(t->data, start, end); break;
+    case TRK_CHORD: d = dms_chordtrack_clone(t->data, start, end); break;
+    case TRK_COMMAND: d = dms_cmdtrack_clone(t->data, start, end); break;
+    case TRK_MUTE: d = dms_mutetrack_clone(t->data, start, end); break;
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }
     dm_track *c = dm_track_new(t->kind, &t->clsid, d);
+    if (c && (t->kind == TRK_CHORD || t->kind == TRK_COMMAND)) c->notify = t->notify;    /* (copied by their Clone) */
     if (!c) { dm_track tmp = { .kind = t->kind, .data = d }; free_track(&tmp); *hr = DM_E_OUTOFMEMORY; }
     return c;
 }
@@ -899,11 +923,17 @@ static const dm_guid GUID_Null = { 0 };
 int dm_track_add_notification(dm_track *t, const dm_guid *g)
 {
     if (t->kind == TRK_TIMESIG && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { t->notify = 1; return DM_OK; }   /* 7731d267 */
+    if (t->kind == TRK_CHORD && guid_eq(g, &GUID_NOTIFICATION_CHORD_)) { ((dms_chordtrack *)t->data)->notify = t->notify = 1; return DM_OK; }   /* 77401e52 */
+    if (t->kind == TRK_COMMAND && guid_eq(g, &GUID_NOTIFICATION_COMMAND_)) { ((dms_cmdtrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 77403518 */
+    if (t->kind == TRK_MUTE) return DM_E_NOTIMPL;
     return DM_FALSE;
 }
 int dm_track_remove_notification(dm_track *t, const dm_guid *g)
 {
     if (t->kind == TRK_TIMESIG && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { t->notify = 0; return DM_OK; }   /* 7731d2a9 */
+    if (t->kind == TRK_CHORD && guid_eq(g, &GUID_NOTIFICATION_CHORD_)) { ((dms_chordtrack *)t->data)->notify = t->notify = 0; return DM_OK; }   /* 77401e91 */
+    if (t->kind == TRK_COMMAND && guid_eq(g, &GUID_NOTIFICATION_COMMAND_)) { ((dms_cmdtrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 77403557 */
+    if (t->kind == TRK_MUTE) return DM_E_NOTIMPL;
     return DM_FALSE;
 }
 

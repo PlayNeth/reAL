@@ -408,9 +408,12 @@ typedef struct { mtime_t t; double tempo; } tempoparam;                       /*
 
 /* IsParamSupported: tempo 7731bcb1, time signature 7731ce8c, band (dmband) 77201858, wave 77324502.  A tempo or time
  * signature track enabled or disabled by SetParam supports only the switch back (and, enabled, its parameter). */
+static int sty_isparam(const dm_track *t, int prm);
+static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data);
 static int track_isparam(const dm_track *t, int prm)
 {
     switch (t->kind) {
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: return sty_isparam(t, prm);
     case TRK_TEMPO: {
         const dm_tempotrack *T = t->data;
         if (prm != PRM_DISABLETEMPO && prm != PRM_TEMPO && prm != PRM_PRIVTEMPO && prm != PRM_ENABLETEMPO)
@@ -483,6 +486,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
         if (next) *next = i < ts->n ? ts->items[i].mt - mt : 0;
         return DM_OK;
     }
+    if (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_MUTE) return sty_getparam(t, prm, mt, next, data);
     if (t->kind == TRK_SEQ || t->kind == TRK_SYSEX) return DM_E_NOTIMPL;    /* 7730790b */
     return DMUS_E_GET_UNSUPPORTED;      /* (BandParam would need band objects; the wave track's is private) */
 }
@@ -1412,6 +1416,11 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
         }
         p->flags = (p->flags & ~0x14u) | PF_TOOL_QUEUE;
         return DMUS_S_REQUEUE;
+    }
+    if (p->type == PT_NOTIFICATION && guid_same(&p->nf_guid, &GUID_NOTIFICATION_PRIVATE_CHORD_)) {
+        /* 77309f00: a chord changed: queued notes of the state's track regenerated (not yet: the style tracks
+         * convert their notes when they make them) */
+        return DMUS_S_FREE;
     }
     if (p->type == PT_NOTIFICATION) {
         if (!(p->flags & PF_TOOL_ATTIME)) { p->flags = (p->flags & ~0xcu) | PF_TOOL_ATTIME; return DMUS_S_REQUEUE; }

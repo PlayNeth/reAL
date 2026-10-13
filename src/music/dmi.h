@@ -282,7 +282,8 @@ typedef struct dm_wavetrack {
     struct wsdl *sdl;                       /* +0x80 streaming downloads in use, by state */
 } dm_wavetrack;
 
-enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE };
+enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE,
+       TRK_CHORD, TRK_COMMAND, TRK_MUTE };   /* the last three are dmstyle's (dmsty.h) */
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */
@@ -319,6 +320,10 @@ typedef struct dm_segment {
 /* notification types (dmusici.h) */
 static const dm_guid GUID_NOTIFICATION_SEGMENT_ = { 0xd2ac2899, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid GUID_NOTIFICATION_MEASUREANDBEAT_ = { 0xd2ac289a, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid GUID_NOTIFICATION_CHORD_ = { 0xd2ac289b, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid GUID_NOTIFICATION_COMMAND_ = { 0xd2ac289c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+/* dmstyle's chord track tells the performance of a chord change with a notification of this type (dmime 7730e5b7) */
+static const dm_guid GUID_NOTIFICATION_PRIVATE_CHORD_ = { 0xf5c19571, 0x7e1e, 0x4fff, { 0xb9, 0x49, 0x7f, 0x74, 0xa6, 0x6f, 0xdf, 0xc0 } };
 static const dm_guid GUID_NOTIFICATION_PERFORMANCE_ = { 0x81f75bc5, 0x4e5d, 0x11d2, { 0xbc, 0xc7, 0x00, 0xa0, 0xc9, 0x22, 0xe6, 0xeb } };
 /* DMUS_NOTIFICATION_* options */
 enum { NOTIF_SEGSTART = 0, NOTIF_SEGEND, NOTIF_SEGALMOSTEND, NOTIF_SEGLOOP, NOTIF_SEGABORT };

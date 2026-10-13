@@ -31,7 +31,26 @@ def case_basic(out):
     seg.chords(0x00ab5ab5, [chord(0, 0, 0, 'C', 0), chord(BAR, 1, 0, 'F', 5)])
     return {'basic.sty': st.build(), 'basic.sgt': seg.build()}
 
-CASES = {'basic': case_basic}
+def case_params(out):
+    """chord, command and mute tracks for GetParam / SetParam / Clone (tests/styletest.c)"""
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000002', 'params', 8 * BAR)
+    seg.timesig([(0, 4, 4, 4)])
+    subs2 = [(MAJOR, CMAJ_SCALE, 0xffffff, 1, 0, 0), (MAJ7, 0xad5ad5, 0x0f0f0f, 6, 12, 2), (0x491, 0, 0, 0, 7, 0)]
+    seg.chords(0x07ab5ab5, [
+        chord(2 * BAR, 2, 0, 'G7', 7, DOM7),
+        chord(0, 0, 0, 'C', 0),
+        (BAR + 768, 1, 1, 'Dm', 0, [(MINOR, CMAJ_SCALE, 0xffffff, 0xffffffff, 2, 0)]),
+        (BAR, 1, 0, 'Am', 1, [(MINOR, CMAJ_SCALE, 0xffffff, 0xffffffff, 9, 0)]),
+        (3 * BAR + 1536, 3, 2, 'multi', 0, subs2),
+        (5 * BAR, 5, 0, 'FFFFFFFFFFFFFFFF', 0, [(MAJOR, CMAJ_SCALE, 0xffffff, 0xffffffff, 5, 0)]),
+        (5 * BAR + 768, 5, 1, 'silent', 1, [(MINOR, 0, 0, 0, 4, 0)]),
+    ])
+    seg.commands([(0, 0, 0, 0, 50, 10, 0), (BAR, 1, 0, 1, 0, 0, 2), (2 * BAR, 2, 0, 0, 80, 120, 7),
+                  (3 * BAR + 20, 3, 0, 3, 0, 5, 1), (BAR + 1536, 1, 2, 2, 70, 20, 3), (6 * BAR, 6, 0, 4, 99, 0, 4)])
+    seg.mutes([(BAR, 0, 3), (0, 1, 0xffffffff), (2 * BAR, 0, 0xffffffff), (BAR // 2, 0, 5), (3 * BAR, 2, 2)])
+    return {'params.sgt': seg.build()}
+
+CASES = {'basic': case_basic, 'params': case_params}
 
 if __name__ == '__main__':
     outdir = sys.argv[1]
