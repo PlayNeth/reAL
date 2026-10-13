@@ -447,6 +447,19 @@ def case_compose2(out, seed=16):
     files['c1.sgt'] = comp_template('c1', '8f6d1a10-1000-4000-8000-000000000046', R, 16, 'compsty', [(0, 'cmapa')], spconfig=0x238)
     files['c2.sgt'] = comp_template('c2', '8f6d1a10-1000-4000-8000-000000000047', R, 24, 'compsty', [(0, 'cmapb'), (10, 'cmapc')], spconfig=0x238)
     files['c3.sgt'] = comp_template('c3', '8f6d1a10-1000-4000-8000-000000000048', R, 12, 'compsty3', [(0, 'cmapc')], ts=(3, 4, 4), spconfig=0x238)
+    # shapes (ComposeSegmentFromShape): a style with a default band and intro, fill, break and end embellishments
+    sh = basic_style('shapesty')
+    sh.bands.append(band('8f6d1a10-0005-4000-8000-000000000011', 'Default Band', [(0, 0x000000, 100, 64, None)]))
+    for nm, ms, emb in (('intro', 2, 4), ('fill', 1, 1), ('break', 2, 2), ('end', 3, 8)):
+        sh.pattern(nm, measures=ms, groove=(1, 100), embellish=emb).partref(sh.parts[0], pchannel=0)
+    files['shapesty.sty'] = sh.build()
+    sh3 = Style('8f6d1a10-0000-4000-8000-0000000000f4', 'shapesty3', timesig=(3, 4, 4))
+    p = sh3.part('8f6d1a10-0001-4000-8000-0000000000f4', measures=1, playmode=DMUS_PLAYMODE_NORMALCHORD)
+    p.note(grid=0, var=0xffffffff, dur=600, music=music_value(4, 0, 0))
+    sh3.pattern('main', measures=1).partref(p, pchannel=0)
+    sh3.pattern('end', measures=1, embellish=8).partref(p, pchannel=0)
+    sh3.bands.append(band('8f6d1a10-0005-4000-8000-000000000012', 'Default Band', [(0, 0x000005, 90, 64, None)]))
+    files['shapesty3.sty'] = sh3.build()
     return files
 
 CASES = {'compose2': case_compose2, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),

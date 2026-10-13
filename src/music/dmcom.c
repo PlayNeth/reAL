@@ -14,6 +14,7 @@
 #include "dmapcfg.h"
 #include "dmport.h"
 #include "dmtheory.h"
+#include "dmcomp.h"
 #include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
@@ -1052,7 +1053,19 @@ static ULONG WINAPI trp_release(IPersistStream *i) { return trk_release(&trp(i)-
 static HRESULT WINAPI trp_getclass(IPersistStream *i, CLSID *c) { if (!c) return E_POINTER; memcpy(c, &trp(i)->t->clsid, sizeof(*c)); return S_OK; }
 static HRESULT WINAPI trp_isdirty(IPersistStream *i) { return S_FALSE; }
 static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s) { return rm_notimpl(__func__); }
-static HRESULT WINAPI trp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }
+/* the signpost track's (7728af59: its 'sgnp' chunk); the others are not written */
+static HRESULT WINAPI trp_save(IPersistStream *i, IStream *s, BOOL c)
+{
+    dm_track *t = trp(i)->t;
+    if (t->kind != TRK_SIGNPOST) return rm_notimpl(__func__);
+    size_t n;
+    uint8_t *b = dmc_sptrack_save(t->data, &n);
+    if (!b) return E_OUTOFMEMORY;
+    ULONG w = 0;
+    HRESULT hr = IStream_Write(s, b, (ULONG)n, &w);
+    free(b);
+    return FAILED(hr) ? hr : w == n ? S_OK : STG_E_MEDIUMFULL;
+}
 static HRESULT WINAPI trp_getsize(IPersistStream *i, ULARGE_INTEGER *s) { return rm_notimpl(__func__); }
 static IPersistStreamVtbl trp_vtbl = { trp_qi, trp_addref, trp_release, trp_getclass, trp_isdirty, trp_load, trp_save, trp_getsize };
 

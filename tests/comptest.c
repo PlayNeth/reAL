@@ -99,6 +99,146 @@ static void dump(IDirectMusicSegment8 *sg, const char *tag)
     }
 }
 
+/* a template's tracks, commands and saved signposts */
+static void dump_template(IDirectMusicSegment *sg0)
+{
+    IDirectMusicSegment8 *sg = NULL;
+    IDirectMusicSegment_QueryInterface(sg0, &IID_IDirectMusicSegment8, (void **)&sg);
+    MUSIC_TIME len = -1;
+    IDirectMusicSegment8_GetLength(sg, &len);
+    printf("  length %ld\n", len);
+    for (DWORD k = 0; k < 12; k++) {
+        IDirectMusicTrack *tr = NULL;
+        IDirectMusicSegment8_GetTrack(sg, &GUID_NULL_, 0xffffffff, k, &tr);
+        if (!tr) break;
+        IPersistStream *ps = NULL;
+        CLSID c = { 0 };
+        DWORD grp = 0;
+        IDirectMusicSegment8_GetTrackGroup(sg, tr, &grp);
+        if (SUCCEEDED(IDirectMusicTrack_QueryInterface(tr, &IID_IPersistStream, (void **)&ps))) IPersistStream_GetClassID(ps, &c);
+        printf("  track %lu class %08lx group %lx\n", k, c.Data1, grp);
+        if (ps && c.Data1 == 0xf17e8672) {
+            IStream *st = NULL;
+            CreateStreamOnHGlobal(NULL, TRUE, &st);
+            HRESULT hr = IPersistStream_Save(ps, st, FALSE);
+            HGLOBAL hg = NULL;
+            GetHGlobalFromStream(st, &hg);
+            ULARGE_INTEGER sz = { 0 };
+            LARGE_INTEGER zero = { 0 };
+            IStream_Seek(st, zero, STREAM_SEEK_END, &sz);
+            BYTE *b = GlobalLock(hg);
+            printf("  signposts %08lx:", hr);
+            for (ULONG q = 12; q + 12 <= sz.LowPart; q += 12)
+                printf(" %lu:%lx", (ULONG)*(WORD *)(b + q + 8), *(DWORD *)(b + q + 4));
+            printf("\n");
+            GlobalUnlock(hg);
+            IStream_Release(st);
+        }
+        if (ps) IPersistStream_Release(ps);
+        IDirectMusicTrack_Release(tr);
+    }
+    printf("  commands:");
+    for (MUSIC_TIME t = 0; t < len && t < 400 * BAR; ) {
+        DMUS_COMMAND_PARAM_2 cm;
+        memset(&cm, 0xcc, sizeof(cm));
+        MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicSegment8_GetParam(sg, &GUID_CommandParam2, 0xffffffff, 0, t, &nx, &cm);
+        if (hr != S_OK) { printf(" [%ld: %08lx]", t, hr); break; }
+        printf(" %ld:%u/%u/%u/%u", t / BAR, cm.bCommand, cm.bGrooveLevel, cm.bGrooveRange, cm.bRepeatMode);
+        if (nx <= 0) break;
+        t += nx;
+    }
+    printf("\n");
+    IDirectMusicSegment8_Release(sg);
+}
+
+/* ComposeTemplateFromShape and ComposeSegmentFromShape over shapes, lengths, intros and ends */
+static int shapes(IDirectMusicLoader8 *ld)
+{
+    IDirectMusicComposer *cp = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);
+    printf("create composer %08lx\n", hr);
+    if (!cp) return 1;
+    static const WORD meas[] = { 1, 2, 3, 8, 17, 25, 40, 100, 0, 0x8005 };
+    static const int ie[][3] = { { 0, 0, 1 }, { 1, 0, 1 }, { 0, 1, 2 }, { 1, 1, 1 }, { 0, 1, 0 }, { 1, 1, 3 } };
+    for (WORD shape = 0; shape < 10; shape++)
+        for (int m = 0; m < 10; m++)
+            for (int k = 0; k < 6; k++) {
+                IDirectMusicSegment *out = (IDirectMusicSegment *)0x1;
+                hr = IDirectMusicComposer_ComposeTemplateFromShape(cp, meas[m], shape, ie[k][0], ie[k][1], (WORD)ie[k][2], &out);
+                printf("template shape %u measures %u intro %d end %d/%d: %08lx\n", shape, meas[m], ie[k][0], ie[k][1], ie[k][2], hr);
+                if (SUCCEEDED(hr) && out && out != (IDirectMusicSegment *)0x1) { dump_template(out); IDirectMusicSegment_Release(out); }
+            }
+    IDirectMusicChordMap *ca = NULL, *cb = NULL;
+    IDirectMusicStyle8 *st = NULL, *sb = NULL, *s3 = NULL;
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapa.cdm", (void **)&ca);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapb.cdm", (void **)&cb);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"shapesty.sty", (void **)&st);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"compsty.sty", (void **)&sb);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"shapesty3.sty", (void **)&s3);
+    printf("loaded %d %d %d %d %d\n", !!ca, !!cb, !!st, !!sb, !!s3);
+    static const WORD smeas[] = { 1, 4, 9, 20, 26, 40, 70 };
+    for (WORD shape = 0; shape < 10; shape++)
+        for (int m = 0; m < 7; m++)
+            for (int k = 0; k < 4; k++) {
+                IDirectMusicSegment *out = NULL;
+                IDirectMusicStyle8 *sty = (m + k) % 5 == 4 ? s3 : st;
+                IDirectMusicChordMap *cm = (shape + k) % 2 ? cb : ca;
+                WORD act = (WORD)((shape + m + k) % 4);
+                hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, (IDirectMusicStyle *)sty, smeas[m], shape, act, k & 1, k >> 1, cm, &out);
+                printf("segment shape %u measures %u activity %u intro %d end %d style %s map %s: %08lx\n", shape, smeas[m], act,
+                       k & 1, k >> 1, sty == s3 ? "3/4" : "4/4", cm == ca ? "a" : "b", hr);
+                if (out) {
+                    IDirectMusicSegment8 *o8 = NULL;
+                    IDirectMusicSegment_QueryInterface(out, &IID_IDirectMusicSegment8, (void **)&o8);
+                    dump(o8, "composed");
+                    IDirectMusicSegment8_Release(o8);
+                    IDirectMusicSegment_Release(out);
+                }
+            }
+    {   /* no default band */
+        IDirectMusicSegment *out = NULL;
+        hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, (IDirectMusicStyle *)sb, 8, 3, 1, TRUE, TRUE, ca, &out);
+        printf("segment without a band: %08lx %d\n", hr, out != NULL);
+        if (out) {
+            IDirectMusicSegment8 *o8 = NULL;
+            IDirectMusicSegment_QueryInterface(out, &IID_IDirectMusicSegment8, (void **)&o8);
+            dump(o8, "composed");
+            IDirectMusicSegment8_Release(o8);
+            IDirectMusicSegment_Release(out);
+        }
+    }
+    {   /* a template from a shape, composed */
+        IDirectMusicSegment *tp = NULL, *out = NULL;
+        hr = IDirectMusicComposer_ComposeTemplateFromShape(cp, 30, 8, TRUE, TRUE, 2, &tp);
+        printf("template for composing: %08lx\n", hr);
+        if (tp) {
+            for (WORD act = 0; act < 4; act++) {
+                hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, (IDirectMusicStyle *)st, tp, act, cb, &out);
+                printf("composed from it %u: %08lx\n", act, hr);
+                if (out) {
+                    IDirectMusicSegment8 *o8 = NULL;
+                    IDirectMusicSegment_QueryInterface(out, &IID_IDirectMusicSegment8, (void **)&o8);
+                    dump(o8, "composed");
+                    IDirectMusicSegment8_Release(o8);
+                    IDirectMusicSegment_Release(out);
+                    out = NULL;
+                }
+            }
+            IDirectMusicSegment_Release(tp);
+        }
+    }
+    hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, NULL, 8, 3, 1, TRUE, TRUE, ca, NULL);
+    printf("null style: %08lx\n", hr);
+    if (st) IDirectMusicStyle8_Release(st);
+    if (sb) IDirectMusicStyle8_Release(sb);
+    if (s3) IDirectMusicStyle8_Release(s3);
+    if (ca) IDirectMusicChordMap_Release(ca);
+    if (cb) IDirectMusicChordMap_Release(cb);
+    IDirectMusicComposer_Release(cp);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -118,6 +258,7 @@ int main(int argc, char **argv)
     WCHAR dir[MAX_PATH];
     GetCurrentDirectoryW(MAX_PATH, dir);
     IDirectMusicLoader8_SetSearchDirectory(ld, &GUID_DirectMusicAllTypes, dir, FALSE);
+    if (argc > 1 && !strcmp(argv[1], "shape")) return shapes(ld);
     if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
         IDirectMusicComposer *cp = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);

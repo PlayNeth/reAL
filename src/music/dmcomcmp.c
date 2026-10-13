@@ -272,9 +272,45 @@ static HRESULT WINAPI cpo_fromtemplate(IDirectMusicComposer *i, IDirectMusicStyl
     seg_release(&o->IDirectMusicSegment8_iface);
     return FAILED(r) ? r : hr;
 }
+/* 77287754: the style's longest end (and, a dmstyle style's, intro, fill and break) embellishments set the lengths
+ * (1 without); the measures (0 or over 0x7fff: 1) grow to hold the intro and end */
 static HRESULT WINAPI cpo_fromshape(IDirectMusicComposer *i, IDirectMusicStyle *s, WORD n, WORD shape, WORD act, BOOL intro,
                                     BOOL end, IDirectMusicChordMap *cm, IDirectMusicSegment **out)
-{ return rm_notimpl("Composer::ComposeSegmentFromShape"); }
+{
+    if (IsBadWritePtr(s, 4) || IsBadWritePtr(cm, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
+    struct dms_style *sx = style_engine_of(s);
+    dmc_chordmap *mx = chordmap_engine_of(cm);
+    if (!sx || !mx) return rm_notimpl("Composer: a style or chord map not made by reAL-Music");
+    IDirectMusicStyle8 *s8 = (IDirectMusicStyle8 *)s;
+    DWORD mn, len;
+    int introlen = 1, fill = 1, brk = 1, endlen = 1;
+    HRESULT hr = IDirectMusicStyle8_GetEmbellishmentLength(s8, 4, 0, &mn, &len);
+    if (FAILED(hr)) return hr;
+    if (hr == S_OK) endlen = (int)len;
+    if (IDirectMusicStyle8_GetEmbellishmentLength(s8, 2, 0, &mn, &len) == S_OK) introlen = (int)len;
+    if (IDirectMusicStyle8_GetEmbellishmentLength(s8, 1, 0, &mn, &len) == S_OK) fill = (int)len;
+    if (IDirectMusicStyle8_GetEmbellishmentLength(s8, 3, 0, &mn, &len) == S_OK) brk = (int)len;
+    int m = (n & 0x8000) || !n ? 1 : n;
+    if (shape > 8) shape = 6;
+    if (intro) { if (introlen <= 0) introlen = 1; if (m <= introlen) m = introlen; }
+    if (end) {
+        if (endlen <= 0) endlen = 1;
+        if (m <= endlen) { m = endlen; if (intro) m = endlen + introlen; }
+    }
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    int r;
+    dm_segment *g = dmc_segment_from_shape(sx, mx, (unsigned)m, shape, act, intro, end, introlen, fill, brk, endlen, &r);
+    if (h) dm_host_unlock(h);
+    LOG_CALL("music: Composer::ComposeSegmentFromShape(%u measures, shape %u, activity %u, intro %d, end %d) -> %08x",
+             n, shape, act, intro, end, r);
+    if (!g) return r < 0 ? r : E_FAIL;
+    rm_segment *o = new_segment(g);
+    if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
+    HRESULT q = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)out);
+    seg_release(&o->IDirectMusicSegment8_iface);
+    return FAILED(q) ? q : r;
+}
 static HRESULT WINAPI cpo_transition(IDirectMusicComposer *i, IDirectMusicSegment *from, IDirectMusicSegment *to, MUSIC_TIME t,
                                      WORD cmd, DWORD fl, IDirectMusicChordMap *cm, IDirectMusicSegment **out)
 { return rm_notimpl("Composer::ComposeTransition"); }
@@ -282,9 +318,25 @@ static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPe
                                          DWORD fl, IDirectMusicChordMap *cm, IDirectMusicSegment **out,
                                          IDirectMusicSegmentState **tostate, IDirectMusicSegmentState **trstate)
 { return rm_notimpl("Composer::AutoTransition"); }
+/* 77286b27 / 77286629: intro, fill and break lengths of 1 */
 static HRESULT WINAPI cpo_templatefromshape(IDirectMusicComposer *i, WORD n, WORD shape, BOOL intro, BOOL end, WORD endlen,
                                             IDirectMusicSegment **out)
-{ return rm_notimpl("Composer::ComposeTemplateFromShape"); }
+{
+    if (IsBadWritePtr(out, 4)) return E_POINTER;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    int r;
+    dm_segment *g = dmc_template_from_shape(n, shape, intro, end, 1, 1, 1, endlen, &r);
+    if (h) dm_host_unlock(h);
+    LOG_CALL("music: Composer::ComposeTemplateFromShape(%u measures, shape %u, intro %d, end %d, end length %u) -> %08x",
+             n, shape, intro, end, endlen, r);
+    if (!g) return r;
+    rm_segment *o = new_segment(g);
+    if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
+    HRESULT q = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)out);
+    seg_release(&o->IDirectMusicSegment8_iface);
+    return FAILED(q) ? q : r;
+}
 static HRESULT WINAPI cpo_changechordmap(IDirectMusicComposer *i, IDirectMusicSegment *s, BOOL trackscale, IDirectMusicChordMap *cm)
 { return rm_notimpl("Composer::ChangeChordMap"); }
 static IDirectMusicComposerVtbl cpo_vtbl = { cpo_qi, cpo_addref, cpo_release, cpo_fromtemplate, cpo_fromshape, cpo_transition,

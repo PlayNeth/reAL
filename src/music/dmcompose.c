@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>
 
 /* msvcrt's rand() on the application thread (the composer's constructor seeded it with time()) */
 static int cm_rand(void)
@@ -753,6 +754,8 @@ static const dm_guid CLSID_StyleTrack_   = { 0xd2ac288d, 0xb39b, 0x11d1, { 0x87,
 static const dm_guid CLSID_ChordMapTrack_ = { 0xd2ac2896, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_TempoTrack_   = { 0xd2ac2885, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_BandTrack_    = { 0xd2ac2894, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_CommandTrack_ = { 0xd2ac288c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_SignPostTrack_ = { 0xf17e8672, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 
 dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordmap *cm, int activity, int *hr)
 {
@@ -904,4 +907,551 @@ int dmc_segment_compose(dm_segment *s)
     for (int i = 0; i < n; i++) dm_track_release(list[i].t);
     free(list);
     return hr;
+}
+
+/* ------------------------------------------------------------------ shapes (ComposeTemplateFromShape 77286629,
+ * ComposeSegmentFromShape 77287754 / 77286edd / 77283810).  A shape's template (0x18: its measures at +0x10, its
+ * list at +0x14) holds a node a measure (0x10, as cmdsp): a signpost (its groups) or a command and groove level. */
+typedef struct { int16_t measures; cmdsp *list; } tshape;
+
+static const int16_t SEC_LEN[10] = { 8, 8, 8, 8, 6, 12, 8, 8, 10, 6 };     /* 7728e214 / 7728e260 */
+static const uint16_t SEC_SHAPE[7] = { 1, 3, 4, 6, 6, 6, 6 };               /* 7728e22a / 7728e276 */
+static const uint8_t SEC_FILL[7] = { 3, 1, 3, 1, 1, 3, 1 };                 /* 7728e1ed / 7728e239: 1 fill, 3 break */
+static const int SEC_TRANS[7] = { -1, 0, 0, 1, -1, 2, -2 };                 /* 7728e1f8 / 7728e244 */
+static const uint8_t GROOVES[4] = { 12, 37, 62, 87 };                       /* 7728e284 */
+static const uint32_t SP_GROUPS[7] = { 0x100, 1, 4, 0x10, 2, 8, 0x20 };      /* 7728e288 */
+
+static void tlist_free(cmdsp *n) { while (n) { cmdsp *x = n->next; free(n); n = x; } }
+static void tshape_free(tshape *T) { if (T) { tlist_free(T->list); free(T); } }
+static int tnode_cmp(const void *a, const void *b) { return ((const cmdsp *)a)->measure < ((const cmdsp *)b)->measure; }   /* 77281d9c */
+static int cnode_cmp(const void *a, const void *b)      /* 77281db4 */
+{
+    const cnode *x = a, *y = b;
+    return x->measure < y->measure || (x->measure == y->measure && x->beat < y->beat);
+}
+
+/* 772890f2: 0..n-1, the lower more likely (n - the bit length of 1 + rand() % (2^n - 1)) */
+static int rand_bits(int n)
+{
+    if (n < 1 || n > 15) return 0;
+    unsigned r = (unsigned)(cm_rand() % ((1 << n) - 1)) + 1;
+    int k = n;
+    for (; r; r >>= 1) k--;
+    return k;
+}
+static void t_append(tshape *T, cmdsp *n)                /* 77283f64 */
+{
+    cmdsp **pp = &T->list;
+    while (*pp) pp = &(*pp)->next;
+    *pp = n;
+}
+/* 77289bec: into the list by measure; on a measure that has a node, a signpost (mode 0) replaces its command and a
+ * command (mode 1) its signpost */
+static void t_insert(tshape *T, cmdsp *n, int mode)
+{
+    n->next = NULL;
+    for (cmdsp **pp = &T->list; *pp; pp = &(*pp)->next) {
+        cmdsp *p = *pp;
+        if (p->measure == n->measure) {
+            if (!mode) { p->chords = n->chords; p->command = p->groove = p->range = p->repeat = 0; }
+            else { p->chords = 0; p->command = n->command; p->groove = n->groove; p->range = n->range; p->repeat = n->repeat; }
+            free(n);
+            return;
+        }
+        if (n->measure < p->measure) { n->next = p; *pp = n; return; }
+    }
+    t_append(T, n);
+}
+static void t_add_sp(tshape *T, int16_t m, uint32_t chords)            /* 77289d27 */
+{
+    cmdsp *n = calloc(1, sizeof(*n));
+    if (!n) return;
+    n->measure = m; n->chords = chords;
+    t_insert(T, n, 0);
+}
+/* 77289c6c: a command by its DMUS_SHAPET-like type: 1 fill, 2 intro, 0x20 break, 0x40 end, else a groove level */
+static void t_add_cmd(tshape *T, int16_t m, unsigned type)
+{
+    cmdsp *n = calloc(1, sizeof(*n));
+    if (!n) return;
+    n->measure = m;
+    switch (type) {
+    case 1: n->command = 1; break;
+    case 2: n->command = 2; break;
+    case 0x20: n->command = 3; break;
+    case 0x40: n->command = 4; break;
+    case 0x80: n->groove = 0x0c; break;
+    case 0x100: n->groove = 0x25; break;
+    case 0x400: n->groove = 0x57; break;
+    default: n->groove = 0x3e; break;
+    }
+    t_insert(T, n, 1);
+}
+
+/* 77289d71: the signposts: up to seven of the groups (the first may be a cadence one), placed every 2 or 4 measures
+ * (each group its own step), the last on the last measure */
+static void t_signposts(tshape *T)
+{
+    T->list = NULL;
+    int16_t m = T->measures;
+    int lv = -2;
+    if (m) do { lv++; m = (int16_t)(m >> 1); } while (m);
+    if (lv <= 0) lv = 1;
+    if (lv > 7) lv = 7;
+    uint32_t pool[7], chosen[7] = { 0 };
+    int steps[7];
+    for (int i = 0; i < 7; i++) { pool[i] = SP_GROUPS[i]; steps[i] = cm_rand() % 3 ? 4 : 2; }
+    if (cm_rand() % 2) steps[0] = 4;
+    for (int c = 0; c < lv; c++) {
+        int k = rand_bits(c ? 7 - c : 3);
+        for (int i = 0; i < 7; i++) {
+            if (!pool[i]) continue;
+            if (!k) {
+                chosen[c] = pool[i];
+                if (cm_rand() % 2) chosen[c] |= 0x8000;
+                pool[i] = 0;
+                break;
+            }
+            k--;
+        }
+    }
+    t_add_sp(T, 0, chosen[0]);
+    uint32_t prev = chosen[0];
+    int pos = 0, idx = 0;
+    while (pos < T->measures) {
+        pos += steps[idx];
+        if (T->measures - 1 <= pos) {
+            if (cm_rand() % 3) chosen[0] = 0x100;
+            t_add_sp(T, (int16_t)(T->measures - 1), chosen[0]);
+            return;
+        }
+        idx = rand_bits(lv);
+        uint32_t v = chosen[idx];
+        if (v == prev) { idx = rand_bits(lv); v = chosen[idx]; }
+        t_add_sp(T, (int16_t)pos, v);
+        prev = v;
+    }
+}
+
+/* 77289211: the signposts' groove levels over [lo, hi): from level `from` toward `to` (at each node's middle), or a
+ * random walk; a level kept for over six measures moves */
+static void t_grooves(tshape *T, int lo, int hi, int from, int to, int rnd)
+{
+    int diff = to - from, span = hi - lo, last = -1, lastm = 0;
+    uint8_t cur = 0;
+    for (cmdsp *n = T->list; n; n = n->next) {
+        if (!n->command && n->groove) { cur = n->groove; lastm = n->measure; }
+        int m = n->measure;
+        if (m < lo) continue;
+        if (m >= hi) return;
+        int pos = n->next ? ((n->next->measure + m) >> 1) - lo : m - lo;
+        int idx;
+        if (rnd) {
+            idx = cm_rand() % 3 - 1 + last;
+            if (idx > 3) idx = 2;
+            if (idx < 0) idx = 1;
+        } else {
+            idx = (pos * diff + (span >> 1)) / span + from;
+            if (idx < 0 || idx >= 4) continue;
+        }
+        uint8_t c;
+        if (GROOVES[idx] == cur) {
+            if (n->measure <= lastm + 6) continue;
+            idx = idx - 1 + cm_rand() % 3;
+            if (idx < 0) idx += 2;
+            if (idx > 3) idx -= 2;
+            if (!diff && idx < last && idx <= from && cm_rand() % 2) idx++;
+            c = GROOVES[idx];
+            if (c == cur) continue;
+        } else {
+            if (last >= 0) { if (idx < last) idx = last - 1; else if (idx > last) idx = last + 1; }
+            c = GROOVES[idx];
+        }
+        n->range = 0; n->groove = c; cur = c; lastm = n->measure; last = idx;
+    }
+}
+
+/* 77289efe: a shape's groove levels, then fills before (and breaks) at level changes; the rising and level shapes add
+ * more now and then */
+static void t_shape(tshape *T, unsigned shape, int fill, int brk)
+{
+    int from, to, more = 0, rnd = 0, lo = 0, hi = T->measures - 1;
+    switch (shape) {
+    case 0: from = 3; to = 0; break;
+    case 3: from = to = 3; more = 1; break;
+    case 4: from = 0; to = 1; more = 1; break;
+    case 5: t_grooves(T, 0, T->measures >> 1, 0, 3, 0); lo = T->measures >> 1; from = 3; to = 0; break;
+    case 6: from = to = 0; rnd = 1; break;
+    case 7: from = 0; to = 3; break;
+    default: from = to = 2; more = 1; break;
+    }
+    t_grooves(T, lo, hi, from, to, rnd);
+    uint8_t prevg = 0;
+    int lastm = 0;
+    for (cmdsp *n = T->list; n; n = n->next) {
+        if (n->command) continue;
+        uint8_t g = n->groove;
+        if (g && g != prevg && cm_rand() % 2) {
+            int m = n->measure;
+            if (m >= fill && m - fill > lastm && (g > 0x32 || prevg > 0x4b)) t_add_cmd(T, (int16_t)(m - fill), 1);
+            else if (m >= brk && m - brk > lastm && cm_rand() % 3) t_add_cmd(T, (int16_t)(m - brk), 0x20);
+        }
+        prevg = g;
+        if (n->groove) lastm = n->measure;
+    }
+    if (!more) return;
+    int cur = 0;
+    lastm = 0;
+    for (cmdsp *n = T->list; n; n = n->next) {
+        cmdsp *nx = n->next;
+        int m = n->measure;
+        if (n->command) { cur = m; continue; }
+        uint8_t g = n->groove;
+        if (cur + fill + 4 + brk < m && cm_rand() % 3 == 0) {
+            cur = m;
+            if (g > 0x32 && m >= fill && m - fill > lastm && cm_rand() % 2) t_add_cmd(T, (int16_t)(m - fill), 1);
+            else if (nx && m + brk <= nx->measure) {
+                int t = m + brk, at = m;
+                do {
+                    t_add_cmd(T, (int16_t)at, 0x20);
+                    t += brk; at += brk;
+                    if (cm_rand() % 2) break;
+                } while (t <= nx->measure);
+            }
+        }
+        if (g) lastm = n->measure;
+    }
+}
+
+/* 77289b56: the end command `n` measures before the end (a signpost there kept only on the first two measures) */
+static void t_end(tshape *T, int n)
+{
+    cmdsp *f = NULL;
+    for (cmdsp *p = T->list; p; p = p->next) if (T->measures - n == p->measure) { f = p; break; }
+    cmdsp *x = f ? f : calloc(1, sizeof(*x));
+    if (!x) return;
+    x->measure = (int16_t)(T->measures - n);
+    if (!f || f->measure > 1) x->chords = 0;
+    x->command = 4; x->groove = x->range = x->repeat = 0;
+    if (!f) t_append(T, x);
+}
+/* 7728999a (`chords` NULL; `keep`: the intro takes the first measure in place) / 772898bc (with the composed chords,
+ * which move by `n`): the intro command at 0, the rest moved by `n`; the first signpost goes to the intro unless the
+ * node had no groove level (it becomes the intro itself) */
+static void t_intro(tshape *T, int keep, int n, cnode *chords, int seg)
+{
+    cmdsp *x = calloc(1, sizeof(*x));
+    if (!x) return;
+    x->command = 2;
+    int merged = 0;
+    for (cnode *c = chords; c; c = c->next) c->measure = (int16_t)(c->measure + n);
+    for (cmdsp *p = T->list; p; p = p->next) {
+        int early = seg ? p->measure < n : p->measure < 1;
+        if (early && p->chords) {
+            int move = seg ? (p->groove || p->command == 4) : (!keep && (p->groove || p->command));
+            if (move) { x->chords = p->chords; p->measure = (int16_t)(p->measure + n); p->chords = 0; }
+            else { p->command = 2; p->groove = p->range = p->repeat = 0; merged = 1; }
+        } else p->measure = (int16_t)(p->measure + n);
+    }
+    if (seg || !keep) T->measures = (int16_t)(T->measures + n);
+    if (merged) free(x);
+    else { x->next = T->list; T->list = x; }
+}
+/* 77281f9d: a command and groove level moved a level up (n > 0) or down (n < 0): a fill up, a break down */
+static void groove_shift(cmdsp *d, const cmdsp *s, int n)
+{
+    uint8_t g = s->groove, c = s->command;
+    if (n > 0) {
+        if (g == 12) g = 37; else if (g == 37) g = 62; else if (g == 62 || g == 87) g = 87;
+        if (c == 1 || c == 3) c = 1;
+    } else if (n < 0) {
+        if (g == 12 || g == 37) g = 12; else if (g == 62) g = 37; else if (g == 87) g = 62;
+        if (c == 1 || c == 3) c = 3;
+    }
+    d->groove = g; d->command = c;
+}
+/* 77289a6e / 7728471d: a section's nodes at `pos` (in front, reversed), its levels shifted; its chords too */
+static void t_copy(cmdsp **list, int pos, const cmdsp *s, int trans, cnode **out, const cnode *chords)
+{
+    for (; s; s = s->next) {
+        cmdsp *x = calloc(1, sizeof(*x));
+        if (!x) continue;
+        x->measure = (int16_t)(s->measure + pos);
+        groove_shift(x, s, trans);
+        x->chords = s->chords;
+        x->next = *list; *list = x;
+    }
+    for (; out && chords; chords = chords->next) {
+        cnode *c = malloc(sizeof(*c));
+        if (!c) continue;
+        *c = *chords;
+        c->measure = (int16_t)(c->measure + pos);
+        c->next = *out; *out = c;
+    }
+}
+/* 772847f9: a fill (1) or break (3) `len` measures before a section, unless a command or level falls inside */
+static void t_fillbreak(cmdsp **list, int pos, int len, uint8_t cmd)
+{
+    int t = pos - len;
+    cmdsp *f = NULL;
+    for (cmdsp *p = *list; p; p = p->next) {
+        if (p->measure == t) f = p;
+        else if ((p->command || p->groove) && p->measure > t && p->measure < len + t) return;
+    }
+    if (f) { f->command = cmd; return; }
+    cmdsp *x = calloc(1, sizeof(*x));
+    if (!x) return;
+    x->measure = (int16_t)t; x->command = cmd;
+    x->next = *list; *list = x;
+}
+
+/* the song shape (8, over 24 measures): two to seven sections of 6 to 12 measures, each with its own shape (and, from
+ * a style, chords), strung together at random (the shorter last), shifted a level now and then */
+static int t_song(composer *cp, tshape *T, int n, int fill, int brk, const uint8_t *ts, dmc_chordmap *cm, int act,
+                  cnode **chords)
+{
+    tshape *S[8] = { 0 };
+    cnode *CL[8] = { 0 };
+    int L[8] = { 0 }, TR[8] = { 0 }, hr = DM_OK;
+    uint8_t B[8] = { 0 };
+    int minlen = 12, cnt = 2;
+    for (unsigned v = (unsigned)n >> 5; v; ) { cnt++; v >>= 1; if (cnt >= 8) break; }
+    for (int c = 0; c + 1 < cnt; c++) {
+        int16_t len = SEC_LEN[cm_rand() % 10];
+        tshape *s = S[c + 1] = calloc(1, sizeof(*s));
+        if (!s) { hr = DM_E_OUTOFMEMORY; goto done; }
+        s->measures = len; L[c + 1] = len;
+        if (len < minlen) minlen = len;
+        t_signposts(s);
+        t_shape(s, SEC_SHAPE[c], fill, brk);
+        if (chords) CL[c + 1] = compose_steps(cp, ts, cm, s->list, 1, act);
+        TR[c + 1] = SEC_TRANS[c];
+        B[c + 1] = cm_rand() % 4 ? SEC_FILL[c] : 0;
+    }
+    T->measures = (int16_t)n;
+    int cur = 1, prev = 0, pos = 0;
+    while (pos < n) {
+        if (n - pos <= minlen) {
+            cur = 0;
+            tshape *s = calloc(1, sizeof(*s));
+            if (!s) { hr = DM_E_OUTOFMEMORY; goto done; }
+            tshape_free(S[0]); clist_free(CL[0]);
+            S[0] = s; CL[0] = NULL;
+            s->measures = (int16_t)(n - pos); L[0] = n - pos;
+            t_signposts(s);
+            t_shape(s, 0, fill, brk);
+            if (chords) CL[0] = compose_steps(cp, ts, cm, s->list, 1, act);
+            TR[0] = 0;
+            B[0] = cm_rand() % 4 != 0;
+        }
+        t_copy(&T->list, pos, S[cur]->list, TR[cur], chords, CL[cur]);
+        if (B[cur] == 1 && pos >= fill) t_fillbreak(&T->list, pos, fill, 1);
+        else if (B[cur] == 3 && pos >= brk) t_fillbreak(&T->list, pos, brk, 3);
+        if (TR[cur] < 0) TR[cur]++;
+        else if (cm_rand() % 3) { if (cm_rand() % 2) TR[cur]++; else TR[cur]--; }
+        pos += L[cur];
+        int nx = rand_bits(cnt - 1) + 1;
+        if (nx == cur) {
+            if (nx == prev) nx = rand_bits(cnt - 1) + 1;
+            if (nx == cur) nx = rand_bits(cnt - 1) + 1;
+        }
+        if (n - pos > minlen) while (n - pos < L[nx]) nx = rand_bits(cnt - 1) + 1;
+        prev = cur; cur = nx;
+    }
+    T->list = dms_msort(T->list, offsetof(cmdsp, next), tnode_cmp);
+    if (chords) *chords = dms_msort(*chords, offsetof(cnode, next), cnode_cmp);
+done:
+    for (int k = 0; k < 8; k++) { tshape_free(S[k]); clist_free(CL[k]); }
+    return hr;
+}
+
+/* the command track ('cmnd': DMUS_IO_COMMAND for each node with a command or level) and signpost track ('sgnp':
+ * DMUS_IO_SIGNPOST for each node, or none) of a template's nodes, a measure being `mlen` */
+static dm_track *t_cmdtrack(const cmdsp *list, int32_t mlen)
+{
+    buf b = { 0 };
+    put32(&b, 0xc);
+    for (const cmdsp *n = list; n; n = n->next) {
+        if (!n->command && !n->groove) continue;
+        put32(&b, (uint32_t)(mlen * n->measure));
+        put16(&b, (uint16_t)n->measure);
+        uint8_t r[6] = { 0, n->command, n->groove, n->range, n->repeat, 0 };
+        put(&b, r, 6);
+    }
+    int32_t h;
+    dms_cmdtrack *T = b.p ? dms_cmdtrack_load(b.p, b.n, &h) : NULL;
+    free(b.p);
+    dm_track *t = T ? dm_track_new(TRK_COMMAND, &CLSID_CommandTrack_, T) : NULL;
+    if (T && !t) dms_cmdtrack_free(T);
+    return t;
+}
+static dm_track *t_sptrack(const cmdsp *list, int32_t mlen)
+{
+    buf b = { 0 };
+    put32(&b, 0xc);
+    for (const cmdsp *n = list; n; n = n->next) {
+        put32(&b, (uint32_t)(mlen * n->measure));
+        put32(&b, n->chords);
+        put32(&b, (uint16_t)n->measure);
+    }
+    int32_t h;
+    dmc_sptrack *T = b.p ? dmc_sptrack_load(b.p, b.n, &h) : NULL;
+    free(b.p);
+    dm_track *t = T ? dm_track_new(TRK_SIGNPOST, &CLSID_SignPostTrack_, T) : NULL;
+    if (T && !t) dmc_sptrack_free(T);
+    return t;
+}
+static dm_segment *new_seg(void)                         /* CoCreateInstance(CLSID_DirectMusicSegment) */
+{
+    dm_segment *s = calloc(1, sizeof(*s));
+    if (s) { s->refs = 1; s->length = 1; }
+    return s;
+}
+
+/* 77286629 (from ComposeTemplateFromShape with intro, fill and break lengths 1): a template's commands and signposts */
+dm_segment *dmc_template_from_shape(unsigned measures, unsigned shape, int intro, int end, int introlen, int fill, int brk,
+                                    int endlen, int *hr)
+{
+    uint16_t m16 = (uint16_t)measures;
+    *hr = DM_E_INVALIDARG;
+    if (!m16 || (end && !endlen) || (intro && !introlen)) return NULL;
+    if (end && ((intro && introlen + endlen > m16) || endlen > m16)) return NULL;
+    if (intro && introlen > m16) return NULL;
+    int n = m16 & 0x8000 ? 1 : m16;
+    if (end && endlen <= 0) endlen = 1;
+    shape = (uint16_t)shape;
+    if (shape > 8) shape = 6;
+    int endm = 0, keep = 0;
+    if (intro) { n -= introlen; if (n < introlen) { n = introlen; keep = 1; } }
+    if (end) { endm = n; n += 1 - endlen; if (n < 1) n = 1; }
+    tshape *T = calloc(1, sizeof(*T));
+    if (!T) { *hr = DM_E_OUTOFMEMORY; return NULL; }
+    if (shape == 8 && n > 24) {
+        int r = t_song(NULL, T, n, fill, brk, NULL, NULL, 0, NULL);
+        if (r < 0) { tshape_free(T); *hr = r; return NULL; }
+    } else {
+        if (shape == 2) n++;
+        T->measures = (int16_t)n;
+        t_signposts(T);
+        t_shape(T, shape, fill, brk);
+        if (shape == 2) { n--; T->measures = (int16_t)n; }
+    }
+    if (end) { T->measures = (int16_t)endm; t_end(T, endlen > endm ? endm : endlen); }
+    if (intro) t_intro(T, keep, introlen, NULL, 0);
+    /* the template object's segment (77289598): the command and signpost tracks in group 1 */
+    dm_segment *s = new_seg();
+    if (!s) { tshape_free(T); *hr = DM_E_OUTOFMEMORY; return NULL; }
+    s->length = (mtime_t)T->measures * 0xc00;
+    dm_track *ct = t_cmdtrack(T->list, 0xc00), *st = t_sptrack(T->list, 0xc00);
+    if (ct) dm_segment_insert_track(s, ct, 0, 1, 0x38, 0);
+    if (st) dm_segment_insert_track(s, st, 0, 1, 0x38, 0);
+    tshape_free(T);
+    *hr = DM_OK;
+    return s;
+}
+
+/* 77286edd / 77283810: ComposeSegmentFromShape after the style's embellishment lengths (77287754 adjusts the
+ * measures): the shape's commands with chords composed from the chord map, as a segment with the tempo, band, style,
+ * chord map, command and chord tracks.  With no default band the band's SetParam fails: the segment has only its
+ * tempo track and the error is returned with it. */
+dm_segment *dmc_segment_from_shape(dms_style *style, dmc_chordmap *cm, unsigned measures, unsigned shape, int activity,
+                                   int intro, int end, int introlen, int fill, int brk, int endlen, int *hr)
+{
+    composer cp = { 0 };
+    *hr = DM_OK;
+    int n = (int)measures, endm = 0;
+    if (intro) { n -= introlen; if (n < 1) n = 1; }
+    if (end) { endm = n; n += 1 - endlen; if (n < 1) n = 1; }
+    uint8_t ts[2] = { style->ts[0], style->ts[1] };
+    tshape T = { 0 };
+    cnode *chords = NULL;
+    if (shape == 8 && n > 24) {
+        int r = t_song(&cp, &T, n, fill, brk, ts, cm, activity, &chords);
+        if (r < 0) { *hr = r; goto out; }
+    } else {
+        if (shape == 2) n++;
+        T.measures = (int16_t)n;
+        t_signposts(&T);
+        t_shape(&T, shape, fill, brk);
+        if (shape == 2) { n--; T.measures = (int16_t)n; }
+        chords = compose_steps(&cp, ts, cm, T.list, 1, activity);
+    }
+    if (end) { T.measures = (int16_t)endm; t_end(&T, endlen > endm ? endm : endlen); }
+    if (intro) t_intro(&T, 0, introlen, chords, 1);
+    cmdsp *cmds = NULL, **pp = &cmds;
+    for (const cmdsp *p = T.list; p; p = p->next) {
+        if (!p->command && !p->groove) continue;
+        cmdsp *x = malloc(sizeof(*x));
+        if (!x) { *hr = DM_E_OUTOFMEMORY; break; }
+        *x = *p; x->next = NULL;
+        *pp = x; pp = &x->next;
+    }
+    dm_segment *s = NULL;
+    if (*hr >= 0) {
+        uint8_t key = (uint8_t)(cm->scale >> 24);
+        uint32_t scale = cm->scale & 0xffffff;
+        int32_t mlen = ts[1] ? 0xc00 / ts[1] * ts[0] : 0;
+        s = new_seg();
+        if (!s) *hr = DM_E_OUTOFMEMORY;
+        dm_track *chordt = NULL, *cmdt = NULL;
+        if (s && chords) {
+            size_t len;
+            uint8_t *b = chords_cord(chords, key, scale, ts, &len);
+            int32_t h;
+            dms_chordtrack *ct = b ? dms_chordtrack_load(b, len, &h) : NULL;
+            free(b);
+            if (ct && !(chordt = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct))) dms_chordtrack_free(ct);
+        }
+        if (s) cmdt = t_cmdtrack(cmds, mlen);
+        dms_styletrack *ST = NULL;
+        dm_track *stt = NULL, *cmt = NULL, *tempo = NULL, *band = NULL;
+        if (s) {
+            dm_style_srand();                   /* (the new style track's constructor) */
+            ST = calloc(1, sizeof(*ST));
+            if (ST && !(stt = dm_track_new(TRK_STYLE, &CLSID_StyleTrack_, ST))) free(ST);
+            if (stt) dm_track_setparam(stt, PRM_STYLE, 0, style);
+            dmc_cmtrack *CT = calloc(1, sizeof(*CT));
+            if (CT && !(cmt = dm_track_new(TRK_CHORDMAP, &CLSID_ChordMapTrack_, CT))) free(CT);
+            if (cmt) dmc_cmtrack_setparam(cmt->data, 0, cm);
+            dm_tempotrack *TT = calloc(1, sizeof(*TT));
+            if (TT && (TT->items = calloc(1, sizeof(*TT->items)))) {
+                TT->active = 1; TT->n = 1; TT->items[0].mt = 0; TT->items[0].tempo = style->tempo;
+                if ((tempo = dm_track_new(TRK_TEMPO, &CLSID_TempoTrack_, TT))) dm_segment_insert_track(s, tempo, 0, 1, 0x38, 0);
+            } else free(TT);
+            dm_bandtrack *BT = calloc(1, sizeof(*BT));
+            if (BT && !(band = dm_track_new(TRK_BAND, &CLSID_BandTrack_, BT))) free(BT);
+            int r = DM_E_OUTOFMEMORY;
+            if (band) {
+                dm_bandparam bp = { -64, style->defband };
+                r = dm_track_setparam(band, PRM_BANDPARAM, 0, &bp);
+            }
+            if (r < 0) {
+                *hr = r;
+                if (band) dm_track_release(band);
+                if (stt) dm_track_release(stt);
+                if (cmt) dm_track_release(cmt);
+                if (cmdt) dm_track_release(cmdt);
+                if (chordt) dm_track_release(chordt);
+            } else {
+                s->repeats = 0;
+                s->length = (mtime_t)mlen * (int)measures;
+                dm_segment_insert_track(s, band, 0, 1, 0x38, 0);
+                if (stt) dm_segment_insert_track(s, stt, 0, 1, 0x38, 0);
+                if (cmt) dm_segment_insert_track(s, cmt, 0, 1, 0x38, 0);
+                if (cmdt) dm_segment_insert_track(s, cmdt, 0, 1, 0x38, 0);
+                if (chordt) dm_segment_insert_track(s, chordt, 0, 1, 0x38, 0);
+                *hr = r;
+            }
+        }
+    }
+    tlist_free(cmds);
+    clist_free(chords);
+    tlist_free(T.list);
+    composer_free(&cp);
+    return s;
+out:
+    clist_free(chords);
+    tlist_free(T.list);
+    composer_free(&cp);
+    return NULL;
 }
