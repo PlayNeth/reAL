@@ -104,4 +104,9 @@ dm_segment *dmc_template_from_shape(unsigned measures, unsigned shape, int intro
 dm_segment *dmc_segment_from_shape(struct dms_style *style, dmc_chordmap *cm, unsigned measures, unsigned shape,
                                    int activity, int intro, int end, int introlen, int fill, int brk, int endlen, int *hr);
 
+/* ChangeChordMap (77284b30): the segment's chord track rewritten in the chord map's palette chords and key */
+int dmc_change_chordmap(dm_segment *seg, int trackscale, dmc_chordmap *cm);
+/* fixes of dmcompos's (and its use of dmstyle's) flaws: on unless REAL_MUSIC_NOFIXES */
+void dmc_set_fixes(int on);
+
 #endif

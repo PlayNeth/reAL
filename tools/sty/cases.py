@@ -357,7 +357,7 @@ def case_compose(out, seed=15):
             'cmap2.cdm': cmap1('cmap2', '8f6d1a10-0006-4000-8000-000000000002', loadname='Second Map'),
             'compsty.sty': st.build(), 'template.sgt': seg.build()}
 
-def cmap_dag(name, guid, seed, layers=10, width=3):
+def cmap_dag(name, guid, seed, layers=10, width=3, scale=0x00ab5ab5, flags=1, holes=()):
     """a layered chord map (connections only go deeper, so no path comes back to an entry), with signposts and
     cadences for the common chords"""
     import random
@@ -401,7 +401,8 @@ def cmap_dag(name, guid, seed, layers=10, width=3):
         sps.append((g, fl, C(ci), cads))
     # the last signpost's chord has a name the loader cannot read (at the file's end): keep a plain one there
     sps.append((0x4000, 0, C(0), []))
-    return chordmap(guid, name, 0x00ab5ab5, subs, pal, entries, sps)
+    pal = [c if r not in holes else None for r, c in enumerate(pal)]
+    return chordmap(guid, name, scale, subs, pal, entries, sps, flags=flags)
 
 def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4), spconfig=None):
     bar = 768 * ts[0] * 4 // ts[1]
@@ -453,6 +454,10 @@ def case_compose2(out, seed=16):
     for nm, ms, emb in (('intro', 2, 4), ('fill', 1, 1), ('break', 2, 2), ('end', 3, 8)):
         sh.pattern(nm, measures=ms, groove=(1, 100), embellish=emb).partref(sh.parts[0], pchannel=0)
     files['shapesty.sty'] = sh.build()
+    # ChangeChordMap: another key and scale, the old (not DMUS_CHORDMAPF_VERSION8) transposition, a palette with holes
+    files['cmapd.cdm'] = cmap_dag('cmapd', '8f6d1a10-0006-4000-8000-00000000000d', 4, scale=0x00ad5ad5, flags=0)
+    files['cmape.cdm'] = cmap_dag('cmape', '8f6d1a10-0006-4000-8000-00000000000e', 5, scale=0x0756b56b, flags=1)
+    files['cmapf.cdm'] = cmap_dag('cmapf', '8f6d1a10-0006-4000-8000-00000000000f', 6, scale=0x00056b56, flags=0, holes=(3, 9, 16))
     sh3 = Style('8f6d1a10-0000-4000-8000-0000000000f4', 'shapesty3', timesig=(3, 4, 4))
     p = sh3.part('8f6d1a10-0001-4000-8000-0000000000f4', measures=1, playmode=DMUS_PLAYMODE_NORMALCHORD)
     p.note(grid=0, var=0xffffffff, dur=600, music=music_value(4, 0, 0))

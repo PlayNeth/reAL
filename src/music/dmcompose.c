@@ -1455,3 +1455,109 @@ out:
     composer_free(&cp);
     return NULL;
 }
+
+/* ------------------------------------------------------------------ ChangeChordMap (77284b30) */
+/* 77282302: the scale's tonic (its pattern among the twelve major scales) from the key */
+static uint8_t scale_tonic(uint32_t scale, uint8_t key)
+{
+    switch (scale & 0xfff) {
+    case 0xad5: key += 7; break;
+    case 0x56b: key += 1; break;
+    case 0x5ab: key += 8; break;
+    case 0x5ad: key += 3; break;
+    case 0x6ad: key += 10; break;
+    case 0x6b5: key += 5; break;
+    case 0xad6: key += 2; break;
+    case 0xb56: key += 9; break;
+    case 0xb5a: key += 4; break;
+    case 0xd5a: key += 11; break;
+    case 0xd6a: key += 6; break;
+    }
+    return (uint8_t)(key % 12);
+}
+
+/* the segment's first chord track, as dmstyle saves it and dmcompos reads it back (77284959: the measure, beat and
+ * silence of each chord, its name and subchords; sorted by measure and beat), each chord replaced by the chord map's
+ * palette chord on its root's degree in the old key (moved by the change of tonic when `trackscale`); the track
+ * reloaded with the chord map's key and scale (dmstyle's Save writes no times: they come from the style's measure) */
+static int g_fixes = 1;
+void dmc_set_fixes(int on) { g_fixes = on; }
+
+int dmc_change_chordmap(dm_segment *seg, int trackscale, dmc_chordmap *cm)
+{
+    dm_segtrack *st = seg_track(seg, TRK_CHORD, 0xffffffff, 0);
+    if (!st) return DMUS_E_NOT_FOUND;
+    dms_chordtrack *T = st->t->data;
+    /* dmstyle's chord track Save (7740475a) assigns its zeroed record buffer to each chord's name before writing it:
+     * the track's names are gone, the change failing or not (fixed: kept) */
+    if (!g_fixes) for (dms_chord *c = T->chords; c; c = c->next) memset(c->name, 0, sizeof(c->name));
+    composer cp = { 0 };
+    uint8_t oldkey = (uint8_t)(T->root % 24);
+    uint32_t oldscale = T->scale;
+    cnode *list = NULL;
+    int hr = DM_OK;
+    for (const dms_chord *c = T->chords; c; c = c->next) {
+        cnode *n = calloc(1, sizeof(*n));
+        ccopy *k = calloc(1, sizeof(*k));
+        if (!n || !k) { free(n); free(k); hr = DM_E_OUTOFMEMORY; break; }
+        k->c.hasname = 1;               /* (the name read back is the empty one Save wrote) */
+        dmc_subnode **pp = &k->c.subs;
+        for (uint32_t s = 0; s < c->nsub; s++) {
+            dmc_subnode *x = calloc(1, sizeof(*x));
+            dmc_sub *u = calloc(1, sizeof(*u));
+            if (!x || !u) { free(x); free(u); break; }
+            u->chordpat = c->sub[s].chord; u->scalepat = c->sub[s].scale; u->invpat = c->sub[s].inversion;
+            u->levels = c->sub[s].levels; u->chordroot = c->sub[s].chordroot; u->scaleroot = c->sub[s].scaleroot;
+            u->refs = 1;
+            x->sub = u;
+            *pp = x; pp = &x->next;
+        }
+        k->next = cp.copies; cp.copies = k;
+        n->chord = &k->c;
+        n->measure = (int16_t)c->measure; n->beat = c->beat; n->silent = c->silent;
+        clist_append(&list, n);
+    }
+    if (list && list->next) list = dms_msort(list, offsetof(cnode, next), cnode_cmp);
+    uint8_t newkey = (uint8_t)(cm->scale >> 24);
+    uint32_t newscale = cm->scale & 0xffffff;
+    int8_t shift;
+    if (!(cm->flags & 1)) shift = (int8_t)(scale_tonic(newscale, newkey) - scale_tonic(oldscale, oldkey));
+    else {
+        if (newkey < oldkey % 12) newkey = (uint8_t)(newkey + 12);
+        shift = (int8_t)(((int)newkey - oldkey % 12) % 12);
+    }
+    for (cnode *n = list; n && hr >= 0; n = n->next) {
+        int8_t d = (int8_t)(n->chord->subs && n->chord->subs->sub ? n->chord->subs->sub->chordroot : 0);
+        if (trackscale) d = (int8_t)(d + shift);
+        d = (int8_t)(d - (int8_t)oldkey);
+        if (d < 0) d = (int8_t)(d + ((uint8_t)(-d - 1) / 12) * 12 + 12);
+        if (d > 23) d = (int8_t)(d - ((uint8_t)(d - 24) / 12) * 12 - 12);
+        const dmc_palchord *p = cm->palette[(int)d];
+        if (!p) { hr = DM_E_POINTER; break; }
+        dmc_chord *c = chord_copy(&cp, &p->c);
+        if (!c) { hr = DM_E_OUTOFMEMORY; break; }
+        n->chord = c;
+    }
+    if (hr >= 0) {
+        dms_style *style = NULL;
+        hr = dm_segment_getparam(seg, PRM_STYLE, 0xffffffff, 0, 0, NULL, &style);
+        if (hr >= 0) {
+            size_t len;
+            uint8_t *b = chords_cord(list, newkey, newscale, style->ts, &len);
+            int32_t h = DM_E_OUTOFMEMORY;
+            dms_chordtrack *N = b ? dms_chordtrack_load(b, len, &h) : NULL;
+            free(b);
+            hr = h;
+            if (N) {
+                dms_chord *old = T->chords;
+                T->chords = N->chords; T->root = N->root; T->scale = N->scale;
+                N->chords = old;
+                dms_chordtrack_free(N);
+            }
+            dms_style_release(style);
+        }
+    }
+    clist_free(list);
+    composer_free(&cp);
+    return hr;
+}

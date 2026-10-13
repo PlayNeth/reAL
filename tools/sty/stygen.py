@@ -207,7 +207,7 @@ def chordmap(guid, name, scale, subchords, palette=(), entries=(), signposts=(),
     items = [chunk('perh', perh), chunk('guid', guid_bytes(guid)), chunk('vers', struct.pack('<II', 0x10000, 0)),
              unfo(name), chunk('chdt', chdt)]
     if palette:
-        items.append(LIST('chpl', *[cm_chord(*c) for c in palette]))
+        items.append(LIST('chpl', *[cm_chord(*c) if c else chunk('none', b'') for c in palette]))
     if entries:
         ch = []
         for fl, cid, crd, nexts in entries:

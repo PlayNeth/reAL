@@ -239,6 +239,50 @@ static int shapes(IDirectMusicLoader8 *ld)
     return 0;
 }
 
+/* ChangeChordMap on composed and loaded segments */
+static int change(IDirectMusicLoader8 *ld)
+{
+    IDirectMusicComposer *cp = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);
+    printf("create composer %08lx\n", hr);
+    if (!cp) return 1;
+    static const WCHAR *const maps[] = { L"cmapa.cdm", L"cmapd.cdm", L"cmape.cdm", L"cmapf.cdm", L"cmapb.cdm" };
+    IDirectMusicChordMap *cm[5] = { 0 };
+    for (int k = 0; k < 5; k++)
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, maps[k], (void **)&cm[k]);
+    printf("maps %d %d %d %d %d\n", !!cm[0], !!cm[1], !!cm[2], !!cm[3], !!cm[4]);
+    static const WCHAR *const segs[] = { L"t1.sgt", L"t2.sgt", L"t3.sgt", L"t4.sgt", L"basic.sgt", L"params.sgt" };
+    for (int a = 0; a < 6; a++) {
+        IDirectMusicSegment8 *tp = NULL;
+        hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, segs[a], (void **)&tp);
+        printf("load %d %08lx\n", a, hr);
+        if (!tp) continue;
+        hr = IDirectMusicComposer_ChangeChordMap(cp, (IDirectMusicSegment *)tp, TRUE, cm[1]);
+        printf("change the loaded one: %08lx\n", hr);
+        IDirectMusicSegment *sg = NULL;
+        if (a < 4) {
+            hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, NULL, (IDirectMusicSegment *)tp, 1, NULL, &sg);
+            printf("composed %08lx\n", hr);
+        } else IDirectMusicSegment8_QueryInterface(tp, &IID_IDirectMusicSegment, (void **)&sg);
+        if (sg) {
+            IDirectMusicSegment8 *o8 = NULL;
+            IDirectMusicSegment_QueryInterface(sg, &IID_IDirectMusicSegment8, (void **)&o8);
+            dump(o8, "before");
+            for (int k = 0; k < 10; k++) {
+                hr = IDirectMusicComposer_ChangeChordMap(cp, sg, k & 1, cm[(k / 2 + a) % 5]);
+                printf("change %d (map %d, track scale %d): %08lx\n", k, (k / 2 + a) % 5, k & 1, hr);
+                dump(o8, "changed");
+            }
+            IDirectMusicSegment8_Release(o8);
+            IDirectMusicSegment_Release(sg);
+        }
+        IDirectMusicSegment8_Release(tp);
+    }
+    for (int k = 0; k < 5; k++) if (cm[k]) IDirectMusicChordMap_Release(cm[k]);
+    IDirectMusicComposer_Release(cp);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -259,6 +303,7 @@ int main(int argc, char **argv)
     GetCurrentDirectoryW(MAX_PATH, dir);
     IDirectMusicLoader8_SetSearchDirectory(ld, &GUID_DirectMusicAllTypes, dir, FALSE);
     if (argc > 1 && !strcmp(argv[1], "shape")) return shapes(ld);
+    if (argc > 1 && !strcmp(argv[1], "change")) return change(ld);
     if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
         IDirectMusicComposer *cp = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);

@@ -337,8 +337,21 @@ static HRESULT WINAPI cpo_templatefromshape(IDirectMusicComposer *i, WORD n, WOR
     seg_release(&o->IDirectMusicSegment8_iface);
     return FAILED(q) ? q : r;
 }
+/* 77284b30 */
 static HRESULT WINAPI cpo_changechordmap(IDirectMusicComposer *i, IDirectMusicSegment *s, BOOL trackscale, IDirectMusicChordMap *cm)
-{ return rm_notimpl("Composer::ChangeChordMap"); }
+{
+    if (IsBadWritePtr(s, 4) || IsBadWritePtr(cm, 4)) return E_POINTER;
+    rm_segment *t = unsafe_segment((IUnknown *)s);
+    dmc_chordmap *mx = chordmap_engine_of(cm);
+    if (!t || !mx) return rm_notimpl("Composer::ChangeChordMap (a segment or chord map not made by reAL-Music)");
+    if (!t->seg) return DMUS_E_NOT_FOUND;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    int r = dmc_change_chordmap(t->seg, trackscale, mx);
+    if (h) dm_host_unlock(h);
+    LOG_CALL("music: Composer::ChangeChordMap(track scale %d) -> %08x", trackscale, r);
+    return r;
+}
 static IDirectMusicComposerVtbl cpo_vtbl = { cpo_qi, cpo_addref, cpo_release, cpo_fromtemplate, cpo_fromshape, cpo_transition,
     cpo_autotransition, cpo_templatefromshape, cpo_changechordmap };
 /* 77282d2f: the constructor seeds the application thread's rand() with time() */
@@ -349,6 +362,7 @@ static HRESULT composer_create(REFIID riid, void **out)
     o->IDirectMusicComposer_iface.lpVtbl = &cpo_vtbl;
     o->ref = 1;
     dm_style_srand();
+    dmc_set_fixes(!GetEnvironmentVariableA("REAL_MUSIC_NOFIXES", NULL, 0));
     HRESULT hr = cpo_qi(&o->IDirectMusicComposer_iface, riid, out);
     cpo_release(&o->IDirectMusicComposer_iface);
     return hr;
