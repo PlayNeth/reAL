@@ -233,6 +233,8 @@ dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void
     return b;
 }
 
+void dm_mutes_free(dm_mutenode *n) { while (n) { dm_mutenode *x = n->link; free(n); n = x; } }
+
 void dm_band_addref(dm_band *b) { if (b) __sync_add_and_fetch(&b->refs, 1); }
 void dm_band_release(dm_band *b)
 {
@@ -437,6 +439,7 @@ void dm_wavetrack_sort(dm_wavetrack *t, int clock)     /* Init 77326edc */
 
 static void free_wavetrack(dm_wavetrack *t)
 {
+    dm_mutes_free(t->mutes);
     for (dm_wavepart *p = t->parts, *pn; p; p = pn) {
         pn = p->next;
         for (dm_waveitem *it = p->items, *in; it; it = in) {
@@ -680,6 +683,7 @@ static void free_track(dm_track *t)
     case TRK_SEQ: {
         dm_seqtrack *q = t->data;
         for (int i = 0; i < q->nparts; i++) { free(q->parts[i].ev); free(q->parts[i].cv); }
+        dm_mutes_free(q->mutes);
         free(q->parts); free(q->pchs); free(q);
         break;
     }

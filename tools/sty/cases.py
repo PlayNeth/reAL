@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """cases.py <outdir> [case...]: write the style test cases (<case>.sgt, plus the .sty files they reference)."""
-import os, sys
+import os, sys, struct
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from stygen import *
 
@@ -253,7 +253,35 @@ def case_comstyle(out, seed=10):
     seg.style([(0, 'comstyle.sty', st.guid, st.name), (4 * BAR, 'mix1.sty', None, None)])
     return {'comstyle.sty': st.build(), 'comstyle.sgt': seg.build()}
 
-CASES = {'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
+def case_seqmute(out, seed=11):
+    """the mute track on a sequence track's parts (muted and remapped)"""
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000039', 'seqmute', 6 * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    ev = []
+    for b in range(6 * 4):
+        for p in range(4):
+            ev.append((b * 768 + p * 10, 300, p, 0x90 | p, 48 + p * 5 + b % 7, 90))
+        ev.append((b * 768 + 384, 0, 2, 0xb2, 10, b * 5 % 128))
+    seg.seq(ev, curves=[(BAR, 1000, 3, 4, 7, 0, 127), (3 * BAR, 500, 0, 3, 0, 0, 8000)])
+    seg.mutes([(BAR, 0, 0xffffffff), (2 * BAR, 0, 0), (BAR + 768, 2, 7), (3 * BAR, 3, 0xffffffff), (4 * BAR, 3, 1),
+               (2 * BAR + 100, 1, 9), (5 * BAR, 1, 1)])
+    return {'seqmute.sgt': seg.build()}
+
+def case_wavemute(out, seed=12):
+    """the mute track on a wave track's parts"""
+    import math
+    pcm = b''.join(struct.pack('<h', int(8000 * math.sin(i * 0.05))) for i in range(22050 // 4))
+    wav = b'RIFF' + struct.pack('<I', 36 + len(pcm)) + b'WAVEfmt ' + struct.pack('<IHHIIHH', 16, 1, 1, 22050, 44100, 2, 16) + \
+        b'data' + struct.pack('<I', len(pcm)) + pcm
+    seg = Segment('8f6d1a10-1000-4000-8000-00000000003a', 'wavemute', 6 * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.waves([(p, [(b * 768 + p * 7, 600, 'tone.wav') for b in range(24)]) for p in range(3)])
+    seg.mutes([(BAR, 0, 0xffffffff), (2 * BAR, 0, 0), (BAR + 768, 2, 5), (3 * BAR, 1, 0xffffffff), (4 * BAR, 1, 1)])
+    return {'tone.wav': wav, 'wavemute.sgt': seg.build()}
+
+CASES = {'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}
 

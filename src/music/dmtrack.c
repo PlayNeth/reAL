@@ -1,6 +1,5 @@
 /* reAL-Music: track playback (included by dmperf.c).  Sequence track 7731a0b4, tempo track 7731c274, time signature
- * track 7731d59e (dmime), band track 7720211c (dmband).  No mute track is supported, so every MuteLookup answers
- * "not muted, same PChannel" as the original does when GetParam(GUID_MuteParam) fails. */
+ * track 7731d59e (dmime), band track 7720211c (dmband). */
 
 #define TF_SEEK 1
 #define TF_LOOP 2
@@ -12,6 +11,29 @@
 #define TF_CLOCK 0x400
 
 #include "dmstytrack.c"
+
+/* 7731e1ff: a PChannel muted or remapped by the mute track at t (GUID_MuteParam), the answer kept in the track until
+ * t reaches its *next (which the original keeps relative: an earlier lookup only asks again) */
+static int32_t mute_lookup(dm_perf *pf, dm_mutenode **list, uint32_t pch, mtime_t t, mtime_t off, uint32_t group,
+                           uint32_t *map)
+{
+    dm_mutenode *n;
+    for (n = *list; n && n->pch != pch; n = n->link) {}
+    if (!n) {
+        n = calloc(1, sizeof(*n));
+        if (!n) { *map = pch; return 0; }
+        n->next = -1; n->pch = pch; n->map = pch; n->mute = 0;
+        n->link = *list; *list = n;
+    }
+    if (!(t < n->next)) {
+        mtime_t nx = 0;
+        dms_muteparam mp = { pch, 0, 0 };
+        if (perf_getparam(pf, PRM_MUTE, group, 0, t + off, &nx, &mp) < 0) n->next = 0x7fffffff;
+        else { n->next = nx; n->map = mp.map; n->mute = mp.mute; }
+    }
+    *map = n->map;
+    return n->mute;
+}
 
 /* ------------------------------------------------------------------ sequence track */
 typedef struct {
@@ -65,6 +87,8 @@ static void seq_common(dm_perf *pf, dm_segstate *ss, dm_pmsg *m, uint32_t pch, u
 
 static void seq_emit_curve(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S, const dm_curveitem *c, mtime_t off)
 {
+    uint32_t map;
+    if (mute_lookup(pf, &((dm_seqtrack *)e->t->data)->mutes, c->pch, c->start, off, S->groupbits, &map)) return;
     dm_pmsg *m = pm_alloc(pf, 0x58);
     if (!m) return;
     seq_tscache(ss, e, S, c->start);
@@ -75,11 +99,13 @@ static void seq_emit_curve(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S
     m->c_dur = c->dur; m->c_resetdur = c->resetdur; m->c_origstart = 0;
     m->c_start = c->sval; m->c_end = c->eval; m->c_reset = c->rval; m->c_type = c->type; m->c_shape = c->shape;
     m->c_cc = c->cc; m->c_flags = c->flags; m->c_param = c->param; m->c_merge = c->merge;
-    seq_common(pf, ss, m, c->pch, e->vid, S);
+    seq_common(pf, ss, m, map, e->vid, S);
 }
 
 static void seq_emit_event(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S, const dm_seqitem *it, mtime_t off)
 {
+    uint32_t map;
+    if (mute_lookup(pf, &((dm_seqtrack *)e->t->data)->mutes, it->pch, it->mt, off, S->groupbits, &map)) return;
     if ((it->status & 0xf0) == 0x90) {
         dm_pmsg *m = pm_alloc(pf, 0x50);
         if (!m) return;
@@ -89,14 +115,14 @@ static void seq_emit_event(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S
         seq_tscache(ss, e, S, it->mt);
         m->flags = PF_MUSICTIME;
         seq_mbg(S, it->mt, &m->n_measure, &m->n_beat, &m->n_grid, &m->n_offset, it->off);
-        seq_common(pf, ss, m, it->pch, e->vid, S);
+        seq_common(pf, ss, m, map, e->vid, S);
     } else {
         dm_pmsg *m = pm_alloc(pf, 0x40);
         if (!m) return;
         m->m_status = it->status & 0xf0; m->m_b1 = it->b1; m->m_b2 = it->b2; m->type = PT_MIDI;
         m->mt = it->mt + off;
         m->flags |= PF_MUSICTIME;
-        seq_common(pf, ss, m, it->pch, e->vid, S);
+        seq_common(pf, ss, m, map, e->vid, S);
     }
 }
 
@@ -104,18 +130,22 @@ static void seq_emit_event(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S
 static void seq_chase_send(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S, const dm_seqitem *ev,
                            const dm_curveitem *cv, mtime_t start, mtime_t off)
 {
+    dm_mutenode **ml = &((dm_seqtrack *)e->t->data)->mutes;
+    uint32_t map;
     if (ev) {
         if (cv && cv->start + cv->dur <= ev->mt) cv = NULL;
         if (!cv) {
+            if (mute_lookup(pf, ml, ev->pch, ev->mt, off, S->groupbits, &map)) return;
             dm_pmsg *m = pm_alloc(pf, 0x40);
             if (!m) return;
             m->m_status = ev->status & 0xf0; m->m_b1 = ev->b1; m->m_b2 = ev->b2; m->type = PT_MIDI;
             m->mt = start + off; m->flags |= PF_MUSICTIME;
-            seq_common(pf, ss, m, ev->pch, e->vid, S);
+            seq_common(pf, ss, m, map, e->vid, S);
             return;
         }
     }
     if (!cv) return;
+    if (mute_lookup(pf, ml, cv->pch, cv->start, off, S->groupbits, &map)) return;
     dm_pmsg *m = pm_alloc(pf, 0x58);
     if (!m) return;
     seq_tscache(ss, e, S, cv->start);
@@ -137,7 +167,7 @@ static void seq_chase_send(dm_perf *pf, dm_segstate *ss, sstrack *e, seqstate *S
             else m->c_flags &= ~CURVEF_RESET;
         }
     }
-    seq_common(pf, ss, m, cv->pch, e->vid, S);
+    seq_common(pf, ss, m, map, e->vid, S);
 }
 
 /* 77319d96 */

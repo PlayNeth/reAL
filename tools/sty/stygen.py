@@ -228,6 +228,29 @@ class Segment:
         body = struct.pack('<I', 12) + b''.join(struct.pack('<iHBBBBB1x', *c) for c in items)
         self.track(CLSID['commandtrack'], 'cmnd', None, chunk('cmnd', body), group=group)
 
+    def seq(self, events, curves=(), group=1):
+        """events: (time, dur, pchannel, status, b1, b2); curves: (time, dur, pchannel, type, cc, start, end)"""
+        ev = struct.pack('<I', 20) + b''.join(struct.pack('<iiIhBBB3x', t, d, p, 0, st, a, b) for t, d, p, st, a, b in events)
+        cu = struct.pack('<I', 32) + b''.join(struct.pack('<iiiIhhhhBBBBHH', t, d, 0, p, 0, s0, e0, 0, ty, 0, cc, 0, 0, 0)
+                                             for t, d, p, ty, cc, s0, e0 in curves)
+        items = [chunk('evtl', ev)]
+        if curves: items.append(chunk('curl', cu))
+        self.track('d2ac2886-b39b-11d1-8704-00600893b1bd', 'seqt', None, chunk('seqt', b''.join(items)), group=group)
+
+    def waves(self, parts, group=1):
+        """parts: (pchannel, [(time, dur, file)]) in music time; one wave track"""
+        lp = []
+        for pch, items in parts:
+            wi = []
+            for t, d, f in items:
+                waih = struct.pack('<iiII', 0, 0, 0xffffffff, 0) + struct.pack('<qqq', t, 0, 0) + struct.pack('<q', d) + \
+                    struct.pack('<iIIIHH', t, 0, 0, 0, 0, 0)
+                wi.append(LIST('wave', chunk('waih', waih), reference('8a667154-f9cb-11d2-ad8a-0060b0575abc', file=f)))
+            waph = struct.pack('<iIIIII', 0, 0xffffffff, pch, 0, 0, 0)
+            lp.append(LIST('wavp', chunk('waph', waph), LIST('wavi', *wi)))
+        self.track('eed36461-9ea5-11d3-9bd1-0080c7150a74', None, 'wavt', LIST('wavt', chunk('wath', struct.pack('<iI', 0, 0)), *lp),
+                   group=group)
+
     def mutes(self, items, group=1):
         """items: (time, pchannel, map)"""
         body = struct.pack('<I', 12) + b''.join(struct.pack('<iII', *m) for m in items)

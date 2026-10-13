@@ -179,6 +179,10 @@ typedef struct { dm_pmsg *head, *hint; } dm_queue;
 /* ------------------------------------------------------------------ loaded objects */
 typedef struct dm_collection dm_collection;     /* a DLS collection (dmdls.c) */
 
+/* a track's mute track answers by PChannel (dmime 7731e1ff) */
+typedef struct dm_mutenode { mtime_t next; uint32_t pch, map; int32_t mute; struct dm_mutenode *link; } dm_mutenode;
+void dm_mutes_free(dm_mutenode *n);
+
 /* sequence track */
 typedef struct { mtime_t mt, dur; uint32_t pch; int16_t off; uint8_t status, b1, b2; } dm_seqitem;
 typedef struct { mtime_t start, dur, resetdur; uint32_t pch; int16_t off, sval, eval, rval;
@@ -187,6 +191,7 @@ typedef struct { uint32_t pch; dm_seqitem *ev; int nev; dm_curveitem *cv; int nc
 typedef struct {
     dm_seqpart *parts; int nparts;     /* in part-list order (reverse of first appearance) */
     uint32_t *pchs; int npchs;         /* first-appearance order (SetPChannelsUsed) */
+    struct dm_mutenode *mutes;         /* +0x3c the mute track's answers, by PChannel (7731e1ff) */
 } dm_seqtrack;
 
 typedef struct { mtime_t mt; double tempo; } dm_tempoitem;
@@ -282,6 +287,7 @@ typedef struct dm_wavetrack {
     uint32_t *persistvar, *persistused;     /* +0x70 +0x74 */
     uint32_t nitems;                        /* +0x78 */
     struct wsdl *sdl;                       /* +0x80 streaming downloads in use, by state */
+    struct dm_mutenode *mutes;              /* +0x4c the mute track's answers, by PChannel (7731e1ff) */
 } dm_wavetrack;
 
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE,

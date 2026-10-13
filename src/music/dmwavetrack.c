@@ -3,8 +3,8 @@
  * Init 77326edc (item order: dmseg.c), InitPlay 77327312, EndPlay 77326fda, Play/PlayEx 77325abd, variations
  * 77324677 / 773250ea / 773242a8, downloads 7732664a / 77326958 (the process-wide download list 7732d4f0 is kept per
  * performance here: its entries name their performance anyway), voices 7732588a, and the output tool's wave
- * messages 77307763.  No track gives GUID_Variations or GUID_MuteParam here, so variations are always chosen by the
- * track itself and no part is muted or remapped, as in the original when those GetParam calls fail. */
+ * messages 77307763.  No track gives GUID_Variations here, so variations are always chosen by the track itself, as in
+ * the original when that GetParam fails. */
 
 static void wv_release(dm_perf *pf, dm_wvoice *v)
 {
@@ -427,10 +427,14 @@ static int wt_play(dm_perf *pf, dm_segstate *ss, sstrack *e, int64_t start, int6
             int64_t t = clock ? it->rt : (int64_t)it->logical;
             if (t >= end) break;
             uint32_t ok = P ? (ws_varmask(S, P, i) & it->variations) : 0;
-            uint32_t mpch = pch;            /* GUID_MuteParam: not muted, not remapped */
+            /* 7731e1ff: the mute track at the item's time (clock time: its music time after the offset's) */
+            uint32_t mpch;
+            mtime_t mo = clock ? R2M(pf, off) : (mtime_t)off;
+            mtime_t mt = clock ? R2M(pf, it->rt + off) - mo : (mtime_t)t;
+            int32_t muted = mute_lookup(pf, &T->mutes, pch, mt, mo, S->groupbits, &mpch);
             uint32_t pi, group, chan;
             wdl *d;
-            if (!ok) goto next;
+            if (muted || !ok) goto next;
             hr = wt_pchinfo(pf, S->ap, mpch, &pi, &group, &chan);
             if (hr < 0) goto next;
             if (pi >= (uint32_t)pf->nports) { hr = DMUS_E_NOT_FOUND; goto next; }
