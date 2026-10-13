@@ -168,6 +168,12 @@ void dm_perf_set_app_precision(dm_perf *pf, int extended);
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
 /* the transport thread's srand(time(NULL)) (wave track variations and random volume/pitch) */
 void dm_perf_set_seed(dm_perf *pf, uint32_t seed);
+/* a band's instruments downloaded to / unloaded from the performance's ports */
+int dm_band_download_to(dm_perf *pf, dm_band *b);
+void dm_band_unload_from(dm_perf *pf, dm_band *b);
+/* GUID_PerfMasterGrooveLevel (a global parameter: unset until SetGlobalParam) */
+void dm_perf_set_groove(dm_perf *pf, int8_t g);
+int dm_perf_get_groove(dm_perf *pf, int8_t *g);
 /* the application thread's rand() (a style track's creation seeds it with time(NULL), 77411f7d) */
 void dm_perf_set_app_seed(dm_perf *pf, uint32_t seed);
 /* debugging: every rand() the engine takes (thread: 1 the application's) */

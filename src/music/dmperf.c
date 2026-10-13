@@ -2035,6 +2035,8 @@ uint32_t dm_perf_get_bumper_length(dm_perf *pf) { return pf->bumper_ms; }
 void dm_perf_set_app_precision(dm_perf *pf, int extended) { pf->appxprec = extended; }
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes) { pf->fixes = fixes; }
 void dm_perf_set_seed(dm_perf *pf, uint32_t seed) { pf->rnd = seed; }
+void dm_perf_set_groove(dm_perf *pf, int8_t g) { pf->groove = g; pf->hasgroove = 1; }
+int dm_perf_get_groove(dm_perf *pf, int8_t *g) { if (!pf->hasgroove) return 0; *g = pf->groove; return 1; }
 /* the application thread's msvcrt rand() state: one for the process (a style track's creation seeds it with
  * time(NULL), 77411f7d / 77412800) */
 static uint32_t g_apprnd = 1;

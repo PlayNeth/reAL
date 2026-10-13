@@ -95,6 +95,7 @@ $CC -O1 -Wno-format -o build/cfgtest.exe tests/cfgtest.c -ldsound -lole32 -luuid
 $CC -O1 -Wno-format -o build/porttest.exe tests/porttest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/theorytest.exe tests/theorytest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/styletest.exe tests/styletest.c -lole32 -luuid -ldxguid
+$CC -O1 -Wno-format -o build/stylecom.exe tests/stylecom.c -lole32 -luuid -ldxguid
 $CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -luuid -ladvapi32
 rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound

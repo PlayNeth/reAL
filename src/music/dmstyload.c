@@ -563,7 +563,7 @@ static void part_release(dms_part *p)
     for (dms_res *r = p->res, *n; r; r = n) { n = r->next; free(r); }
     free(p);
 }
-static void band_free(dm_band *b) { if (b) { free(b->inst); free(b); } }
+static void band_free(dm_band *b) { dm_band_release(b); }
 static void pattern_release(dms_pattern *p)
 {
     if (!p || --p->refs > 0) return;

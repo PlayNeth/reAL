@@ -206,7 +206,16 @@ static void load_dmbd(dm_band *b, rd r, dm_getcoll_fn getcoll, void *ctx)
 {
     uint32_t id, type; rd c;
     while (next_chunk(&r, &id, &c, &type)) {
-        if (id == FCC('L','I','S','T') && type == FCC('l','b','i','l')) {
+        if (id == FCC('g','u','i','d') && c.e - c.p >= 16) { get_guid(&b->guid, c.p); b->hasguid = 1; }
+        else if (id == FCC('L','I','S','T') && type == FCC('U','N','F','O')) {
+            rd s; uint32_t sid;
+            while (next_chunk(&c, &sid, &s, NULL))
+                if (sid == FCC('U','N','A','M')) {
+                    size_t k = 0;
+                    for (const uint8_t *p = s.p; p + 1 < s.e && k + 1 < 64; p += 2) { if (!(b->name[k] = u16(p))) break; k++; }
+                    b->name[k] = 0;
+                }
+        } else if (id == FCC('L','I','S','T') && type == FCC('l','b','i','l')) {
             rd s; uint32_t sid, st;
             while (next_chunk(&c, &sid, &s, &st))
                 if (sid == FCC('L','I','S','T') && st == FCC('l','b','i','n')) load_instrument(b, s, getcoll, ctx);
@@ -222,6 +231,15 @@ dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void
     rd r = { data, (const uint8_t *)data + size };
     load_dmbd(b, r, getcoll, ctx);
     return b;
+}
+
+void dm_band_addref(dm_band *b) { if (b) __sync_add_and_fetch(&b->refs, 1); }
+void dm_band_release(dm_band *b)
+{
+    if (!b) return;
+    if (__sync_sub_and_fetch(&b->refs, 1) >= 0) return;
+    for (int k = 0; k < b->ninst; k++) for (dm_dlrec *r = b->inst[k].dl, *n; r; r = n) { n = r->next; free(r); }
+    free(b->inst); free(b);
 }
 
 static void band_add(dm_bandtrack *t, dm_band *b)
@@ -613,6 +631,21 @@ dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *c
 /* dmime segment Load of a RIFF WAVE (77313d.. / 77328957 AddWave): one wave track (clock time, config 0x78) with
  * one part on PChannel 0 and one item at 0 lasting the wave's length; the segment's length is that, in reference
  * time (whole milliseconds, IDirectSoundWave's GetLength) */
+dm_segment *dm_band_segment(dm_band *b)
+{
+    dm_segment *s = calloc(1, sizeof(*s));
+    dm_bandtrack *t = calloc(1, sizeof(*t));
+    if (!s || !t) { free(s); free(t); return NULL; }
+    s->refs = 1;
+    s->length = 1;
+    t->autodl = 0; t->lockautodl = 1;
+    if (b) { dm_band_addref(b); band_add(t, b); }
+    dm_track *o = dm_track_new(TRK_BAND, &CLSID_BandTrack, t);
+    if (!o) { dm_track tmp = { .kind = TRK_BAND, .data = t }; free_track(&tmp); free(s); return NULL; }
+    dm_segment_insert_track(s, o, 0, 1, 0x38, 0);
+    return s;
+}
+
 dm_segment *dm_segment_from_wave(dm_wave *w)
 {
     dm_segment *s = calloc(1, sizeof(*s));
@@ -665,7 +698,7 @@ static void free_track(dm_track *t)
     case TRK_STYLE: dms_styletrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
-        for (int i = 0; i < b->nbands; i++) { free(b->bands[i]->inst); free(b->bands[i]); }
+        for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
         free(b->bands); free(b);
         break;
     }
@@ -832,6 +865,7 @@ static dm_band *band_copy(const dm_band *b)        /* 77202d94's copy of a band:
     dm_band *n = calloc(1, sizeof(*n));
     if (!n) return NULL;
     *n = *b;
+    n->refs = 0;
     n->inst = NULL; n->ninst = 0;
     if (b->ninst) {
         if (!(n->inst = malloc(b->ninst * sizeof(*n->inst)))) { free(n); return NULL; }

@@ -208,6 +208,8 @@ typedef struct {
     int smf; uint32_t sendpatch;        /* GUID_StandardMIDIFile: downloads take the GM program, the band still sends sendpatch */
 } dm_inst;
 typedef struct dm_band {
+    int refs;                           /* references beyond the first (dm_band_release) */
+    uint16_t name[64]; dm_guid guid; int hasguid;   /* its UNFO name and 'guid' */
     mtime_t logical, physical;
     dm_inst *inst; int ninst;          /* list order = reverse of the file's lbin order */
     uint32_t groupbits;
@@ -353,6 +355,10 @@ dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *c
 dm_segment *dm_segment_from_wave(dm_wave *w);
 /* a band's 'DMBD' form (the data after the form type), as dmband loads it */
 dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
+void dm_band_addref(dm_band *b);
+void dm_band_release(dm_band *b);
+/* dmband 7720322d IDirectMusicBand::CreateSegment: a segment with a band track holding the band (auto-download off) */
+dm_segment *dm_band_segment(dm_band *b);
 /* a Standard MIDI File (or RMID) as dmime imports it (dmsmf.c) */
 dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 int dm_is_midi(const void *data, size_t size);

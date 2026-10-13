@@ -154,7 +154,7 @@ static long fixed_time(void) { return g_fixtime; }
 static FILE *g_randlog;
 static void randhook(int app, int v, void *caller)
 {
-    void *a[1] = { caller };
+    (void)caller;
     fprintf(g_randlog, "R %s %lld %d\n", app ? "app" : "tr", (long long)g_now, v);
 }
 

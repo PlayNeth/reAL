@@ -563,11 +563,10 @@ static int band_download(dm_perf *pf, dm_band *b)
 }
 static void band_unload(dm_perf *pf, dm_band *b) { for (int k = 0; k < b->ninst; k++) inst_unload(pf, &b->inst[k]); }
 
-static void band_free(dm_band *b)
-{
-    for (int k = 0; k < b->ninst; k++) for (dm_dlrec *r = b->inst[k].dl, *n; r; r = n) { n = r->next; free(r); }
-    free(b->inst); free(b);
-}
+static void band_free(dm_band *b) { dm_band_release(b); }
+/* IDirectMusicBand::Download / Unload (dmband 772032ef / 7720331a) */
+int dm_band_download_to(dm_perf *pf, dm_band *b) { return band_download(pf, b); }
+void dm_band_unload_from(dm_perf *pf, dm_band *b) { band_unload(pf, b); }
 
 /* dmband 77202230: the band track's SetParam */
 static int bandtrack_setparam(dm_bandtrack *T, int prm, void *data)

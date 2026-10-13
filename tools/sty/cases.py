@@ -234,7 +234,26 @@ def case_loop(out, seed=9):
     seg.commands([(0, 0, 0, 0, 40, 20, 2), (BAR, 1, 0, 1, 60, 20, 1), (2 * BAR, 2, 0, 0, 70, 20, 0)])
     return {'loop.sty': st.build(), 'loop.sgt': seg.build()}
 
-CASES = {'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
+def case_comstyle(out, seed=10):
+    """a style with bands and motifs for the COM interfaces (tests/stylecom.c)"""
+    st = mix_style('comstyle', seed)
+    st.bands.append(band('8f6d1a10-0005-4000-8000-000000000001', 'Default Band',
+                         [(0, 0x000000, 100, 64, None), (1, 0x000018, 90, 30, None), (2, 0x000021, 80, 100, None)]))
+    st.bands.append(band('8f6d1a10-0005-4000-8000-000000000002', 'Second Band',
+                         [(0, 0x000005, 127, 64, None), (3, 0x000038, 70, 64, None)]))
+    m = st.pattern('Motif A', measures=2, groove=(1, 100), embellish=0x10)
+    m.motif = (1, 0, 0, 768 * 4, 0)
+    m.partref(st.parts[0], pchannel=9)
+    m2 = st.pattern('Motif B', measures=1, groove=(1, 100), embellish=0x10)
+    m2.motif = (0, 0, 0, 0, 0)
+    m2.partref(st.parts[1], pchannel=10)
+    st.pattern('Custom', measures=3, groove=(1, 100), embellish=0x0700).partref(st.parts[2], pchannel=2)
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000038', 'comstyle', 8 * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.style([(0, 'comstyle.sty', st.guid, st.name), (4 * BAR, 'mix1.sty', None, None)])
+    return {'comstyle.sty': st.build(), 'comstyle.sgt': seg.build()}
+
+CASES = {'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}
 
