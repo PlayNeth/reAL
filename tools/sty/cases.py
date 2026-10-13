@@ -50,7 +50,193 @@ def case_params(out):
     seg.mutes([(BAR, 0, 3), (0, 1, 0xffffffff), (2 * BAR, 0, 0xffffffff), (BAR // 2, 0, 5), (3 * BAR, 2, 2)])
     return {'params.sgt': seg.build()}
 
-CASES = {'basic': case_basic, 'params': case_params}
+def mix_style(name, gseed=0):
+    """several patterns by groove and embellishment, parts with several variations in each variation mode"""
+    import random
+    R = random.Random(gseed)
+    st = Style('8f6d1a10-0000-4000-8000-0000000001%02x' % gseed, name)
+    parts = []
+    modes = [0, 1, 2, 3, 4, 1]
+    for k in range(6):
+        nv = 1 + k % 4 + (k // 3)
+        vars_ = []
+        for v in range(nv):
+            vars_.append(R.choice([0xffffffff, 0x7fffffff, 0x3fffffff, 0x20000000 | R.getrandbits(29),
+                                   R.getrandbits(14), 0x101 | R.getrandbits(15), 0x60000000 | R.getrandbits(29)]))
+        p = st.part('8f6d1a10-0002-4000-8000-0000000000%02x' % k, measures=1 + (k == 2), variations=vars_,
+                    playmode=[DMUS_PLAYMODE_NORMALCHORD, DMUS_PLAYMODE_PEDALPOINT, DMUS_PLAYMODE_MELODIC,
+                              DMUS_PLAYMODE_FIXED, DMUS_PLAYMODE_ALWAYSPLAY, DMUS_PLAYMODE_PEDALPOINTCHORD][k],
+                    inv_lower=[0, 40, 0, 0, 30, 0][k], inv_upper=[127, 70, 127, 100, 60, 127][k])
+        for n in range(6 + 2 * k):
+            grid = R.randrange(0, 16 * p.measures)
+            mv = music_value(R.randrange(3, 6), R.randrange(0, 4), R.randrange(0, 3), R.choice([0, 0, 1, 15]))
+            if k == 3: mv = R.randrange(36, 90)
+            pm = R.choice([DMUS_PLAYMODE_NONE] * 3 + [DMUS_PLAYMODE_NORMALCHORD, DMUS_PLAYMODE_SCALE_INTERVALS,
+                                                      DMUS_PLAYMODE_CHORD_ROOT | 8, DMUS_PLAYMODE_KEY_ROOT | 4])
+            p.note(grid=grid, var=R.choice([0xffffffff, (1 << nv) - 1, R.getrandbits(nv) or 1]), dur=R.randrange(50, 900),
+                   music=mv, vel=R.randrange(40, 127), offset=R.randrange(-20, 20),
+                   timerange=R.choice([0, 0, 0, 5, 200]), durrange=R.choice([0, 0, 10]), velrange=R.choice([0, 0, 20]),
+                   inversion=R.choice([0, 0, 0, 1, 2]) if k in (1, 4) else 0, playmode=pm)
+        if k == 5:
+            p.curve(grid=2, var=0xffffffff, dur=700, reset_dur=0, start=0, end=127, etype=4, cc=7)
+            p.curve(grid=9, var=0xffffffff, dur=300, reset_dur=0, start=8192, end=12000, etype=3)
+        parts.append((p, modes[k]))
+    defs = [('slow', 1, (1, 40), 0), ('mid', 1, (30, 70), 0), ('fast', 2, (60, 100), 0), ('fill', 1, (1, 100), 1),
+            ('brk', 1, (1, 100), 2), ('intro', 1, (1, 100), 4), ('end', 1, (1, 100), 8), ('mid2', 1, (35, 65), 0)]
+    for i, (pn, meas, gr, emb) in enumerate(defs):
+        pt = st.pattern(pn, measures=meas, groove=gr, embellish=emb, rhythm=[R.choice([1, 5, 0x11, 0xf]) for _ in range(meas)])
+        for j, (p, mode) in enumerate(parts):
+            if (i + j) % 3 == 2: continue
+            pt.partref(p, pchannel=j, lock=1 if j in (1, 4) and i % 2 else 0, subchord=R.choice([0, 1, 2]), random=mode)
+    return st
+
+def mix_chords(R, nbars):
+    roots = [0, 5, 7, 9, 2, 4, 11, 3]
+    items = []
+    for b in range(nbars):
+        for beat in ([0] if b % 2 else [0, 2]):
+            r = R.choice(roots)
+            pat = R.choice([MAJOR, MINOR, MAJ7, DOM7, 0x49])
+            subs = [(pat, CMAJ_SCALE, R.choice([0xffffff, 0x0f0f0f, 0x1000000]), 0xffffffff, r, 0)]
+            if R.random() < 0.3:
+                subs.append((R.choice([MAJOR, MINOR]), CMAJ_SCALE, 0xffffff, 6, (r + 7) % 24, 0))
+            items.append((b * BAR + beat * 768, b, beat, 'c%d' % b, 0, subs))
+    return items
+
+def case_mix(out, seed=1):
+    import random
+    R = random.Random(seed)
+    st = mix_style('mix%d' % seed, seed)
+    n = 12
+    seg = Segment('8f6d1a10-1000-4000-8000-0000000000%02x' % (16 + seed), 'mix', n * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'mix%d.sty' % seed, st.guid, st.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, n))
+    cmds = []
+    for b in range(n):
+        if b == 0 or R.random() < 0.5:
+            cmds.append((b * BAR, b, 0, R.choice([0, 0, 0, 1, 2, 3, 4]), R.randrange(1, 100), R.choice([0, 10, 40]),
+                         R.choice([0, 1, 2, 3, 4, 5])))
+    seg.commands(cmds)
+    return {'mix%d.sty' % seed: st.build(), 'mix%d.sgt' % seed: seg.build()}
+
+def case_markers(out, seed=4):
+    """parts that change variation at markers (DMUS_PARTF_USE_MARKERS) and with the chords (ALIGN_CHORDS)"""
+    import random
+    R = random.Random(seed)
+    st = mix_style('mark', seed)
+    for i, p in enumerate(st.parts):
+        p.flags = [1, 3, 2, 1, 0, 3][i]
+        nv = sum(1 for v in p.variations if v)
+        for g in range(0, 16 * p.measures, R.choice([2, 4, 6])):
+            p.marker(grid=g, var=R.getrandbits(nv) or 1, flags=R.choice([1, 2, 3, 6, 7]))
+    n = 10
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000031', 'markers', n * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'mark.sty', st.guid, st.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, n))
+    seg.commands([(b * BAR, b, 0, R.choice([0, 0, 1]), R.randrange(1, 100), 20, R.choice([0, 1, 2])) for b in range(0, n, 2)])
+    return {'mark.sty': st.build(), 'markers.sgt': seg.build()}
+
+def case_dx7(out, seed=5):
+    """a DirectX 7 style (patterns at random, the DX7 variation flags)"""
+    import random
+    R = random.Random(seed)
+    st = mix_style('dx7', seed)
+    for p in st.parts: p.dx7 = True
+    n = 10
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000032', 'dx7', n * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'dx7.sty', st.guid, st.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, n))
+    seg.commands([(b * BAR, b, 0, R.choice([0, 0, 1, 2]), R.randrange(1, 100), 20, 0) for b in range(0, n, 2)])
+    return {'dx7.sty': st.build(), 'dx7.sgt': seg.build()}
+
+def case_twostyles(out, seed=6):
+    """two styles (the second in 3/4) on the style track, no time signature track"""
+    import random
+    R = random.Random(seed)
+    a = mix_style('twoa', seed)
+    b = mix_style('twob', seed + 1)
+    b.ts = (3, 4, 4)
+    for p in b.parts: p.ts = (3, 4, 4)
+    for p in b.patterns: p.ts = (3, 4, 4)
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000033', 'twostyles', 4 * BAR + 6 * 3 * 768)
+    seg.tempo([(0, 100.0)])
+    seg.style([(0, 'twoa.sty', a.guid, a.name), (4 * BAR, 'twob.sty', b.guid, b.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, 8))
+    seg.commands([(0, 0, 0, 0, 50, 10, 0), (4 * BAR, 4, 0, 0, 80, 10, 2)])
+    return {'twoa.sty': a.build(), 'twob.sty': b.build(), 'twostyles.sgt': seg.build()}
+
+def case_twots(out, seed=6):
+    d = case_twostyles(out, seed)
+    import random
+    R = random.Random(seed)
+    a = mix_style('twoa', seed)
+    b = mix_style('twob', seed + 1)
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000036', 'twots', 4 * BAR + 6 * 3 * 768)
+    seg.tempo([(0, 100.0)])
+    seg.timesig([(0, 4, 4, 4), (4 * BAR, 3, 4, 4)])
+    seg.style([(0, 'twoa.sty', a.guid, a.name), (4 * BAR, 'twob.sty', b.guid, b.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, 8))
+    seg.commands([(0, 0, 0, 0, 50, 10, 0), (4 * BAR, 4, 0, 0, 80, 10, 2)])
+    d['twots.sgt'] = seg.build()
+    return d
+
+def case_mute(out, seed=7):
+    """the mute track: parts muted and moved to other PChannels"""
+    import random
+    R = random.Random(seed)
+    st = mix_style('mute', seed)
+    n = 8
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000034', 'mute', n * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'mute.sty', st.guid, st.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, n))
+    seg.mutes([(BAR, 0, 0xffffffff), (2 * BAR, 0, 0), (BAR + 768, 2, 7), (3 * BAR, 3, 0xffffffff), (5 * BAR, 3, 3),
+               (2 * BAR + 100, 4, 9), (4 * BAR, 1, 0xffffffff), (6 * BAR, 1, 1)])
+    return {'mute.sty': st.build(), 'mute.sgt': seg.build()}
+
+def case_long(out, seed=8):
+    """patterns of several measures, parts shorter (repeating) and longer than their pattern, repeats"""
+    import random
+    R = random.Random(seed)
+    st = mix_style('long', seed)
+    for i, p in enumerate(st.parts): p.measures = [1, 3, 2, 1, 4, 2][i]
+    for i, pt in enumerate(st.patterns):
+        pt.measures = [2, 3, 1, 4, 2, 1, 2, 3][i]
+        pt.rhythm = [R.choice([1, 5, 0xf]) for _ in range(pt.measures)]
+    n = 14
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000035', 'long', n * BAR, repeats=1)
+    seg.tempo([(0, 140.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'long.sty', st.guid, st.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, n))
+    seg.commands([(b * BAR, b, 0, R.choice([0, 0, 0, 1, 3]), R.randrange(1, 100), 30, R.choice([0, 1, 2, 3, 4, 5]))
+                  for b in range(0, n, 3)])
+    return {'long.sty': st.build(), 'long.sgt': seg.build()}
+
+def case_loop(out, seed=9):
+    """a short segment repeated (the patterns start again at each loop)"""
+    import random
+    R = random.Random(seed)
+    st = mix_style('loop', seed)
+    n = 3
+    seg = Segment('8f6d1a10-1000-4000-8000-000000000037', 'loop', n * BAR, repeats=2)
+    seg.tempo([(0, 150.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'loop.sty', st.guid, st.name)])
+    seg.chords(0x00ab5ab5, mix_chords(R, n))
+    seg.commands([(0, 0, 0, 0, 40, 20, 2), (BAR, 1, 0, 1, 60, 20, 1), (2 * BAR, 2, 0, 0, 70, 20, 0)])
+    return {'loop.sty': st.build(), 'loop.sgt': seg.build()}
+
+CASES = {'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
+'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
+         'mix3': lambda o: case_mix(o, 3)}
 
 if __name__ == '__main__':
     outdir = sys.argv[1]

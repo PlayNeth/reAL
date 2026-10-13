@@ -69,8 +69,9 @@ class Part:
         self.guid, self.ts, self.measures = guid, timesig, measures
         self.variations = list(variations) + [0] * (32 - len(variations))
         self.playmode, self.inv_upper, self.inv_lower, self.flags = playmode, inv_upper, inv_lower, flags
-        self.notes, self.curves = [], []
+        self.notes, self.curves, self.markers = [], [], []
         self.name = None
+        self.dx7 = False
 
     def note(self, grid, var, dur, music, vel=100, offset=0, timerange=0, durrange=0, velrange=0, inversion=0,
              playmode=DMUS_PLAYMODE_NONE, noteflags=0):
@@ -82,9 +83,14 @@ class Part:
         self.curves.append((grid, var, dur, reset_dur, offset, start, end, reset, etype, shape, cc, flags, paramtype,
                             merge))
 
+    def marker(self, grid, var, flags=1):
+        """DMUS_IO_STYLEMARKER: mtGridStart, dwVariation, wMarkerFlags (1 start, 2 stop, 4 chord aligned)"""
+        self.markers.append((grid, var, flags))
+
     def build(self):
         prth = timesig(self.ts) + struct.pack('<32I', *self.variations) + guid_bytes(self.guid) + \
             struct.pack('<HBBB3xI', self.measures, self.playmode, self.inv_upper, self.inv_lower, self.flags)
+        if self.dx7: prth = prth[:0x9c]      # DMUS_IO_STYLEPART without dwFlags: a DirectX 7 style
         items = [chunk('prth', prth)]
         if self.notes:
             fmt = '<iIihHBBBBBBB'
@@ -96,6 +102,10 @@ class Part:
             sz = struct.calcsize(fmt)
             body = struct.pack('<I', sz) + b''.join(struct.pack(fmt, *c) for c in self.curves)
             items.append(chunk('crve', body))
+        if self.markers:
+            fmt = '<iIH'
+            body = struct.pack('<I', struct.calcsize(fmt)) + b''.join(struct.pack(fmt, *m) for m in self.markers)
+            items.append(chunk('mrkr', body))
         if self.name: items.append(unfo(self.name))
         return LIST('part', *items)
 

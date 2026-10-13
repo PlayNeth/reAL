@@ -39,9 +39,11 @@ typedef struct wstate {
 
 static int wt_rand(dm_perf *pf)     /* msvcrt rand(): per thread */
 {
-    uint32_t *r = pf->apprand ? &pf->rndapp : &pf->rnd;
+    uint32_t *r = pf->apprand ? dm_app_rand_state() : &pf->rnd;
     *r = *r * 214013u + 2531011u;
-    return (int)((*r >> 16) & 0x7fff);
+    int v = (int)((*r >> 16) & 0x7fff);
+    if (dm_rand_hook) dm_rand_hook(pf->apprand, v, __builtin_return_address(0));
+    return v;
 }
 
 /* 773245f6: t * 2^(cents/1200), truncated */

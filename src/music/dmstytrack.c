@@ -2,6 +2,9 @@
  * Their data and loading are in dmstyload.c. */
 #include "dmsty.h"
 
+static int wt_rand(dm_perf *pf);
+#include "dmstyplay.c"
+
 /* IsParamSupported: chord 77401d9e, command 77403498, mute 774153d1 */
 static int sty_isparam(const dm_track *t, int prm)
 {
@@ -10,6 +13,7 @@ static int sty_isparam(const dm_track *t, int prm)
     case TRK_COMMAND:
         return prm == PRM_COMMAND || prm == PRM_COMMAND2 || prm == PRM_COMMANDNEXT ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;
     case TRK_MUTE: return prm == PRM_MUTE ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;
+    case TRK_STYLE: return stytrack_isparam(t, prm);
     }
     return DMUS_E_TYPE_UNSUPPORTED;
 }
@@ -37,6 +41,7 @@ static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, v
         if (!data) return DM_E_POINTER;
         if (prm != PRM_MUTE) return DMUS_E_TYPE_UNSUPPORTED;
         return dms_mute_getparam(t->data, mt, next, data);
+    case TRK_STYLE: return stytrack_getparam(t, NULL, prm, mt, next, data);
     }
     return DMUS_E_GET_UNSUPPORTED;
 }
@@ -58,6 +63,7 @@ static int sty_setparam(dm_track *t, int prm, mtime_t mt, void *data)
         if (!data) return DM_E_POINTER;
         if (prm != PRM_MUTE) return DMUS_E_TYPE_UNSUPPORTED;
         return dms_mute_setparam(t->data, mt, data);
+    case TRK_STYLE: return stytrack_setparam(t, prm, mt, data);
     }
     return DMUS_E_SET_UNSUPPORTED;
 }
@@ -156,12 +162,13 @@ static int sty_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
     case TRK_CHORD: return chord_play(pf, ss, e, start, end, off, flags);
     case TRK_COMMAND: return cmd_play(pf, ss, e, start, end, off, flags);
     case TRK_MUTE: return DMUS_S_END;       /* 77415388 */
+    case TRK_STYLE: return stytrack_play(pf, ss, e, start, end, off, flags);
     }
     return DM_OK;
 }
 
 static int sty_getparam_state(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data)
 {
-    (void)state;
+    if (t->kind == TRK_STYLE) return stytrack_getparam(t, state, prm, mt, next, data);
     return sty_getparam(t, prm, mt, next, data);
 }

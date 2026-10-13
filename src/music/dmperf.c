@@ -4,6 +4,7 @@
  * Comments give the original function addresses (dmime image base 0x77300000, dmband 0x77200000) and offsets.  The
  * code keeps the original's arithmetic, orderings and quirks: event times and their order at the port depend on them. */
 #include "dmperf.h"
+#include <time.h>
 #include "dmdls.h"
 #include <stdlib.h>
 #include <string.h>
@@ -122,6 +123,7 @@ struct dm_perf {
     uint32_t rnd, rndapp;                       /* rand() of the transport thread (srand(time) at its start 7730eb7f)
                                                  * and of the application thread (seed 1) */
     int apprand;                                /* running in the application thread (PlaySegment) */
+    int hasgroove; int8_t groove;               /* GUID_PerfMasterGrooveLevel (a global parameter once set) */
     dm_toolops tops; void *tctx;                /* tool graphs and application tools (the host's) */
     void *graph;                                /* +0x24 the application's tool graph (SetGraph) */
     dm_pmsg *apphead, *apptail;                 /* messages waiting for an application tool's ProcessPMsg */
@@ -413,7 +415,7 @@ static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, v
 static int track_isparam(const dm_track *t, int prm)
 {
     switch (t->kind) {
-    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: return sty_isparam(t, prm);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: return sty_isparam(t, prm);
     case TRK_TEMPO: {
         const dm_tempotrack *T = t->data;
         if (prm != PRM_DISABLETEMPO && prm != PRM_TEMPO && prm != PRM_PRIVTEMPO && prm != PRM_ENABLETEMPO)
@@ -486,7 +488,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
         if (next) *next = i < ts->n ? ts->items[i].mt - mt : 0;
         return DM_OK;
     }
-    if (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_MUTE) return sty_getparam(t, prm, mt, next, data);
+    if (t->kind >= TRK_CHORD) return sty_getparam(t, prm, mt, next, data);
     if (t->kind == TRK_SEQ || t->kind == TRK_SYSEX) return DM_E_NOTIMPL;    /* 7730790b */
     return DMUS_E_GET_UNSUPPORTED;      /* (BandParam would need band objects; the wave track's is private) */
 }
@@ -2033,6 +2035,15 @@ uint32_t dm_perf_get_bumper_length(dm_perf *pf) { return pf->bumper_ms; }
 void dm_perf_set_app_precision(dm_perf *pf, int extended) { pf->appxprec = extended; }
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes) { pf->fixes = fixes; }
 void dm_perf_set_seed(dm_perf *pf, uint32_t seed) { pf->rnd = seed; }
+/* the application thread's msvcrt rand() state: one for the process (a style track's creation seeds it with
+ * time(NULL), 77411f7d / 77412800) */
+static uint32_t g_apprnd = 1;
+static long (*g_timefn)(void);
+uint32_t *dm_app_rand_state(void) { return &g_apprnd; }
+void dm_perf_set_app_seed(dm_perf *pf, uint32_t seed) { (void)pf; g_apprnd = seed; }
+void dm_set_time_source(long (*fn)(void)) { g_timefn = fn; }
+void dm_style_srand(void) { g_apprnd = g_timefn ? (uint32_t)g_timefn() : (uint32_t)time(NULL); }
+void (*dm_rand_hook)(int app, int value, void *caller);
 
 
 static void free_queue(dm_perf *pf, dm_queue *q)

@@ -693,7 +693,7 @@ static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
     case TRK_BAND: return bandtrack_setparam(t->data, prm, data);
     case TRK_WAVE: return wavetrack_setparam(t->data, prm, data);
     case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 7732465d */
-    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: return sty_setparam(t, prm, mt, data);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: return sty_setparam(t, prm, mt, data);
     }
     return DMUS_E_SET_UNSUPPORTED;
 }
@@ -769,6 +769,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         break;
     }
     case TRK_WAVE: wt_initplay(pf, ss, e); break;
+    case TRK_STYLE: stytrack_initplay(pf, ss, e, flags); break;
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));
@@ -785,6 +786,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
 static void track_endplay(dm_perf *pf, sstrack *e)
 {
     if (e->t->kind == TRK_WAVE) { wt_endplay(pf, e); return; }
+    if (e->t->kind == TRK_STYLE) { stytrack_endplay(e); return; }
     if (e->t->kind == TRK_SEQ && e->state) { free(((seqstate *)e->state)->ev); free(((seqstate *)e->state)->cv); }
     if (e->t->kind == TRK_BAND && e->state && ((dm_bandtrack *)e->t->data)->autodl) bandtrack_download(pf, e->t->data, 1);
     free(e->state);
@@ -800,7 +802,7 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_BAND: return band_play(pf, ss, e, start, end, off, flags);
     case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
     case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
-    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: return sty_play(pf, ss, e, start, end, off, flags);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: return sty_play(pf, ss, e, start, end, off, flags);
     }
     return DM_OK;
 }

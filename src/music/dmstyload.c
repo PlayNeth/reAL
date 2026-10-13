@@ -928,3 +928,134 @@ dms_style *dms_style_load(const uint8_t *data, size_t n, dm_getcoll_fn getcoll, 
     if (res < 0) { dms_style_release(s); return NULL; }
     return s;
 }
+
+/* ------------------------------------------------------------------ style track (Load 7741313c) */
+void dms_styletrack_free(dms_styletrack *T)
+{
+    if (!T) return;
+    for (dms_stynode *n = T->styles, *x; n; n = x) { x = n->next; dms_style_release(n->style); free(n); }
+    free(T->pchs);
+    free(T);
+}
+
+static void wstr_utf8(char *out, size_t max, rd c)
+{
+    size_t k = 0;
+    for (const uint8_t *p = c.p; p + 1 < c.e && k + 4 < max; p += 2) {
+        uint32_t ch = u16(p);
+        if (!ch) break;
+        if (ch < 0x80) out[k++] = (char)ch;
+        else if (ch < 0x800) { out[k++] = (char)(0xc0 | ch >> 6); out[k++] = (char)(0x80 | (ch & 0x3f)); }
+        else { out[k++] = (char)(0xe0 | ch >> 12); out[k++] = (char)(0x80 | ((ch >> 6) & 0x3f)); out[k++] = (char)(0x80 | (ch & 0x3f)); }
+    }
+    out[k] = 0;
+}
+
+/* 774123a0: a 'DMRF' list: the loader's style (then every part's events sorted again, 774087cf) */
+static dms_style *load_styleref(rd r, dms_getstyle_fn get, void *ctx, int32_t *hr)
+{
+    dm_guid g; int hasg = 0;
+    char file[520] = "", name[260] = "";
+    uint32_t id, size; rd c;
+    while (next_chunk(&r, &id, &c, &size)) {
+        if (id == FCC('g','u','i','d') && c.e - c.p >= 16) { get_guid(&g, c.p); hasg = 1; }
+        else if (id == FCC('f','i','l','e')) wstr_utf8(file, sizeof(file), c);
+        else if (id == FCC('n','a','m','e')) wstr_utf8(name, sizeof(name), c);
+    }
+    dms_style *s = get ? get(ctx, hasg ? &g : NULL, file[0] ? file : NULL, name[0] ? name : NULL) : NULL;
+    if (!s) { *hr = DMUS_E_NOT_FOUND_; return NULL; }
+    dms_style_resort(s);
+    *hr = 0;
+    return s;
+}
+
+static int stynode_cmp(const void *a, const void *b) { return ((const dms_stynode *)a)->t < ((const dms_stynode *)b)->t; }
+
+/* 77410c9b: the PChannels of every style (each once, the newest first; one 0 when there are none) */
+int dms_styletrack_pchs(dms_styletrack *T)
+{
+    uint32_t *l = NULL; int n = 0;
+    for (dms_stynode *x = T->styles; x; x = x->next) {
+        if (!x->style) continue;
+        for (int i = 0; i < x->style->npchs; i++) {
+            uint32_t p = x->style->pchs[i];
+            int k;
+            for (k = 0; k < n && l[k] != p; k++) {}
+            if (k < n) continue;
+            uint32_t *m = realloc(l, (n + 1) * sizeof(*m));
+            if (!m) { free(l); return DM_E_OUTOFMEMORY; }
+            l = m;
+            memmove(l + 1, l, n * sizeof(*l));
+            l[0] = p;
+            n++;
+        }
+    }
+    if (!n) { l = calloc(1, sizeof(*l)); if (!l) return DM_E_OUTOFMEMORY; n = 1; }
+    free(T->pchs);
+    T->pchs = l; T->npchs = n;
+    T->pchschanged = 1;
+    return 0;
+}
+
+/* 77412fbc / 77412b3c: the 'strf' lists ('stmp' time, 'DMRF' reference), appended; then sorted by time */
+dms_styletrack *dms_styletrack_load(const uint8_t *p, size_t n, dms_getstyle_fn get, void *ctx, int32_t *hr)
+{
+    dms_styletrack *T = calloc(1, sizeof(*T));
+    if (!T) { *hr = DM_E_OUTOFMEMORY; return NULL; }
+    rd r = { p, p + n }, c;
+    uint32_t id, size;
+    int32_t res = 0, ok = 0;
+    while (next_chunk(&r, &id, &c, &size)) {
+        if (id != FCC('L','I','S','T') || c.e - c.p < 4 || u32(c.p) != FCC('s','t','r','f')) continue;
+        rd x = { c.p + 4, c.e }, y;
+        dms_stynode *nd = calloc(1, sizeof(*nd));
+        if (!nd) { res = DM_E_OUTOFMEMORY; break; }
+        int32_t h = 0, warn = 0;
+        uint32_t xid, xs;
+        while (next_chunk(&x, &xid, &y, &xs)) {
+            if (xid == FCC('L','I','S','T') && y.e - y.p >= 4 && u32(y.p) == FCC('D','M','R','F')) {
+                rd z = { y.p + 4, y.e };
+                dms_style *s = load_styleref(z, get, ctx, &h);
+                if (h >= 0) { if (h) warn = h; dms_style_release(nd->style); nd->style = s; }
+            } else if (xid == FCC('s','t','m','p')) {
+                if (xs != 4 || y.e - y.p < 4) { h = E_FAIL_; break; }
+                nd->t = (int32_t)u32(y.p);
+            }
+        }
+        if (h < 0) { dms_style_release(nd->style); free(nd); res = h; continue; }
+        APPEND(T->styles, nd);
+        res = warn;
+        ok = 1;
+    }
+    if (res != 0 && ok) res = 0;
+    T->styles = dms_msort(T->styles, offsetof(dms_stynode, next), stynode_cmp);
+    T->gen++;
+    dms_styletrack_pchs(T);
+    *hr = res;
+    return T;
+}
+
+/* 77410b5b: the styles in [start, end) moved by -start, and the one in effect before start (unless one is at start)
+ * put first at 0; the seed and the load generation are not copied */
+dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mtime_t end)
+{
+    dms_styletrack *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    const dms_stynode *last = NULL;
+    for (const dms_stynode *x = T->styles; x; x = x->next) {
+        if (x->t < start) { last = x; continue; }
+        if (end <= x->t) continue;
+        if (x->t == start) last = NULL;
+        dms_stynode *nd = calloc(1, sizeof(*nd));
+        if (!nd) continue;
+        nd->t = x->t - start; nd->style = x->style; dms_style_addref(nd->style);
+        APPEND(C->styles, nd);
+    }
+    if (last) {
+        dms_stynode *nd = calloc(1, sizeof(*nd));
+        if (nd) { nd->style = last->style; dms_style_addref(nd->style); nd->next = C->styles; C->styles = nd; }
+    }
+    C->pchschanged = T->pchschanged; C->notify = T->notify; C->tsenabled = T->tsenabled; C->tsset = T->tsset;
+    dms_styletrack_pchs(C);
+    return C;
+}

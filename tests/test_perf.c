@@ -3,6 +3,7 @@
  * the port as "<rt> <group> <bytes>" (same format as dmgt perf). */
 #include "../src/music/dmperf.h"
 #include "../src/music/dmdls.h"
+#include "../src/music/dmsty.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -126,8 +127,41 @@ static dm_wave *getwave(void *ctx, const dm_guid *g, const char *file, const cha
     return w;
 }
 
+/* style references: the file next to the segment ('DMST' form), loaded once */
+static dms_style *getstyle(void *ctx, const dm_guid *g, const char *file, const char *name)
+{
+    static struct { char name[256]; dms_style *s; } cache[16];
+    static int n;
+    if (!file) return NULL;
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", g_dir, file);
+    for (int i = 0; i < n; i++) if (!strcmp(cache[i].name, path)) { dms_style_addref(cache[i].s); return cache[i].s; }
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *b = malloc(sz);
+    if (fread(b, 1, sz, f) != (size_t)sz || sz < 12 || memcmp(b + 8, "DMST", 4)) { fclose(f); free(b); return NULL; }
+    fclose(f);
+    int32_t hr;
+    dms_style *s = dms_style_load(b + 12, (size_t)sz - 12, getcoll, NULL, &hr);
+    free(b);
+    if (s && n < 16) { snprintf(cache[n].name, 256, "%s", path); cache[n++].s = s; dms_style_addref(s); }
+    return s;
+}
+
+static long g_fixtime;
+static long fixed_time(void) { return g_fixtime; }
+static FILE *g_randlog;
+static void randhook(int app, int v, void *caller)
+{
+    void *a[1] = { caller };
+    fprintf(g_randlog, "R %s %lld %d\n", app ? "app" : "tr", (long long)g_now, v);
+}
+
 int main(int argc, char **argv)
 {
+    if (getenv("TP_APPSEED")) { g_fixtime = strtol(getenv("TP_APPSEED"), NULL, 0); dm_set_time_source(fixed_time); }
+    if (getenv("TP_RANDLOG")) { g_randlog = fopen(getenv("TP_RANDLOG"), "w"); dm_rand_hook = randhook; }
     if (argc < 4) { fprintf(stderr, "usage: test_perf seg.sgt out.log ms [flags]\n"); return 2; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
@@ -146,7 +180,7 @@ int main(int argc, char **argv)
     dm_segment *seg = NULL;
     if (dm_is_midi(buf, sz)) seg = dm_segment_from_midi(buf, sz, gc, NULL);
     else if (sz > 12 && !memcmp((char *)buf + 8, "WAVE", 4)) { dm_wave *w = dm_wave_load(buf, sz); if (w) { wid(w); seg = dm_segment_from_wave(w); dm_wave_release(w); } }
-    else seg = dm_segment_load_ex(buf, sz, gc, getwave, NULL);
+    else { dm_loadcb cb = { gc, getwave, getstyle, NULL }; seg = dm_segment_load_cb(buf, sz, &cb); }
     if (!seg) { fprintf(stderr, "load failed\n"); return 1; }
     int ms = atoi(argv[3]);
     uint32_t flags = argc > 4 ? strtoul(argv[4], NULL, 0) : 0;
@@ -192,9 +226,9 @@ int main(int argc, char **argv)
     g_ss1 = ss;
     if (hr < 0) { fprintf(stderr, "play %08x\n", hr); return 1; }
     /* TP_STOP=<ms>: stop the segment (as dmgt DMGT_STOP); TP_NEXT=<ms>:<segment>: play a second segment */
-    int stop_ms = getenv("TP_STOP") ? atoi(getenv("TP_STOP")) : -1, next_ms = -1;
+    int stop_ms = getenv("TP_STOP") && *getenv("TP_STOP") ? atoi(getenv("TP_STOP")) : -1, next_ms = -1;
     dm_segment *seg2 = NULL;
-    if (getenv("TP_NEXT")) {
+    if (getenv("TP_NEXT") && *getenv("TP_NEXT")) {
         char *p;
         next_ms = strtol(getenv("TP_NEXT"), &p, 0);
         FILE *g = fopen(p + 1, "rb");
@@ -203,7 +237,8 @@ int main(int argc, char **argv)
         void *b2 = malloc(n2);
         if (fread(b2, 1, n2, g) != (size_t)n2) return 1;
         fclose(g);
-        seg2 = dm_segment_load(b2, n2, gc, NULL);
+        dm_loadcb cb2 = { gc, getwave, getstyle, NULL };
+        seg2 = dm_segment_load_cb(b2, n2, &cb2);
         if (seg2) dm_segment_download(pf, seg2);
     }
     for (int t = 0; t <= ms + 1500; t++) {

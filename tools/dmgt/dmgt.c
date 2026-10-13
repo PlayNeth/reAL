@@ -303,6 +303,20 @@ LIBM_THUNK1(libm_sin_thunk, call_sin)
 LIBM_THUNK1(libm_tan_thunk, call_tan)
 LIBM_THUNK1(libm_log_thunk, call_log)
 
+/* DMGT_RANDLOG=<file>: every rand() of dmstyle and dmime, with its caller, thread and virtual time */
+static FILE *g_randlog;
+static int (__cdecl *g_rand)(void);
+static int __cdecl rand_log(void)
+{
+    int v = g_rand();
+    if (g_randlog) { fprintf(g_randlog, "R %p %lu %lld %d\n", __builtin_return_address(0), GetCurrentThreadId(), (long long)g_now, v); fflush(g_randlog); }
+    return v;
+}
+
+/* DMGT_TIME=<seconds>: time() of dmime and dmstyle fixed (their srand(time(NULL)) seeds) */
+static long g_fixtime;
+static long __cdecl fixed_time(long *t) { if (t) *t = g_fixtime; return g_fixtime; }
+
 static void load_dm(const char *dir)
 {
     strcpy(g_dir, dir);
@@ -325,6 +339,15 @@ static void load_dm(const char *dir)
             patch_import_name(m, "msvcrt.dll", "_libm_sse2_log_precise", (void *)libm_log_thunk);
         }
         if (getenv("DMGT_VTIME")) { LoadLibraryA("winmm.dll"); v_hook(m); }
+        if (getenv("DMGT_TIME") && (!strcmp(g_dlls[i], "dmstyle.dll") || !strcmp(g_dlls[i], "dmime.dll"))) {
+            g_fixtime = atol(getenv("DMGT_TIME"));
+            patch_import_name(m, "msvcrt.dll", "time", (void *)fixed_time);
+        }
+        if (getenv("DMGT_RANDLOG") && (!strcmp(g_dlls[i], "dmstyle.dll") || !strcmp(g_dlls[i], "dmime.dll"))) {
+            if (!g_randlog) g_randlog = fopen(getenv("DMGT_RANDLOG"), "w");
+            g_rand = (void *)GetProcAddress(GetModuleHandleA("msvcrt.dll"), "rand");
+            patch_import_name(m, "msvcrt.dll", "rand", (void *)rand_log);
+        }
         g_mods[n++] = m;
     }
 }
@@ -775,7 +798,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     /* DMGT_APATH=1: set up like Midnight Club II: InitAudio(shared stereo+reverb, 128), four standard audiopaths of
      * 64 PChannels, the segment played on the first; DMGT_VOL="<ms>:<vol>,...": AudioPath::SetVolume calls */
     IDirectMusicAudioPath *apath = NULL;
-    long t_init = (long)time(NULL);     /* dmime's transport thread seeds rand() with time(NULL) when it starts */
+    long t_init = getenv("DMGT_TIME") ? atol(getenv("DMGT_TIME")) : (long)time(NULL);     /* dmime's transport thread seeds rand() with time(NULL) when it starts */
     if (getenv("DMGT_APATH")) {
         if (FAILED(hr = my_cocreate(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&perf))) die("performance", hr);
         IDirectMusic *dmi = (IDirectMusic *)dm;
@@ -840,7 +863,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         }
     }
     g_ev = fopen(out, "w");
-    if (g_ev) fprintf(g_ev, "# time %ld %ld\n", t_init, (long)time(NULL));
+    if (g_ev) fprintf(g_ev, "# time %ld %ld\n", t_init, getenv("DMGT_TIME") ? t_init : (long)time(NULL));
     if (getenv("DMGT_NOTIFY")) {
         const char *ty = getenv("DMGT_NTYPES") ? getenv("DMGT_NTYPES") : "spm";
         g_nf = fopen(getenv("DMGT_NOTIFY"), "w");
@@ -856,7 +879,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
      * another segment with the same flags */
     DWORD stop_ms = getenv("DMGT_STOP") ? atoi(getenv("DMGT_STOP")) : 0, next_ms = 0;
     IDirectMusicSegment8 *sg2 = NULL;
-    if (getenv("DMGT_NEXT")) {
+    if (getenv("DMGT_NEXT") && *getenv("DMGT_NEXT")) {
         char *p;
         next_ms = strtoul(getenv("DMGT_NEXT"), &p, 0);
         MultiByteToWideChar(CP_ACP, 0, p + 1, -1, w, MAX_PATH);

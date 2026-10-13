@@ -4,6 +4,7 @@
 #define REAL_DMSTY_H
 #include "dmi.h"
 #include "dmtheory.h"
+typedef struct dms_style dms_style;
 
 /* ------------------------------------------------------------------ chord track (CChordTrack 77402b98, 0x3c) */
 typedef struct dms_chord {          /* DMChord (0x20) */
@@ -125,7 +126,7 @@ typedef struct dms_pattern {        /* CDirectMusicPattern (0x48) */
     dms_mtime *markers;             /* +0x40 */
     uint32_t flags;                 /* +0x44 */
 } dms_pattern;
-typedef struct dms_style {
+struct dms_style {
     int refs;
     dm_guid guid; int hasguid;      /* +0x04 */
     uint16_t category[64];          /* +0x14 */
@@ -141,7 +142,7 @@ typedef struct dms_style {
     uint32_t *pchs; int npchs;      /* +0x54 newest first */
     uint32_t flags;                 /* +0x58 1: DX8 */
     void *wrapper;                  /* the COM object (weak) */
-} dms_style;
+};
 
 /* a style file's 'DMST' form (the data after the form type) */
 dms_style *dms_style_load(const uint8_t *p, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr);
@@ -155,6 +156,30 @@ const uint8_t *dms_part_ts(const dms_part *pt, const dms_style *s, const dms_pat
 /* 77401b7f: clocks per beat; 7740625b: a grid position in clocks */
 int32_t dms_beat_clocks(const uint8_t *ts);
 int32_t dms_grid_clocks(const uint8_t *ts, uint16_t grid);
+
+/* ------------------------------------------------------------------ style track (CStyleTrack 774128f4; StyleTrackInfo) */
+typedef struct dms_stynode {        /* +0 time, +4 IDirectMusicStyle, +8 next */
+    struct dms_stynode *next;
+    mtime_t t;
+    dms_style *style;
+} dms_stynode;
+typedef struct {
+    dms_stynode *styles;            /* +0x08 sorted by time after Load */
+    uint32_t *pchs; int npchs;      /* +0x0c +0x10 every style's PChannels (each once) */
+    int notify;                     /* +0x14 GUID_NOTIFICATION_MEASUREANDBEAT */
+    int tsenabled, tsset;           /* +0x18 +0x1c GUID_EnableTimeSig / DisableTimeSig */
+    int pchschanged;                /* +0x20 */
+    int32_t seed;                   /* +0x24 GUID_SeedVariations */
+    uint32_t gen;                   /* +0x2c load generation */
+} dms_styletrack;
+/* a style reference (DMRF): the loader's style, with a reference for the caller */
+typedef dm_getstyle_fn dms_getstyle_fn;
+/* the 'sttr' list's data (after its type) */
+dms_styletrack *dms_styletrack_load(const uint8_t *p, size_t n, dms_getstyle_fn get, void *ctx, int32_t *hr);
+void dms_styletrack_free(dms_styletrack *T);
+dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mtime_t end);
+/* 77410c9b: the PChannels of all the styles */
+int dms_styletrack_pchs(dms_styletrack *T);
 
 /* dmstyle's list merge sort (77402021 split, 77402056 merge, the same for every list): cmp(a, b) != 0 when a
  * goes before b; next at nextoff in every element */
