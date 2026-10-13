@@ -357,7 +357,95 @@ def case_compose(out, seed=15):
             'cmap2.cdm': cmap1('cmap2', '8f6d1a10-0006-4000-8000-000000000002', loadname='Second Map'),
             'compsty.sty': st.build(), 'template.sgt': seg.build()}
 
-CASES = {'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def cmap_dag(name, guid, seed, layers=10, width=3):
+    """a layered chord map (connections only go deeper, so no path comes back to an entry), with signposts and
+    cadences for the common chords"""
+    import random
+    R = random.Random(seed)
+    sc = CMAJ_SCALE
+    kinds = [(MAJOR, 0), (MIN, 2), (MIN, 4), (MAJOR, 5), (MAJOR, 7), (MIN, 9), (DOM7, 7), (DIM, 11), (MAJ7, 0), (MIN, 2)]
+    names = ['C', 'Dm', 'Em', 'F', 'G', 'Am', 'G7', 'Bdim', 'Cmaj7', 'Dm7']
+    subs = [(pat, sc, R.choice([0xffffff, 0x0f0f0f]), root, 0, 0, 0xffffffff) for pat, root in kinds]
+    C = lambda i: (names[i], [i, i, i, i] if R.random() < 0.8 else [i, i, (i + 3) % 10, i])
+    main = [0, 3, 4, 5, 1, 2]
+    ents, cid = [], 1
+    layer_ids = []
+    for L in range(layers):
+        ids = []
+        chords = R.sample(range(10), width) if L else main[:width + 1]
+        if 2 <= L: chords += R.sample(main, 2)
+        for ci in chords:
+            fl = (2 if L <= 2 else 0) | (4 if L >= 3 and ci in main else 0)
+            ents.append([fl, cid, ci, []])
+            ids.append(len(ents) - 1)
+            cid += 1
+        layer_ids.append(ids)
+    for L in range(layers - 1):
+        for e in layer_ids[L]:
+            targets = R.sample(layer_ids[L + 1], min(len(layer_ids[L + 1]), R.choice([1, 2, 3])))
+            if L + 2 < layers and R.random() < 0.3: targets.append(R.choice(layer_ids[L + 2]))
+            for t in targets:
+                mn = R.choice([1, 1, 2])
+                ents[e][3].append((0, R.randrange(1, 60), mn, mn + R.choice([0, 1, 2, 3]), ents[t][1]))
+    entries = [(fl, cid, C(ci), nx) for fl, cid, ci, nx in ents]
+    pal = [C(R.randrange(10)) for r in range(24)]
+    groups = [0x0101, 0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0200, 0x0400, 0x1000, 0x2000, 0x0102, 0x8001, 0x8002,
+              0x8004, 0x0100]
+    sps = []
+    for g in groups:
+        ci = R.choice(main)
+        fl = R.choice([0, 0, 2, 4, 6])
+        cads = []
+        if fl & 2: cads.append(C(R.choice([4, 6, 1])))
+        if fl & 4: cads.append(C(R.choice([4, 3, 1, 6])))
+        sps.append((g, fl, C(ci), cads))
+    # the last signpost's chord has a name the loader cannot read (at the file's end): keep a plain one there
+    sps.append((0x4000, 0, C(0), []))
+    return chordmap(guid, name, 0x00ab5ab5, subs, pal, entries, sps)
+
+def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4)):
+    bar = 768 * ts[0] * 4 // ts[1]
+    seg = Segment(guid, name, nbars * bar)
+    seg.tempo([(0, 100.0)])
+    seg.timesig([(0, ts[0], ts[1], ts[2])])
+    seg.style([(0, style + '.sty', None, style)])
+    cmds, m = [], 0
+    while m < nbars:
+        cmds.append((m * bar, m, 0, R.choice([0, 0, 0, 1, 2, 3, 4]), R.randrange(1, 100), 0, 0))
+        m += R.choice([1, 2, 3, 4])
+    seg.commands(cmds)
+    sp, m = [], 0
+    groups = [0x0101, 0x0001, 0x0002, 0x0004, 0x0008, 0x0010, 0x0020, 0x0200, 0x0400, 0x1000, 0x2000, 0x8001, 0x8002, 0x0100]
+    while m < nbars:
+        sp.append((m * bar, R.choice(groups), m))
+        m += R.choice([1, 2, 2, 3, 4])
+    seg.signposts(sp)
+    seg.chordmaps([(t * bar, f + '.cdm', None, f) for t, f in cmaps])
+    return seg.build()
+
+def case_compose2(out, seed=16):
+    """layered chord maps and templates for the composer (tests/comptest.c t1..t5)"""
+    import random
+    R = random.Random(seed)
+    files = {'cmapa.cdm': cmap_dag('cmapa', '8f6d1a10-0006-4000-8000-00000000000a', 1),
+             'cmapb.cdm': cmap_dag('cmapb', '8f6d1a10-0006-4000-8000-00000000000b', 2, layers=12, width=4),
+             'cmapc.cdm': cmap_dag('cmapc', '8f6d1a10-0006-4000-8000-00000000000c', 3, layers=8, width=2)}
+    st = basic_style('compsty')
+    st.chordmaps = [('cmapa.cdm', None, 'cmapa')]
+    files['compsty.sty'] = st.build()
+    st3 = Style('8f6d1a10-0000-4000-8000-0000000000f3', 'compsty3', timesig=(3, 4, 4))
+    p = st3.part('8f6d1a10-0001-4000-8000-0000000000f3', measures=1, playmode=DMUS_PLAYMODE_NORMALCHORD)
+    p.note(grid=0, var=0xffffffff, dur=600, music=music_value(4, 0, 0))
+    st3.pattern('main', measures=1).partref(p, pchannel=0)
+    files['compsty3.sty'] = st3.build()
+    files['t1.sgt'] = comp_template('t1', '8f6d1a10-1000-4000-8000-000000000041', R, 16, 'compsty', [(0, 'cmapa')])
+    files['t2.sgt'] = comp_template('t2', '8f6d1a10-1000-4000-8000-000000000042', R, 24, 'compsty', [(0, 'cmapa'), (8, 'cmapb'), (16, 'cmapc')])
+    files['t3.sgt'] = comp_template('t3', '8f6d1a10-1000-4000-8000-000000000043', R, 12, 'compsty3', [(0, 'cmapb')], ts=(3, 4, 4))
+    files['t4.sgt'] = comp_template('t4', '8f6d1a10-1000-4000-8000-000000000044', R, 20, 'compsty', [(0, 'cmapc'), (5, 'cmapa')])
+    files['t5.sgt'] = comp_template('t5', '8f6d1a10-1000-4000-8000-000000000045', R, 32, 'compsty', [(0, 'cmapb')])
+    return files
+
+CASES = {'compose2': case_compose2, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

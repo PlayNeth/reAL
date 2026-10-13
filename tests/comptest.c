@@ -118,6 +118,44 @@ int main(int argc, char **argv)
     WCHAR dir[MAX_PATH];
     GetCurrentDirectoryW(MAX_PATH, dir);
     IDirectMusicLoader8_SetSearchDirectory(ld, &GUID_DirectMusicAllTypes, dir, FALSE);
+    if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
+        IDirectMusicComposer *cp = NULL;
+        HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);
+        printf("create composer %08lx\n", hr);
+        IDirectMusicChordMap *ca = NULL;
+        IDirectMusicStyle8 *st = NULL;
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapa.cdm", (void **)&ca);
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"compsty.sty", (void **)&st);
+        for (int a = 1; a < argc; a++) {
+            WCHAR w[MAX_PATH];
+            MultiByteToWideChar(CP_ACP, 0, argv[a], -1, w, MAX_PATH);
+            IDirectMusicSegment8 *tp = NULL;
+            hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&tp);
+            printf("load %s %08lx\n", argv[a], hr);
+            if (!tp) continue;
+            for (int k = 0; k < 6; k++) {
+                IDirectMusicSegment *out = NULL;
+                WORD act = (WORD)(k % 4);
+                int given = k >= 4;
+                hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, given ? (IDirectMusicStyle *)st : NULL, (IDirectMusicSegment *)tp,
+                                                                     given ? (WORD)(k - 3) : act, given ? ca : NULL, &out);
+                printf("%s compose %d: %08lx\n", argv[a], k, hr);
+                if (out) {
+                    IDirectMusicSegment8 *o8 = NULL;
+                    IDirectMusicSegment_QueryInterface(out, &IID_IDirectMusicSegment8, (void **)&o8);
+                    dump(o8, "composed");
+                    IDirectMusicSegment8_Release(o8);
+                    IDirectMusicSegment_Release(out);
+                }
+            }
+            IDirectMusicSegment8_Release(tp);
+        }
+        if (st) IDirectMusicStyle8_Release(st);
+        if (ca) IDirectMusicChordMap_Release(ca);
+        if (cp) IDirectMusicComposer_Release(cp);
+        IDirectMusicLoader8_Release(ld);
+        return 0;
+    }
     IDirectMusicChordMap *c1 = NULL;
     HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmap1.cdm", (void **)&c1);
     printf("load cmap1 %08lx\n", hr);
