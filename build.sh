@@ -16,7 +16,7 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffer.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
+SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reAL-Music: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
@@ -37,6 +37,10 @@ for f in $EXACT_SRCS; do
     $CC $CFLAGS_EXACT -c -o "$o" "$f"
     OBJS="$OBJS $o"
 done
+# dsdmo.dll's effects, bit for bit: no fused multiply-adds either
+o=build/obj/dsfx.o
+$CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/dsfx.c
+OBJS="$OBJS $o"
 for f in $MUSIC_SRCS; do
     o=build/obj/music_$(basename "$f" .c).o
     $CC $CFLAGS_EXACT -ffp-contract=off -DDM_FPU_NATIVE -Isrc -c -o "$o" "$f"
@@ -82,6 +86,9 @@ $CC -O1 -o build/aptest.exe tests/aptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/dopptest.exe tests/dopptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/comtest.exe tests/comtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/tooltest.exe tests/tooltest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -Wno-format -o build/fxtest.exe tests/fxtest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -luuid -ladvapi32
+rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
@@ -103,6 +110,8 @@ if command -v cc >/dev/null 2>&1; then
     cc -O1 -std=gnu11 -Wall -o build/test_dls tests/test_dls.c src/music/dmdls.c
     cc -O1 -std=gnu11 -Wall -o build/test_sf2 tests/test_sf2.c src/music/sf2dls.c src/music/dmdls.c src/music/msynth.c -lm
     cc -O2 -std=gnu11 -Wall -ffp-contract=off -o build/test_wavesrev tests/test_wavesrev.c src/music/wavesrev.c -lm
+    # dsdmo's effects against dsdmo.dll itself: tools/dsfx/cmp.sh
+    cc -O1 -std=gnu11 -Wall -ffp-contract=off -Isrc -o build/test_dsfx tests/test_dsfx.c src/dsfx.c src/music/wavesrev.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_msynth tests/test_msynth.c src/music/msynth.c -lm
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then

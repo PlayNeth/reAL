@@ -75,7 +75,7 @@ static HRESULT WINAPI ds_CreateSoundBuffer(IDirectSound8 *iface, LPCDSBUFFERDESC
         return DSERR_INVALIDPARAM;
 
     if (desc->dwFlags & DSBCAPS_PRIMARYBUFFER) {
-        if (desc->lpwfxFormat || desc->dwBufferBytes) return DSERR_INVALIDPARAM;
+        if (desc->lpwfxFormat || desc->dwBufferBytes || (desc->dwFlags & DSBCAPS_CTRLFX)) return DSERR_INVALIDPARAM;
         /* one primary object per device object; hand out new references */
         if (!This->primary) {
             HRESULT hr = rl_buffer_create(This->dev, This, desc, &This->primary);

@@ -178,6 +178,15 @@ struct rl_buffer {
     struct rl_dsound *owner;    /* IDirectSound that created it (weak); NULL once that is released */
     BOOL          dead;         /* owner released: stopped for good, like real DirectSound */
 
+    /* effects (SetFX): processed into a copy of the buffer ahead of the play cursor, which the voice plays */
+    struct rl_fxchain *fx;
+    BYTE         *fxdata;
+    uint32_t      fx_head;      /* next frame to process (== frames: the end of a non-looping buffer reached) */
+    uint32_t      fx_lead;      /* frames processed ahead of the play cursor */
+    uint32_t      fx_last;      /* the play cursor (frames) when that was worked out */
+    LONG          locks;        /* Lock calls not yet unlocked (SetFX is refused meanwhile) */
+    BOOL          fx_placed;    /* a LOCDEFER buffer's effects have their resources (Play / AcquireResources to Stop) */
+
     /* EAX per-buffer */
     float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */
     eax2_buffer   eax2;
@@ -191,6 +200,7 @@ int32_t rl_buffer_sink_cents(rl_buffer *b);
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out);
 void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released */
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */
+void    rl_buffer_fx_run(rl_buffer *b, UINT32 out_frames, UINT32 out_rate);   /* lock held: effects ahead of the mix */
 /* a known FPU state for float work on the game's threads (and the game's own state back after) */
 unsigned int rl_fpu_enter(void);
 void    rl_fpu_leave(unsigned int cw);

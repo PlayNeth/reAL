@@ -1,4 +1,4 @@
-/* Waves reverb (DirectSound effect GUID_DSFX_WAVES_REVERB), a port of dsdmo.dll's 16-bit paths: the parameters are
+/* Waves reverb (DirectSound effect GUID_DSFX_WAVES_REVERB), a port of dsdmo.dll's 16-bit and float paths: the parameters are
  * turned into Q15 coefficients and the network runs in integer arithmetic, so the output matches Microsoft's. */
 #ifndef REAL_WAVESREV_H
 #define REAL_WAVESREV_H
@@ -15,5 +15,8 @@ int wavesrev_set(wavesrev *w, float ingain, float mix, float time, float hfratio
 /* in place on interleaved 16-bit frames */
 void wavesrev_stereo16(wavesrev *w, int16_t *buf, uint32_t frames);
 void wavesrev_mono16(wavesrev *w, int16_t *buf, uint32_t frames);
+/* and on 32-bit float frames */
+void wavesrev_stereo_float(wavesrev *w, float *buf, uint32_t frames);
+void wavesrev_mono_float(wavesrev *w, float *buf, uint32_t frames);
 
 #endif

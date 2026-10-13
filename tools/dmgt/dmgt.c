@@ -292,6 +292,16 @@ __attribute__((naked)) static void libm_sqrt_thunk(void)
     __asm__("subl $12, %esp\n movsd %xmm0, (%esp)\n call _call_sqrt\n fstpl (%esp)\n"
             " movsd (%esp), %xmm0\n addl $12, %esp\n ret");
 }
+__attribute__((used)) double __cdecl call_cos(double a) { return cos(a); }
+__attribute__((used)) double __cdecl call_sin(double a) { return sin(a); }
+__attribute__((used)) double __cdecl call_tan(double a) { return tan(a); }
+__attribute__((used)) double __cdecl call_log(double a) { return log(a); }
+#define LIBM_THUNK1(name, fn) __attribute__((naked)) static void name(void) { \
+    __asm__("subl $12, %esp\n movsd %xmm0, (%esp)\n call _" #fn "\n fstpl (%esp)\n movsd (%esp), %xmm0\n addl $12, %esp\n ret"); }
+LIBM_THUNK1(libm_cos_thunk, call_cos)
+LIBM_THUNK1(libm_sin_thunk, call_sin)
+LIBM_THUNK1(libm_tan_thunk, call_tan)
+LIBM_THUNK1(libm_log_thunk, call_log)
 
 static void load_dm(const char *dir)
 {
@@ -309,6 +319,10 @@ static void load_dm(const char *dir)
         if (!strcmp(g_dlls[i], "dsdmo.dll")) {
             patch_import_name(m, "msvcrt.dll", "_libm_sse2_pow_precise", (void *)libm_pow_thunk);
             patch_import_name(m, "msvcrt.dll", "_libm_sse2_sqrt_precise", (void *)libm_sqrt_thunk);
+            patch_import_name(m, "msvcrt.dll", "_libm_sse2_cos_precise", (void *)libm_cos_thunk);
+            patch_import_name(m, "msvcrt.dll", "_libm_sse2_sin_precise", (void *)libm_sin_thunk);
+            patch_import_name(m, "msvcrt.dll", "_libm_sse2_tan_precise", (void *)libm_tan_thunk);
+            patch_import_name(m, "msvcrt.dll", "_libm_sse2_log_precise", (void *)libm_log_thunk);
         }
         if (getenv("DMGT_VTIME")) { LoadLibraryA("winmm.dll"); v_hook(m); }
         g_mods[n++] = m;
@@ -929,6 +943,105 @@ static int cmd_wavesrev(int argc, char **argv)
     return 0;
 }
 
+/* ------------------------------------------------------------------ dmo: any dsdmo.dll effect on raw PCM
+ * dmgt <dmdir> dmo <effect> <in.raw> <out.raw> <rate> <channels> <bits> <chunk frames> [parameters...]
+ * <effect>: gargle chorus flanger echo distortion compressor parameq waves i3dl2 (XP's dsdmo); the parameters go to SetAllParameters in
+ * the order of the effect's DSFX structure (none: the defaults).  PCM is processed in place through
+ * IMediaObjectInPlace::Process, after Discontinuity, as DirectSound does.  Prints the types it accepts and the
+ * parameters it ends up with. */
+static const struct { const char *name; GUID clsid, iid; const char *types; } s_fx[] = {
+    { "gargle", { 0xdafd8210, 0x5711, 0x4b91, { 0x9f, 0xe3, 0xf7, 0x5b, 0x7a, 0xe2, 0x79, 0xbf } }, { 0xd616f352, 0xd622, 0x11ce, { 0xaa, 0xc5, 0x00, 0x20, 0xaf, 0x0b, 0x99, 0xa3 } }, "uu" },
+    { "chorus", { 0xefe6629c, 0x81f7, 0x4281, { 0xbd, 0x91, 0xc9, 0xd6, 0x04, 0xa9, 0x5a, 0xf6 } }, { 0x880842e3, 0x145f, 0x43e6, { 0xa9, 0x34, 0xa7, 0x18, 0x06, 0xe5, 0x05, 0x47 } }, "ffffifi" },
+    { "flanger", { 0xefca3d92, 0xdfd8, 0x4672, { 0xa6, 0x03, 0x74, 0x20, 0x89, 0x4b, 0xad, 0x98 } }, { 0x903e9878, 0x2c92, 0x4072, { 0x9b, 0x2c, 0xea, 0x68, 0xf5, 0x39, 0x67, 0x83 } }, "ffffifi" },
+    { "echo", { 0xef3e932c, 0xd40b, 0x4f51, { 0x8c, 0xcf, 0x3f, 0x98, 0xf1, 0xb2, 0x9d, 0x5d } }, { 0x8bd28edf, 0x50db, 0x4e92, { 0xa2, 0xbd, 0x44, 0x54, 0x88, 0xd1, 0xed, 0x42 } }, "ffffi" },
+    { "distortion", { 0xef114c90, 0xcd1d, 0x484e, { 0x96, 0xe5, 0x09, 0xcf, 0xaf, 0x91, 0x2a, 0x21 } }, { 0x8ecf4326, 0x455f, 0x4d8b, { 0xbd, 0xa9, 0x8d, 0x5d, 0x3e, 0x9e, 0x3e, 0x0b } }, "fffff" },
+    { "compressor", { 0xef011f79, 0x4000, 0x406d, { 0x87, 0xaf, 0xbf, 0xfb, 0x3f, 0xc3, 0x9d, 0x57 } }, { 0x4bbd1154, 0x62f6, 0x4e2c, { 0xa1, 0x5c, 0xd3, 0xb6, 0xc4, 0x17, 0xf7, 0xa0 } }, "ffffff" },
+    { "parameq", { 0x120ced89, 0x3bf4, 0x4173, { 0xa1, 0x32, 0x3c, 0xb4, 0x06, 0xcf, 0x32, 0x31 } }, { 0xc03ca9fe, 0xfe90, 0x4204, { 0x80, 0x78, 0x82, 0x33, 0x4c, 0xd1, 0x77, 0xda } }, "fff" },
+    { "waves", { 0x87fc0268, 0x9a55, 0x4360, { 0x95, 0xaa, 0x00, 0x4a, 0x1d, 0x9d, 0xe2, 0x6c } }, { 0x46858c3a, 0x0dc6, 0x45e3, { 0xb7, 0x60, 0xd4, 0xee, 0xf1, 0x6c, 0xb3, 0x25 } }, "ffff" },
+    { "i3dl2", { 0xef985e71, 0xd5c7, 0x42d4, { 0xba, 0x4d, 0x2d, 0x07, 0x3e, 0x2e, 0x96, 0xf4 } }, { 0x4b166a6a, 0x0d66, 0x43f3, { 0x80, 0xe3, 0xee, 0x62, 0x80, 0xde, 0xe1, 0xa4 } }, "iifffififfff" },
+};
+static void print_params(const char *types, const DWORD *v)
+{
+    for (int k = 0; types[k]; k++) {
+        if (types[k] == 'f') { float f; memcpy(&f, &v[k], 4); fprintf(stderr, " %.9g", f); }
+        else fprintf(stderr, " %ld", (long)v[k]);
+    }
+    fprintf(stderr, "\n");
+}
+static int cmd_dmo(int argc, char **argv)
+{
+    int e;
+    for (e = 0; e < (int)(sizeof(s_fx) / sizeof(s_fx[0])); e++) if (!strcmp(argv[3], s_fx[e].name)) break;
+    if (e == (int)(sizeof(s_fx) / sizeof(s_fx[0]))) die("unknown effect", E_INVALIDARG);
+    IClassFactory *cf;
+    HRESULT hr = get_class(&s_fx[e].clsid, &IID_IClassFactory, (void **)&cf);
+    if (FAILED(hr)) die("class", hr);
+    IMediaObject *mo;
+    if (FAILED(hr = IClassFactory_CreateInstance(cf, NULL, &IID_IMediaObject, (void **)&mo))) die("CreateInstance", hr);
+    DWORD rate = strtoul(argv[6], NULL, 0), ch = strtoul(argv[7], NULL, 0), bits = strtoul(argv[8], NULL, 0);
+    DWORD chunk = strtoul(argv[9], NULL, 0);
+    WAVEFORMATEX wf = { bits == 32 ? 3 : WAVE_FORMAT_PCM, (WORD)ch, rate, rate * ch * bits / 8, (WORD)(ch * bits / 8), (WORD)bits, 0 };
+    DMO_MEDIA_TYPE mt = { 0 };
+    mt.majortype = MT_Audio; mt.subtype = MST_PCM; mt.bFixedSizeSamples = TRUE; mt.lSampleSize = wf.nBlockAlign;
+    if (bits == 32) mt.subtype.Data1 = 3;
+    mt.formattype = FMT_WaveFormatEx; mt.cbFormat = sizeof(wf); mt.pbFormat = (BYTE *)&wf;
+    hr = IMediaObject_SetInputType(mo, 0, &mt, 0);
+    fprintf(stderr, "SetInputType %08lx\n", hr);
+    if (FAILED(hr)) return 1;
+    if (FAILED(hr = IMediaObject_SetOutputType(mo, 0, &mt, 0))) die("SetOutputType", hr);
+    if (getenv("DMO_DISC_FIRST")) IMediaObject_Discontinuity(mo, 0);       /* parameters set after it */
+    IUnknown *fx;
+    if (FAILED(hr = IMediaObject_QueryInterface(mo, &s_fx[e].iid, (void **)&fx))) die("QI effect", hr);
+    DWORD v[16] = { 0 };
+    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)fx)[4])(fx, v);
+    fprintf(stderr, "defaults"); print_params(s_fx[e].types, v);
+    if (!strcmp(s_fx[e].name, "i3dl2")) {       /* DMO_I3DL2_QUALITY / DMO_I3DL2_PRESET: SetQuality, SetPreset first */
+        LONG q = 0; DWORD pr = 0;
+        if (getenv("DMO_I3DL2_QUALITY")) {
+            hr = ((HRESULT (WINAPI *)(void *, LONG))(*(void ***)fx)[7])(fx, atol(getenv("DMO_I3DL2_QUALITY")));
+            fprintf(stderr, "SetQuality %08lx\n", hr);
+        }
+        if (getenv("DMO_I3DL2_PRESET")) {
+            hr = ((HRESULT (WINAPI *)(void *, DWORD))(*(void ***)fx)[5])(fx, strtoul(getenv("DMO_I3DL2_PRESET"), NULL, 0));
+            fprintf(stderr, "SetPreset %08lx\n", hr);
+        }
+        ((HRESULT (WINAPI *)(void *, LONG *))(*(void ***)fx)[8])(fx, &q);
+        ((HRESULT (WINAPI *)(void *, DWORD *))(*(void ***)fx)[6])(fx, &pr);
+        memset(v, 0, sizeof(v));
+        ((HRESULT (WINAPI *)(void *, void *))(*(void ***)fx)[4])(fx, v);
+        fprintf(stderr, "quality %ld preset %lu params", q, pr); print_params(s_fx[e].types, v);
+    }
+    int np = (int)strlen(s_fx[e].types);
+    if (argc > 10) {
+        for (int k = 0; k < np && 10 + k < argc; k++) {
+            if (s_fx[e].types[k] == 'f') { float f = (float)atof(argv[10 + k]); memcpy(&v[k], &f, 4); }
+            else v[k] = (DWORD)strtol(argv[10 + k], NULL, 0);
+        }
+        hr = ((HRESULT (WINAPI *)(void *, void *))(*(void ***)fx)[3])(fx, v);
+        fprintf(stderr, "SetAllParameters %08lx\n", hr);
+        memset(v, 0, sizeof(v));
+        ((HRESULT (WINAPI *)(void *, void *))(*(void ***)fx)[4])(fx, v);
+        fprintf(stderr, "parameters"); print_params(s_fx[e].types, v);
+    }
+    if (!getenv("DMO_DISC_FIRST")) IMediaObject_Discontinuity(mo, 0);
+    void *ip;
+    if (FAILED(hr = IMediaObject_QueryInterface(mo, &IID_MOInPlace, &ip))) die("QI InPlace", hr);
+    FILE *f = fopen(argv[4], "rb");
+    if (!f) die("open input", E_FAIL);
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    BYTE *b = malloc(n);
+    fread(b, 1, n, f); fclose(f);
+    DWORD csz = chunk * wf.nBlockAlign;
+    for (long o = 0; o < n; o += csz) {
+        DWORD sz = (DWORD)(n - o < (long)csz ? n - o : csz);
+        hr = ((HRESULT (WINAPI *)(void *, ULONG, BYTE *, REFERENCE_TIME, DWORD))(*(void ***)ip)[3])(ip, sz, b + o, 0, 0);
+        if (FAILED(hr)) die("Process", hr);
+    }
+    f = fopen(argv[5], "wb");
+    fwrite(b, 1, n, f); fclose(f);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { fprintf(stderr, "usage: dmgt <dmdir> synth <dls> <out.wav> <script>\n"); return 2; }
@@ -938,6 +1051,7 @@ int main(int argc, char **argv)
     load_dm(argv[1]);
     if (!strcmp(argv[2], "synth") && argc >= 6) return cmd_synth(argv[3], argv[4], argv[5]);
     if (!strcmp(argv[2], "wavesrev") && argc >= 7) return cmd_wavesrev(argc, argv);
+    if (!strcmp(argv[2], "dmo") && argc >= 10) return cmd_dmo(argc, argv);
     if (!strcmp(argv[2], "perf") && argc >= 6) return cmd_perf(argv[3], argv[4], atoi(argv[5]), argc > 6 ? strtoul(argv[6], NULL, 0) : 0);
     fprintf(stderr, "unknown command\n");
     return 2;

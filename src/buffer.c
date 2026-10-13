@@ -1,6 +1,7 @@
 /* reAL - IDirectSoundBuffer8 + IDirectSound3DBuffer + IDirectSoundNotify + IKsPropertySet
  *        + IDirectSound3DListener (primary buffer) */
 #include "real.h"
+#include "fx.h"
 #include <math.h>
 #include <stdio.h>
 #include <float.h>
@@ -270,10 +271,12 @@ static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
     list_remove_all(dev, This);
     if (!This->is_primary) {
         dev->n_buffers--;
-        if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers--;
+        if (!(This->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers--;
     }
     LeaveCriticalSection(&dev->lock);
 
+    rl_fxchain_free(This->fx);
+    HeapFree(GetProcessHeap(), 0, This->fxdata);
     if (This->shared && !InterlockedDecrement(&This->shared->ref)) {
         HeapFree(GetProcessHeap(), 0, This->shared->data);
         HeapFree(GetProcessHeap(), 0, This->shared);
@@ -290,7 +293,9 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
     rl_buffer *This = BUF(iface);
     if (!caps || caps->dwSize < sizeof(*caps)) return DSERR_INVALIDPARAM;
     caps->dwFlags = This->desc.dwFlags;
-    if (!(caps->dwFlags & DSBCAPS_LOCSOFTWARE)) {
+    if ((caps->dwFlags & (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER | DSBCAPS_LOCSOFTWARE)) == (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) {
+        /* effects buffers are software ones (Windows 7): a deferred one is placed by Play / AcquireResources */
+    } else if (!(caps->dwFlags & DSBCAPS_LOCSOFTWARE)) {
         caps->dwFlags &= ~DSBCAPS_LOCDEFER;
         caps->dwFlags |= DSBCAPS_LOCHARDWARE;
     }
@@ -311,6 +316,73 @@ static DWORD write_lead_bytes(rl_buffer *This)
     return frames * This->voice.block;
 }
 
+/* effects: a fresh start at the play cursor (Play, SetCurrentPosition call Discontinuity).  DirectSound's mixer then
+ * runs the chain on the 32 frames before the cursor first (from the end of the buffer at 0, looping or not) */
+#define FX_PREROLL 32
+static void fx_chunk(rl_buffer *b, uint32_t at, uint32_t n)
+{
+    uint32_t block = b->voice.block;
+    BYTE *d = b->fxdata + (size_t)at * block;
+    memcpy(d, b->shared->data + (size_t)at * block, (size_t)n * block);
+    rl_fxchain_process(b->fx, d, n * block);
+}
+static void fx_restart(rl_buffer *b)
+{
+    uint32_t frames = rl_voice_frames(&b->voice), play = (uint32_t)(b->voice.pos >> 32);
+    rl_fxchain_discontinuity(b->fx);
+    b->fx_head = b->fx_last = play;
+    b->fx_lead = 0;
+    if (!frames || play >= frames || !b->fxdata) return;
+    uint32_t pre = FX_PREROLL < frames ? FX_PREROLL : frames - 1, at = (play + frames - pre) % frames;
+    unsigned int cw = rl_fpu_enter();
+    while (pre) {
+        uint32_t n = pre < frames - at ? pre : frames - at;
+        fx_chunk(b, at, n);
+        at = (at + n) % frames;
+        pre -= n;
+    }
+    rl_fpu_leave(cw);
+}
+
+/* before the mixer reads the voice: the effects run on the next frames of the application's data, copied to the
+ * buffer the voice plays, until DirectSound's 150 ms (in 20 ms pieces) are processed ahead - or at least what this
+ * mix will read */
+void rl_buffer_fx_run(rl_buffer *b, UINT32 out_frames, UINT32 out_rate)
+{
+    if (!b->fx || !b->fxdata) return;
+    uint32_t frames = rl_voice_frames(&b->voice);
+    uint32_t play = (uint32_t)(b->voice.pos >> 32);
+    if (!frames || play >= frames) return;
+    uint32_t moved = (play + frames - b->fx_last) % frames;
+    b->fx_last = play;
+    if (moved > b->fx_lead) {           /* the mix got past what was processed: carry on from the cursor */
+        b->fx_head = play;
+        b->fx_lead = 0;
+    } else b->fx_lead -= moved;
+    uint32_t rate = orig_rate(b);
+    double speed = (double)b->voice.rate * (b->voice.pitch > 0.0f ? b->voice.pitch : 1.0f) / (out_rate ? out_rate : 44100);
+    /* 150 ms on from where the pre-roll started */
+    uint32_t want = rate * 150 / 1000 - FX_PREROLL, need = (uint32_t)(out_frames * speed) + 64, chunk = rate / 50;
+    if (want < need) want = need;
+    if (want > frames - 1) want = frames - 1;
+    if (!chunk) chunk = 1;
+    unsigned int cw = rl_fpu_enter();
+    while (b->fx_lead < want) {
+        if (b->fx_head >= frames) {
+            if (!b->voice.looping) break;
+            b->fx_head = 0;
+        }
+        uint32_t n = chunk;
+        if (n > frames - b->fx_head) n = frames - b->fx_head;
+        if (n > want - b->fx_lead + chunk) n = want - b->fx_lead + chunk;
+        fx_chunk(b, b->fx_head, n);
+        b->fx_head += n;
+        b->fx_lead += n;
+        if (b->fx_head >= frames && b->voice.looping) b->fx_head = 0;
+    }
+    rl_fpu_leave(cw);
+}
+
 static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD play, LPDWORD write)
 {
     rl_buffer *This = BUF(iface);
@@ -323,7 +395,10 @@ static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD
     DWORD p = rl_voice_play_bytes(&This->voice);
     DWORD w = p;
     if (This->voice.playing) {
-        w = p + write_lead_bytes(This);
+        DWORD lead = write_lead_bytes(This);
+        /* with effects, the cursor is past what is processed already (DirectSound's write-ahead) */
+        if (This->fx && This->fx_lead * This->voice.block > lead) lead = This->fx_lead * This->voice.block;
+        w = p + lead;
         if (This->voice.size) w %= This->voice.size;
     }
     LeaveCriticalSection(&This->dev->lock);
@@ -387,7 +462,10 @@ static HRESULT WINAPI dsb_GetStatus(IDirectSoundBuffer8 *iface, LPDWORD status)
         if (This->voice.looping) s |= DSBSTATUS_LOOPING;
     }
     LeaveCriticalSection(&This->dev->lock);
-    if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) s |= DSBSTATUS_LOCHARDWARE;
+    if (This->desc.dwFlags & DSBCAPS_CTRLFX) {
+        /* effects buffers are DirectSound's own (software) ones: the location only for a deferred one, as there */
+        if ((This->desc.dwFlags & DSBCAPS_LOCDEFER) && This->fx_placed) s |= DSBSTATUS_LOCSOFTWARE;
+    } else if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) s |= DSBSTATUS_LOCHARDWARE;
     else s |= DSBSTATUS_LOCSOFTWARE;
     *status = s;
     return DS_OK;
@@ -427,6 +505,7 @@ static HRESULT WINAPI dsb_Lock(IDirectSoundBuffer8 *iface, DWORD offset, DWORD b
             *b2 = bytes - (size - offset);
         }
     }
+    InterlockedIncrement(&This->locks);
     LOG_TRACE("Buffer[%d]::Lock off %lu bytes %lu flags %lx -> %lu + %lu", This->id, (unsigned long)offset,
               (unsigned long)bytes, (unsigned long)flags, (unsigned long)*b1, (unsigned long)(b2 ? *b2 : 0));
     return DS_OK;
@@ -452,6 +531,13 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
             /* make sure a deferred position set before Play is not lost */
             rl_buffer_update_gains(This);
         }
+        if (This->fx) {
+            if (This->desc.dwFlags & DSBCAPS_LOCDEFER) {
+                rl_fxchain_place(This->fx, TRUE);
+                This->fx_placed = TRUE;
+            }
+            fx_restart(This);
+        }
         rl_voice_start(&This->voice);
         if (!This->in_play_list) rl_device_start_voice(This->dev, This);
     }
@@ -466,6 +552,7 @@ static HRESULT WINAPI dsb_SetCurrentPosition(IDirectSoundBuffer8 *iface, DWORD p
     if (pos >= This->voice.size) return DSERR_INVALIDPARAM;
     EnterCriticalSection(&This->dev->lock);
     rl_voice_jump(&This->voice, (uint64_t)(pos / This->voice.block) << 32);
+    if (This->fx && This->voice.playing) fx_restart(This);    /* stopped: Play makes the fresh start */
     LeaveCriticalSection(&This->dev->lock);
     return DS_OK;
 }
@@ -530,6 +617,10 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
     } else {
         BOOL was = This->voice.playing;
         This->voice.playing = 0;
+        if ((This->desc.dwFlags & (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) == (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) {
+            This->fx_placed = FALSE;        /* a deferred buffer gives its effects' resources up */
+            rl_fxchain_place(This->fx, FALSE);
+        }
         if (This->in_play_list) rl_device_stop_voice(This->dev, This);
         if (was) rl_fire_stop(&This->voice, rl_signal_event);
     }
@@ -539,8 +630,10 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
 
 static HRESULT WINAPI dsb_Unlock(IDirectSoundBuffer8 *iface, LPVOID p1, DWORD b1, LPVOID p2, DWORD b2)
 {
-    (void)iface; (void)p1; (void)b1; (void)p2; (void)b2;
-    /* data is written in place; nothing to do */
+    rl_buffer *This = BUF(iface);
+    (void)p1; (void)b1; (void)p2; (void)b2;
+    /* data is written in place; only the count of open locks is kept (SetFX is refused while one is open) */
+    if (InterlockedDecrement(&This->locks) < 0) InterlockedIncrement(&This->locks);
     return DS_OK;
 }
 
@@ -549,27 +642,71 @@ static HRESULT WINAPI dsb_Restore(IDirectSoundBuffer8 *iface) { (void)iface; ret
 static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFFECTDESC fx, LPDWORD results)
 {
     rl_buffer *This = BUF(iface);
-    if (!(This->desc.dwFlags & DSBCAPS_CTRLFX)) return DSERR_CONTROLUNAVAIL;
-    if (This->voice.playing) return DSERR_INVALIDCALL;
+    /* DirectSound's order (tests/fxtest.c): the arguments, the buffer's caps, its state */
+    if (count ? !fx : (fx || results)) return DSERR_INVALIDPARAM;
+    for (DWORD i = 0; i < count; i++)
+        if (fx[i].dwSize != sizeof(DSEFFECTDESC) || fx[i].dwReserved1 || fx[i].dwReserved2 ||
+            (fx[i].dwFlags & ~(DSFX_LOCHARDWARE | DSFX_LOCSOFTWARE))) return DSERR_INVALIDPARAM;
+    if (This->is_primary || !(This->desc.dwFlags & DSBCAPS_CTRLFX)) return DSERR_CONTROLUNAVAIL;
+    EnterCriticalSection(&This->dev->lock);
+    if (This->voice.playing || This->locks > 0) {
+        LeaveCriticalSection(&This->dev->lock);
+        LOG_CALL("Buffer[%d]::SetFX(%lu): playing or locked", This->id, (unsigned long)count);
+        return DSERR_INVALIDCALL;
+    }
+    /* the old chain goes first, whatever becomes of the new one */
+    rl_fxchain *old = This->fx;
+    This->fx = NULL;
+    This->voice.data = This->shared->data;
+    LeaveCriticalSection(&This->dev->lock);
+    rl_fxchain_free(old);
+    LOG_CALL("Buffer[%d]::SetFX(%lu)", This->id, (unsigned long)count);
     if (!count) return DS_OK;
-    if (!fx) return DSERR_INVALIDPARAM;
-    LOG_CALL("Buffer[%d]::SetFX(%lu) - DMO effects not supported", This->id, (unsigned long)count);
-    if (results) for (DWORD i = 0; i < count; i++) results[i] = DSFXR_UNKNOWN;
-    return DSERR_FXUNAVAILABLE;
+
+    HRESULT hr;
+    BOOL defer = (This->desc.dwFlags & DSBCAPS_LOCDEFER) != 0;     /* a new chain is not placed yet */
+    This->fx_placed = FALSE;
+    rl_fxchain *c = rl_fxchain_create(&This->fmt.Format, count, fx, results, defer, &hr);
+    if (!c) return hr;
+    if (!This->fxdata) This->fxdata = HeapAlloc(GetProcessHeap(), 0, This->voice.size);
+    if (!This->fxdata) { rl_fxchain_free(c); return DSERR_OUTOFMEMORY; }
+    memset(This->fxdata, This->voice.sfmt == RL_U8 ? 0x80 : 0, This->voice.size);
+    EnterCriticalSection(&This->dev->lock);
+    This->fx = c;
+    This->voice.data = This->fxdata;
+    This->fx_head = This->fx_last = (uint32_t)(This->voice.pos >> 32);
+    This->fx_lead = 0;
+    LeaveCriticalSection(&This->dev->lock);
+    return hr;
 }
 
 static HRESULT WINAPI dsb_AcquireResources(IDirectSoundBuffer8 *iface, DWORD flags, DWORD count, LPDWORD results)
 {
-    (void)iface; (void)flags;
-    if (results) for (DWORD i = 0; i < count; i++) results[i] = DSFXR_LOCHARDWARE;
-    return DS_OK;
+    rl_buffer *This = BUF(iface);
+    (void)flags;
+    EnterCriticalSection(&This->dev->lock);
+    HRESULT hr = DS_OK;
+    if (!(This->desc.dwFlags & DSBCAPS_LOCDEFER)) {
+        hr = DSERR_INVALIDCALL;         /* not a deferred buffer (the effects' state is still given) */
+        rl_fxchain_status(This->fx, results, count);
+    } else if (count != rl_fxchain_count(This->fx) || (count && !results)) hr = DSERR_INVALIDPARAM;
+    else {
+        if (This->fx) { rl_fxchain_place(This->fx, TRUE); This->fx_placed = TRUE; }
+        rl_fxchain_status(This->fx, results, count);
+    }
+    LeaveCriticalSection(&This->dev->lock);
+    return hr;
 }
 
 static HRESULT WINAPI dsb_GetObjectInPath(IDirectSoundBuffer8 *iface, REFGUID obj, DWORD idx, REFGUID iid, LPVOID *out)
 {
-    (void)iface; (void)obj; (void)idx; (void)iid;
-    if (out) *out = NULL;
-    return DSERR_OBJECTNOTFOUND;
+    rl_buffer *This = BUF(iface);
+    if (!(This->desc.dwFlags & DSBCAPS_CTRLFX)) return DSERR_CONTROLUNAVAIL;
+    if (!obj || !iid || !out) return DSERR_INVALIDPARAM;
+    EnterCriticalSection(&This->dev->lock);
+    HRESULT hr = rl_fxchain_get_object(This->fx, obj, idx, iid, out);
+    LeaveCriticalSection(&This->dev->lock);
+    return hr;
 }
 
 static IDirectSoundBuffer8Vtbl dsb_vtbl = {
@@ -1457,6 +1594,23 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
 
     rl_sfmt sfmt;
     HRESULT hr = parse_format(desc->lpwfxFormat, &b->fmt, &sfmt);
+    if (SUCCEEDED(hr) && (desc->dwFlags & DSBCAPS_CTRLFX)) {
+        /* effects buffers (Windows 7): IDirectSound8 only, software, not static, PCM 8/16 or float, at most two
+         * channels, at least DSBSIZE_FX_MIN ms */
+        const WAVEFORMATEX *w = &b->fmt.Format;
+        if (owner && !owner->is_ds8) hr = DSERR_DS8_REQUIRED;
+        else if (desc->dwFlags & DSBCAPS_LOCHARDWARE) hr = E_NOTIMPL;
+        else if ((desc->dwFlags & DSBCAPS_STATIC) || w->nChannels > 2 ||
+                 (sfmt != RL_U8 && sfmt != RL_S16 && sfmt != RL_F32)) hr = DSERR_INVALIDPARAM;
+        else if ((unsigned long long)desc->dwBufferBytes * 1000 < (unsigned long long)DSBSIZE_FX_MIN * w->nAvgBytesPerSec)
+            hr = DSERR_BUFFERTOOSMALL;
+        if (FAILED(hr)) {
+            LOG_CALL("CreateSoundBuffer: CTRLFX refused (%08lx)", (unsigned long)hr);
+            HeapFree(GetProcessHeap(), 0, b);
+            return hr;
+        }
+        if (!(desc->dwFlags & DSBCAPS_LOCDEFER)) b->desc.dwFlags |= DSBCAPS_LOCSOFTWARE;
+    }
     if (FAILED(hr)) {
         LOG_CALL("CreateSoundBuffer: bad format (tag %u)", desc->lpwfxFormat ? desc->lpwfxFormat->wFormatTag : 0);
         HeapFree(GetProcessHeap(), 0, b);
@@ -1505,7 +1659,7 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     EnterCriticalSection(&dev->lock);
     list_add_all(dev, b);
     dev->n_buffers++;
-    if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;
+    if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
     rl_buffer_update_gains(b);
     LeaveCriticalSection(&dev->lock);
 
@@ -1549,7 +1703,7 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     rl_buffer_update_gains(b);
     list_add_all(dev, b);
     dev->n_buffers++;
-    if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;
+    if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
     LeaveCriticalSection(&dev->lock);
     rl_device_addref(dev);
 

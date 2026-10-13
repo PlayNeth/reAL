@@ -1,0 +1,25 @@
+LIBRARY msvcrx.dll
+EXPORTS
+_libm_sse2_cos_precise=libm_cos
+_libm_sse2_sin_precise=libm_sin
+_libm_sse2_tan_precise=libm_tan
+_libm_sse2_log_precise=libm_log
+_libm_sse2_pow_precise=libm_pow
+_libm_sse2_sqrt_precise=libm_sqrt
+_XcptFilter=msvcrt._XcptFilter
+free=msvcrt.free
+_amsg_exit=msvcrt._amsg_exit
+malloc=msvcrt.malloc
+_vsnwprintf=msvcrt._vsnwprintf
+_initterm=msvcrt._initterm
+_except_handler4_common=msvcrt._except_handler4_common
+modf=msvcrt.modf
+_purecall=msvcrt._purecall
+wcstombs=msvcrt.wcstombs
+_callnewh=msvcrt._callnewh
+memcpy=msvcrt.memcpy
+_CIsinh=msvcrt._CIsinh
+__CxxFrameHandler3=msvcrt.__CxxFrameHandler3
+ceil=msvcrt.ceil
+floor=msvcrt.floor
+memset=msvcrt.memset

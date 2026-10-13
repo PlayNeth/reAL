@@ -1,5 +1,6 @@
 /* Waves reverb, ported from dsdmo.dll (10.0.26100, image base 0x10000000): coefficient setup 10003210, Q15
- * conversion 10002eb0, delay layout 100030d0, 16-bit stereo 10003b30 and mono 10003770.  The setup is single
+ * conversion 10002eb0, delay layout 100030d0, 16-bit stereo 10003b30 and mono 10003770, float mono 10003f30 and
+ * stereo 100042b0 (the same network on floats in the same memory).  The setup is single
  * precision float (SSE) with pow/sqrt in double, then everything runs in 32-bit integers.  See wavesrev.h. */
 #include "wavesrev.h"
 #include <stdlib.h>
@@ -118,8 +119,8 @@ void wavesrev_reset(wavesrev *w)
 
 int wavesrev_set(wavesrev *w, float ingain, float mix, float time, float hfratio)
 {
-    if (!(ingain >= -96.0f && ingain <= 0.0f) || !(mix >= -96.0f && mix <= 0.0f) ||
-        !(time >= 0.001f && time <= 3000.0f) || !(hfratio >= 0.001f && hfratio <= 0.999f)) return -1;
+    if (ingain < -96.0f || ingain > 0.0f || mix < -96.0f || mix > 0.0f ||      /* comiss: NaN passes */
+        time < 0.001f || time > 3000.0f || hfratio < 0.001f || hfratio > 0.999f) return -1;
     w->ingain = ingain; w->mix = mix; w->time = time; w->hfratio = hfratio;
     setup(w, ingain, mix, time, hfratio);
     return 0;
@@ -218,3 +219,55 @@ void wavesrev_mono16(wavesrev *w, int16_t *buf, uint32_t frames)
     }
     B[0] = p; B[1] = pa;
 }
+
+/* 10003f30 (mono) and 100042b0 (stereo): the network in float; the input gets 1e-30 added (no denormals), a mono
+ * input is halved and its dry part added to both halves of the sum */
+static void wavesrev_float(wavesrev *w, float *buf, uint32_t frames, int stereo)
+{
+    uint32_t *B = w->mem;
+    float *F = (float *)(void *)w->mem;
+    const float tiny = 1.0000000031710769e-30f;     /* 10002940 */
+    uint32_t pa = B[1], p = B[0];
+    uint32_t i0 = (w->d[0] + 4 + p) & 0x3fff, i1 = (w->d[1] + 4 + p) & 0x3fff;
+    uint32_t i2 = (w->d[2] + 4 + p) & 0x3fff, i3 = (w->d[3] + 4 + p) & 0x3fff;
+    float *L0 = &F[i0 + 2], *L1 = &F[i1 + 3], *L2 = &F[i2 + 4], *L3 = &F[i3 + 5];
+    for (uint32_t n = 0; n < frames; n++) {
+        i0 = (i0 - 4) & 0x3fff; i1 = (i1 - 4) & 0x3fff; i2 = (i2 - 4) & 0x3fff; i3 = (i3 - 4) & 0x3fff;
+        float dl, dr, a0, a1;
+        if (stereo) {
+            float xl = buf[2 * n] + tiny, xr = buf[2 * n + 1] + tiny;
+            a0 = w->fwet * xl; dr = w->fdry * xr; a1 = w->fwet * xr; dl = w->fdry * xl;
+        } else {
+            float x = buf[n] * 0.5f + tiny;
+            dl = dr = x * w->fdry; a0 = a1 = x * w->fwet;
+        }
+        float *c0 = &F[i0 + 2], *c1 = &F[i1 + 3], *c2 = &F[i2 + 4], *c3 = &F[i3 + 5];
+        float g = w->fap, k = w->fa0;
+        uint32_t q = pa & 0x7ff, r = (w->ap[0] + pa) & 0x7ff;
+        float u9 = k * F[r + 0x4002] + g * *c1;
+        float u7 = k * F[r + 0x4003] - *c0 * g;
+        F[q + 0x4002] = u7 * g + *c0;
+        F[q + 0x4003] = *c1 - u9 * g;
+        *c0 = u9; *c1 = u7;
+        k = w->fa1;
+        r = (w->ap[1] + pa) & 0x7ff;
+        float v9 = k * F[r + 0x4802] + g * *c3;
+        float u8 = k * F[r + 0x4803] - *c2 * g;
+        F[q + 0x4802] = u8 * g + *c2;
+        F[q + 0x4803] = *c3 - v9 * g;
+        *c2 = v9; *c3 = u8;
+        float ol = *c0 + *c2 + dl, orr = u8 + *c1 + dr;
+        F[p + 2] = *c0 * w->f[0] + a0 + w->f[1] * *L0;
+        F[p + 3] = w->f[2] * *c1 + a1 + w->f[3] * *L1;
+        F[p + 4] = *c2 * w->f[4] - a1 + w->f[5] * *L2;
+        F[p + 5] = w->f[6] * *c3 + a0 + *L3 * w->f[7];
+        L0 = c0; L1 = c1; L2 = c2; L3 = c3;
+        p = (p - 4) & 0x3fff;
+        pa = (pa - 2) & 0x7ff;
+        if (stereo) { buf[2 * n] = ol; buf[2 * n + 1] = orr; }
+        else buf[n] = orr + ol;
+    }
+    B[1] = pa; B[0] = p;
+}
+void wavesrev_mono_float(wavesrev *w, float *buf, uint32_t frames) { wavesrev_float(w, buf, frames, 0); }
+void wavesrev_stereo_float(wavesrev *w, float *buf, uint32_t frames) { wavesrev_float(w, buf, frames, 1); }
