@@ -3312,11 +3312,28 @@ static IDirectMusicLoader8Vtbl ld_vtbl = { ld_qi, ld_addref, ld_release, ld_geto
     ld_cacheobj, ld_releaseobj, ld_clearcache, ld_enablecache, ld_enum, ld_gc, ld_releasebyunk, ld_loadfile };
 
 /* ------------------------------------------------------------------ class creation */
+/* test hooks: REAL_MUSIC_TIME fixes time() for the rand() seeds (as tests do to Microsoft's DLLs); REAL_MUSIC_RANDLOG
+ * logs the application thread's rand() calls */
+static long g_fixtime;
+static long fixed_time(void) { return g_fixtime; }
+static FILE *g_randlog;
+static void randlog(int app, int v, void *caller) { if (g_randlog && app) { fprintf(g_randlog, "R %p %d\n", caller, v); fflush(g_randlog); } }
+static void test_hooks(void)
+{
+    static int done;
+    char b[MAX_PATH];
+    if (done) return;
+    done = 1;
+    if (GetEnvironmentVariableA("REAL_MUSIC_TIME", b, sizeof(b))) { g_fixtime = strtol(b, NULL, 0); dm_set_time_source(fixed_time); }
+    if (GetEnvironmentVariableA("REAL_MUSIC_RANDLOG", b, sizeof(b)) && (g_randlog = fopen(b, "w"))) dm_rand_hook = randlog;
+}
+
 HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
 {
     char b1[64], b2[64];
     LOG_CALL("music: create %s (%s)", guidstr(clsid, b1), guidstr(riid, b2));
     *out = NULL;
+    test_hooks();
     dm_wave_set_decoder(acm_decode);
     if (IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave)) {
         rm_wave *o = new_wave(NULL);
@@ -3369,6 +3386,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         bnd_release(&b->IDirectMusicBand_iface);
         return hr;
     }
+    if (IsEqualCLSID(clsid, &RM_CLSID_DirectMusicComposer)) return composer_create(riid, out);
     if (IsEqualCLSID(clsid, &RM_CLSID_DirectMusicChordMap)) {
         rm_chordmap *m = new_chordmap(NULL);
         if (!m) return E_OUTOFMEMORY;
@@ -3394,5 +3412,5 @@ BOOL rm_handles(REFCLSID clsid)
            IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) || IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicStyle) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectMusicBand) ||
-           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicChordMap);
+           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicChordMap) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicComposer);
 }

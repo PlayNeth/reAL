@@ -89,4 +89,9 @@ dmc_sptrack *dmc_sptrack_clone(const dmc_sptrack *T, mtime_t start, mtime_t end)
 /* IPersistStream::Save (7728af59): the 'sgnp' chunk; returns the bytes (malloc), *n their count */
 uint8_t *dmc_sptrack_save(const dmc_sptrack *T, size_t *n);
 
+/* the composer (dmcompose.c).  ComposeSegmentFromTemplate (77287974 with flags 3): the template's chords composed
+ * with the style (NULL: the template's) and chord map (NULL: the template's chord map track); a new segment */
+struct dms_style;
+dm_segment *dmc_compose_template(dm_segment *tmpl, struct dms_style *style, dmc_chordmap *cm, int activity, int *hr);
+
 #endif

@@ -20,7 +20,7 @@ SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffe
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reAL-Music: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
-MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c"
+MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
 CFLAGS="$CFLAGS_EXACT -ffast-math"
 
@@ -97,6 +97,7 @@ $CC -O1 -Wno-format -o build/theorytest.exe tests/theorytest.c -lole32 -luuid -l
 $CC -O1 -Wno-format -o build/styletest.exe tests/styletest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/stylecom.exe tests/stylecom.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/cmapcom.exe tests/cmapcom.c -lole32 -luuid -ldxguid
+$CC -O1 -Wno-format -o build/comptest.exe tests/comptest.c -lole32 -luuid -ldxguid
 $CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -luuid -ladvapi32
 rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
@@ -116,7 +117,7 @@ if command -v cc >/dev/null 2>&1; then
     cc -O2 -std=gnu11 -Wall -o build/test_eax4 tests/test_eax4.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_fx tests/test_fx.c src/eax4dsp.c -lm
     # reAL-Music performance engine against dmime captures (tools/dmgt perf, DMGT_VTIME=1)
-    cc -O1 -std=gnu11 -Wall -o build/test_perf tests/test_perf.c src/music/dmperf.c src/music/dmseg.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmtheory.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c -lm
+    cc -O1 -std=gnu11 -Wall -o build/test_perf tests/test_perf.c src/music/dmperf.c src/music/dmseg.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmtheory.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c -lm
     cc -O1 -std=gnu11 -Wall -o build/test_dls tests/test_dls.c src/music/dmdls.c
     cc -O1 -std=gnu11 -Wall -o build/test_sf2 tests/test_sf2.c src/music/sf2dls.c src/music/dmdls.c src/music/msynth.c -lm
     cc -O2 -std=gnu11 -Wall -ffp-contract=off -o build/test_wavesrev tests/test_wavesrev.c src/music/wavesrev.c -lm

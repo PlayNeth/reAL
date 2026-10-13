@@ -36,7 +36,8 @@ static int next_chunk(rd *r, chk *c)
 }
 static int is_list(const chk *c, uint32_t type) { return (c->id == FCC('L','I','S','T') || c->id == FCC('R','I','F','F')) && c->data.e - c->data.p >= 4 && c->type == type; }
 static rd list_body(const chk *c) { rd r = { c->data.p + 4, c->data.e, c->data.end }; return r; }
-/* a stream Read of n bytes at the chunk's data: it is not bounded by the chunk (only by the file); returns the count */
+/* a stream Read of n bytes at the chunk's data: it is not bounded by the chunk, only by the file (a read past the
+ * file's end fails, as the loader's file stream's does); returns the count */
 static size_t stream_read(const chk *c, void *dst, size_t n)
 {
     size_t k = (size_t)(c->data.end - c->data.p) < n ? (size_t)(c->data.end - c->data.p) : n;
@@ -111,7 +112,7 @@ static int32_t load_chord(dmc_chord *ch, rd r, const subtab *tab)
         if (c.id == FCC('I','N','A','M')) {
             uint8_t b[24 + 8];
             memset(b, 0, sizeof(b));
-            stream_read(&c, b, 24);
+            if (stream_read(&c, b, 24) < 24) continue;     /* (a read past the file's end fails: no name) */
             b[24] = 'I'; b[25] = 'N'; b[26] = 'A'; b[27] = 'M';
             b[28] = (uint8_t)c.size; b[29] = (uint8_t)(c.size >> 8); b[30] = (uint8_t)(c.size >> 16); b[31] = (uint8_t)(c.size >> 24);
             int k = 0;
@@ -121,7 +122,7 @@ static int32_t load_chord(dmc_chord *ch, rd r, const subtab *tab)
             hn = 0;
         } else if (c.id == FCC('s','b','c','n')) {
             uint8_t b[8] = { 0 };
-            stream_read(&c, b, 8);
+            if (stream_read(&c, b, 8) < 8) continue;
             hs = 0;
             chord_clear(ch);
             dmc_subnode *head = NULL;

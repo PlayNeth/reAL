@@ -430,6 +430,7 @@ static const CLSID s_CLSID_DirectSoundWave = { 0x8a667154, 0xf9cb, 0x11d2, { 0xa
 static const CLSID s_CLSID_DirectMusicStyle = { 0xd2ac288a, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const CLSID s_CLSID_DirectMusicBand = { 0x79ba9e00, 0xb6ee, 0x11d1, { 0x86, 0xbe, 0x00, 0xc0, 0x4f, 0xbf, 0x8f, 0xef } };
 static const CLSID s_CLSID_DirectMusicChordMap = { 0xd2ac288f, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const CLSID s_CLSID_DirectMusicComposer = { 0xd2ac2890, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const struct { const CLSID *clsid; const char *dll; } s_music_classes[] = {
     { &CLSID_DirectMusicLoader, "dmloader.dll" },
     { &CLSID_DirectMusicPerformance, "dmime.dll" },
@@ -440,6 +441,7 @@ static const struct { const CLSID *clsid; const char *dll; } s_music_classes[] =
     { &s_CLSID_DirectMusicStyle, "dmstyle.dll" },
     { &s_CLSID_DirectMusicBand, "dmband.dll" },
     { &s_CLSID_DirectMusicChordMap, "dmcompos.dll" },
+    { &s_CLSID_DirectMusicComposer, "dmcompos.dll" },
 };
 #define MUSIC_PREV "reAL.previous"
 
