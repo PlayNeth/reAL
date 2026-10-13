@@ -305,7 +305,54 @@ def case_pattern(out, seed=13, flags=None):
     seg.chords(0x00ab5ab5, mix_chords(R, n))
     return {'pattern.sgt' if not flags else 'patmark.sgt': seg.build()}
 
-CASES = {'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+MIN, DIM = 0x89, 0x49
+def cmap1(name='cmap1', guid='8f6d1a10-0006-4000-8000-000000000001', loadname=None):
+    sc = CMAJ_SCALE
+    subs = [(MAJOR, sc, 0xffffff, 0, 0, 0, 0xffffffff), (MIN, sc, 0xffffff, 2, 0, 0, 0xffffffff),
+            (MIN, sc, 0xffffff, 4, 0, 0, 0xffffffff), (MAJOR, sc, 0xffffff, 5, 0, 0, 0xffffffff),
+            (MAJOR, sc, 0xffffff, 7, 0, 0, 0xffffffff), (MIN, sc, 0xffffff, 9, 0, 0, 0xffffffff),
+            (DOM7, sc, 0x0f0f0f, 7, 0, 0, 0xffffffff), (DIM, sc, 0xffffff, 11, 0, 0, 0xffffffff),
+            (MAJ7, sc, 0xffffff, 0, 0, 0, 0xffffffff), (MAJOR, 0xad5ad5, 0xffffff, 2, 2, 0, 0xffffffff)]
+    names = ['C', 'Dm', 'Em', 'F', 'G', 'Am', 'G7', 'Bdim', 'Cmaj7', 'D']
+    C = lambda i: (names[i], [i, i, i, i])
+    pal = [C([0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 7][r % 12]) for r in range(24)]
+    pal[13] = ('LongChordName1', [8, 8, 8, 8])
+    E = lambda i, cid, fl, nx: (fl, cid, C(i), nx)
+    ent = [E(0, 1, 2 | 4, [(0, 20, 1, 4, 2), (0, 30, 2, 4, 4), (0, 10, 1, 2, 6), (0, 20, 2, 8, 5)]),
+           E(1, 2, 0, [(0, 50, 1, 4, 5), (0, 30, 1, 2, 7)]),
+           E(2, 3, 2, [(0, 40, 2, 4, 6), (0, 20, 1, 4, 4)]),
+           E(3, 4, 2, [(0, 40, 1, 4, 5), (0, 20, 2, 4, 1), (0, 20, 1, 2, 2)]),
+           E(4, 5, 2 | 4, [(0, 60, 2, 4, 1), (0, 20, 1, 4, 6), (0, 10, 1, 1, 3)]),
+           E(5, 6, 0, [(0, 30, 1, 4, 2), (0, 30, 2, 2, 4), (0, 10, 1, 4, 3)]),
+           E(6, 7, 4, [(0, 80, 1, 4, 1), (0, 5, 1, 1, 9)]),
+           E(7, 8, 0, [(0, 50, 1, 2, 1), (0, 10, 1, 4, 3)]),
+           E(8, 9, 2, [(0, 50, 1, 4, 4), (0, 50, 1, 4, 2), (0, 0, 1, 1, 0)]),
+           E(9, 10, 4, [(0, 40, 2, 4, 5)])]
+    sps = [(0x0001 | 0x0100, 0, C(0), []), (0x0001, 2, C(0), [C(6)]), (0x0002 | 0x0400, 0, C(3), []),
+           (0x0004 | 0x1000, 4, C(4), [C(1)]), (0x0100, 6, C(0), [C(3), C(4)]), (0x0002 | 0x8000, 2, C(5), [C(4)]),
+           (0x0008, 0, C(8), []), (0x0002, 0, C(3), [])]
+    return chordmap(guid, name, 0x00ab5ab5, subs, pal, ent, sps, loadname=loadname)
+
+def case_compose(out, seed=15):
+    """a chord map, a style that refers to it, and a template (signposts, commands, the chord map track)"""
+    st = basic_style('compsty')
+    st.chordmaps = [('cmap1.cdm', '8f6d1a10-0006-4000-8000-000000000001', 'cmap1'),
+                    ('cmap2.cdm', '8f6d1a10-0006-4000-8000-000000000002', 'cmap2'),
+                    ('cmap1.cdm', None, 'cmap1')]
+    seg = Segment('8f6d1a10-1000-4000-8000-00000000003c', 'template', 12 * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'compsty.sty', st.guid, st.name)])
+    seg.commands([(0, 0, 0, 0, 40, 0, 0), (4 * BAR, 4, 0, 1, 70, 0, 0), (8 * BAR, 8, 0, 0, 90, 0, 0)])
+    seg.signposts([(0, 0x0101, 0), (2 * BAR, 0x0002, 2), (4 * BAR, 0x0004, 4), (6 * BAR, 0x0400, 6),
+                   (8 * BAR, 0x8002, 8), (10 * BAR, 0x0100, 10)])
+    seg.chordmaps([(0, 'cmap1.cdm', '8f6d1a10-0006-4000-8000-000000000001', 'cmap1'),
+                   (6 * BAR, 'cmap2.cdm', '8f6d1a10-0006-4000-8000-000000000002', 'cmap2')])
+    return {'cmap1.cdm': cmap1(),
+            'cmap2.cdm': cmap1('cmap2', '8f6d1a10-0006-4000-8000-000000000002', loadname='Second Map'),
+            'compsty.sty': st.build(), 'template.sgt': seg.build()}
+
+CASES = {'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

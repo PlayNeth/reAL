@@ -53,6 +53,9 @@ CLSID = {
     'tempotrack': 'd2ac2885-b39b-11d1-8704-00600893b1bd',
     'timesigtrack': 'd2ac2888-b39b-11d1-8704-00600893b1bd',
     'bandtrack': 'd2ac2894-b39b-11d1-8704-00600893b1bd',
+    'chordmap': 'd2ac288f-b39b-11d1-8704-00600893b1bd',
+    'chordmaptrack': 'd2ac2896-b39b-11d1-8704-00600893b1bd',
+    'signposttrack': 'f17e8672-c3b4-11d1-870b-00600893b1bd',
     'patterntrack': 'd2ac2897-b39b-11d1-8704-00600893b1bd',
     'collection': '480ff4b0-28b2-11d1-bef7-00c04fbf8fef',
 }
@@ -143,6 +146,7 @@ class Style:
     def __init__(self, guid, name, timesig=(4, 4, 4), tempo=120.0):
         self.guid, self.name, self.ts, self.tempo = guid, name, timesig, tempo
         self.parts, self.patterns, self.bands = [], [], []
+        self.chordmaps = []      # (file, guid, name) references ('prrf')
 
     def part(self, guid, measures=1, variations=(0xffffffff,), playmode=DMUS_PLAYMODE_PEDALPOINT, **kw):
         p = Part(guid, self.ts, measures, variations, playmode, **kw)
@@ -160,6 +164,8 @@ class Style:
         items += [p.build() for p in self.parts]
         items += [p.build() for p in self.patterns]
         items += self.bands
+        if self.chordmaps:
+            items.append(LIST('prrf', *[reference(CLSID['chordmap'], g, n, f) for f, g, n in self.chordmaps]))
         return RIFF('DMST', *items)
 
 def reference(clsid, guid=None, name=None, file=None):
@@ -184,6 +190,38 @@ def band(guid, name, insts):
             items.append(reference(CLSID['collection'], file=coll))
         lbin.append(LIST('lbin', *items))
     return RIFF('DMBD', chunk('guid', guid_bytes(guid)), unfo(name), LIST('lbil', *lbin))
+
+def cm_chord(name, ids):
+    """a 'chrd' list: INAM (the name, NUL-terminated, padded to even) and sbcn (four subchord ids)"""
+    ids = list(ids) + [ids[-1]] * (4 - len(ids))
+    return LIST('chrd', chunk('INAM', (name + '\0').encode('utf-16-le')), chunk('sbcn', struct.pack('<4H', *ids)))
+
+def chordmap(guid, name, scale, subchords, palette=(), entries=(), signposts=(), flags=1, loadname=None):
+    """a chord map ('DMPR').  subchords: (chordpat, scalepat, invpat, chordroot, scaleroot, cflags, levels);
+    palette: [(name, ids)] per root (up to 24); entries: (flags, connid, (name, ids), [(flags, weight, minbeats,
+    maxbeats, connid)]); signposts: (chords, flags, (name, ids), [cadence (name, ids), ...])"""
+    ln = (loadname if loadname is not None else name).encode('utf-16-le')[:40]
+    perh = ln + b'\0' * (40 - len(ln)) + struct.pack('<II', scale, flags)
+    if flags is None: perh = perh[:44]
+    chdt = struct.pack('<H', 20) + b''.join(struct.pack('<IIIBBHI', *sc) for sc in subchords)
+    items = [chunk('perh', perh), chunk('guid', guid_bytes(guid)), chunk('vers', struct.pack('<II', 0x10000, 0)),
+             unfo(name), chunk('chdt', chdt)]
+    if palette:
+        items.append(LIST('chpl', *[cm_chord(*c) for c in palette]))
+    if entries:
+        ch = []
+        for fl, cid, crd, nexts in entries:
+            ncsq = struct.pack('<H', 12) + b''.join(struct.pack('<IHHHH', *n) for n in nexts)
+            ch.append(LIST('choe', chunk('cheh', struct.pack('<IH2x', fl, cid)), cm_chord(*crd), chunk('ncsq', ncsq)))
+        items.append(LIST('cmap', *ch))
+    if signposts:
+        sp = []
+        for chords, fl, crd, cads in signposts:
+            it = [chunk('spsh', struct.pack('<II', chords, fl)), cm_chord(*crd)]
+            if cads: it.append(LIST('cade', *[cm_chord(*c) for c in cads]))
+            sp.append(LIST('spst', *it))
+        items.append(LIST('spsq', *sp))
+    return RIFF('DMPR', *items)
 
 class Segment:
     def __init__(self, guid, name, length, repeats=0, flags=0, resolution=0):
@@ -268,6 +306,16 @@ class Segment:
         """a pattern track: RIFF 'DMPT' with styh and the pattern (its parts embedded)"""
         styh = chunk('styh', struct.pack('<BBH', *timesig) + struct.pack('<d', tempo))
         self.track(CLSID['patterntrack'], None, 'DMPT', RIFF('DMPT', styh, pat.build()), group=group)
+
+    def chordmaps(self, refs, group=1):
+        """refs: (time, file, guid, name)"""
+        items = [LIST('pfrf', chunk('stmp', struct.pack('<i', t)), reference(CLSID['chordmap'], g, n, f)) for t, f, g, n in refs]
+        self.track(CLSID['chordmaptrack'], None, 'pftr', LIST('pftr', *items), group=group)
+
+    def signposts(self, items, group=1):
+        """items: (time, chords, measure)"""
+        body = struct.pack('<I', 12) + b''.join(struct.pack('<iIH2x', *it) for it in items)
+        self.track(CLSID['signposttrack'], 'sgnp', None, chunk('sgnp', body), group=group)
 
     def build(self):
         segh = struct.pack('<IiiiiI', self.repeats, self.length, 0, 0, 0, self.resolution) + \

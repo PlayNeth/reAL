@@ -154,6 +154,8 @@ typedef struct rm_style {
     dms_style *s;
     rm_band **bands; int nbands;        /* +0x78 (the style's order) */
     rm_band *defband;                   /* +0x7c */
+    IDirectMusicChordMap **cmaps; int ncmaps;   /* +0x84 (newest first) */
+    IDirectMusicChordMap *defcmap;      /* +0x88 (the list's reference) */
     DMUS_OBJECTDESC desc;
 } rm_style;
 static rm_style *sty(IDirectMusicStyle8 *i) { return impl_from(i, rm_style, IDirectMusicStyle8_iface); }
@@ -184,6 +186,9 @@ static void style_drop(rm_style *s)
     s->defband = NULL;
     if (s->s) { if (s->s->wrapper == s) s->s->wrapper = NULL; dms_style_release(s->s); }
     s->s = NULL;
+    for (int k = 0; k < s->ncmaps; k++) IDirectMusicChordMap_Release(s->cmaps[k]);
+    free(s->cmaps); s->cmaps = NULL; s->ncmaps = 0;
+    s->defcmap = NULL;
 }
 static ULONG WINAPI sty_release(IDirectMusicStyle8 *i)
 {
@@ -268,21 +273,136 @@ static HRESULT WINAPI sty_getmotif(IDirectMusicStyle8 *i, WCHAR *name, IDirectMu
     }
     return S_FALSE;
 }
-/* 77406d8a / 774082a0 / 77408176: chord maps (DMUS_FOURCC_STYLE_PERS_REF_LIST) */
+/* a chord map's descriptor name (FALSE when it has none or the calls fail; *hr their result) */
+static BOOL cmap_name(IDirectMusicChordMap *m, WCHAR *out, HRESULT *hr)
+{
+    IDirectMusicObject *o = NULL;
+    *hr = IDirectMusicChordMap_QueryInterface(m, &IID_IDirectMusicObject, (void **)&o);
+    if (FAILED(*hr)) return FALSE;
+    DMUS_OBJECTDESC d;
+    memset(&d, 0, sizeof(d));
+    d.dwSize = sizeof(d);
+    *hr = IDirectMusicObject_GetDescriptor(o, &d);
+    IDirectMusicObject_Release(o);
+    if (FAILED(*hr)) return FALSE;
+    if (!(d.dwValidData & DMUS_OBJ_NAME)) { *hr = E_FAIL; return FALSE; }
+    lstrcpynW(out, d.wszName, DMUS_MAX_NAME);
+    return TRUE;
+}
+/* 77406d8a */
 static HRESULT WINAPI sty_getdefaultchordmap(IDirectMusicStyle8 *i, IDirectMusicChordMap **out)
 {
+    rm_style *s = sty(i);
     if (IsBadWritePtr(out, 4)) return E_POINTER;
-    return S_FALSE;                  /* TODO: chord map references (dmcompos) */
+    if (!s->defcmap) return S_FALSE;
+    *out = s->defcmap;
+    IDirectMusicChordMap_AddRef(s->defcmap);
+    return S_OK;
 }
+/* 774082a0: the index-th chord map's name (no name: DMUS_E_TYPE_UNSUPPORTED; past 0x103 characters cut, with
+ * DMUS_S_STRING_TRUNCATED) */
 static HRESULT WINAPI sty_enumchordmap(IDirectMusicStyle8 *i, DWORD n, WCHAR *name)
 {
-    if (IsBadWritePtr(name, 0x104)) return E_POINTER;
-    return S_FALSE;
+    rm_style *s = sty(i);
+    if (IsBadWritePtr(name, 0x104 * sizeof(WCHAR) / 2)) return E_POINTER;
+    if (n >= (DWORD)s->ncmaps) return S_FALSE;
+    WCHAR w[DMUS_MAX_NAME];
+    HRESULT hr;
+    if (!cmap_name(s->cmaps[n], w, &hr)) return hr == E_FAIL ? DMUS_E_TYPE_UNSUPPORTED : hr;
+    lstrcpyW(name, w);
+    return S_OK;
 }
+/* 77408176: the chord map of that name (case-insensitive; not found: S_FALSE; one without a name: E_FAIL) */
 static HRESULT WINAPI sty_getchordmap(IDirectMusicStyle8 *i, WCHAR *name, IDirectMusicChordMap **out)
 {
+    rm_style *s = sty(i);
     if (IsBadReadPtr(name, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
+    for (int k = 0; k < s->ncmaps; k++) {
+        WCHAR w[DMUS_MAX_NAME];
+        HRESULT hr;
+        if (!cmap_name(s->cmaps[k], w, &hr)) return hr;
+        if (lstrcmpiW(w, name)) continue;
+        IDirectMusicChordMap_AddRef(s->cmaps[k]);
+        *out = s->cmaps[k];
+        return S_OK;
+    }
     return S_FALSE;
+}
+/* 7740af13 / 7740a17d / 7740a031: the style's 'prrf' list: each named reference's chord map from the loader, put
+ * first unless one with its name (the map's own) is there already; the first reference's is the default */
+static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out);
+DMG(RM_IID_IDirectMusicChordMap_, 0xd2ac28be, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+static void style_add_cmap(rm_style *o, IDirectMusicChordMap *m, const WCHAR *refname, int first)
+{
+    for (int k = 0; k < o->ncmaps; k++) {
+        WCHAR w[DMUS_MAX_NAME];
+        HRESULT hr;
+        if (!cmap_name(o->cmaps[k], w, &hr)) { if (FAILED(hr)) { IDirectMusicChordMap_Release(m); return; } continue; }
+        if (!lstrcmpiW(w, refname)) { IDirectMusicChordMap_Release(m); return; }
+    }
+    IDirectMusicChordMap **n = realloc(o->cmaps, (o->ncmaps + 1) * sizeof(*n));
+    if (!n) { IDirectMusicChordMap_Release(m); return; }
+    o->cmaps = n;
+    memmove(n + 1, n, o->ncmaps * sizeof(*n));
+    n[0] = m;
+    o->ncmaps++;
+    if (first) o->defcmap = m;
+}
+static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, rm_loader *l)
+{
+    if (!l || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMST", 4)) return;
+    DWORD end = 8 + *(const DWORD *)(b + 4);
+    if (end > n) end = n;
+    for (DWORD off = 12; off + 8 <= end; ) {
+        DWORD sz = *(const DWORD *)(b + off + 4), dend = off + 8 + sz;
+        if (dend > end) dend = end;
+        if (!memcmp(b + off, "LIST", 4) && sz >= 4 && !memcmp(b + off + 8, "prrf", 4)) {
+            int first = 1;
+            for (DWORD q = off + 12; q + 8 <= dend; ) {
+                DWORD qs = *(const DWORD *)(b + q + 4), qend = q + 8 + qs;
+                if (qend > dend) qend = dend;
+                if (!memcmp(b + q, "LIST", 4) && qs >= 4 && !memcmp(b + q + 8, "DMRF", 4)) {
+                    DMUS_OBJECTDESC d;
+                    memset(&d, 0, sizeof(d));
+                    BOOL bad = FALSE;
+                    for (DWORD r = q + 12; r + 8 <= qend; ) {
+                        DWORD rs = *(const DWORD *)(b + r + 4);
+                        const BYTE *rd = b + r + 8;
+                        DWORD avail = qend - (r + 8) < rs ? qend - (r + 8) : rs;
+                        if (!memcmp(b + r, "refh", 4)) {
+                            if (avail != 20) bad = TRUE;
+                            else { memcpy(&d.guidClass, rd, 16); d.dwValidData |= *(const DWORD *)(rd + 16) | DMUS_OBJ_CLASS; }
+                        } else if (!memcmp(b + r, "guid", 4)) {
+                            if (avail != 16) bad = TRUE; else { memcpy(&d.guidObject, rd, 16); d.dwValidData |= DMUS_OBJ_OBJECT; }
+                        } else if (!memcmp(b + r, "name", 4)) {
+                            DWORD k = avail < 0x80 ? avail : 0x80;
+                            memcpy(d.wszName, rd, k); d.wszName[DMUS_MAX_NAME - 1] = 0; d.dwValidData |= DMUS_OBJ_NAME;
+                        } else if (!memcmp(b + r, "file", 4)) {
+                            DWORD k = avail < 0x208 ? avail : 0x208;
+                            memcpy(d.wszFileName, rd, k); d.wszFileName[DMUS_MAX_FILENAME - 1] = 0; d.dwValidData |= DMUS_OBJ_FILENAME;
+                        } else if (!memcmp(b + r, "catg", 4)) {
+                            DWORD k = avail < 0x80 ? avail : 0x80;
+                            memcpy(d.wszCategory, rd, k); d.wszCategory[DMUS_MAX_CATEGORY - 1] = 0; d.dwValidData |= DMUS_OBJ_CATEGORY;
+                        } else if (!memcmp(b + r, "vers", 4)) {
+                            if (avail != 8) bad = TRUE; else { memcpy(&d.vVersion, rd, 8); d.dwValidData |= DMUS_OBJ_VERSION; }
+                        } else if (!memcmp(b + r, "date", 4)) {
+                            if (avail != 8) bad = TRUE; else { memcpy(&d.ftDate, rd, 8); d.dwValidData |= DMUS_OBJ_DATE; }
+                        }
+                        r += 8 + rs + (rs & 1);
+                    }
+                    if (!bad && (d.dwValidData & DMUS_OBJ_NAME)) {
+                        d.dwSize = sizeof(d);
+                        IDirectMusicChordMap *m = NULL;
+                        if (SUCCEEDED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &RM_IID_IDirectMusicChordMap_, (void **)&m)) && m)
+                            style_add_cmap(o, m, d.wszName, first);
+                    }
+                    first = 0;
+                }
+                q += 8 + qs + (qs & 1);
+            }
+        }
+        off += 8 + sz + (sz & 1);
+    }
 }
 /* 77406df7 */
 static HRESULT WINAPI sty_gettimesig(IDirectMusicStyle8 *i, DMUS_TIMESIGNATURE *ts)
@@ -406,9 +526,10 @@ static HRESULT WINAPI stp_load(IPersistStream *i, IStream *st)
     if (!read_stream(st, &b, &n)) return E_FAIL;
     HRESULT hr;
     dms_style *x = style_from_data(b, n, g_styleloader, &hr);
-    free(b);
-    if (!x) return FAILED(hr) ? hr : E_FAIL;
+    if (!x) { free(b); return FAILED(hr) ? hr : E_FAIL; }
     style_take(o, x);
+    style_load_cmaps(o, b, n, g_styleloader);
+    free(b);
     return S_OK;
 }
 static HRESULT WINAPI stp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }

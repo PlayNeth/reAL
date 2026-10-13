@@ -1,6 +1,7 @@
 /* reAL-Music: the chord, command and mute tracks' parameters and Play (dmstyle), included by dmtrack.c.
  * Their data and loading are in dmstyload.c. */
 #include "dmsty.h"
+#include "dmcomp.h"
 
 static int wt_rand(dm_perf *pf);
 #include "dmstyplay.c"
@@ -16,6 +17,8 @@ static int sty_isparam(const dm_track *t, int prm)
     case TRK_STYLE: return stytrack_isparam(t, prm);
     case TRK_MOTIF: return motiftrack_isparam(t, prm);
     case TRK_PATTERN: return patterntrack_isparam(t, prm);
+    case TRK_CHORDMAP: return prm == PRM_CHORDMAP ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;     /* 7728bd75 */
+    case TRK_SIGNPOST: return DM_E_NOTIMPL;                                             /* 7728acae */
     }
     return DMUS_E_TYPE_UNSUPPORTED;
 }
@@ -45,6 +48,11 @@ static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, v
         return dms_mute_getparam(t->data, mt, next, data);
     case TRK_STYLE: return stytrack_getparam(t, NULL, prm, mt, next, data);
     case TRK_MOTIF: case TRK_PATTERN: return motiftrack_getparam(t, prm, mt, next, data);
+    case TRK_CHORDMAP:                  /* 7728c1d1 */
+        if (!data) return DM_E_POINTER;
+        if (prm != PRM_CHORDMAP) return DMUS_E_GET_UNSUPPORTED;
+        return dmc_cmtrack_getparam(t->data, mt, next, data);
+    case TRK_SIGNPOST: return DM_E_NOTIMPL;   /* 7728ac6d */
     }
     return DMUS_E_GET_UNSUPPORTED;
 }
@@ -68,6 +76,11 @@ static int sty_setparam(dm_track *t, int prm, mtime_t mt, void *data)
         return dms_mute_setparam(t->data, mt, data);
     case TRK_STYLE: return stytrack_setparam(t, prm, mt, data);
     case TRK_MOTIF: case TRK_PATTERN: return motiftrack_setparam(t, prm, data);
+    case TRK_CHORDMAP:                  /* 7728c327 */
+        if (!data) return DM_E_POINTER;
+        if (prm != PRM_CHORDMAP) return DMUS_E_SET_UNSUPPORTED;
+        return dmc_cmtrack_setparam(t->data, mt, data);
+    case TRK_SIGNPOST: return DM_E_NOTIMPL;   /* 7728c0fa */
     }
     return DMUS_E_SET_UNSUPPORTED;
 }
@@ -169,6 +182,8 @@ static int sty_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
     case TRK_STYLE: return stytrack_play(pf, ss, e, start, end, off, flags);
     case TRK_MOTIF: return motiftrack_play(pf, ss, e, start, end, off, flags);
     case TRK_PATTERN: return patterntrack_play(pf, ss, e, start, end, off, flags);
+    case TRK_CHORDMAP: return DM_OK;      /* 7728bd46 */
+    case TRK_SIGNPOST: return DM_OK;      /* 7728aeaf: TODO recomposing (DMUS_TRACKF_RECOMPOSE) */
     }
     return DM_OK;
 }

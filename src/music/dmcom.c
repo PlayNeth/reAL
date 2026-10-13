@@ -447,6 +447,7 @@ DMG(G_IDirectMusicStyle, 0xd2ac28a1, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x0
 DMG(G_SeedVariations, 0x65b76fa5, 0xff37, 0x11d2, 0x81, 0x4e, 0x00, 0xc0, 0x4f, 0xa3, 0x6e, 0x58);
 DMG(G_StyleTimeSig, 0x76612507, 0x4f37, 0x4b35, 0x80, 0x92, 0x50, 0x48, 0x4e, 0xd4, 0xba, 0x92);
 DMG(G_ValidStartTime, 0x7f6b1760, 0x1fdb, 0x11d3, 0x82, 0x26, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+DMG(G_IDirectMusicChordMap_, 0xd2ac28ad, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_PerfMasterGrooveLevel, 0xd2ac28b2, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_PrivateTempo, 0xe8dbd832, 0xbcf0, 0x4c8c, 0xa0, 0x75, 0xa3, 0xf1, 0x5e, 0x67, 0xfd, 0x63);
 static const struct { const GUID *g; int prm; } s_params[] = {
@@ -458,7 +459,7 @@ static const struct { const GUID *g; int prm; } s_params[] = {
     { &G_BandParam, PRM_BANDPARAM }, { &G_StandardMIDIFile, PRM_SMF }, { &G_ConnectToDLSCollection, PRM_CONNECTDLS },
     { &G_MuteParam, PRM_MUTE }, { &G_PrivateTempo, PRM_PRIVTEMPO }, { &G_ChordParam, PRM_CHORD }, { &G_RhythmParam, PRM_RHYTHM },
     { &G_CommandParam, PRM_COMMAND }, { &G_CommandParam2, PRM_COMMAND2 }, { &G_CommandParamNext, PRM_COMMANDNEXT },
-    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &GUID_NULL, PRM_ANY },
+    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &G_IDirectMusicChordMap_, PRM_CHORDMAP }, { &GUID_NULL, PRM_ANY },
 };
 static int prm_of(REFGUID g)
 {
@@ -472,6 +473,7 @@ static int prm_takes_target(int prm)
 static rm_collection *col_of(IUnknown *u);
 static struct dms_style *style_engine_of(void *p);     /* dmcomsty.c */
 static dm_band *band_engine_of(void *p);
+static struct dmc_chordmap *chordmap_engine_of(void *p);     /* dmcomcmp.c */
 static void prm_out(int prm, int hr, void *p);
 static rm_perf *perf_from_unknown(IUnknown *u);
 static rm_path *unsafe_path(IUnknown *u);
@@ -498,6 +500,9 @@ static HRESULT prm_data(int prm, void *p, dm_dltarget *dt, void **data, dm_host 
     } else if (prm == PRM_STYLE) {
         if (!p) return E_POINTER;
         if (!(*data = style_engine_of(p))) return E_NOINTERFACE;
+    } else if (prm == PRM_CHORDMAP) {
+        if (!p) return E_POINTER;
+        if (!(*data = chordmap_engine_of(p))) return E_NOINTERFACE;
     } else if (prm == PRM_IBAND) {
         if (!p) return E_POINTER;
         if (!(*data = band_engine_of(p))) return E_NOINTERFACE;
@@ -627,6 +632,7 @@ static IDirectMusicObjectVtbl sgo_vtbl = { sgo_qi, sgo_addref, sgo_release, sgo_
 static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *file);
 static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, const char *name);
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name);
+static struct dmc_chordmap *loader_getcmap(void *ctx, const dm_guid *g, const char *file, const char *name);
 static dm_segment *segment_from_data(const BYTE *b, DWORD n, rm_loader *l)
 {
     if (dm_is_midi(b, n)) return dm_segment_from_midi(b, n, loader_getcoll, l);
@@ -637,7 +643,7 @@ static dm_segment *segment_from_data(const BYTE *b, DWORD n, rm_loader *l)
         dm_wave_release(w);
         return g;
     }
-    dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l };
+    dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap };
     return dm_segment_load_cb(b, n, &cb);
 }
 static rm_segment *sgp(IPersistStream *i) { return impl_from(i, rm_segment, IPersistStream_iface); }
@@ -2991,6 +2997,7 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
 }
 
 #include "dmcomsty.c"
+#include "dmcomcmp.c"
 static struct dms_style *style_engine_of(void *p) { rm_style *s = style_of(p); return s ? s->s : NULL; }
 static dm_band *band_engine_of(void *p)
 {
@@ -3002,6 +3009,7 @@ static dm_band *band_engine_of(void *p)
 static void prm_out(int prm, int hr, void *p)
 {
     if (prm == PRM_STYLE && hr >= 0 && p) *(void **)p = style_iface(*(dms_style **)p);
+    if (prm == PRM_CHORDMAP && hr >= 0 && p) *(void **)p = chordmap_iface(*(dmc_chordmap **)p);
 }
 
 /* a wave track item's reference (773248af: the loader's GetObject of a DirectSoundWave by guid, file or name) */
@@ -3139,7 +3147,7 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
             dms_style *x = style_from_data(data, size, l, &hr);
             rm_style *s = x ? new_style(x) : NULL;
             if (x && !s) dms_style_release(x);
-            if (s) o = (IUnknown *)&s->IDirectMusicStyle8_iface;
+            if (s) { o = (IUnknown *)&s->IDirectMusicStyle8_iface; style_load_cmaps(s, data, size, l); }
         } else {
             dm_band *x = size >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "DMBD", 4) ?
                          dm_band_load(data + 12, size - 12, loader_getcoll, l) : NULL;
@@ -3154,6 +3162,29 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
         const GUID *cg = g;
         if (!cg && isstyle && style_of(o)->s->hasguid) cg = (const GUID *)&style_of(o)->s->guid;
         cache_add(l, path, cg, o);
+        hr = IUnknown_QueryInterface(o, riid, out);
+        IUnknown_Release(o);
+        return hr;
+    }
+    if ((d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectMusicChordMap)) {
+        BYTE *data = NULL;
+        DWORD size = 0;
+        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
+        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
+            size = (DWORD)d->llMemLength;
+            data = malloc(size ? size : 1);
+            if (data) memcpy(data, d->pbMemData, size);
+        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
+            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
+        } else return DMUS_E_LOADER_NOFILENAME;
+        if (!data) return E_OUTOFMEMORY;
+        IUnknown *o = NULL;
+        HRESULT hr = chordmap_from_data(data, size, &o);
+        free(data);
+        LOG_CALL("music: loaded chord map -> %08lx", (unsigned long)hr);
+        if (FAILED(hr)) return hr;
+        dmc_chordmap *m = chordmap_engine_of(o);
+        cache_add(l, path, g ? g : (const GUID *)&m->guid, o);
         hr = IUnknown_QueryInterface(o, riid, out);
         IUnknown_Release(o);
         return hr;
@@ -3338,6 +3369,13 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         bnd_release(&b->IDirectMusicBand_iface);
         return hr;
     }
+    if (IsEqualCLSID(clsid, &RM_CLSID_DirectMusicChordMap)) {
+        rm_chordmap *m = new_chordmap(NULL);
+        if (!m) return E_OUTOFMEMORY;
+        HRESULT hr = cmp_qi(&m->IDirectMusicChordMap_iface, riid, out);
+        cmp_release(&m->IDirectMusicChordMap_iface);
+        return hr;
+    }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig)) return rm_apcfg_create(riid, out);
     if (IsEqualCLSID(clsid, &CLSID_DirectMusic)) {
         IDirectMusic8 *d = new_dmusic();
@@ -3355,5 +3393,6 @@ BOOL rm_handles(REFCLSID clsid)
            IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) || IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicStyle) ||
-           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicBand);
+           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicBand) ||
+           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicChordMap);
 }

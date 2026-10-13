@@ -415,7 +415,8 @@ static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, v
 static int track_isparam(const dm_track *t, int prm)
 {
     switch (t->kind) {
-    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN: return sty_isparam(t, prm);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN:
+    case TRK_CHORDMAP: case TRK_SIGNPOST: return sty_isparam(t, prm);
     case TRK_TEMPO: {
         const dm_tempotrack *T = t->data;
         if (prm != PRM_DISABLETEMPO && prm != PRM_TEMPO && prm != PRM_PRIVTEMPO && prm != PRM_ENABLETEMPO)

@@ -729,7 +729,8 @@ static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
     case TRK_BAND: return bandtrack_setparam(t->data, prm, mt, data);
     case TRK_WAVE: return wavetrack_setparam(t->data, prm, data);
     case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 7732465d */
-    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN: return sty_setparam(t, prm, mt, data);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN:
+    case TRK_CHORDMAP: case TRK_SIGNPOST: return sty_setparam(t, prm, mt, data);
     }
     return DMUS_E_SET_UNSUPPORTED;
 }
@@ -808,6 +809,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
     case TRK_STYLE: stytrack_initplay(pf, ss, e, flags); break;
     case TRK_MOTIF: motiftrack_initplay(pf, ss, e, flags); break;
     case TRK_PATTERN: patterntrack_initplay(pf, ss, e, flags); break;
+    case TRK_SIGNPOST: dm_style_srand(); break;      /* 7728aac2: a composer for recomposing (its constructor seeds rand()) */
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));
@@ -840,7 +842,8 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_BAND: return band_play(pf, ss, e, start, end, off, flags);
     case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
     case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
-    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN: return sty_play(pf, ss, e, start, end, off, flags);
+    case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN:
+    case TRK_CHORDMAP: case TRK_SIGNPOST: return sty_play(pf, ss, e, start, end, off, flags);
     }
     return DM_OK;
 }

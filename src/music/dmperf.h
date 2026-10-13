@@ -119,6 +119,7 @@ enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND,
        PRM_STYLETS,
        PRM_VALIDSTART,
        PRM_VARIATIONS,      /* GUID_Variations */      /* GUID_Valid_Start_Time (DMUS_VALID_START_PARAM) */         /* dmstyle's private 76612507-4f37-4b35-8092-50484ed4ba92 (the composer's signature) */
+       PRM_CHORDMAP,        /* GUID_IDirectMusicChordMap: a dmc_chordmap * (the getter takes a reference) */
        PRM_ANY, PRM_OTHER };
 /* PRM_BANDPARAM (DMUS_BAND_PARAM); PRM_IBAND takes the dm_band itself */
 typedef struct { mtime_t physical; dm_band *band; } dm_bandparam;

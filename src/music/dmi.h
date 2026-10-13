@@ -291,7 +291,8 @@ typedef struct dm_wavetrack {
 } dm_wavetrack;
 
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE,
-       TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF, TRK_PATTERN };   /* TRK_CHORD on are dmstyle's (dmsty.h) */
+       TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF, TRK_PATTERN,   /* TRK_CHORD on are dmstyle's (dmsty.h) */
+       TRK_CHORDMAP, TRK_SIGNPOST };      /* dmcompos's (dmcomp.h) */
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */
@@ -329,6 +330,7 @@ typedef struct dm_segment {
 static const dm_guid GUID_NOTIFICATION_SEGMENT_ = { 0xd2ac2899, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid GUID_NOTIFICATION_MEASUREANDBEAT_ = { 0xd2ac289a, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid GUID_NOTIFICATION_CHORD_ = { 0xd2ac289b, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid GUID_NOTIFICATION_RECOMPOSE_ = { 0xd348372b, 0x945b, 0x45ae, { 0xa5, 0x22, 0x45, 0x0f, 0x12, 0x5b, 0x84, 0xa5 } };
 static const dm_guid GUID_NOTIFICATION_COMMAND_ = { 0xd2ac289c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 /* dmstyle's chord track tells the performance of a chord change with a notification of this type (dmime 7730e5b7) */
 static const dm_guid GUID_NOTIFICATION_PRIVATE_CHORD_ = { 0xf5c19571, 0x7e1e, 0x4fff, { 0xb9, 0x49, 0x7f, 0x74, 0xa6, 0x6f, 0xdf, 0xc0 } };
@@ -356,7 +358,8 @@ uint32_t *dm_app_rand_state(void);
 /* with style references too (a style track's DMRF: guid, file, name; the style comes with a reference) */
 struct dms_style;
 typedef struct dms_style *(*dm_getstyle_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
-typedef struct { dm_getcoll_fn getcoll; dm_getwave_fn getwave; dm_getstyle_fn getstyle; void *ctx; } dm_loadcb;
+typedef struct dmc_chordmap *(*dm_getcmap_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
+typedef struct { dm_getcoll_fn getcoll; dm_getwave_fn getwave; dm_getstyle_fn getstyle; void *ctx; dm_getcmap_fn getcmap; } dm_loadcb;
 dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *cb);
 dm_segment *dm_segment_from_wave(dm_wave *w);
 /* a band's 'DMBD' form (the data after the form type), as dmband loads it */
