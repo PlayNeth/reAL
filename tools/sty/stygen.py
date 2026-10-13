@@ -312,10 +312,11 @@ class Segment:
         items = [LIST('pfrf', chunk('stmp', struct.pack('<i', t)), reference(CLSID['chordmap'], g, n, f)) for t, f, g, n in refs]
         self.track(CLSID['chordmaptrack'], None, 'pftr', LIST('pftr', *items), group=group)
 
-    def signposts(self, items, group=1):
-        """items: (time, chords, measure)"""
+    def signposts(self, items, group=1, config=None):
+        """items: (time, chords, measure); config: the track's (0x238 to compose)"""
         body = struct.pack('<I', 12) + b''.join(struct.pack('<iIH2x', *it) for it in items)
-        self.track(CLSID['signposttrack'], 'sgnp', None, chunk('sgnp', body), group=group)
+        self.track(CLSID['signposttrack'], 'sgnp', None, chunk('sgnp', body), group=group,
+                   extras=(config, 0) if config is not None else None)
 
     def build(self):
         segh = struct.pack('<IiiiiI', self.repeats, self.length, 0, 0, 0, self.resolution) + \

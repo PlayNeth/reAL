@@ -596,7 +596,34 @@ static HRESULT WINAPI seg_settrackcfg(IDirectMusicSegment8 *i, REFGUID g, DWORD 
     return hr;
 }
 static HRESULT WINAPI seg_getapconfig(IDirectMusicSegment8 *i, IUnknown **c) { if (c) *c = NULL; return DMUS_E_NO_AUDIOPATH_CONFIG; }
-static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c) { return rm_notimpl(__func__); }
+static rm_segment *new_segment(dm_segment *g);
+int dmc_segment_compose(dm_segment *s);
+/* 773150d0: the composing tracks composed (into a clone of the segment when one is asked for) */
+static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c)
+{
+    if ((a && (IsBadReadPtr(a, 4) || IsBadReadPtr(*(void **)a, 4))) || (b && (IsBadReadPtr(b, 4) || IsBadReadPtr(*(void **)b, 4))) ||
+        (c && IsBadWritePtr(c, 4)))
+        return E_POINTER;
+    if (a || b) return rm_notimpl("Segment::Compose from or to a segment (transitions)");
+    rm_segment *s = sgm(i);
+    if (!s->seg) return DMUS_E_NOT_INIT;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    int hr = DM_OK;
+    dm_segment *g = s->seg;
+    if (c) { g = dm_segment_clone(s->seg, 0, s->seg->length, &hr); if (!g) hr = E_OUTOFMEMORY; }
+    if (g) hr = dmc_segment_compose(g);
+    if (h) dm_host_unlock(h);
+    if (c && g) {
+        rm_segment *o = new_segment(g);
+        if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
+        HRESULT r = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)c);
+        seg_release(&o->IDirectMusicSegment8_iface);
+        if (FAILED(r)) return r;
+    }
+    LOG_CALL("music: Segment::Compose -> %08x", hr);
+    return hr;
+}
 static rm_perf *perf_from_unknown(IUnknown *u);
 static rm_path *unsafe_path(IUnknown *u);
 /* 77312338 / 773123e7: SetParam(GUID_DownloadToAudioPath / GUID_UnloadFromAudioPath) on every track; a segment

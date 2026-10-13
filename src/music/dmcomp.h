@@ -93,5 +93,7 @@ uint8_t *dmc_sptrack_save(const dmc_sptrack *T, size_t *n);
  * with the style (NULL: the template's) and chord map (NULL: the template's chord map track); a new segment */
 struct dms_style;
 dm_segment *dmc_compose_template(dm_segment *tmpl, struct dms_style *style, dmc_chordmap *cm, int activity, int *hr);
+/* Segment::Compose (dmime 77314b64): the composing tracks composed and their results put in the segment */
+int dmc_segment_compose(dm_segment *s);
 
 #endif

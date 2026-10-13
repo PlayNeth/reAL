@@ -842,3 +842,66 @@ dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordma
     if (ownstyle) dms_style_release(style);
     return out;
 }
+
+/* ------------------------------------------------------------------ Segment::Compose (dmime 77314b64) */
+/* 7728b532: the signpost track's Compose: the segment's style (at 0, in the track's group), chord map track,
+ * command track and length composed (activity mode off) into a new chord track.  The chord track's times are
+ * written for 4/4 whatever the style's signature (dmcompos passes a fixed one). */
+static dm_track *signpost_compose(dm_segment *seg, dm_track *spt, uint32_t group, int *hr)
+{
+    dms_style *style = NULL;
+    *hr = dm_segment_getparam(seg, PRM_STYLE, group, 0, 0, NULL, &style);
+    if (*hr < 0) return NULL;
+    dm_segtrack *cmt = seg_track(seg, TRK_CHORDMAP, group, 0), *cmdt = seg_track(seg, TRK_COMMAND, group, 0);
+    if (!cmt || !cmdt) { dms_style_release(style); *hr = DMUS_E_NOT_FOUND; return NULL; }
+    composer cp = { 0 };
+    dm_style_srand();                   /* the composer it makes (77282d2f) */
+    uint8_t key = 0;
+    uint32_t scale = 0;
+    cnode *chords = compose_chords(&cp, style->ts, NULL, cmt->t->data, spt->data, cmdt->t->data, seg->length, 0, 0,
+                                   &key, &scale, hr);
+    dm_track *out = NULL;
+    static const uint8_t ts44[2] = { 4, 4 };
+    size_t n;
+    uint8_t *b = chords_cord(chords, key, scale, ts44, &n);
+    int32_t h = DM_E_OUTOFMEMORY;
+    dms_chordtrack *ct = b ? dms_chordtrack_load(b, n, &h) : NULL;
+    free(b);
+    if (ct && !(out = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct))) dms_chordtrack_free(ct);
+    *hr = out ? h : DM_E_OUTOFMEMORY;
+    clist_free(chords);
+    composer_free(&cp);
+    dms_style_release(style);
+    return out;
+}
+
+/* 77314b64: the composing tracks (DMUS_TRACKCONFIG_COMPOSING), highest priority first, each composed into a new
+ * track that replaces the segment's of its class in the group (the signpost track's: a chord track) */
+int dmc_segment_compose(dm_segment *s)
+{
+    int n = 0, hr = DM_OK;
+    dm_segtrack *list = malloc((s->ntracks ? s->ntracks : 1) * sizeof(*list));
+    if (!list) return DM_E_OUTOFMEMORY;
+    for (int i = 0; i < s->ntracks; i++) {
+        if (!(s->tracks[i].config & 0x200)) continue;
+        int k = 0;
+        while (k < n && !(list[k].priority < s->tracks[i].priority)) k++;
+        memmove(list + k + 1, list + k, (n - k) * sizeof(*list));
+        list[k] = s->tracks[i];
+        dm_track_addref(list[k].t);
+        n++;
+    }
+    for (int i = 0; i < n; i++) {
+        dm_track *t = NULL;
+        if (list[i].t->kind == TRK_SIGNPOST) t = signpost_compose(s, list[i].t, list[i].group, &hr);
+        else hr = DM_E_NOTIMPL;                 /* (the other tracks' Compose) */
+        if (hr < 0 || !t) { if (t) dm_track_release(t); if (hr >= 0) hr = DM_E_FAIL; break; }
+        for (int k = 0; k < s->ntracks; k++)
+            if (s->tracks[k].t->kind == t->kind && !memcmp(&s->tracks[k].t->clsid, &t->clsid, sizeof(t->clsid)) &&
+                (s->tracks[k].group & list[i].group)) { seg_remove(s, &s->tracks[k]); break; }
+        dm_segment_insert_track(s, t, 0, list[i].group, 0x38, 0);
+    }
+    for (int i = 0; i < n; i++) dm_track_release(list[i].t);
+    free(list);
+    return hr;
+}

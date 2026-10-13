@@ -403,7 +403,7 @@ def cmap_dag(name, guid, seed, layers=10, width=3):
     sps.append((0x4000, 0, C(0), []))
     return chordmap(guid, name, 0x00ab5ab5, subs, pal, entries, sps)
 
-def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4)):
+def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4), spconfig=None):
     bar = 768 * ts[0] * 4 // ts[1]
     seg = Segment(guid, name, nbars * bar)
     seg.tempo([(0, 100.0)])
@@ -419,7 +419,7 @@ def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4)):
     while m < nbars:
         sp.append((m * bar, R.choice(groups), m))
         m += R.choice([1, 2, 2, 3, 4])
-    seg.signposts(sp)
+    seg.signposts(sp, config=spconfig)
     seg.chordmaps([(t * bar, f + '.cdm', None, f) for t, f in cmaps])
     return seg.build()
 
@@ -443,6 +443,10 @@ def case_compose2(out, seed=16):
     files['t3.sgt'] = comp_template('t3', '8f6d1a10-1000-4000-8000-000000000043', R, 12, 'compsty3', [(0, 'cmapb')], ts=(3, 4, 4))
     files['t4.sgt'] = comp_template('t4', '8f6d1a10-1000-4000-8000-000000000044', R, 20, 'compsty', [(0, 'cmapc'), (5, 'cmapa')])
     files['t5.sgt'] = comp_template('t5', '8f6d1a10-1000-4000-8000-000000000045', R, 32, 'compsty', [(0, 'cmapb')])
+    # composing signpost tracks (Segment::Compose)
+    files['c1.sgt'] = comp_template('c1', '8f6d1a10-1000-4000-8000-000000000046', R, 16, 'compsty', [(0, 'cmapa')], spconfig=0x238)
+    files['c2.sgt'] = comp_template('c2', '8f6d1a10-1000-4000-8000-000000000047', R, 24, 'compsty', [(0, 'cmapb'), (10, 'cmapc')], spconfig=0x238)
+    files['c3.sgt'] = comp_template('c3', '8f6d1a10-1000-4000-8000-000000000048', R, 12, 'compsty3', [(0, 'cmapc')], ts=(3, 4, 4), spconfig=0x238)
     return files
 
 CASES = {'compose2': case_compose2, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),

@@ -133,6 +133,23 @@ int main(int argc, char **argv)
             hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&tp);
             printf("load %s %08lx\n", argv[a], hr);
             if (!tp) continue;
+            if (argv[a][0] == 'c') {        /* Segment::Compose: into a new segment, then in place */
+                IDirectMusicSegment *out = NULL;
+                hr = IDirectMusicSegment8_Compose(tp, 0, NULL, NULL, &out);
+                printf("%s Compose (new): %08lx\n", argv[a], hr);
+                if (out) {
+                    IDirectMusicSegment8 *o8 = NULL;
+                    IDirectMusicSegment_QueryInterface(out, &IID_IDirectMusicSegment8, (void **)&o8);
+                    dump(o8, "composed");
+                    IDirectMusicSegment8_Release(o8);
+                    IDirectMusicSegment_Release(out);
+                }
+                hr = IDirectMusicSegment8_Compose(tp, 0, NULL, NULL, NULL);
+                printf("%s Compose (in place): %08lx\n", argv[a], hr);
+                dump(tp, "in place");
+                IDirectMusicSegment8_Release(tp);
+                continue;
+            }
             for (int k = 0; k < 6; k++) {
                 IDirectMusicSegment *out = NULL;
                 WORD act = (WORD)(k % 4);
