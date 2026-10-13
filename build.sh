@@ -91,6 +91,7 @@ $CC -O1 -o build/dopptest.exe tests/dopptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/comtest.exe tests/comtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/tooltest.exe tests/tooltest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/fxtest.exe tests/fxtest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -Wno-format -o build/cfgtest.exe tests/cfgtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -luuid -ladvapi32
 rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
