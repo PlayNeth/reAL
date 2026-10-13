@@ -20,7 +20,7 @@ SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffe
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reAL-Music: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
-MUSIC_SRCS="src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c"
+MUSIC_SRCS="src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
 CFLAGS="$CFLAGS_EXACT -ffast-math"
 

@@ -126,7 +126,14 @@ static HRESULT WINAPI ip_process(IMediaObjectInPlace *i, ULONG n, BYTE *d, REFER
     pdata(d, n);
     return S_OK;
 }
-static HRESULT WINAPI ip_clone(IMediaObjectInPlace *i, IMediaObjectInPlace **o) { plog("Clone"); return E_NOTIMPL; }
+static HRESULT WINAPI cf_create(IClassFactory *i, IUnknown *outer, REFIID r, void **o);
+/* a new probe (DirectSound clones a buffer configuration's effects for each buffer made from it) */
+static HRESULT WINAPI ip_clone(IMediaObjectInPlace *i, IMediaObjectInPlace **o)
+{
+    plog("Clone");
+    if (!o) return E_POINTER;
+    return cf_create(NULL, NULL, &IID_IMediaObjectInPlace_, (void **)o);
+}
 static HRESULT WINAPI ip_latency(IMediaObjectInPlace *i, REFERENCE_TIME *t) { plog("GetLatency"); *t = 0; return S_OK; }
 static IMediaObjectInPlaceVtbl ip_vtbl = { ip_qi, ip_addref, ip_release, ip_process, ip_clone, ip_latency };
 

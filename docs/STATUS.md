@@ -44,6 +44,23 @@ Doppler, and WASAPI output.
 - Standard audiopaths: shared stereo + reverb, dynamic 3D, mono and stereo.
 - The 3D path's Doppler and pitch, matching Windows dsound.
 
+**DirectMusic: audiopath configurations** (`src/music/dmapcfg.c`, `dmcom.c`'s cfg_path, `dmhost.c`)
+- The configuration object (CLSID_DirectMusicAudioPathConfig, the 'DMAP' form: descriptor, top-level buffers, port
+  configurations with their buffers and PChannel maps, the tool graph) loaded by the loader or IPersistStream, with
+  the DSBC buffer descriptions as dsound loads them (effects made at load, 'data' through IPersistStream).
+- CreateAudioPath as dmime builds it (77320f10): top-level buffers first, then each port's, shared buffers found
+  again by GUID (the standard path's stereo and reverb too), the maps' buffers looked up in the port, the path, the
+  other ports and the performance, PChannels from blocks of 16 (drums on 10 honoured, freed with the path) on the
+  map's buffers' buses when the port has the audiopath feature.
+- The defined buffers (Reverb with Waves, EnvReverb mix-in with I3DL2, 3D dry, mono, stereo) and DSBC ones, playing
+  in the sink: effects cloned from the configuration and run as each block is written (no JIT, no Discontinuity, as
+  dsound's sink), sends (GUID_DSFX_SEND, its IDirectSoundFXSend object, dsound's fixed-point mixing and millibel
+  table) into mix-in buffers, which are written after the buffers that send to them.
+- GetObjectInPath for configured paths: buffers (dwBuffer across the maps), their effects, mix-ins (PChannel 0 only),
+  the primary buffer; ConvertPChannel as dmime (broadcast values pass, others DMUS_E_NOT_FOUND).
+- `tests/cfgcmp.sh` runs `tests/cfgtest.c`'s configurations one by one against Microsoft's: all match, but for the
+  port and sink stages (reAL-Music has no port objects).
+
 **DirectMusic: COM methods**
 - GetParam, SetParam and GetParamEx.
 - SetTrackConfig, SetPChannelsUsed and SendPMsg.
@@ -75,12 +92,14 @@ Doppler, and WASAPI output.
 
 1. Scripts (dmscript; needs an AudioVBScript interpreter)
 2. Styles and chordmaps (dmstyle, dmcompos)
-3. Audiopath configurations (.aud / CreateAudioPath) and environmental reverb (in progress)
+3. Audiopath configurations: port objects for the port and sink stages
 4. Surround / CMSS
 5. EAX 5
 
 Smaller items still open:
-- Audiopath stages for ports and mix-in buffers.
+- Audiopath stages for ports (and the sink): reAL-Music has no IDirectMusicPort objects.
+- Standard audiopaths still use the host's fixed buffers rather than the configuration machinery (they match
+  Microsoft's in every test so far).
 - Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the
   segment's load, as on Microsoft's). A working case needs a tool class registered in both Wine prefixes.
 - reAL treats every application as DX8 (`dxver` 8): a DX7 application calling Get/SetGraph before Init gets

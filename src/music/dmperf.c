@@ -110,7 +110,8 @@ struct dm_perf {
     dm_segstate *ssplaying; uint32_t cfgplaying;   /* +0x374 +0x378 */
     int autodl;
     dm_audiopath *paths, *defpath;
-    uint32_t nextpch;
+    uint32_t nextpch;                           /* PChannels allocated so far (any) */
+    struct apblock *apblocks;                   /* audiopaths' PChannel blocks (7730b361) */
     int xprec, appxprec;        /* extended precision now / in application threads */
     dm_pmsg *pool;
     uint32_t fixes;             /* DM_FIX_* departures from the original */
@@ -1823,22 +1824,83 @@ static void drop_musicstopped(dm_perf *pf)
 
 
 /* ------------------------------------------------------------------ audiopaths */
-/* a standard audiopath: npch virtual PChannels 0..npch-1 on new performance PChannels of port 0 */
-dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate, const uint32_t *buses, uint32_t nbuses)
+/* the audiopaths' PChannels (7730b361 / 7730b2e2): blocks of 16 on port 0, each a channel group; a channel taken in
+ * the order of a table (all, all but 10 when drums are on 10, or 10 itself); a new block above every block there is */
+typedef struct apblock { struct apblock *next; uint32_t base, group; uint16_t used; } apblock;
+static const uint8_t s_order_all[16] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15 };
+static const uint8_t s_order_nodrum[15] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14, 15 };
+static const uint8_t s_order_drum[1] = { 9 };
+static int ap_alloc(dm_perf *pf, int drum, uint32_t *real)
+{
+    const uint8_t *t = drum & 1 ? (drum & 2 ? s_order_drum : s_order_nodrum) : s_order_all;
+    int nt = drum & 1 ? (drum & 2 ? 1 : 15) : 16;
+    apblock *b;
+    for (b = pf->apblocks; b; b = b->next)
+        for (int i = 0; i < nt; i++)
+            if (!(b->used & (1u << t[i]))) { b->used |= (uint16_t)(1u << t[i]); *real = b->base + t[i]; goto got; }
+    b = calloc(1, sizeof(*b));
+    if (!b) return DM_E_OUTOFMEMORY;
+    {
+        int any = 0;
+        uint32_t top = 0;
+        for (apblock *o = pf->apblocks; o; o = o->next) { if (!any || o->base > top) top = o->base; any = 1; }
+        for (pchblock *o = pf->blocks; o; o = o->next) { if (!any || o->base > top) top = o->base; any = 1; }
+        b->base = any ? top + 16 : 0;
+    }
+    b->group = b->base / 16 + 1;
+    {
+        apblock **q = &pf->apblocks;      /* in the order they were made (7730262a appends) */
+        while (*q) q = &(*q)->next;
+        *q = b;
+    }
+    b->used = (uint16_t)(1u << t[0]);
+    *real = b->base + t[0];
+got:
+    pf->nextpch++;
+    dm_perf_assign_pchannel(pf, *real, 0, *real / 16 + 1, *real % 16);
+    return DM_OK;
+}
+static void ap_free(dm_perf *pf, uint32_t real)
+{
+    for (apblock *b = pf->apblocks; b; b = b->next)
+        if (b->base <= real && real < b->base + 16) { b->used &= (uint16_t)~(1u << (real - b->base)); return; }
+}
+
+/* an audiopath: n virtual PChannels, each on a new performance PChannel of port 0 (drum[]: 1 drums on 10, 3 this is
+ * the drum channel), its channel on the buses given (nbus[i] of them, buses + 32 * i; none: not assigned) */
+dm_audiopath *dm_perf_create_audiopath_ex(dm_perf *pf, int activate, uint32_t n, const uint32_t *virt, const int *drum,
+                                          const uint32_t *nbus, const uint32_t *buses)
 {
     if (!pf->nports) return NULL;
     dm_audiopath *ap = calloc(1, sizeof(*ap));
     if (!ap) return NULL;
     ap->refs = 1; ap->pf = pf; ap->vid = ++g_trackid; ap->active = activate;
-    ap->virt = malloc((npch + 1) * sizeof(uint32_t)); ap->real = malloc((npch + 1) * sizeof(uint32_t));
-    ap->n = npch;
-    for (uint32_t i = 0; i < npch; i++) {
-        uint32_t r = pf->nextpch++;
-        ap->virt[i] = i; ap->real[i] = r;
-        dm_perf_assign_pchannel(pf, r, 0, r / 16 + 1, r % 16);
-        if (buses && nbuses && pf->ports[0].ops.assign) pf->ports[0].ops.assign(pf->ports[0].ctx, r / 16 + 1, r % 16, buses, nbuses);
+    ap->virt = malloc((n + 1) * sizeof(uint32_t)); ap->real = malloc((n + 1) * sizeof(uint32_t));
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t r;
+        if (ap_alloc(pf, drum ? drum[i] : 0, &r) < 0) break;
+        ap->virt[ap->n] = virt[i]; ap->real[ap->n] = r; ap->n++;
+        if (nbus && nbus[i] && pf->ports[0].ops.assign) pf->ports[0].ops.assign(pf->ports[0].ctx, r / 16 + 1, r % 16, buses + 32 * i, nbus[i]);
     }
     ap->next = pf->paths; pf->paths = ap;
+    return ap;
+}
+
+/* a standard audiopath: npch virtual PChannels 0..npch-1, all on the same buses */
+dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate, const uint32_t *buses, uint32_t nb)
+{
+    uint32_t *virt = malloc((npch + 1) * sizeof(uint32_t)), *nbus = malloc((npch + 1) * sizeof(uint32_t));
+    uint32_t *bl = calloc(npch + 1, 32 * sizeof(uint32_t));
+    dm_audiopath *ap = NULL;
+    if (virt && nbus && bl) {
+        for (uint32_t i = 0; i < npch; i++) {
+            virt[i] = i;
+            nbus[i] = buses ? (nb > 32 ? 32 : nb) : 0;
+            if (buses) memcpy(bl + 32 * i, buses, nbus[i] * sizeof(uint32_t));
+        }
+        ap = dm_perf_create_audiopath_ex(pf, activate, npch, virt, NULL, nbus, bl);
+    }
+    free(virt); free(nbus); free(bl);
     return ap;
 }
 
@@ -1849,6 +1911,7 @@ void dm_audiopath_release(dm_audiopath *ap)
     dm_perf *pf = ap->pf;
     for (dm_audiopath **pp = &pf->paths; *pp; pp = &(*pp)->next) if (*pp == ap) { *pp = ap->next; break; }
     if (pf->defpath == ap) pf->defpath = NULL;
+    for (uint32_t i = 0; i < ap->n; i++) ap_free(pf, ap->real[i]);     /* 77320eba */
     graph_drop(pf, ap->graph);
     free(ap->virt); free(ap->real); free(ap);
 }
@@ -1967,6 +2030,7 @@ void dm_perf_free(dm_perf *pf)
     while (pf->apphead) { dm_pmsg *p = pf->apphead; pf->apphead = p->next; pm_free(pf, p); }
     for (int i = 0; i < nss; i++) ss_destroy(ssv[i]);
     free(ssv);
+    while (pf->apblocks) { apblock *b = pf->apblocks; pf->apblocks = b->next; free(b); }
     while (pf->paths) { dm_audiopath *ap = pf->paths; pf->paths = ap->next; graph_drop(pf, ap->graph); free(ap->virt); free(ap->real); free(ap); }
     graph_drop(pf, pf->graph); pf->graph = NULL;
     while (pf->pool) { dm_pmsg *p = pf->pool; pf->pool = p->next; free(p); }

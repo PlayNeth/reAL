@@ -23,6 +23,20 @@ HRESULT rl_fxchain_get_object(rl_fxchain *c, REFGUID cls, DWORD index, REFIID ii
 void    rl_fxchain_discontinuity(rl_fxchain *c);
 void    rl_fxchain_process(rl_fxchain *c, BYTE *data, DWORD bytes);
 
+/* DirectMusic's buffers made from a buffer configuration (DSBC): the effects made at load (IMediaObject; ours for
+ * the standard classes), and the chain of a buffer made from it, which clones them.  Sends (GUID_DSFX_SEND) go to
+ * another buffer of the sink, found by its GUID; the chain's Process hands their data to `mix`. */
+typedef struct rl_sendops {
+    int  (*find)(void *ctx, REFGUID buffer);            /* the target, or -1 */
+    void (*mix)(void *ctx, int target, const BYTE *data, DWORD bytes, uint16_t gain, int srcch);
+} rl_sendops;
+typedef struct { GUID cls; IUnknown *obj; GUID send; LONG level; } rl_fxsrc;
+HRESULT rl_fx_create_config(REFCLSID cls, IUnknown **out);
+rl_fxchain *rl_fxchain_from_config(const WAVEFORMATEX *wfx, DWORD count, const rl_fxsrc *src, const rl_sendops *ops,
+                                   void *ctx, HRESULT *hr);
+/* the send's mixing (dst gets n samples, or 2n when `dup`: a mono send into a stereo buffer) */
+void rl_send_mix(int16_t *dst, const int16_t *src, DWORD n, uint16_t gain, BOOL first, BOOL dup);
+
 /* one of our effects as a COM object (CoCreateInstance of a standard effect's class, for DirectMusic) */
 HRESULT rl_fx_create(REFCLSID cls, REFIID iid, void **out);
 

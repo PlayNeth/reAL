@@ -352,7 +352,34 @@ static HRESULT WINAPI ip_Process(IMediaObjectInPlace *i, ULONG size, BYTE *data,
     LeaveCriticalSection(&This->cs);
     return S_OK;
 }
-static HRESULT WINAPI ip_Clone(IMediaObjectInPlace *i, IMediaObjectInPlace **out) { if (out) *out = NULL; return E_NOTIMPL; }
+static rl_fx *fx_new(int std);
+/* Clone (DirectSound clones a buffer configuration's effects for each buffer made from it): the same effect with
+ * the same parameters and, if set, the same format */
+static HRESULT WINAPI ip_Clone(IMediaObjectInPlace *i, IMediaObjectInPlace **out)
+{
+    rl_fx *This = from_ip(i);
+    if (!out) return E_POINTER;
+    *out = NULL;
+    rl_fx *n = fx_new(This->std);
+    if (!n) return E_OUTOFMEMORY;
+    BYTE p[64];
+    unsigned int cw = rl_fpu_enter();
+    EnterCriticalSection(&This->cs);
+    dsfx_get_all(This->fx, p);
+    dsfx_set_all(n->fx, p);
+    if (This->kind == DSFX_I3DL2) {
+        int32_t q = 0;
+        if (SUCCEEDED(dsfx_i3dl2_get_quality(This->fx, &q))) dsfx_i3dl2_set_quality(n->fx, q);
+    }
+    if (This->has_in || This->has_out) {
+        dsfx_set_format(n->fx, This->wf.wFormatTag, This->wf.nChannels, This->wf.nSamplesPerSec, This->wf.wBitsPerSample);
+        n->wf = This->wf; n->has_in = This->has_in; n->has_out = This->has_out;
+    }
+    LeaveCriticalSection(&This->cs);
+    rl_fpu_leave(cw);
+    *out = &n->IMediaObjectInPlace_iface;
+    return S_OK;
+}
 static HRESULT WINAPI ip_GetLatency(IMediaObjectInPlace *i, REFERENCE_TIME *t) { if (!t) return E_POINTER; *t = 0; return S_OK; }
 static IMediaObjectInPlaceVtbl ip_vtbl = { ip_QueryInterface, ip_AddRef, ip_Release, ip_Process, ip_Clone, ip_GetLatency };
 
@@ -441,19 +468,102 @@ typedef struct {
     IMediaObject *mo;
     IMediaObjectInPlace *ip;
     rl_fx *ours;                        /* our object: processed directly */
+    struct rl_send *send;               /* a send (GUID_DSFX_SEND): no DMO */
     DWORD status;
 } fxentry;
 
 struct rl_fxchain {
     DWORD n;
     DWORD block;
+    const rl_sendops *ops; void *ctx;   /* where sends go */
+    int nch;
     fxentry e[1];
 };
 
 DWORD rl_fxchain_count(const rl_fxchain *c) { return c ? c->n : 0; }
 
+/* ------------------------------------------------------------------ the send effect (DirectSound's 6efdaa1b): adds the
+ * buffer's data, as it is at that point of the chain, to a mix-in buffer's, at the send level */
+static const GUID RL_GUID_DSFX_SEND = { 0xef602176, 0xbcbb, 0x49e0, { 0x8c, 0xca, 0xe0, 0x9a, 0x5a, 0x15, 0x2b, 0x33 } };
+static const GUID RL_IID_IDirectSoundFXSend = { 0xb30f3564, 0x1698, 0x45ba, { 0x9f, 0x75, 0xfc, 0x3c, 0x6c, 0x3b, 0x28, 0x10 } };
+#include "sendgain.inc"
+typedef struct rl_send {
+    const void *vtbl;
+    LONG ref;
+    LONG level;                         /* +0x4c */
+    uint16_t gain;                      /* +0x50 */
+    int target;
+} rl_send;
+typedef struct { LONG lSendLevel; } RL_DSFXSend;
+/* 6efb3079: millibels to the 16-bit gain */
+static uint16_t send_gain(LONG mb)
+{
+    if (mb >= 0) return 0xffff;
+    LONG i = (mb + 5) / 10;
+    if (i > -1) i = -1;
+    if (i < -964) i = -964;
+    return s_sendgain[i + 964];
+}
+static HRESULT WINAPI sd_QueryInterface(void *i, REFIID riid, void **out)
+{
+    if (!out) return E_INVALIDARG;
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &RL_IID_IDirectSoundFXSend)) {
+        *out = i;
+        InterlockedIncrement(&((rl_send *)i)->ref);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI sd_AddRef(void *i) { return InterlockedIncrement(&((rl_send *)i)->ref); }
+static ULONG WINAPI sd_Release(void *i)
+{
+    LONG r = InterlockedDecrement(&((rl_send *)i)->ref);
+    if (!r) HeapFree(GetProcessHeap(), 0, i);
+    return r;
+}
+/* 6efda3c5 / 6efda400 */
+static HRESULT WINAPI sd_SetAllParameters(void *i, const RL_DSFXSend *p)
+{
+    rl_send *This = i;
+    if (!p || p->lSendLevel < -10000 || p->lSendLevel > 0) return E_INVALIDARG;
+    This->level = p->lSendLevel;
+    This->gain = send_gain(p->lSendLevel);
+    return S_OK;
+}
+static HRESULT WINAPI sd_GetAllParameters(void *i, RL_DSFXSend *p)
+{
+    if (!p) return E_INVALIDARG;
+    p->lSendLevel = ((rl_send *)i)->level;
+    return S_OK;
+}
+static const struct {
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *SetAllParameters)(void *, const RL_DSFXSend *);
+    HRESULT (WINAPI *GetAllParameters)(void *, RL_DSFXSend *);
+} sd_vtbl = { sd_QueryInterface, sd_AddRef, sd_Release, sd_SetAllParameters, sd_GetAllParameters };
+
+/* 6efda423 / 6efda510: dst = (first send ? 0 : dst) + src * gain / 65535 (rounded toward zero), clamped; a mono
+ * send into a stereo mix-in goes to both channels */
+void rl_send_mix(int16_t *dst, const int16_t *src, DWORD n, uint16_t gain, BOOL first, BOOL dup)
+{
+    for (DWORD k = 0; k < n; k++) {
+        int32_t t = (int32_t)src[k] * (int32_t)gain;
+        int64_t h = (int64_t)t * (int32_t)0x80008001;
+        int32_t q = ((int32_t)(h >> 32) + t) >> 15;
+        q += (int32_t)((uint32_t)q >> 31);
+        for (int c = 0; c < (dup ? 2 : 1); c++) {
+            int32_t v = q + (first ? 0 : dst[0]);
+            *dst++ = (int16_t)(v > 0x7fff ? 0x7fff : v < -0x8000 ? -0x8000 : v);
+        }
+    }
+}
+
 static void entry_free(fxentry *e)
 {
+    if (e->send) sd_Release(e->send);
     if (e->ip) IMediaObjectInPlace_Release(e->ip);
     if (e->mo) IMediaObject_Release(e->mo);
     if (e->unk) IUnknown_Release(e->unk);
@@ -561,10 +671,75 @@ HRESULT rl_fxchain_get_object(rl_fxchain *c, REFGUID cls, DWORD index, REFIID ii
 
 void rl_fxchain_discontinuity(rl_fxchain *c)
 {
-    for (DWORD i = 0; c && i < c->n; i++) IMediaObject_Discontinuity(c->e[i].mo, 0);
+    for (DWORD i = 0; c && i < c->n; i++) if (c->e[i].mo) IMediaObject_Discontinuity(c->e[i].mo, 0);
 }
 
 void rl_fxchain_process(rl_fxchain *c, BYTE *data, DWORD bytes)
 {
-    for (DWORD i = 0; c && i < c->n; i++) IMediaObjectInPlace_Process(c->e[i].ip, bytes, data, 0, 0);
+    for (DWORD i = 0; c && i < c->n; i++) {
+        if (c->e[i].send) { if (c->ops) c->ops->mix(c->ctx, c->e[i].send->target, data, bytes, c->e[i].send->gain, c->nch); }
+        else IMediaObjectInPlace_Process(c->e[i].ip, bytes, data, 0, 0);
+    }
+}
+
+/* DirectSound's buffer configuration effects (DSBC 'DSFX' forms, 6efdb574): the object made at load (as CoCreateInstance
+ * with IID_IMediaObject: ours for the standard classes) */
+HRESULT rl_fx_create_config(REFCLSID cls, IUnknown **out)
+{
+    *out = NULL;
+    int s = std_index(cls);
+    if (s >= 0) {
+        rl_fx *f = fx_new(s);
+        if (!f) return E_OUTOFMEMORY;
+        *out = (IUnknown *)&f->IMediaObject_iface;
+        return S_OK;
+    }
+    return CoCreateInstance(cls, NULL, CLSCTX_INPROC_SERVER, &RL_IID_IMediaObject, (void **)out);
+}
+
+/* a buffer made from a configuration: its effects cloned (IMediaObjectInPlace::Clone) and given the buffer's format;
+ * sends found by the target buffer's GUID (DSERR_BADSENDBUFFERGUID if there is none) */
+rl_fxchain *rl_fxchain_from_config(const WAVEFORMATEX *wfx, DWORD count, const rl_fxsrc *src, const rl_sendops *ops,
+                                   void *ctx, HRESULT *phr)
+{
+    rl_fxchain *c = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, offsetof(rl_fxchain, e) + (count ? count : 1) * sizeof(fxentry));
+    if (!c) { *phr = DSERR_OUTOFMEMORY; return NULL; }
+    c->n = count; c->block = wfx->nBlockAlign; c->ops = ops; c->ctx = ctx; c->nch = wfx->nChannels;
+    WAVEFORMATEX wf = *wfx;
+    wf.cbSize = 0;
+    DMO_MEDIA_TYPE mt;
+    media_type(&wf, &mt);
+    HRESULT hr = S_OK;
+    for (DWORD i = 0; i < count && SUCCEEDED(hr); i++) {
+        fxentry *e = &c->e[i];
+        e->cls = src[i].cls;
+        e->status = DSFXR_LOCSOFTWARE;
+        if (IsEqualGUID(&src[i].cls, &RL_GUID_DSFX_SEND)) {
+            int t = ops ? ops->find(ctx, &src[i].send) : -1;
+            if (t < 0) { hr = DSERR_BADSENDBUFFERGUID; break; }
+            rl_send *sd = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*sd));
+            if (!sd) { hr = E_OUTOFMEMORY; break; }
+            sd->vtbl = &sd_vtbl; sd->ref = 1; sd->target = t;
+            RL_DSFXSend p = { src[i].level };
+            sd_SetAllParameters(sd, &p);
+            e->send = sd;
+            e->unk = (IUnknown *)sd; IUnknown_AddRef(e->unk);
+            continue;
+        }
+        IMediaObjectInPlace *ip = NULL, *n = NULL;
+        hr = IUnknown_QueryInterface(src[i].obj, &RL_IID_IMediaObjectInPlace, (void **)&ip);
+        if (SUCCEEDED(hr)) { hr = IMediaObjectInPlace_Clone(ip, &n); IMediaObjectInPlace_Release(ip); }
+        if (SUCCEEDED(hr)) {
+            e->ip = n;
+            void **vt = *(void ***)n;
+            if (vt == (void **)&ip_vtbl) e->ours = from_ip(n);
+            hr = IMediaObjectInPlace_QueryInterface(n, &IID_IUnknown, (void **)&e->unk);
+        }
+        if (SUCCEEDED(hr)) hr = IUnknown_QueryInterface(e->unk, &RL_IID_IMediaObject, (void **)&e->mo);
+        if (SUCCEEDED(hr)) hr = IMediaObject_SetInputType(e->mo, 0, &mt, 0);
+        if (SUCCEEDED(hr)) hr = IMediaObject_SetOutputType(e->mo, 0, &mt, 0);
+    }
+    if (FAILED(hr)) { rl_fxchain_free(c); *phr = hr; return NULL; }
+    *phr = DS_OK;           /* (no Discontinuity: dsound's sink buffers play from the start) */
+    return c;
 }

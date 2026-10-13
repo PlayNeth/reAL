@@ -14,6 +14,7 @@
 #include "msynth.h"
 #include "wavesrev.h"
 #include "sf2dls.h"
+#include "../fx.h"
 #include <stdio.h>
 #include <math.h>
 #include <float.h>
@@ -24,9 +25,21 @@
 
 /* the sink's buffers: [0] the shared stereo (dry) buffer, [1] the shared reverb buffer, then the audiopaths' own
  * (3D, mono, stereo).  Each takes one bus per channel (DirectX 8 sink: IDirectSoundSource::Read into the bus buffers) */
-enum { HB_DRY, HB_REVERB, HB_3D, HB_MONO, HB_STEREO };
+enum { HB_DRY, HB_REVERB, HB_3D, HB_MONO, HB_STEREO, HB_CFG };
 #define MAXHB 64
-typedef struct { rl_buffer *b; int kind, nch, refs; uint32_t bus[2], func[2]; } hbuf;
+#define BLOCK 256           /* frames a sink pass renders at a time */
+/* HB_CFG: a buffer an audiopath configuration describes (dm_host_buffer_new): its buses (none: a mix-in, fed by the
+ * sends of other buffers), its effects run on each block before it is written (as dsound's sink does, 6efd878f) */
+typedef struct {
+    rl_buffer *b; int kind, nch, refs; uint32_t bus[2], func[2];
+    int nbus;
+    rl_fxchain *fx;
+    int mixin;
+    GUID guid;
+    uint32_t seq;
+    int hasacc;                     /* +0x124: a send wrote to acc this block */
+    int16_t acc[BLOCK * 2];         /* +0x120 */
+} hbuf;
 
 struct dm_host {
     CRITICAL_SECTION lock;
@@ -38,7 +51,7 @@ struct dm_host {
     rl_device *dev;
     rl_buffer *dry, *wet;
     hbuf hb[MAXHB];
-    uint32_t nextbus;
+    uint32_t nextbus, nextseq;
     rl_buffer *primary;
     int buslog, peak[MAXHB];        /* REAL_MUSIC_BUSLOG: each sink buffer's peak, once a second */
     uint32_t bufframes;
@@ -289,7 +302,17 @@ static void sink_pass(dm_host *h)
         first[k] = nb;
         if (!x->b) continue;
         int32_t pc = x->kind >= HB_3D ? rl_buffer_sink_cents(x->b) : 0;
-        for (int c = 0; c < x->nch; c++) { ids[nb] = x->bus[c]; fn[nb] = x->func[c]; pitch[nb] = pc; bufs[nb] = tmp[nb]; nb++; }
+        int nbus = x->kind == HB_CFG ? x->nbus : x->nch;
+        for (int c = 0; c < nbus; c++) { ids[nb] = x->bus[c]; fn[nb] = x->func[c]; pitch[nb] = pc; bufs[nb] = tmp[nb]; nb++; }
+    }
+    /* the order buffers are written in: the configured mix-ins last, newest first (a send's target was made before it) */
+    int order[MAXHB], no = 0, nm;
+    for (int k = 0; k < MAXHB; k++) if (h->hb[k].b && !h->hb[k].mixin) order[no++] = k;
+    nm = no;
+    for (int k = 0; k < MAXHB; k++) if (h->hb[k].b && h->hb[k].mixin) {
+        int j = no++;
+        while (j > nm && h->hb[order[j - 1]].seq < h->hb[k].seq) { order[j] = order[j - 1]; j--; }
+        order[j] = k;
     }
     while (h->written < target) {
         uint32_t n = (uint32_t)(target - h->written);
@@ -298,11 +321,30 @@ static void sink_pass(dm_host *h)
         msynth_read(h->syn, bufs, ids, fn, pitch, nb, n);
         uint32_t at = (uint32_t)(h->written % h->bufframes);
         int16_t dry[512], v[512];
-        for (int k = 0; k < MAXHB; k++) {
+        for (int k = 0; k < MAXHB; k++) h->hb[k].hasacc = 0;
+        for (int oi = 0; oi < no; oi++) {
+            int k = order[oi];
             hbuf *x = &h->hb[k];
-            if (!x->b) continue;
             const int16_t *a = tmp[first[k]], *b2 = x->nch > 1 ? tmp[first[k] + 1] : NULL;
             switch (x->kind) {
+            case HB_CFG: {                          /* 6efd7afc: the buses (or what was sent), the effects, written */
+                if (x->mixin) {
+                    if (x->hasacc) memcpy(out, x->acc, n * 2 * x->nch);
+                    else memset(out, 0, n * 2 * x->nch);
+                } else if (x->nbus == 1) {
+                    for (uint32_t i = 0; i < n; i++) for (int c = 0; c < x->nch; c++) out[i * x->nch + c] = a[i];
+                } else {
+                    const int16_t *b1 = tmp[first[k] + 1];
+                    for (uint32_t i = 0; i < n; i++) {
+                        if (x->nch == 2) { out[2 * i] = a[i]; out[2 * i + 1] = b1[i]; }
+                        else out[i] = a[i];
+                    }
+                }
+                if (x->fx) rl_fxchain_process(x->fx, (BYTE *)out, n * 2 * x->nch);
+                write_buffer(x->b, at, out, n, x->nch);
+                b2 = NULL;
+                break;
+            }
             case HB_DRY: case HB_STEREO:            /* two buses interleaved */
                 for (uint32_t i = 0; i < n; i++) { out[2 * i] = a[i]; out[2 * i + 1] = b2[i]; }
                 if (x->kind == HB_DRY) memcpy(dry, out, n * 4);
@@ -318,7 +360,7 @@ static void sink_pass(dm_host *h)
                 write_buffer(x->b, at, a, n, 1);
                 break;
             }
-            if (h->buslog) for (uint32_t i = 0; i < n * x->nch; i++) {
+            if (h->buslog && x->kind != HB_CFG) for (uint32_t i = 0; i < n * x->nch; i++) {
                 int v2 = (x->nch > 1 ? (i & 1 ? b2 : a)[i / 2] : a[i]);
                 if (v2 < 0) v2 = -v2;
                 if (v2 > h->peak[k]) h->peak[k] = v2;
@@ -454,7 +496,10 @@ void dm_host_free(dm_host *h)
     for (int i = 0; i < 3; i++) if (h->th[i]) { WaitForSingleObject(h->th[i], 2000); CloseHandle(h->th[i]); }
     for (int i = 0; i < 2; i++) if (h->ev[i]) CloseHandle(h->ev[i]);
     if (h->quit) CloseHandle(h->quit);
-    for (int k = 2; k < MAXHB; k++) if (h->hb[k].b) IDirectSoundBuffer8_Release(&h->hb[k].b->IDirectSoundBuffer8_iface);
+    for (int k = 2; k < MAXHB; k++) if (h->hb[k].b) {
+        rl_fxchain_free(h->hb[k].fx);
+        IDirectSoundBuffer8_Release(&h->hb[k].b->IDirectSoundBuffer8_iface);
+    }
     if (h->primary) IDirectSoundBuffer8_Release(&h->primary->IDirectSoundBuffer8_iface);
     if (h->dry) IDirectSoundBuffer8_Release(&h->dry->IDirectSoundBuffer8_iface);
     if (h->wet) IDirectSoundBuffer8_Release(&h->wet->IDirectSoundBuffer8_iface);
@@ -563,11 +608,119 @@ void dm_host_path_close(dm_host *h, const int *idx, int nidx)
         hbuf *x = &h->hb[idx[i]];
         if (--x->refs > 0 || idx[i] < 2) continue;
         rl_buffer *b = x->b;
+        rl_fxchain *fx = x->fx;
         memset(x, 0, sizeof(*x));
+        rl_fxchain_free(fx);
         IDirectSoundBuffer8_Stop(&b->IDirectSoundBuffer8_iface);
         IDirectSoundBuffer8_Release(&b->IDirectSoundBuffer8_iface);
     }
     LeaveCriticalSection(&h->lock);
+}
+
+/* ------------------------------------------------------------------ configured buffers
+ * What dsound's sink does for DirectMusic (IDirectSoundConnect::CreateSoundBuffer / CreateSoundBufferFromConfig):
+ * a 16-bit buffer at the synth rate on new buses (one per function), playing; its effects cloned from the
+ * configuration's, sends found among the sink's buffers by GUID.  A buffer without buses is a mix-in. */
+static int send_find(void *ctx, REFGUID g)
+{
+    dm_host *h = ctx;
+    for (int k = 0; k < MAXHB; k++) if (h->hb[k].b && h->hb[k].kind == HB_CFG && IsEqualGUID(&h->hb[k].guid, g)) return k;
+    return -1;
+}
+/* 6efda6ce: the send's data into the target's block (copied by the first send of the block, added by the others) */
+static void send_mix(void *ctx, int t, const BYTE *data, DWORD bytes, uint16_t gain, int srcch)
+{
+    dm_host *h = ctx;
+    hbuf *x = &h->hb[t];
+    if (t < 0 || t >= MAXHB || !x->b) return;
+    DWORD n = bytes / 2;
+    BOOL dup = srcch != x->nch;
+    if (dup && srcch == 2) n /= 2;              /* (stereo into mono: as many samples as fit) */
+    if (n > BLOCK * 2 / (dup ? 2 : 1)) n = BLOCK * 2 / (dup ? 2 : 1);
+    rl_send_mix(x->acc, (const int16_t *)data, n, gain, !x->hasacc, dup);
+    x->hasacc = 1;
+}
+static const rl_sendops s_sendops = { send_find, send_mix };
+
+HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
+{
+    *idx = -1;
+    if (d->nch < 1 || d->nch > 2) return E_INVALIDARG;
+    EnterCriticalSection(&h->lock);
+    int k;
+    for (k = 2; k < MAXHB && h->hb[k].b; k++) ;
+    if (k == MAXHB) { LeaveCriticalSection(&h->lock); return E_OUTOFMEMORY; }
+    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, (WORD)d->nch, h->rate, h->rate * 2 * d->nch, (WORD)(2 * d->nch), 16, 0 };
+    HRESULT hr = S_OK;
+    rl_fxchain *fx = NULL;
+    if (d->nfx) {
+        fx = rl_fxchain_from_config(&wf, d->nfx, d->fx, &s_sendops, h, &hr);
+        if (!fx) { LeaveCriticalSection(&h->lock); return hr; }
+    }
+    rl_buffer *b = make_buffer_ex(h, d->nch, d->flags & (DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN |
+                                  DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS | DSBCAPS_MUTE3DATMAXDISTANCE), d->alg);
+    if (!b) { rl_fxchain_free(fx); LeaveCriticalSection(&h->lock); return E_OUTOFMEMORY; }
+    rl_buffer_set_sink(b, d->caps);
+    hbuf *x = &h->hb[k];
+    memset(x, 0, sizeof(*x));
+    x->b = b; x->refs = 1; x->kind = HB_CFG; x->nch = d->nch; x->fx = fx; x->guid = d->guid; x->seq = h->nextseq++;
+    x->nbus = d->nfunc > 2 ? 2 : (int)d->nfunc;
+    x->mixin = x->nbus == 0;
+    for (int c = 0; c < x->nbus; c++) { x->bus[c] = h->nextbus++; x->func[c] = d->func[c]; }
+    if (d->flags & DSBCAPS_CTRLVOLUME) IDirectSoundBuffer8_SetVolume(&b->IDirectSoundBuffer8_iface, d->vol);
+    if (d->flags & DSBCAPS_CTRLPAN) IDirectSoundBuffer8_SetPan(&b->IDirectSoundBuffer8_iface, d->pan);
+    if (d->ds3d && (d->flags & DSBCAPS_CTRL3D)) {
+        IDirectSound3DBuffer8 *b3 = NULL;
+        if (SUCCEEDED(IDirectSoundBuffer8_QueryInterface(&b->IDirectSoundBuffer8_iface, &IID_IDirectSound3DBuffer8, (void **)&b3))) {
+            DS3DBUFFER p = *d->ds3d;
+            p.dwSize = sizeof(p);
+            IDirectSound3DBuffer_SetAllParameters(b3, &p, DS3D_IMMEDIATE);
+            IDirectSound3DBuffer_Release(b3);
+        }
+    }
+    DWORD play = 0, wr = 0;
+    IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr);
+    IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
+    IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
+    *idx = k;
+    LeaveCriticalSection(&h->lock);
+    return S_OK;
+}
+/* IDirectSoundConnect::GetSoundBufferBusIDs: the buffer's buses (0 for a mix-in) */
+DWORD dm_host_buffer_buses(dm_host *h, int idx, uint32_t *out, DWORD max)
+{
+    DWORD n = 0;
+    EnterCriticalSection(&h->lock);
+    if (idx >= 0 && idx < MAXHB && h->hb[idx].b) {
+        hbuf *x = &h->hb[idx];
+        int nb = x->kind == HB_CFG ? x->nbus : x->kind == HB_REVERB ? 1 : x->nch;
+        for (int c = 0; c < nb && n < max; c++) out[n++] = x->bus[c];
+    }
+    LeaveCriticalSection(&h->lock);
+    return n;
+}
+int dm_host_buffer_inuse(dm_host *h, int idx)
+{
+    EnterCriticalSection(&h->lock);
+    int r = idx >= 0 && idx < MAXHB && h->hb[idx].b && h->hb[idx].refs > (idx < 2 ? 1 : 0);
+    LeaveCriticalSection(&h->lock);
+    return r;
+}
+void dm_host_buffer_addref(dm_host *h, int idx)
+{
+    EnterCriticalSection(&h->lock);
+    if (idx >= 0 && idx < MAXHB && h->hb[idx].b) h->hb[idx].refs++;
+    LeaveCriticalSection(&h->lock);
+}
+/* DMUS_PATH_BUFFER_DMO on a configured buffer: its effects (IDirectSoundBuffer8::GetObjectInPath) */
+HRESULT dm_host_buffer_dmo(dm_host *h, int idx, REFGUID g, DWORD n, REFIID iid, void **out)
+{
+    *out = NULL;
+    HRESULT hr = DSERR_OBJECTNOTFOUND;
+    EnterCriticalSection(&h->lock);
+    if (idx >= 0 && idx < MAXHB && h->hb[idx].b && h->hb[idx].fx) hr = rl_fxchain_get_object(h->hb[idx].fx, g, n, iid, out);
+    LeaveCriticalSection(&h->lock);
+    return hr;
 }
 
 /* the buffer object (AudioPath::GetObjectInPath, DMUS_PATH_BUFFER) */

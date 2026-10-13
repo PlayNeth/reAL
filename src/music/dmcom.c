@@ -11,6 +11,7 @@
 #include "dmhost.h"
 #include "dmcom.h"
 #include "dmgraph.h"
+#include "dmapcfg.h"
 #include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
@@ -65,7 +66,18 @@ typedef struct {
     rm_perf *perf;
     DWORD type, npch;
     int buf[2], nbuf;                       /* the host's sink buffers, in the path's buffer order */
+    /* a path made from a configuration (77320f10): its buffers (+0x58 the top-level ones, +0x54 the ports') */
+    BOOL cfg;
+    struct rm_bref *top; DWORD ntop;
+    struct rm_pcfg *ports; DWORD nports;
+    struct rm_buf **held; DWORD nheld;      /* every buffer reference the path holds */
 } rm_path;
+
+/* the performance's buffers (dmime's buffer manager, perf +0x90): made from configurations, shared by GUID */
+typedef struct rm_buf { struct rm_buf *next; GUID guid; DWORD flags; int host; LONG refs; } rm_buf;
+typedef struct rm_bref { rm_buf *b; DWORD flags; } rm_bref;    /* a path's reference (0x24): the flags as they were */
+typedef struct { DWORD base, count, nbuf; rm_buf **b; } rm_pmap;
+typedef struct rm_pcfg { GUID port; DWORD base, count; rm_bref *bufs; DWORD nbufs; rm_pmap *maps; DWORD nmaps; } rm_pcfg;
 
 struct rm_perf {
     IDirectMusicPerformance8 IDirectMusicPerformance8_iface;
@@ -75,6 +87,8 @@ struct rm_perf {
     dm_host *host;
     DSFXWavesReverb revparams;              /* the shared reverb's parameters as last set */
     rm_path *defpath;
+    DWORD audioflags;                       /* InitAudio's (DMUS_AUDIOF_*) */
+    rm_buf *bufs;
     IDirectMusic8 *dm;
     BOOL closed;
     HANDLE notify;
@@ -1261,6 +1275,125 @@ static HRESULT reverb_object(rm_perf *p, REFIID iid, void **out)
     return hr;
 }
 
+/* ------------------------------------------------------------------ the buffer manager */
+static void buf_release(rm_perf *p, rm_buf *b)
+{
+    if (--b->refs > 0) return;
+    for (rm_buf **q = &p->bufs; *q; q = &(*q)->next) if (*q == b) { *q = b->next; break; }
+    if (p->host) dm_host_path_close(p->host, &b->host, 1);
+    free(b);
+}
+static void path_free_config(rm_path *a)
+{
+    for (DWORD i = 0; i < a->nheld; i++) buf_release(a->perf, a->held[i]);
+    for (DWORD k = 0; k < a->nports; k++) {
+        for (DWORD m = 0; m < a->ports[k].nmaps; m++) free(a->ports[k].maps[m].b);
+        free(a->ports[k].maps); free(a->ports[k].bufs);
+    }
+    free(a->ports); free(a->top); free(a->held);
+    a->ports = NULL; a->top = NULL; a->held = NULL; a->nports = a->ntop = a->nheld = 0;
+}
+static BOOL hold(rm_path *a, rm_buf *b)
+{
+    rm_buf **n = realloc(a->held, (a->nheld + 1) * sizeof(*n));
+    if (!n) return FALSE;
+    a->held = n;
+    a->held[a->nheld++] = b;
+    return TRUE;
+}
+
+/* the standard buffers DirectMusic's configurations can name (dmime 773016a4..), and the effects of the defined ones */
+static const GUID RM_GUID_Buffer_Reverb = { 0x186cc541, 0xdb29, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
+static const GUID RM_GUID_Buffer_Stereo = { 0x186cc545, 0xdb29, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
+static const GUID RM_DS3DALG_NO_VIRTUALIZATION = { 0xc241333f, 0x1c1b, 0x11d2, { 0x94, 0xf5, 0x00, 0xc0, 0x4f, 0xc2, 0x8a, 0xca } };
+static const GUID RM_GUID_DSFX_WAVES = { 0x87fc0268, 0x9a55, 0x4360, { 0x95, 0xaa, 0x00, 0x4a, 0x1d, 0x9d, 0xe2, 0x6c } };
+static const GUID RM_GUID_DSFX_I3DL2 = { 0xef985e71, 0xd5c7, 0x42d4, { 0xba, 0x4d, 0x2d, 0x07, 0x3e, 0x2e, 0x96, 0xf4 } };
+
+/* 7731e70c (any) / 773208c7 (a shared one): a buffer by GUID; the standard path's shared stereo and reverb buffers
+ * count as the manager's while a path holds them */
+static rm_buf *buf_find(rm_perf *p, const GUID *g, BOOL shared)
+{
+    for (rm_buf *b = p->bufs; b; b = b->next)
+        if ((!shared || (b->flags & DMUS_BUFFERF_SHARED)) && IsEqualGUID(&b->guid, g)) { b->refs++; return b; }
+    int std = IsEqualGUID(g, &RM_GUID_Buffer_Stereo) ? 0 : IsEqualGUID(g, &RM_GUID_Buffer_Reverb) ? 1 : -1;
+    if (std < 0 || !p->host || !dm_host_buffer_inuse(p->host, std)) return NULL;
+    rm_buf *b = calloc(1, sizeof(*b));
+    if (!b) return NULL;
+    b->guid = *g; b->flags = DMUS_BUFFERF_SHARED | DMUS_BUFFERF_DEFINED; b->host = std; b->refs = 1;
+    dm_host_buffer_addref(p->host, std);
+    b->next = p->bufs; p->bufs = b;
+    return b;
+}
+
+/* 7732084b: a configuration's buffer for a path (shared ones found again); the reference's flags are the
+ * configuration's as they were, a buffer that turns out to be a mix-in marking the configuration's */
+static HRESULT buf_make(rm_perf *p, apc_buffer *c, rm_bref *ref)
+{
+    memset(ref, 0, sizeof(*ref));
+    if (!(p->audioflags & DMUS_AUDIOF_BUFFERS)) return (HRESULT)0x8878122a;
+    ref->flags = c->flags;
+    if ((c->flags & DMUS_BUFFERF_SHARED) && (ref->b = buf_find(p, &c->guid, TRUE))) return S_OK;
+    dm_hostbuf d;
+    memset(&d, 0, sizeof(d));
+    d.guid = c->guid;
+    DWORD func[2];
+    rl_fxsrc fx;
+    IUnknown *fxobj = NULL;
+    if (c->flags & DMUS_BUFFERF_DEFINED) {
+        int hasfx = 0;
+        switch (c->type) {
+        case 1: d.nch = 2; func[0] = DSBUSID_REVERB_SEND; d.nfunc = 1; d.flags = 0x480c0; hasfx = 1; fx.cls = RM_GUID_DSFX_WAVES; break;
+        case 2:
+            d.nch = 2; d.nfunc = 0; d.flags = 0xa0c0; hasfx = 1; fx.cls = RM_GUID_DSFX_I3DL2;
+            break;
+        case 4: d.nch = 1; func[0] = DSBUSID_DYNAMIC_0; d.nfunc = 1; d.flags = 0x680b0; d.alg = &RM_DS3DALG_NO_VIRTUALIZATION; break;
+        case 6: d.nch = 1; func[0] = DSBUSID_LEFT; d.nfunc = 1; d.flags = 0x480e0; break;
+        case 7: d.nch = 2; func[0] = DSBUSID_LEFT; func[1] = DSBUSID_RIGHT; d.nfunc = 2; d.flags = 0x480e0; break;
+        case 8: d.nch = 2; func[0] = DSBUSID_LEFT; func[1] = DSBUSID_RIGHT; d.nfunc = 2; d.flags = 0x480c0; break;
+        default: return E_INVALIDARG;
+        }
+        if ((c->flags & DMUS_BUFFERF_MIXIN) || !d.nfunc) {
+            d.nfunc = 0;
+            c->flags |= DMUS_BUFFERF_MIXIN;
+            d.flags = (d.flags & ~0x40000u) | 0x2000;
+        }
+        d.flags |= DSBCAPS_CTRLFX;
+        d.caps = d.flags | (d.flags & 0x40000 ? 0 : DSBCAPS_LOCSOFTWARE);
+        d.func = func;
+        if (hasfx) {
+            memset(&fx.send, 0, sizeof(fx.send)); fx.level = 0;
+            HRESULT hr = rl_fx_create_config(&fx.cls, &fxobj);
+            if (FAILED(hr)) return hr;
+            fx.obj = fxobj;
+            d.nfx = 1; d.fx = &fx;
+        }
+    } else {
+        c->flags &= ~DMUS_BUFFERF_MIXIN;
+        if (!c->dsbc || !c->hasdesc) return E_INVALIDARG;
+        d.nch = c->nch; d.vol = c->vol; d.pan = c->pan;
+        d.nfunc = c->nbus > 2 ? 2 : c->nbus;
+        d.func = c->bus;
+        d.flags = c->dsflags;
+        if (c->has3d) { d.alg = &c->alg; d.ds3d = &c->ds3d; }
+        d.nfx = c->nfx; d.fx = c->fx;
+        d.caps = (c->dsflags & ~0x40000u) | (d.nfunc ? 0 : 0x2000) | DSBCAPS_LOCSOFTWARE;
+        /* (77320b9f marks it a mix-in again only if its first bus id is DSBUSID_NULL, which dsound never gives: a
+         * configuration's DSBC mix-in is one only for the first path made from it) */
+    }
+    rm_buf *b = calloc(1, sizeof(*b));
+    if (!b) { if (fxobj) IUnknown_Release(fxobj); return E_OUTOFMEMORY; }
+    HRESULT hr = dm_host_buffer_new(p->host, &d, &b->host);
+    if (fxobj) IUnknown_Release(fxobj);
+    if (FAILED(hr)) { free(b); return hr; }
+    b->guid = c->guid; b->flags = ref->flags; b->refs = 1;
+    b->next = p->bufs; p->bufs = b;
+    ref->b = b;
+    char g[64];
+    LOG_CALL("music: audiopath buffer %s (type %d, flags %lx) -> host buffer %d", rl_guid_str(&c->guid, g), c->type,
+             (unsigned long)ref->flags, b->host);
+    return S_OK;
+}
+
 /* ------------------------------------------------------------------ audiopaths */
 static IDirectMusicAudioPathVtbl ap_vtbl;
 static rm_path *apt(IDirectMusicAudioPath *i) { return impl_from(i, rm_path, IDirectMusicAudioPath_iface); }
@@ -1296,10 +1429,58 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
             dm_host_unlock(a->perf->host);
             if (a->nbuf) dm_host_path_close(a->perf->host, a->buf, a->nbuf);
         }
+        path_free_config(a);
         IDirectMusicPerformance8_Release(&a->perf->IDirectMusicPerformance8_iface);
         free(a);
     }
     return r;
+}
+/* a buffer's object at the buffer stages: the buffer (index 0), or its effects (IDirectSoundBuffer8::GetObjectInPath) */
+static HRESULT buf_object(rm_path *a, rm_buf *b, DWORD stage, REFGUID g, DWORD n, REFIID iid, void **o)
+{
+    if (stage == DMUS_PATH_BUFFER || stage == DMUS_PATH_MIXIN_BUFFER)
+        return n ? DMUS_E_NOT_FOUND : dm_host_buffer_query(a->perf->host, b->host, iid, o);
+    if (b->host == 1 && n == 0 && (IsEqualGUID(g, &GUID_All_Objects) || IsEqualGUID(g, &GUID_DSFX_WAVES_REVERB)))
+        return reverb_object(a->perf, iid, o);      /* the standard path's shared reverb */
+    return dm_host_buffer_dmo(a->perf->host, b->host, g, n, iid, o);
+}
+/* 7731fbc1, the stages a configured path has of its own */
+static HRESULT cfg_getobj(rm_path *a, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFIID iid, void **o)
+{
+    HRESULT hr = DMUS_E_NOT_FOUND;
+    if (!a->perf->host) return hr;
+    dm_host_lock(a->perf->host);
+    if (stage == DMUS_PATH_PORT || stage == 0x5000) {
+        /* the port (and the sink): reAL-Music has no port objects */
+        char b1[64];
+        LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s): no port objects", (unsigned long)stage, guidstr(iid, b1));
+    } else if (stage == DMUS_PATH_BUFFER || stage == DMUS_PATH_BUFFER_DMO) {
+        /* the port configurations whose PChannels include pch (DMUS_PCHANNEL_ALL: all), then their maps; dwBuffer
+         * counts the maps' buffers */
+        for (DWORD k = 0; k < a->nports && hr < 0; k++) {
+            rm_pcfg *pc = &a->ports[k];
+            if (pch != DMUS_PCHANNEL_ALL && (pch < pc->base || pch >= pc->base + pc->count)) continue;
+            DWORD idx = buf;
+            for (DWORD m = 0; m < pc->nmaps; m++) {
+                rm_pmap *pm = &pc->maps[m];
+                if (pch != DMUS_PCHANNEL_ALL && (pch < pm->base || pch >= pm->base + pm->count)) continue;
+                if (idx >= pm->nbuf) { idx -= pm->nbuf; continue; }
+                if (pm->b[idx]) hr = buf_object(a, pm->b[idx], stage, g, n, iid, o);
+                break;
+            }
+        }
+    } else {
+        /* the top-level mix-in buffers (only on PChannel 0) */
+        if (pch == 0)
+            for (DWORD i = 0, idx = buf; i < a->ntop; i++) {
+                if (!(a->top[i].flags & DMUS_BUFFERF_MIXIN)) continue;
+                if (idx--) continue;
+                hr = buf_object(a, a->top[i].b, stage, g, n, iid, o);
+                break;
+            }
+    }
+    dm_host_unlock(a->perf->host);
+    return hr;
 }
 static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
 {
@@ -1307,6 +1488,9 @@ static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage
     if (!o) return E_POINTER;
     *o = NULL;
     if (buf && (stage < DMUS_PATH_BUFFER || stage > 0x7fff)) return DMUS_E_NOT_FOUND;     /* 7731fbc1 */
+    if (a->cfg && (stage == DMUS_PATH_PORT || stage == 0x5000 || stage == DMUS_PATH_BUFFER || stage == DMUS_PATH_BUFFER_DMO ||
+                   stage == DMUS_PATH_MIXIN_BUFFER || stage == DMUS_PATH_MIXIN_BUFFER_DMO))
+        return cfg_getobj(a, pch, stage, buf, g, n, iid, o);
     if (stage == DMUS_PATH_PERFORMANCE) return n || pch ? DMUS_E_NOT_FOUND : IDirectMusicPerformance8_QueryInterface(&a->perf->IDirectMusicPerformance8_iface, iid, o);
     if (stage == DMUS_PATH_AUDIOPATH) return n || pch ? DMUS_E_NOT_FOUND : ap_qi(i, iid, o);
     if (stage == DMUS_PATH_BUFFER) {
@@ -1383,11 +1567,13 @@ static HRESULT WINAPI ap_setvolume(IDirectMusicAudioPath *i, LONG vol, DWORD dur
     LOG_TRACE("music: AudioPath::SetVolume(%ld, %lu) -> %08x", vol, (unsigned long)dur, hr);
     return hr;
 }
+/* 7731eedb: the broadcast values (0xfffffff0 and up) as they are; a PChannel the path does not have: DMUS_E_NOT_FOUND */
 static HRESULT WINAPI ap_convert(IDirectMusicAudioPath *i, DWORD in, DWORD *out)
 {
-    if (!out) return E_POINTER;
+    if (!out || IsBadWritePtr(out, 4)) return E_POINTER;
+    if (in >= 0xfffffff0) { *out = in; return S_OK; }
     uint32_t r;
-    if (dm_audiopath_convert(apt(i)->ap, in, &r) < 0) return E_INVALIDARG;
+    if (dm_audiopath_convert(apt(i)->ap, in, &r) < 0) return DMUS_E_NOT_FOUND;
     *out = r;
     return S_OK;
 }
@@ -2339,6 +2525,7 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
     LOG_CALL("music: Performance::InitAudio(dm %p/%p, ds %p/%p, type %lu, %lu pchannels, flags %lx)", (void *)pdm, pdm ? (void *)*pdm : NULL,
              (void *)pds, pds ? (void *)*pds : NULL, (unsigned long)type, (unsigned long)npch, (unsigned long)flags);
     if (p->host) return DMUS_E_ALREADY_INITED;
+    p->audioflags = flags ? flags : DMUS_AUDIOF_ALL;
     uint32_t rate = 22050, voices = 64;
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {
         if ((params->dwValidData & DMUS_AUDIOPARAMS_SAMPLERATE) && params->dwSampleRate) rate = params->dwSampleRate;
@@ -2458,10 +2645,138 @@ static HRESULT WINAPI pf_clonepmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *s, DM
     if (s->pGraph) IDirectMusicGraph_AddRef(s->pGraph);
     return S_OK;
 }
+/* 7731f12c / 7731ea82: a buffer a PChannel map names: the port configuration's own, the path's top-level ones,
+ * another port configuration's, then any of the performance's */
+static rm_buf *path_find(rm_path *a, const rm_pcfg *pc, const GUID *g)
+{
+    for (DWORD i = 0; i < pc->nbufs; i++) if (IsEqualGUID(&pc->bufs[i].b->guid, g)) { pc->bufs[i].b->refs++; return pc->bufs[i].b; }
+    for (DWORD i = 0; i < a->ntop; i++) if (IsEqualGUID(&a->top[i].b->guid, g)) { a->top[i].b->refs++; return a->top[i].b; }
+    for (DWORD k = 0; k < a->nports; k++)
+        for (DWORD i = 0; i < a->ports[k].nbufs; i++)
+            if (IsEqualGUID(&a->ports[k].bufs[i].b->guid, g)) { a->ports[k].bufs[i].b->refs++; return a->ports[k].bufs[i].b; }
+    return buf_find(a->perf, g, FALSE);
+}
+
+/* 77320f10: an audiopath from a configuration: the top-level buffers, then each port configuration's buffers and
+ * PChannel maps (77320dd5), then the PChannels (7731f19b): on a port with the audiopath feature, each map's PChannels
+ * on its buffers' buses; otherwise the port configuration's PChannels as they are */
+static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
+{
+    *out = NULL;
+    rm_path *a = calloc(1, sizeof(*a));
+    if (!a) return E_OUTOFMEMORY;
+    a->perf = p; a->cfg = TRUE;
+    HRESULT hr = S_OK;
+    a->top = calloc(c->nbufs + 1, sizeof(rm_bref));
+    a->ports = calloc(c->nports + 1, sizeof(rm_pcfg));
+    if (!a->top || !a->ports) hr = E_OUTOFMEMORY;
+    for (DWORD i = 0; SUCCEEDED(hr) && i < c->nbufs; i++) {
+        hr = buf_make(p, &c->bufs[i], &a->top[a->ntop]);
+        if (SUCCEEDED(hr)) { hold(a, a->top[a->ntop].b); a->ntop++; }
+    }
+    for (DWORD k = 0; SUCCEEDED(hr) && k < c->nports; k++) {
+        apc_port *cp = &c->ports[k];
+        rm_pcfg *pc = &a->ports[a->nports++];
+        pc->port = cp->h.guidPort; pc->base = cp->h.dwPChannelBase; pc->count = cp->h.dwPChannelCount;
+        pc->bufs = calloc(cp->nbufs + 1, sizeof(rm_bref));
+        pc->maps = calloc(cp->nmaps + 1, sizeof(rm_pmap));
+        if (!pc->bufs || !pc->maps) { hr = E_OUTOFMEMORY; break; }
+        for (DWORD i = 0; SUCCEEDED(hr) && i < cp->nbufs; i++) {
+            hr = buf_make(p, &cp->bufs[i], &pc->bufs[pc->nbufs]);
+            if (SUCCEEDED(hr)) { hold(a, pc->bufs[pc->nbufs].b); pc->nbufs++; }
+        }
+        for (DWORD m = 0; SUCCEEDED(hr) && m < cp->nmaps; m++) {
+            rm_pmap *pm = &pc->maps[pc->nmaps++];
+            pm->base = cp->maps[m].base; pm->count = cp->maps[m].count; pm->nbuf = cp->maps[m].nbuf;
+            pm->b = calloc(pm->nbuf + 1, sizeof(rm_buf *));
+            if (!pm->b) { hr = E_OUTOFMEMORY; break; }
+            for (DWORD i = 0; i < pm->nbuf; i++) if ((pm->b[i] = path_find(a, pc, &cp->maps[m].bufs[i]))) hold(a, pm->b[i]);
+        }
+    }
+    /* the PChannels */
+    DWORD total = 0;
+    for (DWORD k = 0; k < c->nports; k++) {
+        total += c->ports[k].h.dwPChannelCount;
+        for (DWORD m = 0; m < c->ports[k].nmaps; m++) total += c->ports[k].maps[m].count;
+    }
+    uint32_t *virt = malloc((total + 1) * sizeof(uint32_t)), *nbus = calloc(total + 1, sizeof(uint32_t));
+    uint32_t *buses = calloc(total + 1, 32 * sizeof(uint32_t));
+    int *drum = calloc(total + 1, sizeof(int));
+    if (SUCCEEDED(hr) && (!virt || !nbus || !buses || !drum)) hr = E_OUTOFMEMORY;
+    DWORD n = 0;
+    for (DWORD k = 0; SUCCEEDED(hr) && k < c->nports; k++) {
+        apc_port *cp = &c->ports[k];
+        rm_pcfg *pc = &a->ports[k];
+        BOOL feat = (cp->pp.dwValidParams & DMUS_PORTPARAMS_FEATURES) && (cp->pp.dwFeatures & DMUS_PORT_FEATURE_AUDIOPATH);
+        BOOL drums = cp->h.dwFlags & DMUS_PORTCONFIGF_DRUMSON10;
+        if (feat) {
+            for (DWORD m = 0; m < pc->nmaps; m++) {
+                rm_pmap *pm = &pc->maps[m];
+                uint32_t bl[32];
+                DWORD nb = 0;
+                for (DWORD i = 0; i < pm->nbuf; i++) {
+                    if (!pm->b[i] || (pm->b[i]->flags & 4)) continue;
+                    nb += dm_host_buffer_buses(p->host, pm->b[i]->host, bl + nb, 32 - nb);
+                }
+                for (DWORD j = 0; j < pm->count; j++, n++) {
+                    virt[n] = pm->base + j;
+                    drum[n] = drums ? ((virt[n] & 15) == 9 ? 3 : 1) : 0;
+                    nbus[n] = nb;
+                    memcpy(buses + 32 * n, bl, nb * sizeof(uint32_t));
+                }
+            }
+        } else {
+            for (DWORD j = 0; j < cp->h.dwPChannelCount; j++, n++) {
+                virt[n] = cp->h.dwPChannelBase + j;
+                drum[n] = drums ? ((virt[n] & 15) == 9 ? 3 : 1) : 0;
+            }
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        dm_host_lock(p->host);
+        a->ap = dm_perf_create_audiopath_ex(dm_host_perf(p->host), act, n, virt, drum, nbus, buses);
+        if (a->ap && c->graph) {                    /* 7731f0f2: a clone of the configuration's graph */
+            IDirectMusicGraph *g = NULL;
+            if (SUCCEEDED(rm_graph_clone(c->graph, &g))) dm_audiopath_set_graph(a->ap, g);
+        }
+        dm_host_unlock(p->host);
+        if (!a->ap) hr = E_OUTOFMEMORY;
+    }
+    free(virt); free(nbus); free(buses); free(drum);
+    if (FAILED(hr)) {
+        path_free_config(a);
+        free(a);
+        return hr;
+    }
+    a->IDirectMusicAudioPath_iface.lpVtbl = &ap_vtbl;
+    a->IDirectMusicGraph_iface.lpVtbl = &apg_vtbl;
+    a->ref = 1;
+    a->npch = n;
+    void **w = dm_audiopath_wrapper(a->ap);
+    if (!*w) *w = a;
+    IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
+    *out = a;
+    return S_OK;
+}
+
 static HRESULT WINAPI pf_createpath(IDirectMusicPerformance8 *i, IUnknown *cfg, BOOL act, IDirectMusicAudioPath **out)
 {
-    LOG_INFO("music: CreateAudioPath from a configuration: using a standard stereo + reverb path");
-    return pf_createstdpath(i, DMUS_APATH_SHARED_STEREOPLUSREVERB, 64, act, out);
+    rm_perf *p = prf(i);
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    IUnknown *holder = NULL;
+    const apc *c = rm_apcfg_data(cfg, &holder);
+    if (!c) {
+        LOG_INFO("music: CreateAudioPath: not an audiopath configuration of ours");
+        return E_INVALIDARG;
+    }
+    rm_path *a = NULL;
+    HRESULT hr = cfg_path(p, (apc *)c, act, &a);
+    IUnknown_Release(holder);
+    LOG_CALL("music: CreateAudioPath(%p) -> %08lx (%p)", (void *)cfg, (unsigned long)hr, (void *)a);
+    if (SUCCEEDED(hr)) *out = &a->IDirectMusicAudioPath_iface;
+    return hr;
 }
 static HRESULT WINAPI pf_createstdpath(IDirectMusicPerformance8 *i, DWORD type, DWORD npch, BOOL act, IDirectMusicAudioPath **out)
 {
@@ -2685,6 +3000,28 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
         wvo_release(&o->IDirectMusicObject_iface);
         return hr;
     }
+    if ((d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &CLSID_DirectMusicAudioPathConfig)) {
+        BYTE *data = NULL;
+        DWORD size = 0;
+        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
+        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
+            size = (DWORD)d->llMemLength;
+            data = malloc(size ? size : 1);
+            if (data) memcpy(data, d->pbMemData, size);
+        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
+            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
+        } else return DMUS_E_LOADER_NOFILENAME;
+        if (!data) return E_OUTOFMEMORY;
+        IUnknown *o = NULL;
+        HRESULT hr = rm_apcfg_load(data, size, &o);
+        free(data);
+        LOG_CALL("music: loaded audiopath configuration -> %08lx", (unsigned long)hr);
+        if (FAILED(hr)) return hr;
+        cache_add(l, path, g, o);
+        hr = IUnknown_QueryInterface(o, riid, out);
+        IUnknown_Release(o);
+        return hr;
+    }
     if (!isseg) {
         LOG_INFO("music: Loader::GetObject: class %s not supported", guidstr(&d->guidClass, b1));
         return DMUS_E_LOADER_NOCLASSID;
@@ -2828,6 +3165,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         return hr;
     }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicGraph)) return rm_graph_create(riid, out);
+    if (IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig)) return rm_apcfg_create(riid, out);
     if (IsEqualCLSID(clsid, &CLSID_DirectMusic)) {
         IDirectMusic8 *d = new_dmusic();
         if (!d) return E_OUTOFMEMORY;
@@ -2842,6 +3180,6 @@ BOOL rm_handles(REFCLSID clsid)
 {
     return IsEqualCLSID(clsid, &CLSID_DirectMusicLoader) || IsEqualCLSID(clsid, &CLSID_DirectMusicPerformance) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
-           IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) ||
+           IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) || IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave);
 }

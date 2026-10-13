@@ -50,6 +50,7 @@ static void close_(riff *r)
 }
 static void chunk(riff *r, const char *id, const void *p, DWORD n) { open_(r, id, NULL); put(r, p, n); close_(r); }
 
+static int g_nofeature;
 static void (*g_inner)(riff *r);     /* buffers written inside the port configuration (as DirectMusic Producer does) */
 static void portconfig(riff *r, DWORD base, DWORD count, int nbuf, const GUID *const *bufs, DWORD pflags)
 {
@@ -59,8 +60,9 @@ static void portconfig(riff *r, DWORD base, DWORD count, int nbuf, const GUID *c
     DMUS_PORTPARAMS8 pp;
     memset(&pp, 0, sizeof(pp));
     pp.dwSize = sizeof(pp);
-    pp.dwValidParams = DMUS_PORTPARAMS_CHANNELGROUPS;
+    pp.dwValidParams = DMUS_PORTPARAMS_CHANNELGROUPS | (g_nofeature ? 0 : DMUS_PORTPARAMS_FEATURES);
     pp.dwChannelGroups = (base + count + 15) / 16;
+    pp.dwFeatures = DMUS_PORT_FEATURE_AUDIOPATH;    /* (as DirectMusic Producer writes it; "nofeature" leaves it out) */
     chunk(r, "pprh", &pp, sizeof(pp));
     if (g_inner) { g_inner(r); g_inner = NULL; }
     open_(r, "LIST", "pchl");
@@ -237,6 +239,28 @@ static void probe(IDirectMusicAudioPath *ap)
     }
 }
 
+/* what the probe DMO saw (FXPROBE_LOG / FXPROBE_DATA): its calls but Process, and whether any sound reached it */
+static void probe_report(void)
+{
+    if (getenv("FXPROBE_DATA") && !getenv("CFG_DATA")) DeleteFileA(getenv("FXPROBE_DATA"));
+    char *lp = getenv("FXPROBE_LOG"), *dp = getenv("FXPROBE_DATA");
+    if (!lp) return;
+    FILE *f = fopen(lp, "r");
+    if (f) {
+        char l[512];
+        /* (not Process or the releases: when they come is timing) */
+        while (fgets(l, sizeof(l), f)) if (strncmp(l, "Process", 7) && strncmp(l, "released", 8)) printf("  probe: %s", l);
+        fclose(f);
+        DeleteFileA(lp);
+    }
+    if (dp && getenv("CFG_DATA") && (f = fopen(dp, "rb"))) {     /* (Microsoft's sink under Wine is not reliable here) */
+        int nz = 0, c;
+        long n = 0;
+        while ((c = fgetc(f)) != EOF) { n++; if (c) nz = 1; }
+        fclose(f);
+        printf("  probe data: %s\n", n ? (nz ? "sound" : "silence") : "none");
+    }
+}
 static void run(const char *name, riff *r, int play)
 {
     DMUS_OBJECTDESC d;
@@ -308,6 +332,7 @@ static void run(const char *name, riff *r, int play)
         IDirectMusicAudioPath_Release(ap);
     }
     IUnknown_Release(cfg);
+    probe_report();
     memset(r, 0, sizeof(*r));               /* (the memory stays: a new configuration at the address of an old one would
                                              * be the old one's for the loader, even a failed one) */
 }
@@ -315,6 +340,9 @@ static void run(const char *name, riff *r, int play)
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
+    LoadLibraryA("dsound.dll");
+    if (getenv("FXPROBE_LOG")) DeleteFileA(getenv("FXPROBE_LOG"));
+    if (getenv("FXPROBE_DATA")) DeleteFileA(getenv("FXPROBE_DATA"));     /* reAL's hooks DirectMusic's classes from dsound.dll (nothing else here loads it) */
     CoInitialize(NULL);
     CoCreateInstance(&CLSID_DirectMusicLoader, NULL, CLSCTX_INPROC, &IID_IDirectMusicLoader8, (void **)&loader);
     CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&perf);
@@ -446,6 +474,36 @@ int main(int argc, char **argv)
         buffer(&r, &GUID_Buffer_EnvReverb, DMUS_BUFFERF_SHARED | DMUS_BUFFERF_DEFINED | DMUS_BUFFERF_MIXIN, 0, 0, 0, 0, 0, 0, NULL, NULL, 0, NULL);
         close_(&r);
         run("envrev in the port", &r, 0);
+    }
+    if (WANT("nofeature")) {   /* a port without the audiopath feature: its PChannels keep their buses */
+        const GUID *b[1] = { &GUID_BufA };
+        g_nofeature = 1;
+        open_(&r, "RIFF", "DMAP");
+        open_(&r, "LIST", "pcsl"); portconfig(&r, 0, 16, 1, b, DMUS_PORTCONFIGF_DRUMSON10); close_(&r);
+        buffer(&r, &GUID_BufA, 0, 1, DSBCAPS_CTRLVOLUME, 2, 0, 0, 2, lr, NULL, 0, NULL);
+        close_(&r);
+        g_nofeature = getenv("CFG_NOFEATURE") != NULL;
+        run("nofeature", &r, 0);
+    }
+    if (WANT("mixplay")) {   /* a stereo buffer sending to a mix-in with a reverb and the probe, playing */
+        const GUID *b[1] = { &GUID_BufA };
+        DSFXWavesReverb w = { 0, -3, 1200, 0.2f };
+        fxdesc fm[2] = { { &GUID_DSFX_WAVES_REVERB, NULL, &w, sizeof(w) }, { &CLSID_FxProbe, NULL, NULL, 0 } };
+        open_(&r, "RIFF", "DMAP");
+        buffer(&r, &GUID_BufM, DMUS_BUFFERF_MIXIN, 1, DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX, 2, -200, 0, 0, NULL, NULL, 2, fm);
+        g_inner = inner_a;
+        open_(&r, "LIST", "pcsl"); portconfig(&r, 0, 16, 1, b, DMUS_PORTCONFIGF_DRUMSON10); close_(&r);
+        close_(&r);
+        run("mixplay", &r, 1);
+    }
+    if (WANT("envplay")) {   /* the 3D path's send to the environmental reverb (I3DL2), the probe after it */
+        const GUID *e[1] = { &GUID_Buffer_3D_Dry };
+        open_(&r, "RIFF", "DMAP");
+        buffer(&r, &GUID_Buffer_EnvReverb, DMUS_BUFFERF_SHARED | DMUS_BUFFERF_DEFINED | DMUS_BUFFERF_MIXIN, 0, 0, 0, 0, 0, 0, NULL, NULL, 0, NULL);
+        g_inner = inner_env;
+        open_(&r, "LIST", "pcsl"); portconfig(&r, 0, 16, 1, e, DMUS_PORTCONFIGF_DRUMSON10); close_(&r);
+        close_(&r);
+        run("envplay", &r, 1);
     }
     if (WANT("errors")) {
         const GUID *b[1] = { &GUID_BufUnknown };

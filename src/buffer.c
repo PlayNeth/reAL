@@ -462,7 +462,10 @@ static HRESULT WINAPI dsb_GetStatus(IDirectSoundBuffer8 *iface, LPDWORD status)
         if (This->voice.looping) s |= DSBSTATUS_LOOPING;
     }
     LeaveCriticalSection(&This->dev->lock);
-    if (This->desc.dwFlags & DSBCAPS_CTRLFX) {
+    if (This->sink) {
+        /* DirectMusic's buffers: in software where DirectMusic deferred them (its standard ones), else no location */
+        if (This->sink_caps & DSBCAPS_LOCDEFER) s |= DSBSTATUS_LOCSOFTWARE;
+    } else if (This->desc.dwFlags & DSBCAPS_CTRLFX) {
         /* effects buffers are DirectSound's own (software) ones: the location only for a deferred one, as there */
         if ((This->desc.dwFlags & DSBCAPS_LOCDEFER) && This->fx_placed) s |= DSBSTATUS_LOCSOFTWARE;
     } else if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) s |= DSBSTATUS_LOCHARDWARE;
