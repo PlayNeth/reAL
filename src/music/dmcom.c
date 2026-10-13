@@ -13,6 +13,7 @@
 #include "dmgraph.h"
 #include "dmapcfg.h"
 #include "dmport.h"
+#include "dmtheory.h"
 #include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
@@ -2505,8 +2506,17 @@ static HRESULT WINAPI pf_adjust(IDirectMusicPerformance8 *i, REFERENCE_TIME t)
 }
 static HRESULT WINAPI pf_closedown_m(IDirectMusicPerformance8 *i) { LOG_CALL("music: Performance::CloseDown"); pf_closedown(prf(i)); return S_OK; }
 static HRESULT WINAPI pf_resolved(IDirectMusicPerformance8 *i, REFERENCE_TIME t, REFERENCE_TIME *o, DWORD f) { if (!o) return E_POINTER; *o = t; return S_OK; }
-static HRESULT WINAPI pf_midi2music(IDirectMusicPerformance8 *i, BYTE v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, WORD *o) { return rm_notimpl(__func__); }
-static HRESULT WINAPI pf_music2midi(IDirectMusicPerformance8 *i, WORD v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, BYTE *o) { return rm_notimpl(__func__); }
+/* MIDIToMusic 773082a6 / MusicToMIDI 773085af (dmtheory.c) */
+static HRESULT WINAPI pf_midi2music(IDirectMusicPerformance8 *i, BYTE v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, WORD *o)
+{
+    if (IsBadReadPtr(c, sizeof(*c)) || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
+    return dmt_midi_to_music(v, (const dm_chord_key *)c, m, l, o);
+}
+static HRESULT WINAPI pf_music2midi(IDirectMusicPerformance8 *i, WORD v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, BYTE *o)
+{
+    if (IsBadReadPtr(c, sizeof(*c)) || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
+    return dmt_music_to_midi(v, (const dm_chord_key *)c, m, l, o);
+}
 /* TimeToRhythm 7730897b / RhythmToTime 77308a97: measure, beat, grid and offset under a time signature (a beat of 0
  * counts as a quarter, 0 grids as 256).  Microsoft divides by zero on 0 beats per measure; that is refused here. */
 static void ts_units(const DMUS_TIMESIGNATURE *ts, int *beat, int *grid)
