@@ -174,6 +174,7 @@ typedef struct {
     uint32_t gen;                   /* +0x2c load generation */
     uint8_t *pvar; uint32_t *pnorep;    /* +0x30 +0x34 the parts' variations kept across plays (a pattern with flag 1) */
     dms_pattern *motif;             /* +0x38 the motif track's pattern (MotifTrackInfo) */
+    int kind;                       /* TRK_PATTERN: a pattern track (its pattern its own, cloned by measures) */
 } dms_styletrack;
 /* a style reference (DMRF): the loader's style, with a reference for the caller */
 typedef dm_getstyle_fn dms_getstyle_fn;
@@ -184,6 +185,8 @@ dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mti
 /* the motif track (CMotifTrack 7740ec38) of a style's motif: 7740ecba SetParams; the motif's parts sorted again
  * (77409532) */
 dms_styletrack *dms_motiftrack_new(dms_style *s, dms_pattern *p);
+/* the pattern track (CPatternTrack 7741484d): a 'DMPT' form's data; the pattern in ->motif, its style the first */
+dms_styletrack *dms_patterntrack_load(const uint8_t *p, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr);
 /* IDirectMusicStyle::GetMotif (77409532): a segment with the motif track (and the motif's band) */
 dm_segment *dms_motif_segment(dms_style *s, dms_pattern *p);
 void dms_pattern_addref(dms_pattern *p);

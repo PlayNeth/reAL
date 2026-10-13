@@ -51,6 +51,8 @@ typedef struct {
     mtime_t gap;                                /* +0x384 */
     styhist *hist;                              /* +0x388 */
     int nparts;
+    int kind;                                   /* TRK_STYLE, TRK_MOTIF, TRK_PATTERN */
+    int noinv;                                  /* +0x388 (pattern track state: vtable[3] 774132f8): no inversions */
 } stystate;
 
 static int32_t sty_beat(const uint8_t *ts) { return dms_beat_clocks(ts); }
@@ -340,7 +342,7 @@ static int st_variation(dm_perf *pf, stystate *S, const dms_pattern *pat, const 
     uint32_t m7x = th_flags7(pat, t, nextt, c, nc);
     uint8_t lockid = pr->lock;
     const dms_part *part = pr->part;
-    mtime_t rel = S->partoff[idx] + S->pstart;          /* 774113cf */
+    mtime_t rel = S->partoff[idx] + (S->kind == TRK_STYLE ? S->pstart : 0);     /* 774113cf / 7740fe83 */
     rel = t < rel ? 0 : t - rel;
     mtime_t mark = 0;
     if (lockid) {
@@ -577,7 +579,7 @@ static int32_t st_convert(stystate *S, const dms_partref *pr, const dms_event *e
             if (dmt_music_to_midi(ev->mv, &K, pm, pr->subchord, &o) == 0) mv = o;
             else { mv = 0; hr = STY_E_FAIL; }
         }
-        if (mv) {
+        if (mv && !S->noinv) {
             uint8_t inv = ev->inversion;
             const dms_part *part = pr->part;
             if (!inv) transpose = inv_range((uint8_t)mv, part->invlower, part->invupper, L.inversion, base);
@@ -1380,7 +1382,7 @@ static void stytrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t
     S->group = 0xffffffff; S->newpat = 1; S->tsenabled = 1;
     S->chord = g_sty_m7;
     S->gen = T->gen;
-    S->ss = ss; S->vid = e->vid; S->ti = T;
+    S->kind = TRK_STYLE; S->ss = ss; S->vid = e->vid; S->ti = T;
     S->nextstyle = 0;
     S->style = st_style_at(S, 0, &S->nextstyle);
     if (!S->style) { free(S); return; }
@@ -1514,7 +1516,7 @@ static void motiftrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32
     if (!S) return;
     S->group = 0xffffffff; S->newpat = 1; S->tsenabled = 1;
     S->chord = g_sty_m7;
-    S->ss = ss; S->vid = e->vid; S->ti = T;
+    S->kind = TRK_MOTIF; S->ss = ss; S->vid = e->vid; S->ti = T;
     S->style = T->styles->style;
     if (st_set_pattern(S, T->motif, 0) < 0 || st_mute_reset(S) < 0) { stytrack_endplay_state(S); return; }
     S->pf = pf;
@@ -1605,4 +1607,87 @@ static int motiftrack_setparam(dm_track *t, int prm, void *data)
         return DM_OK;
     }
     return DMUS_E_SET_UNSUPPORTED;
+}
+
+/* ------------------------------------------------------------------ the pattern track (CPatternTrack, PatternTrackState) */
+/* 77414673: the state plays the track's pattern (from its own style); no audition (774132b1 / 77413ff2 defaults) */
+static void patterntrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t segflags)
+{
+    dms_styletrack *T = e->t->data;
+    if (!T || !T->motif || !T->styles || !T->styles->style) return;
+    stystate *S = calloc(1, sizeof(*S));
+    if (!S) return;
+    S->group = 0xffffffff; S->newpat = 1; S->tsenabled = 1;
+    S->chord = g_sty_m7;
+    S->gen = T->gen;
+    S->kind = TRK_PATTERN; S->noinv = 1;
+    S->ss = ss; S->vid = e->vid; S->ti = T;
+    S->style = T->styles->style;
+    if (st_set_pattern(S, T->motif, 0) < 0 || st_mute_reset(S) < 0) { stytrack_endplay_state(S); return; }
+    S->pf = pf;
+    S->tsenabled = T->tsset ? T->tsenabled : (segflags & (SEGF_SECONDARY | SEGF_CONTROL)) == 0;
+    if (T->seed) st_seed(S, T->seed);
+    S->group = e->group;
+    e->state = S;
+}
+
+/* 774140ad */
+static int st_pattern_play(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, mtime_t off, uint32_t tflags, int clock)
+{
+    S->off = off;
+    int fdirty = (tflags >> 4) & 1, fstart = (tflags >> 2) & 1, floop = (tflags >> 1) & 1, fseek = tflags & 1;
+    mtime_t mb = start ? st_next_beat(st_ts(S), start) : 0;
+    if (tflags & 0x80000000u) { st_chord(pf, S, mb, off, fstart, 0); S->chordt = start; }
+    if (fdirty) st_chord(pf, S, start, off, fstart, 0);
+    if (S->tsenabled && S->ti->notify && !clock && mb < end) mb = st_mbnotify(pf, S, mb, end, off, tflags);
+    uint8_t again = 0;
+    const uint8_t *ts = st_ts(S);
+    int32_t plen = sty_beat(ts) * S->pattern->measures * ts[0];
+    if ((floop || fstart) && plen) S->pstart = start - start % plen;
+    mtime_t pe = S->pstart + plen, stop = pe <= end ? pe : end;
+    uint32_t f = (fstart || floop || fseek) ? 6 : 2;
+    if (clock) f |= 1;
+    if (floop || (0 < start && (fstart || fseek || fdirty))) f |= 0x10;
+    st_play_parts(pf, S, start, stop, off, S->pstart, f, tflags, &again);
+    if (again) st_play_parts(pf, S, start, stop, off, S->pstart, clock ? 9 : 8, tflags, &again);
+    if (start <= pe && pe < end) {
+        S->pstart = pe;
+        st_set_pattern(S, S->pattern, pe);
+        st_play_parts(pf, S, start, end, off, S->pstart, clock ? 1 : 0, tflags, &again);
+    }
+    if (S->tsenabled && S->ti->notify && !clock && mb < end) st_mbnotify(pf, S, mb, end, off, tflags);
+    return 0;
+}
+
+/* 7741374e: a reload brings the pattern again; a start, seek or dirty play restarts the variations */
+static int patterntrack_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    stystate *S = e->state;
+    dms_styletrack *T = e->t->data;
+    if (!T || !S) return (int)0x88781162;
+    int clock = 0;
+    int32_t hr = (int32_t)0x88781162;
+    if (S->gen != T->gen) {
+        mtime_t nx = 0;
+        S->style = st_style_at(S, start, &nx);
+        if (!S->style) hr = STY_E_POINTER;
+        st_set_pattern(S, T->motif, 0);
+        if (T->pchschanged) st_mute_reset(S);
+        S->gen = T->gen;
+    }
+    if (!S->mute) return hr;
+    if (flags & (TF_SEEK | TF_LOOP | TF_START | TF_DIRTY)) {
+        if (S->tsenabled && !clock) st_tspmsg(pf, S, start, off, 0);
+        S->newpat = 1;
+        S->chordt = S->nextchordt = S->nnchordt = 0;
+        for (int i = 0; i < S->nmute && i < T->npchs; i++) { S->mute[i].t = 0; S->mute[i].pch = T->pchs[i]; S->mute[i].mute = 0; }
+    }
+    return st_pattern_play(pf, S, start, end, off, flags, clock);
+}
+
+/* 77413a39 */
+static int patterntrack_isparam(const dm_track *t, int prm)
+{
+    if (prm == PRM_VARIATIONS) return DM_OK;
+    return motiftrack_isparam(t, prm);
 }

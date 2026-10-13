@@ -1054,6 +1054,85 @@ static void motif_vars(dms_styletrack *T)
 
 /* 77410b5b: the styles in [start, end) moved by -start, and the one in effect before start (unless one is at start)
  * put first at 0; the seed and the load generation are not copied */
+/* 7740c497: the clone's reference on a PChannel, with a new part (the pattern's signature, the source's guid, bounds,
+ * flags and play mode) the first time; a later reference on the same PChannel widens the bounds and adds the flags */
+static dms_partref *clone_partref(dms_pattern *C, const dms_partref *src, uint8_t playmode, uint16_t measures)
+{
+    for (dms_partref *r = C->prefs; r; r = r->next)
+        if (r->pch == src->pch) {
+            if (r->part && src->part) {
+                if (r->part->invupper < src->part->invupper) r->part->invupper = src->part->invupper;
+                if (src->part->invlower < r->part->invlower) r->part->invlower = src->part->invlower;
+                r->part->flags |= src->part->flags;
+            }
+            return r;
+        }
+    dms_partref *r = calloc(1, sizeof(*r));
+    dms_part *pt = calloc(1, sizeof(*pt));
+    if (!r || !pt) { free(r); free(pt); return NULL; }
+    pt->refs = 1;
+    pt->measures = 1; pt->playmode = 10; pt->invupper = 0x7f;       /* 7740b215 */
+    if (src->part) {
+        pt->guid = src->part->guid;
+        memcpy(pt->ts, C->ts, 4);
+        for (int i = 0; i < 32; i++) pt->varchoices[i] = 0x7fffffff;
+        pt->playmode = playmode;
+        pt->invupper = src->part->invupper; pt->invlower = src->part->invlower;
+        pt->flags = src->part->flags;
+        pt->measures = measures;
+    }
+    r->part = pt;
+    r->pch = src->pch; r->lock = src->lock; r->subchord = src->subchord; r->priority = src->priority; r->random = src->random;
+    APPEND(C->prefs, r);
+    return r;
+}
+
+/* 7740d4bf: the measures of a pattern in [start, end): the parts' events in range moved to the new start (their grid
+ * from the pattern's signature, the remainder into the time offset).  The embellishment is not copied (the new
+ * pattern's constructor clears it) and the markers are not rebuilt. */
+static dms_pattern *pattern_clone(const dms_pattern *P, mtime_t start, mtime_t end)
+{
+    dms_pattern *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    C->refs = 1;
+    memcpy(C->ts, P->ts, 4);
+    int32_t mlen = dms_beat_clocks(P->ts) * P->ts[0];
+    uint32_t m0 = mlen ? (uint32_t)start / (uint32_t)mlen : 0, m1 = mlen ? (uint32_t)end / (uint32_t)mlen : 0;
+    C->measures = (uint16_t)(m1 - m0);
+    memcpy(C->name, P->name, sizeof(C->name));
+    C->groovelo = P->groovelo; C->groovehi = P->groovehi; C->destlo = P->destlo; C->desthi = P->desthi;
+    C->hasmotif = P->hasmotif; C->repeats = P->repeats;
+    C->resolution = P->resolution; C->flags = P->flags;
+    C->playstart = start < P->playstart ? P->playstart - start : 0;
+    C->loopstart = start < P->loopstart ? P->loopstart - start : 0;
+    if (P->loopend < end - start) C->loopend = P->loopend < 0 ? -1 : P->loopend - start;
+    else C->loopend = end - start;
+    C->rhythm = calloc(C->measures ? C->measures : 1, sizeof(uint32_t));
+    if (!C->rhythm) { pattern_release(C); return NULL; }
+    for (uint32_t i = 0; i < C->measures; i++)          /* (read past the source's rhythm in the original) */
+        C->rhythm[i] = m0 + i < P->measures ? P->rhythm[m0 + i] : 0;
+    if (P->band) { C->band = P->band; dm_band_addref(C->band); }
+    int32_t glen = grid_len(P->ts);
+    for (const dms_partref *r = P->prefs; r; r = r->next) {
+        if (!r->part) { pattern_release(C); return NULL; }
+        dms_partref *n = clone_partref(C, r, r->part->playmode, C->measures);
+        if (!n) { pattern_release(C); return NULL; }
+        memcpy(n->part->varchoices, r->part->varchoices, sizeof(n->part->varchoices));
+        for (const dms_event *e = r->part->events; e; e = e->next) {
+            int32_t t = dms_grid_clocks(P->ts, (uint16_t)e->grid);
+            if (!glen || t < start || end <= t) continue;
+            dms_event *x = malloc(sizeof(*x));
+            if (!x) { pattern_release(C); return NULL; }
+            *x = *e;
+            x->grid = (int16_t)((t - start) / glen);
+            x->offset = (int16_t)(e->offset + (t - start) % glen);
+            x->next = n->part->events; n->part->events = x;
+        }
+        dms_part_resort(n->part);
+    }
+    return C;
+}
+
 dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mtime_t end)
 {
     dms_styletrack *C = calloc(1, sizeof(*C));
@@ -1073,7 +1152,11 @@ dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mti
         if (nd) { nd->style = last->style; dms_style_addref(nd->style); nd->next = C->styles; C->styles = nd; }
     }
     C->pchschanged = T->pchschanged; C->notify = T->notify; C->tsenabled = T->tsenabled; C->tsset = T->tsset;
-    if (T->motif) { C->motif = T->motif; C->motif->refs++; motif_vars(C); }     /* 7740dd73 */
+    if (T->motif && T->kind == TRK_PATTERN) {
+        C->kind = TRK_PATTERN;
+        C->motif = pattern_clone(T->motif, start, end);    /* 77413246 */
+        if (C->motif) motif_vars(C);
+    } else if (T->motif) { C->motif = T->motif; C->motif->refs++; motif_vars(C); }     /* 7740dd73 */
     dms_styletrack_pchs(C);
     return C;
 }
@@ -1088,6 +1171,55 @@ dms_styletrack *dms_motiftrack_new(dms_style *s, dms_pattern *p)
     motif_vars(T);
     nd->style = s; dms_style_addref(s);
     T->styles = nd;
+    dms_styletrack_pchs(T);
+    return T;
+}
+
+/* ------------------------------------------------------------------ pattern track (CPatternTrack 7741484d) */
+/* 77414f43 / 77414b48: a 'DMPT' form's data: a private style ('styh') holding the pattern's parts, the pattern itself
+ * the track's (not among the style's patterns) */
+dms_styletrack *dms_patterntrack_load(const uint8_t *data, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr)
+{
+    *hr = 0;
+    dms_styletrack *T = calloc(1, sizeof(*T));
+    dms_stynode *nd = calloc(1, sizeof(*nd));
+    dms_style *s = calloc(1, sizeof(*s));
+    if (!T || !nd || !s) { free(T); free(nd); free(s); *hr = DM_E_OUTOFMEMORY; return NULL; }
+    s->refs = 1;
+    rd r = { data, data + n }, c;
+    uint32_t id, size;
+    while (next_chunk(&r, &id, &c, &size)) {
+        if ((id == FCC('R','I','F','F') || id == FCC('L','I','S','T')) && c.e - c.p >= 4 && u32(c.p) == FCC('p','t','t','n')) {
+            dms_pattern *p = calloc(1, sizeof(*p));
+            if (!p) { *hr = DM_E_OUTOFMEMORY; break; }
+            p->refs = 1;
+            memcpy(p->ts, s->ts, 4);            /* 7740c9ea */
+            p->groovelo = 1; p->groovehi = 100; p->destlo = 1; p->desthi = 100;
+            p->measures = 1; p->loopend = -1;
+            rd x = { c.p + 4, c.e };
+            int k = load_pattern(p, s, x, getcoll, ctx);
+            if (k < 0) { pattern_release(p); *hr = k; break; }
+            pattern_release(T->motif);
+            T->motif = p;
+            motif_vars(T);                      /* 774147e9 */
+            break;
+        } else if (id == FCC('s','t','y','h')) {
+            uint8_t b[12] = { 0 };
+            uint32_t k = size > 11 ? 12 : size;
+            if (take(&c, b, k) != k) { *hr = E_FAIL_; break; }
+            memcpy(&s->tempo, b + 4, 8);
+            memcpy(s->ts, b, 4);
+        }
+    }
+    if (*hr < 0 || !T->motif) {
+        if (*hr >= 0) *hr = E_FAIL_;
+        dms_style_release(s); free(nd); dms_styletrack_free(T);
+        return NULL;
+    }
+    nd->style = s;
+    T->styles = nd;
+    T->kind = TRK_PATTERN;
+    T->gen++;
     dms_styletrack_pchs(T);
     return T;
 }

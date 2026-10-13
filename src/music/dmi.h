@@ -291,7 +291,7 @@ typedef struct dm_wavetrack {
 } dm_wavetrack;
 
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE,
-       TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF };   /* TRK_CHORD on are dmstyle's (dmsty.h) */
+       TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF, TRK_PATTERN };   /* TRK_CHORD on are dmstyle's (dmsty.h) */
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */

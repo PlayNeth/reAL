@@ -39,6 +39,7 @@ static const dm_guid CLSID_TimeSigTrack = { 0xd2ac2888, 0xb39b, 0x11d1, { 0x87, 
 static const dm_guid CLSID_BandTrack    = { 0xd2ac2894, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_ChordTrack   = { 0xd2ac288b, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_CommandTrack = { 0xd2ac288c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_PatternTrack = { 0xd2ac2897, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_MotifTrack   = { 0xd2ac288e, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_StyleTrack   = { 0xd2ac288d, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_MuteTrack    = { 0xd2ac2898, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
@@ -500,7 +501,7 @@ static void track_init(dm_segment *s, dm_segtrack *e)
         dm_wavetrack_sort(w, (e->config & 0x40) != 0);
         break;
     }
-    case TRK_STYLE: case TRK_MOTIF: {       /* 7741152f / 7740df34: Init */
+    case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN: {       /* 7741152f / 7740df34 / 774135aa: Init */
         dms_styletrack *y = t->data;
         if (dms_styletrack_pchs(y) >= 0) dm_segment_add_pchannels(s, y->pchs, y->npchs);
         break;
@@ -582,6 +583,10 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
                 dm_style_srand();           /* 774128f4: the track's constructor */
                 t.data = dms_styletrack_load(c.p, (size_t)(c.e - c.p), cb->getstyle, ctx, &hr);
                 t.kind = t.data ? TRK_STYLE : TRK_OTHER;
+            } else if (guid_eq(&t.clsid, &CLSID_PatternTrack) && id == FCC('R','I','F','F') && type == FCC('D','M','P','T')) {
+                int32_t hr;                 /* 7741484d: unlike the style and motif tracks, no srand */
+                t.data = dms_patterntrack_load(c.p, (size_t)(c.e - c.p), getcoll, ctx, &hr);
+                t.kind = t.data ? TRK_PATTERN : TRK_OTHER;
             } else if (guid_eq(&t.clsid, &CLSID_MuteTrack) && id == FCC('m','u','t','e')) {
                 int32_t hr;
                 t.data = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr);
@@ -741,7 +746,7 @@ static void free_track(dm_track *t)
     case TRK_CHORD: dms_chordtrack_free(t->data); break;
     case TRK_COMMAND: dms_cmdtrack_free(t->data); break;
     case TRK_MUTE: dms_mutetrack_free(t->data); break;
-    case TRK_STYLE: case TRK_MOTIF: dms_styletrack_free(t->data); break;
+    case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN: dms_styletrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
@@ -983,11 +988,12 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_COMMAND: d = dms_cmdtrack_clone(t->data, start, end); break;
     case TRK_MUTE: d = dms_mutetrack_clone(t->data, start, end); break;
     case TRK_STYLE: case TRK_MOTIF: dm_style_srand(); d = dms_styletrack_clone(t->data, start, end); break;    /* 77411f7d / 7740e877 */
+    case TRK_PATTERN: d = dms_styletrack_clone(t->data, start, end); break;      /* 7740d4bf: no srand */
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }
     dm_track *c = dm_track_new(t->kind, &t->clsid, d);
-    if (c && (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_STYLE || t->kind == TRK_MOTIF)) c->notify = t->notify;    /* (copied by their Clone) */
+    if (c && (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_STYLE || t->kind == TRK_MOTIF || t->kind == TRK_PATTERN)) c->notify = t->notify;    /* (copied by their Clone) */
     if (!c) { dm_track tmp = { .kind = t->kind, .data = d }; free_track(&tmp); *hr = DM_E_OUTOFMEMORY; }
     return c;
 }
@@ -1036,7 +1042,7 @@ int dm_track_add_notification(dm_track *t, const dm_guid *g)
     if (t->kind == TRK_CHORD && guid_eq(g, &GUID_NOTIFICATION_CHORD_)) { ((dms_chordtrack *)t->data)->notify = t->notify = 1; return DM_OK; }   /* 77401e52 */
     if (t->kind == TRK_COMMAND && guid_eq(g, &GUID_NOTIFICATION_COMMAND_)) { ((dms_cmdtrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 77403518 */
     if (t->kind == TRK_MUTE) return DM_E_NOTIMPL;
-    if ((t->kind == TRK_STYLE || t->kind == TRK_MOTIF) && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 7740fe93 */
+    if ((t->kind == TRK_STYLE || t->kind == TRK_MOTIF || t->kind == TRK_PATTERN) && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 7740fe93 */
     return DM_FALSE;
 }
 int dm_track_remove_notification(dm_track *t, const dm_guid *g)
@@ -1045,7 +1051,7 @@ int dm_track_remove_notification(dm_track *t, const dm_guid *g)
     if (t->kind == TRK_CHORD && guid_eq(g, &GUID_NOTIFICATION_CHORD_)) { ((dms_chordtrack *)t->data)->notify = t->notify = 0; return DM_OK; }   /* 77401e91 */
     if (t->kind == TRK_COMMAND && guid_eq(g, &GUID_NOTIFICATION_COMMAND_)) { ((dms_cmdtrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 77403557 */
     if (t->kind == TRK_MUTE) return DM_E_NOTIMPL;
-    if ((t->kind == TRK_STYLE || t->kind == TRK_MOTIF) && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 7740febe */
+    if ((t->kind == TRK_STYLE || t->kind == TRK_MOTIF || t->kind == TRK_PATTERN) && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 7740febe */
     return DM_FALSE;
 }
 

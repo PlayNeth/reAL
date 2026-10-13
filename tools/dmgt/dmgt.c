@@ -841,7 +841,7 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         static const GUID smf = { 0x06621075, 0xe92e, 0x11d1, { 0xa8, 0xc5, 0x00, 0xc0, 0x4f, 0xa3, 0x72, 0x6e } };
         fprintf(stderr, "SetParam(StandardMIDIFile): %08lx\n", (unsigned long)IDirectMusicSegment8_SetParam(sg, &smf, 0xffffffff, 0, 0, NULL));
     }
-    if (getenv("DMGT_CLONE")) {    /* "start:end": play Segment::Clone(start, end) instead */
+    if (getenv("DMGT_CLONE") && *getenv("DMGT_CLONE")) {    /* "start:end": play Segment::Clone(start, end) instead */
         long a = 0, b = 0;
         sscanf(getenv("DMGT_CLONE"), "%ld:%ld", &a, &b);
         IDirectMusicSegment *c = NULL;

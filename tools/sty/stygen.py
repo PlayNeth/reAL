@@ -53,6 +53,7 @@ CLSID = {
     'tempotrack': 'd2ac2885-b39b-11d1-8704-00600893b1bd',
     'timesigtrack': 'd2ac2888-b39b-11d1-8704-00600893b1bd',
     'bandtrack': 'd2ac2894-b39b-11d1-8704-00600893b1bd',
+    'patterntrack': 'd2ac2897-b39b-11d1-8704-00600893b1bd',
     'collection': '480ff4b0-28b2-11d1-bef7-00c04fbf8fef',
 }
 
@@ -117,6 +118,7 @@ class Pattern:
         self.refs = []
         self.motif = None
         self.band = None
+        self.parts = []          # parts embedded in the pattern (a pattern track's DMPT form)
 
     def partref(self, part, pchannel, lock=0, subchord=0, priority=0, random=0, logical=None):
         self.refs.append((part.guid, pchannel if logical is None else logical, lock, subchord, priority, random,
@@ -131,6 +133,7 @@ class Pattern:
         if self.band:
             items.append(self.band)
         if self.name: items.append(unfo(self.name))
+        items += [p.build() for p in self.parts]
         for g, logical, lock, sub, prio, rnd, pch in self.refs:
             prfc = guid_bytes(g) + struct.pack('<HBBBBHI', logical & 0xffff, lock, sub, prio, rnd, 0, pch)
             items.append(LIST('pref', chunk('prfc', prfc)))
@@ -260,6 +263,11 @@ class Segment:
         """items: (time, band RIFF)"""
         lbnd = [LIST('lbnd', chunk('bd2h', struct.pack('<ii', 0, t)), b) for t, b in items]
         self.track(CLSID['bandtrack'], None, 'DMBT', RIFF('DMBT', LIST('lbdl', *lbnd)), group=group)
+
+    def pattern(self, pat, timesig=(4, 4, 4), tempo=120.0, group=1):
+        """a pattern track: RIFF 'DMPT' with styh and the pattern (its parts embedded)"""
+        styh = chunk('styh', struct.pack('<BBH', *timesig) + struct.pack('<d', tempo))
+        self.track(CLSID['patterntrack'], None, 'DMPT', RIFF('DMPT', styh, pat.build()), group=group)
 
     def build(self):
         segh = struct.pack('<IiiiiI', self.repeats, self.length, 0, 0, 0, self.resolution) + \
