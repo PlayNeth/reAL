@@ -104,10 +104,29 @@ Doppler, and WASAPI output.
   tools wait in a queue that the host threads drain after each pass, with the engine lock released around each
   ProcessPMsg call, as Microsoft calls tools without its locks.
 
+**DirectMusic: styles** (`src/music/dmstyload.c`, `dmstyplay.c`, `dmcomsty.c`, from dmstyle)
+- Style files ('DMST'): parts, patterns, motifs, bands, markers, DirectX 7 parts. IDirectMusicStyle8 (bands,
+  motifs, patterns, time signature, tempo, embellishment lengths) and IDirectMusicBand (CreateSegment, Download,
+  Unload) through the loader.
+- The style track: Microsoft's pattern chooser (groove and embellishment commands, rhythm, destination groove),
+  variation choice in every mode, markers and chord alignment, the chord mapping (play modes, inversions, subchords),
+  ranges, curves, chase, and measure-and-beat notifications. It supports several styles, time signature changes,
+  loops, transitions, stops, and control and secondary segments.
+- The motif track: IDirectMusicStyle::GetMotif segments, with beat and marker alignment and the motif's band.
+- The pattern track ('DMPT'): load, play (no inversions), and Clone by measures.
+- The mute track on style, sequence and wave tracks. Band objects as track parameters (GUID_IDirectMusicBand,
+  GUID_BandParam).
+- rand() is the one Microsoft's code uses. The style and motif tracks reseed it from time() when they are made or
+  cloned; the pattern track never does. It plays the same as Microsoft's when time() is fixed (`DMGT_TIME`).
+- `tools/sty/cases.py` writes the cases. `tools/sty/cap.sh <case>` compares dmgt with test_perf; every case matches
+  event for event. `tests/comcmp.sh styletest.exe` gives 927 lines and `stylecom.exe` gives 186, all identical.
+- Open: IDirectMusicPatternTrack (audition, used by Producer); GUID_Variations with play state and dmstyle's private
+  GetParams; chord regeneration (DMUS_SEGF... regenerate flags); the style's chordmap methods (stubs until dmcompos).
+
 ## Remaining, in the agreed order
 
 1. Scripts (dmscript; needs an AudioVBScript interpreter)
-2. Styles and chordmaps (dmstyle, dmcompos)
+2. Chordmaps and the composer (dmcompos); styles are done but for the open items above
 3. Surround / CMSS
 4. EAX 5
 
