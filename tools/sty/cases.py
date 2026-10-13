@@ -241,8 +241,11 @@ def case_comstyle(out, seed=10):
                          [(0, 0x000000, 100, 64, None), (1, 0x000018, 90, 30, None), (2, 0x000021, 80, 100, None)]))
     st.bands.append(band('8f6d1a10-0005-4000-8000-000000000002', 'Second Band',
                          [(0, 0x000005, 127, 64, None), (3, 0x000038, 70, 64, None)]))
+    st.parts[0].marker(grid=4, var=0xffffffff, flags=1)
+    st.parts[0].marker(grid=12, var=0xffffffff, flags=3)
     m = st.pattern('Motif A', measures=2, groove=(1, 100), embellish=0x10)
     m.motif = (1, 0, 0, 768 * 4, 0)
+    m.band = band('8f6d1a10-0005-4000-8000-000000000003', 'Motif Band', [(9, 0x000030, 110, 20, None)])
     m.partref(st.parts[0], pchannel=9)
     m2 = st.pattern('Motif B', measures=1, groove=(1, 100), embellish=0x10)
     m2.motif = (0, 0, 0, 0, 0)

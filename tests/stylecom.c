@@ -130,6 +130,52 @@ static void style(IDirectMusicStyle8 *s)
         printf("GetBand %d %08lx %s\n", i, hr, b ? "yes" : "no");
         if (b) IDirectMusicBand_Release(b);
     }
+    static const WCHAR *const motifs[] = { L"Motif A", L"motif b", L"Nope" };
+    for (int i = 0; i < 3; i++) {
+        IDirectMusicSegment *ms = NULL;
+        hr = IDirectMusicStyle8_GetMotif(s, (WCHAR *)motifs[i], &ms);
+        printf("GetMotif %d %08lx %s\n", i, hr, ms ? "yes" : "no");
+        if (!ms) continue;
+        IDirectMusicSegment8 *m8 = NULL;
+        IDirectMusicSegment_QueryInterface(ms, &IID_IDirectMusicSegment8, (void **)&m8);
+        MUSIC_TIME len = -1, st = -1, la = -1, lb = -1;
+        DWORD rep = 99, res = 99;
+        IDirectMusicSegment8_GetLength(m8, &len);
+        IDirectMusicSegment8_GetRepeats(m8, &rep);
+        IDirectMusicSegment8_GetDefaultResolution(m8, &res);
+        IDirectMusicSegment8_GetStartPoint(m8, &st);
+        IDirectMusicSegment8_GetLoopPoints(m8, &la, &lb);
+        printf("  length %ld repeats %lu res %lx start %ld loop %ld %ld\n", len, rep, res, st, la, lb);
+        for (DWORD k = 0; k < 3; k++) {
+            IDirectMusicTrack *tr = NULL;
+            hr = IDirectMusicSegment8_GetTrack(m8, &GUID_NULL_, 0xffffffff, k, &tr);
+            DWORD grp = 0;
+            if (tr) IDirectMusicSegment8_GetTrackGroup(m8, tr, &grp);
+            printf("  track %lu %08lx group %lx", k, hr, grp);
+            if (tr) {
+                IPersistStream *ps = NULL;
+                if (SUCCEEDED(IDirectMusicTrack_QueryInterface(tr, &IID_IPersistStream, (void **)&ps))) {
+                    CLSID c;
+                    IPersistStream_GetClassID(ps, &c);
+                    printf(" class %08lx", c.Data1);
+                    IPersistStream_Release(ps);
+                }
+                static const GUID *const gs[] = { &GUID_SeedVariations_, &GUID_Valid_Start_Time, &GUID_TimeSignature,
+                                                  &GUID_EnableTimeSig, &GUID_DisableTimeSig, &GUID_IDirectMusicStyle_ };
+                for (unsigned q = 0; q < 6; q++) printf(" %08lx", IDirectMusicTrack_IsParamSupported(tr, gs[q]));
+                for (MUSIC_TIME t = -10; t < 3072 * 2; t += 700) {
+                    DMUS_VALID_START_PARAM v = { -1 };
+                    MUSIC_TIME nx = -1;
+                    hr = IDirectMusicTrack_GetParam(tr, &GUID_Valid_Start_Time, t, &nx, &v);
+                    printf(" [%ld %08lx %ld %ld]", t, hr, v.mtTime, nx);
+                }
+                IDirectMusicTrack_Release(tr);
+            }
+            printf("\n");
+        }
+        IDirectMusicSegment8_Release(m8);
+        IDirectMusicSegment_Release(ms);
+    }
     IDirectMusicChordMap *cm = (void *)1;
     hr = IDirectMusicStyle8_GetDefaultChordMap(s, &cm);
     printf("default chordmap %08lx %s\n", hr, cm == (void *)1 ? "untouched" : cm ? "yes" : "no");
@@ -235,7 +281,7 @@ int main(void)
         memset(&d, 0, sizeof(d));
         d.dwSize = sizeof(d);
         if (o) { printf("new style desc %08lx", IDirectMusicObject_GetDescriptor(o, &d)); IDirectMusicObject_Release(o); }
-        printf(" valid %lx\n", d.dwValidData);     /* (Microsoft's object GUID is uninitialised) */
+        printf(" valid has class %d\n", (d.dwValidData & DMUS_OBJ_CLASS) != 0);     /* (Microsoft leaves the rest uninitialised) */
         IDirectMusicStyle8_Release(ns);
     }
     if (st) IDirectMusicStyle8_Release(st);

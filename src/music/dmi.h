@@ -291,7 +291,7 @@ typedef struct dm_wavetrack {
 } dm_wavetrack;
 
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE,
-       TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE };   /* the last four are dmstyle's (dmsty.h) */
+       TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF };   /* TRK_CHORD on are dmstyle's (dmsty.h) */
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */
@@ -363,6 +363,8 @@ dm_segment *dm_segment_from_wave(dm_wave *w);
 dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 void dm_band_addref(dm_band *b);
 void dm_band_release(dm_band *b);
+/* a band into a band track (dmband 7720271c: before the first at its time or later; the caller's reference) */
+void dm_bandtrack_add(dm_bandtrack *t, dm_band *b);
 /* dmband 7720322d IDirectMusicBand::CreateSegment: a segment with a band track holding the band (auto-download off) */
 dm_segment *dm_band_segment(dm_band *b);
 /* a Standard MIDI File (or RMID) as dmime imports it (dmsmf.c) */

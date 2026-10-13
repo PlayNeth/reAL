@@ -247,9 +247,26 @@ static HRESULT WINAPI sty_enummotif(IDirectMusicStyle8 *i, DWORD n, WCHAR *name)
     name_out(name, s->s->motifs[n]->name);
     return S_OK;
 }
+/* 77409919: a segment playing the motif of that name (not found: S_FALSE) */
 static HRESULT WINAPI sty_getmotif(IDirectMusicStyle8 *i, WCHAR *name, IDirectMusicSegment **out)
 {
-    return rm_notimpl(__func__);     /* TODO: the motif track (dmstyle 77409919) */
+    rm_style *s = sty(i);
+    if (IsBadReadPtr(name, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
+    if (!s->s) return S_FALSE;
+    for (int k = 0; k < s->s->nmotifs; k++) {
+        if (!name_eq(name, s->s->motifs[k]->name)) continue;
+        dm_host *h = any_host();
+        if (h) dm_host_lock(h);
+        dm_segment *g = dms_motif_segment(s->s, s->s->motifs[k]);
+        if (h) dm_host_unlock(h);
+        if (!g) return E_OUTOFMEMORY;
+        rm_segment *o = new_segment(g);
+        if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
+        HRESULT hr = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)out);
+        seg_release(&o->IDirectMusicSegment8_iface);
+        return hr;
+    }
+    return S_FALSE;
 }
 /* 77406d8a / 774082a0 / 77408176: chord maps (DMUS_FOURCC_STYLE_PERS_REF_LIST) */
 static HRESULT WINAPI sty_getdefaultchordmap(IDirectMusicStyle8 *i, IDirectMusicChordMap **out)
@@ -407,7 +424,7 @@ static rm_style *new_style(dms_style *x)
     o->IPersistStream_iface.lpVtbl = &stp_vtbl;
     o->ref = 1;
     o->desc.dwSize = sizeof(o->desc);
-    o->desc.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_OBJECT;     /* (dmstyle's constructor: the object GUID left as it was) */
+    o->desc.dwValidData = DMUS_OBJ_CLASS;       /* (dmstyle's constructor leaves DMUS_OBJ_OBJECT and the GUID uninitialised) */
     o->desc.guidClass = RM_CLSID_DirectMusicStyle;
     if (x) style_take(o, x);
     return o;

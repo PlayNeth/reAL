@@ -573,6 +573,8 @@ static void pattern_release(dms_pattern *p)
     band_free(p->band);
     free(p);
 }
+void dms_pattern_addref(dms_pattern *p) { if (p) p->refs++; }
+void dms_pattern_release(dms_pattern *p) { pattern_release(p); }
 void dms_style_release(dms_style *s)
 {
     if (!s || --s->refs > 0) return;
@@ -590,6 +592,7 @@ static int event_cmp(const void *a, const void *b)
     const dms_event *x = a, *y = b;
     return x->grid < y->grid || (x->type == EV_MARKER && x->grid == y->grid) || (x->grid == y->grid && x->offset < y->offset);
 }
+void dms_part_resort(dms_part *p) { p->events = dms_msort(p->events, offsetof(dms_event, next), event_cmp); }
 void dms_style_resort(dms_style *s)
 {
     for (int i = 0; i < s->nparts; i++) s->parts[i]->events = dms_msort(s->parts[i]->events, offsetof(dms_event, next), event_cmp);
@@ -934,7 +937,8 @@ void dms_styletrack_free(dms_styletrack *T)
 {
     if (!T) return;
     for (dms_stynode *n = T->styles, *x; n; n = x) { x = n->next; dms_style_release(n->style); free(n); }
-    free(T->pchs);
+    free(T->pchs); free(T->pvar); free(T->pnorep);
+    pattern_release(T->motif);
     free(T);
 }
 
@@ -1035,6 +1039,19 @@ dms_styletrack *dms_styletrack_load(const uint8_t *p, size_t n, dms_getstyle_fn 
     return T;
 }
 
+/* 77410a30: a pattern that keeps its variations (flag 1): the parts' variations held by the track */
+static void motif_vars(dms_styletrack *T)
+{
+    if (!T->motif || !(T->motif->flags & 1)) return;
+    free(T->pvar); free(T->pnorep);
+    T->pvar = NULL; T->pnorep = NULL;
+    int n = 0;
+    for (dms_partref *r = T->motif->prefs; r; r = r->next) n++;
+    T->pvar = malloc(n ? n : 1);
+    T->pnorep = calloc(n ? n : 1, sizeof(*T->pnorep));
+    if (T->pvar) memset(T->pvar, 0xff, n ? n : 1);
+}
+
 /* 77410b5b: the styles in [start, end) moved by -start, and the one in effect before start (unless one is at start)
  * put first at 0; the seed and the load generation are not copied */
 dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mtime_t end)
@@ -1056,6 +1073,21 @@ dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mti
         if (nd) { nd->style = last->style; dms_style_addref(nd->style); nd->next = C->styles; C->styles = nd; }
     }
     C->pchschanged = T->pchschanged; C->notify = T->notify; C->tsenabled = T->tsenabled; C->tsset = T->tsset;
+    if (T->motif) { C->motif = T->motif; C->motif->refs++; motif_vars(C); }     /* 7740dd73 */
     dms_styletrack_pchs(C);
     return C;
+}
+
+/* 7740ecba: SetParams(style, pattern) on a new motif track */
+dms_styletrack *dms_motiftrack_new(dms_style *s, dms_pattern *p)
+{
+    dms_styletrack *T = calloc(1, sizeof(*T));
+    dms_stynode *nd = calloc(1, sizeof(*nd));
+    if (!T || !nd) { free(T); free(nd); return NULL; }
+    T->motif = p; if (p) p->refs++;
+    motif_vars(T);
+    nd->style = s; dms_style_addref(s);
+    T->styles = nd;
+    dms_styletrack_pchs(T);
+    return T;
 }

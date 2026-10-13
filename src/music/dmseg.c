@@ -39,6 +39,7 @@ static const dm_guid CLSID_TimeSigTrack = { 0xd2ac2888, 0xb39b, 0x11d1, { 0x87, 
 static const dm_guid CLSID_BandTrack    = { 0xd2ac2894, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_ChordTrack   = { 0xd2ac288b, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_CommandTrack = { 0xd2ac288c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_MotifTrack   = { 0xd2ac288e, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_StyleTrack   = { 0xd2ac288d, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_MuteTrack    = { 0xd2ac2898, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_WaveTrack    = { 0xeed36461, 0x9ea5, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
@@ -233,6 +234,7 @@ dm_band *dm_band_load(const void *data, size_t size, dm_getcoll_fn getcoll, void
     return b;
 }
 
+static void band_add(dm_bandtrack *t, dm_band *b);
 void dm_mutes_free(dm_mutenode *n) { while (n) { dm_mutenode *x = n->link; free(n); n = x; } }
 
 void dm_band_addref(dm_band *b) { if (b) __sync_add_and_fetch(&b->refs, 1); }
@@ -244,6 +246,7 @@ void dm_band_release(dm_band *b)
     free(b->inst); free(b);
 }
 
+void dm_bandtrack_add(dm_bandtrack *t, dm_band *b) { band_add(t, b); }
 static void band_add(dm_bandtrack *t, dm_band *b)
 {
     int i = 0;
@@ -497,7 +500,7 @@ static void track_init(dm_segment *s, dm_segtrack *e)
         dm_wavetrack_sort(w, (e->config & 0x40) != 0);
         break;
     }
-    case TRK_STYLE: {       /* 7741152f: Init */
+    case TRK_STYLE: case TRK_MOTIF: {       /* 7741152f / 7740df34: Init */
         dms_styletrack *y = t->data;
         if (dms_styletrack_pchs(y) >= 0) dm_segment_add_pchannels(s, y->pchs, y->npchs);
         break;
@@ -634,6 +637,45 @@ dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *c
 /* dmime segment Load of a RIFF WAVE (77313d.. / 77328957 AddWave): one wave track (clock time, config 0x78) with
  * one part on PChannel 0 and one item at 0 lasting the wave's length; the segment's length is that, in reference
  * time (whole milliseconds, IDirectSoundWave's GetLength) */
+/* dmstyle 77409532 (IDirectMusicStyle::GetMotif): the motif's parts sorted again, a segment of the motif's length
+ * with a motif track (its repeats, resolution, start and loop from 'mtfs', else no repeats and beat resolution) and,
+ * when the motif has a band, a band track with it (physical time -64) */
+dm_segment *dms_motif_segment(dms_style *st, dms_pattern *p)
+{
+    const uint8_t *ts = p->ts[1] ? p->ts : st->ts;
+    for (dms_partref *r = p->prefs; r; r = r->next) if (r->part) dms_part_resort(r->part);
+    dm_style_srand();                   /* 7740ec38: the track's constructor */
+    dms_styletrack *T = dms_motiftrack_new(st, p);
+    dm_segment *s = calloc(1, sizeof(*s));
+    if (!T || !s) { dms_styletrack_free(T); free(s); return NULL; }
+    s->refs = 1;
+    s->length = 1;
+    int32_t len = dms_beat_clocks(ts) * p->measures * ts[0];
+    if (len > 0) s->length = len;
+    if (!p->hasmotif) { s->repeats = 0; s->resolution = 0x1000; }
+    else {
+        s->repeats = p->repeats; s->resolution = p->resolution;
+        if (p->playstart >= 0 && p->playstart < s->length) s->playstart = p->playstart;
+        mtime_t a = p->loopstart, b = p->loopend;
+        if (!((a || b) && (a < 0 || b > s->length || a >= b))) { s->loopstart = a; s->loopend = b; }
+    }
+    dm_track *o = dm_track_new(TRK_MOTIF, &CLSID_MotifTrack, T);
+    if (!o) { dms_styletrack_free(T); dm_segment_release(s); return NULL; }
+    dm_segment_insert_track(s, o, 0, 1, 0x38, 0);
+    if (p->band) {
+        dm_bandtrack *bt = calloc(1, sizeof(*bt));
+        if (bt) {
+            p->band->logical = 0; p->band->physical = -64;
+            dm_band_addref(p->band);
+            band_add(bt, p->band);
+            dm_track *b = dm_track_new(TRK_BAND, &CLSID_BandTrack, bt);
+            if (b) dm_segment_insert_track(s, b, 0, 1, 0x38, 0);
+            else { dm_track tmp = { .kind = TRK_BAND, .data = bt }; free_track(&tmp); }
+        }
+    }
+    return s;
+}
+
 dm_segment *dm_band_segment(dm_band *b)
 {
     dm_segment *s = calloc(1, sizeof(*s));
@@ -699,7 +741,7 @@ static void free_track(dm_track *t)
     case TRK_CHORD: dms_chordtrack_free(t->data); break;
     case TRK_COMMAND: dms_cmdtrack_free(t->data); break;
     case TRK_MUTE: dms_mutetrack_free(t->data); break;
-    case TRK_STYLE: dms_styletrack_free(t->data); break;
+    case TRK_STYLE: case TRK_MOTIF: dms_styletrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
@@ -940,12 +982,12 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_CHORD: d = dms_chordtrack_clone(t->data, start, end); break;
     case TRK_COMMAND: d = dms_cmdtrack_clone(t->data, start, end); break;
     case TRK_MUTE: d = dms_mutetrack_clone(t->data, start, end); break;
-    case TRK_STYLE: dm_style_srand(); d = dms_styletrack_clone(t->data, start, end); break;    /* 77411f7d */
+    case TRK_STYLE: case TRK_MOTIF: dm_style_srand(); d = dms_styletrack_clone(t->data, start, end); break;    /* 77411f7d / 7740e877 */
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }
     dm_track *c = dm_track_new(t->kind, &t->clsid, d);
-    if (c && (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_STYLE)) c->notify = t->notify;    /* (copied by their Clone) */
+    if (c && (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_STYLE || t->kind == TRK_MOTIF)) c->notify = t->notify;    /* (copied by their Clone) */
     if (!c) { dm_track tmp = { .kind = t->kind, .data = d }; free_track(&tmp); *hr = DM_E_OUTOFMEMORY; }
     return c;
 }
@@ -994,7 +1036,7 @@ int dm_track_add_notification(dm_track *t, const dm_guid *g)
     if (t->kind == TRK_CHORD && guid_eq(g, &GUID_NOTIFICATION_CHORD_)) { ((dms_chordtrack *)t->data)->notify = t->notify = 1; return DM_OK; }   /* 77401e52 */
     if (t->kind == TRK_COMMAND && guid_eq(g, &GUID_NOTIFICATION_COMMAND_)) { ((dms_cmdtrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 77403518 */
     if (t->kind == TRK_MUTE) return DM_E_NOTIMPL;
-    if (t->kind == TRK_STYLE && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 7740fe93 */
+    if ((t->kind == TRK_STYLE || t->kind == TRK_MOTIF) && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 1; return DM_OK; }    /* 7740fe93 */
     return DM_FALSE;
 }
 int dm_track_remove_notification(dm_track *t, const dm_guid *g)
@@ -1003,7 +1045,7 @@ int dm_track_remove_notification(dm_track *t, const dm_guid *g)
     if (t->kind == TRK_CHORD && guid_eq(g, &GUID_NOTIFICATION_CHORD_)) { ((dms_chordtrack *)t->data)->notify = t->notify = 0; return DM_OK; }   /* 77401e91 */
     if (t->kind == TRK_COMMAND && guid_eq(g, &GUID_NOTIFICATION_COMMAND_)) { ((dms_cmdtrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 77403557 */
     if (t->kind == TRK_MUTE) return DM_E_NOTIMPL;
-    if (t->kind == TRK_STYLE && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 7740febe */
+    if ((t->kind == TRK_STYLE || t->kind == TRK_MOTIF) && guid_eq(g, &GUID_NOTIFICATION_MEASUREANDBEAT_)) { ((dms_styletrack *)t->data)->notify = t->notify = 0; return DM_OK; }    /* 7740febe */
     return DM_FALSE;
 }
 

@@ -882,9 +882,24 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
     if (getenv("DMGT_NEXT") && *getenv("DMGT_NEXT")) {
         char *p;
         next_ms = strtoul(getenv("DMGT_NEXT"), &p, 0);
-        MultiByteToWideChar(CP_ACP, 0, p + 1, -1, w, MAX_PATH);
-        if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&sg2)))
-            die("load segment 2", hr);
+        char *colon = strrchr(p + 1, ':');
+        if (colon && colon > p + 3) {      /* <ms>:<style file>:<motif>: the style's motif (IDirectMusicStyle::GetMotif) */
+            *colon = 0;
+            MultiByteToWideChar(CP_ACP, 0, p + 1, -1, w, MAX_PATH);
+            IDirectMusicStyle8 *sty;
+            if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, w, (void **)&sty)))
+                die("load style", hr);
+            WCHAR mn[64];
+            MultiByteToWideChar(CP_ACP, 0, colon + 1, -1, mn, 64);
+            IDirectMusicSegment *ms = NULL;
+            if (FAILED(hr = IDirectMusicStyle8_GetMotif(sty, mn, &ms)) || !ms) die("GetMotif", hr);
+            IDirectMusicSegment_QueryInterface(ms, &IID_IDirectMusicSegment8, (void **)&sg2);
+            IDirectMusicSegment_Release(ms);
+        } else {
+            MultiByteToWideChar(CP_ACP, 0, p + 1, -1, w, MAX_PATH);
+            if (FAILED(hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, w, (void **)&sg2)))
+                die("load segment 2", hr);
+        }
         IDirectMusicSegment8_Download(sg2, (IUnknown *)perf);
     }
     const char *vols = getenv("DMGT_VOL");
@@ -905,7 +920,8 @@ static int cmd_perf(const char *seg, const char *out, DWORD ms, DWORD flags)
         }
         if (sg2 && t == next_ms) {
             IDirectMusicSegmentState *st2;
-            if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg2, NULL, NULL, flags, 0, &st2, NULL, (IUnknown *)apath)))
+            DWORD f2 = getenv("DMGT_FLAGS2") && *getenv("DMGT_FLAGS2") ? strtoul(getenv("DMGT_FLAGS2"), NULL, 0) : flags;
+            if (FAILED(hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg2, NULL, NULL, f2, 0, &st2, NULL, (IUnknown *)apath)))
                 die("PlaySegmentEx 2", hr);
             g_nss2 = unk_of(st2);
             dump_tmap(perf, "next");

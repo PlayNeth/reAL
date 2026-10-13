@@ -14,6 +14,7 @@ static int sty_isparam(const dm_track *t, int prm)
         return prm == PRM_COMMAND || prm == PRM_COMMAND2 || prm == PRM_COMMANDNEXT ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;
     case TRK_MUTE: return prm == PRM_MUTE ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;
     case TRK_STYLE: return stytrack_isparam(t, prm);
+    case TRK_MOTIF: return motiftrack_isparam(t, prm);
     }
     return DMUS_E_TYPE_UNSUPPORTED;
 }
@@ -42,6 +43,7 @@ static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, v
         if (prm != PRM_MUTE) return DMUS_E_TYPE_UNSUPPORTED;
         return dms_mute_getparam(t->data, mt, next, data);
     case TRK_STYLE: return stytrack_getparam(t, NULL, prm, mt, next, data);
+    case TRK_MOTIF: return motiftrack_getparam(t, prm, mt, next, data);
     }
     return DMUS_E_GET_UNSUPPORTED;
 }
@@ -64,6 +66,7 @@ static int sty_setparam(dm_track *t, int prm, mtime_t mt, void *data)
         if (prm != PRM_MUTE) return DMUS_E_TYPE_UNSUPPORTED;
         return dms_mute_setparam(t->data, mt, data);
     case TRK_STYLE: return stytrack_setparam(t, prm, mt, data);
+    case TRK_MOTIF: return motiftrack_setparam(t, prm, data);
     }
     return DMUS_E_SET_UNSUPPORTED;
 }
@@ -163,6 +166,7 @@ static int sty_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
     case TRK_COMMAND: return cmd_play(pf, ss, e, start, end, off, flags);
     case TRK_MUTE: return DMUS_S_END;       /* 77415388 */
     case TRK_STYLE: return stytrack_play(pf, ss, e, start, end, off, flags);
+    case TRK_MOTIF: return motiftrack_play(pf, ss, e, start, end, off, flags);
     }
     return DM_OK;
 }

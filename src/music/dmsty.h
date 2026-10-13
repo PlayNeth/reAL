@@ -150,6 +150,7 @@ void dms_style_addref(dms_style *s);
 void dms_style_release(dms_style *s);
 /* the style track's Load sorts every part's events again (77412645: the sort is not stable) */
 void dms_style_resort(dms_style *s);
+void dms_part_resort(dms_part *p);
 /* a time signature (beats, beat, grids) of the pattern or part, falling back to the style's (77407c91 / 77407cb1) */
 const uint8_t *dms_pattern_ts(const dms_pattern *p, const dms_style *s);
 const uint8_t *dms_part_ts(const dms_part *pt, const dms_style *s, const dms_pattern *p);
@@ -171,6 +172,8 @@ typedef struct {
     int pchschanged;                /* +0x20 */
     int32_t seed;                   /* +0x24 GUID_SeedVariations */
     uint32_t gen;                   /* +0x2c load generation */
+    uint8_t *pvar; uint32_t *pnorep;    /* +0x30 +0x34 the parts' variations kept across plays (a pattern with flag 1) */
+    dms_pattern *motif;             /* +0x38 the motif track's pattern (MotifTrackInfo) */
 } dms_styletrack;
 /* a style reference (DMRF): the loader's style, with a reference for the caller */
 typedef dm_getstyle_fn dms_getstyle_fn;
@@ -178,6 +181,13 @@ typedef dm_getstyle_fn dms_getstyle_fn;
 dms_styletrack *dms_styletrack_load(const uint8_t *p, size_t n, dms_getstyle_fn get, void *ctx, int32_t *hr);
 void dms_styletrack_free(dms_styletrack *T);
 dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mtime_t end);
+/* the motif track (CMotifTrack 7740ec38) of a style's motif: 7740ecba SetParams; the motif's parts sorted again
+ * (77409532) */
+dms_styletrack *dms_motiftrack_new(dms_style *s, dms_pattern *p);
+/* IDirectMusicStyle::GetMotif (77409532): a segment with the motif track (and the motif's band) */
+dm_segment *dms_motif_segment(dms_style *s, dms_pattern *p);
+void dms_pattern_addref(dms_pattern *p);
+void dms_pattern_release(dms_pattern *p);
 /* 77410c9b: the PChannels of all the styles */
 int dms_styletrack_pchs(dms_styletrack *T);
 

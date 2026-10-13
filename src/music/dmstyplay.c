@@ -483,6 +483,8 @@ static void st_chord(dm_perf *pf, stystate *S, mtime_t t, mtime_t off, int seek,
     if (S->style && (S->style->flags & 1)) f |= 0x20;
     st_variations(pf, S, f, t, S->nextchordt);
     S->newpat = 0;
+    if ((S->pattern->flags & 1) && S->ti->pvar && S->ti->pnorep)       /* (a motif track's, kept across plays) */
+        for (int i = 0; i < S->nparts; i++) { S->ti->pvar[i] = S->var[i]; S->ti->pnorep[i] = S->norep[i]; }
 }
 
 /* ------------------------------------------------------------------ notes */
@@ -646,6 +648,7 @@ static void st_event(dm_perf *pf, stystate *S, mtime_t t, const dms_event *ev, c
             if (*mflag) f |= 0x40;
             st_variation_marker(pf, S, pr, idx, f, ev->offset + t, S->nextchordt);
             *mflag = 1;
+            if ((S->pattern->flags & 1) && S->ti->pvar && S->ti->pnorep) { S->ti->pvar[idx] = S->var[idx]; S->ti->pnorep[idx] = S->norep[idx]; }
         }
         return;
     }
@@ -1091,7 +1094,8 @@ static int st_set_pattern(stystate *S, dms_pattern *p, mtime_t t)
         if (!S->mflag || !S->partoff || !S->cursor || !S->partpch || !S->var || !S->norep) { S->nparts = 0; return DM_E_OUTOFMEMORY; }
         int i = 0;
         for (const dms_partref *r = p->prefs; r; r = r->next) S->partpch[i++] = r->pch;
-        memset(S->var, 0xff, n ? n : 1);
+        int keep = (p->flags & 1) && S->ti && S->ti->pvar && S->ti->pnorep;
+        for (i = 0; i < n; i++) { S->var[i] = keep ? S->ti->pvar[i] : 0xff; S->norep[i] = keep ? S->ti->pnorep[i] : 0; }
         S->nparts = n;
     }
     for (int i = 0; i < n; i++) { S->partoff[i] = 0; S->cursor[i] = NULL; }
@@ -1388,16 +1392,15 @@ static void stytrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t
     e->state = S;
 }
 
-static void stytrack_endplay(sstrack *e)
+static void stytrack_endplay_state(stystate *S)
 {
-    stystate *S = e->state;
     if (!S) return;
     free(S->partpch); free(S->var); free(S->norep); free(S->partoff); free(S->mflag); free(S->mute); free(S->cursor);
     free(S->rtab);
     hist_free(&S->hist);
     free(S);
-    e->state = NULL;
 }
+static void stytrack_endplay(sstrack *e) { stytrack_endplay_state(e->state); e->state = NULL; }
 
 /* ------------------------------------------------------------------ parameters */
 /* 77411916 */
@@ -1485,6 +1488,109 @@ static int stytrack_setparam(dm_track *t, int prm, mtime_t mt, void *data)
         T->gen++;
         return dms_styletrack_pchs(T);
     }
+    if (prm == PRM_ENABLETIMESIG) {
+        if (!T->tsset || !T->tsenabled) { T->tsset = 1; T->tsenabled = 1; return DM_OK; }
+        return DMUS_E_TYPE_DISABLED;
+    }
+    if (prm == PRM_DISABLETIMESIG) {
+        if (!T->tsset || T->tsenabled) { T->tsset = 1; T->tsenabled = 0; return DM_OK; }
+        return DMUS_E_TYPE_DISABLED;
+    }
+    if (prm == PRM_SEEDVAR) {
+        if (!data) return STY_E_POINTER;
+        T->seed = *(int32_t *)data;
+        return DM_OK;
+    }
+    return DMUS_E_SET_UNSUPPORTED;
+}
+
+/* ------------------------------------------------------------------ the motif track (CMotifTrack, MotifTrackState) */
+/* 7740eaea: the state plays the track's pattern with the first style */
+static void motiftrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t segflags)
+{
+    dms_styletrack *T = e->t->data;
+    if (!T || !T->styles || !T->styles->style) return;
+    stystate *S = calloc(1, sizeof(*S));
+    if (!S) return;
+    S->group = 0xffffffff; S->newpat = 1; S->tsenabled = 1;
+    S->chord = g_sty_m7;
+    S->ss = ss; S->vid = e->vid; S->ti = T;
+    S->style = T->styles->style;
+    if (st_set_pattern(S, T->motif, 0) < 0 || st_mute_reset(S) < 0) { stytrack_endplay_state(S); return; }
+    S->pf = pf;
+    S->tsenabled = T->tsset ? T->tsenabled : (segflags & (SEGF_SECONDARY | SEGF_CONTROL)) == 0;
+    if (T->seed) st_seed(S, T->seed);
+    S->group = e->group;
+    e->state = S;
+}
+
+/* 7740e0d8 / 7740e70b */
+static int motiftrack_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    stystate *S = e->state;
+    dms_styletrack *T = e->t->data;
+    if (!T || !S || !S->mute) return (int)0x88781162;
+    int clock = 0;
+    if (flags & (TF_SEEK | TF_LOOP | TF_START | TF_DIRTY)) {
+        S->newpat = 1;
+        S->chordt = S->nextchordt = S->nnchordt = 0;
+        for (int i = 0; i < S->nmute && i < T->npchs; i++) { S->mute[i].t = 0; S->mute[i].pch = T->pchs[i]; S->mute[i].mute = 0; }
+    }
+    int fstart = (flags >> 2) & 1, floop = (flags >> 1) & 1, fdirty = (flags >> 4) & 1, fseek = flags & 1;
+    S->off = off;
+    if (fdirty) st_chord(pf, S, start, off, fstart, 0);
+    mtime_t mb = start ? st_next_beat(st_ts(S), start) : 0;
+    if (S->tsenabled && T->notify && !clock && mb < end) mb = st_mbnotify(pf, S, mb, end, off, flags);
+    uint8_t again = 0;
+    uint32_t f = (fstart || floop || fseek) ? 6 : 2;
+    if (clock) f |= 1;
+    if (floop || (0 < start && (fstart || fseek || fdirty))) f |= 0x10;
+    st_play_parts(pf, S, start, end, off, 0, f, flags, &again);
+    if (again) st_play_parts(pf, S, start, end, off, 0, clock ? 9 : 8, flags, &again);
+    if (S->tsenabled && T->notify && !clock && mb < end) st_mbnotify(pf, S, mb, end, off, flags);
+    return 0;
+}
+
+/* 7740e33a */
+static int motiftrack_isparam(const dm_track *t, int prm)
+{
+    const dms_styletrack *T = t->data;
+    if (!T) return (int)0x88781162;
+    if (prm == PRM_SEEDVAR || prm == PRM_VALIDSTART) return DM_OK;
+    if (!T->tsset) {
+        if (prm == PRM_DISABLETIMESIG || prm == PRM_ENABLETIMESIG) return DM_OK;
+        return DMUS_E_TYPE_UNSUPPORTED;
+    }
+    if (!T->tsenabled) {
+        if (prm == PRM_ENABLETIMESIG) return DM_OK;
+        return prm == PRM_DISABLETIMESIG ? DMUS_E_TYPE_DISABLED : DMUS_E_TYPE_UNSUPPORTED;
+    }
+    if (prm == PRM_DISABLETIMESIG) return DM_OK;
+    return prm == PRM_ENABLETIMESIG ? DMUS_E_TYPE_DISABLED : DMUS_E_TYPE_UNSUPPORTED;
+}
+
+/* 7740e922: GUID_Valid_Start_Time: the motif's next start marker */
+static int motiftrack_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data)
+{
+    const dms_styletrack *T = t->data;
+    if (!data) return STY_E_POINTER;
+    if (!T) return (int)0x88781162;
+    if (prm != PRM_VALIDSTART) return DMUS_E_GET_UNSUPPORTED;
+    if (!T->motif) return STY_E_POINTER;
+    for (const dms_mtime *m = T->motif->markers; m; m = m->next)
+        if (mt <= m->t) {
+            *(mtime_t *)data = m->t - mt;
+            if (next) *next = m->next ? m->next->t - mt : 0;
+            return DM_OK;
+        }
+    return DMUS_E_NOT_FOUND;
+}
+
+/* 7740e216 */
+static int motiftrack_setparam(dm_track *t, int prm, void *data)
+{
+    dms_styletrack *T = t->data;
+    if (!T) return (int)0x88781162;
     if (prm == PRM_ENABLETIMESIG) {
         if (!T->tsset || !T->tsenabled) { T->tsset = 1; T->tsenabled = 1; return DM_OK; }
         return DMUS_E_TYPE_DISABLED;

@@ -446,6 +446,7 @@ DMG(G_CommandParamNext, 0x472afe7a, 0x281b, 0x11d3, 0x81, 0x7d, 0x00, 0xc0, 0x4f
 DMG(G_IDirectMusicStyle, 0xd2ac28a1, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_SeedVariations, 0x65b76fa5, 0xff37, 0x11d2, 0x81, 0x4e, 0x00, 0xc0, 0x4f, 0xa3, 0x6e, 0x58);
 DMG(G_StyleTimeSig, 0x76612507, 0x4f37, 0x4b35, 0x80, 0x92, 0x50, 0x48, 0x4e, 0xd4, 0xba, 0x92);
+DMG(G_ValidStartTime, 0x7f6b1760, 0x1fdb, 0x11d3, 0x82, 0x26, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
 DMG(G_PerfMasterGrooveLevel, 0xd2ac28b2, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_PrivateTempo, 0xe8dbd832, 0xbcf0, 0x4c8c, 0xa0, 0x75, 0xa3, 0xf1, 0x5e, 0x67, 0xfd, 0x63);
 static const struct { const GUID *g; int prm; } s_params[] = {
@@ -457,7 +458,7 @@ static const struct { const GUID *g; int prm; } s_params[] = {
     { &G_BandParam, PRM_BANDPARAM }, { &G_StandardMIDIFile, PRM_SMF }, { &G_ConnectToDLSCollection, PRM_CONNECTDLS },
     { &G_MuteParam, PRM_MUTE }, { &G_PrivateTempo, PRM_PRIVTEMPO }, { &G_ChordParam, PRM_CHORD }, { &G_RhythmParam, PRM_RHYTHM },
     { &G_CommandParam, PRM_COMMAND }, { &G_CommandParam2, PRM_COMMAND2 }, { &G_CommandParamNext, PRM_COMMANDNEXT },
-    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &GUID_NULL, PRM_ANY },
+    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &GUID_NULL, PRM_ANY },
 };
 static int prm_of(REFGUID g)
 {
@@ -470,6 +471,7 @@ static int prm_takes_target(int prm)
 }
 static rm_collection *col_of(IUnknown *u);
 static struct dms_style *style_engine_of(void *p);     /* dmcomsty.c */
+static dm_band *band_engine_of(void *p);
 static void prm_out(int prm, int hr, void *p);
 static rm_perf *perf_from_unknown(IUnknown *u);
 static rm_path *unsafe_path(IUnknown *u);
@@ -496,6 +498,15 @@ static HRESULT prm_data(int prm, void *p, dm_dltarget *dt, void **data, dm_host 
     } else if (prm == PRM_STYLE) {
         if (!p) return E_POINTER;
         if (!(*data = style_engine_of(p))) return E_NOINTERFACE;
+    } else if (prm == PRM_IBAND) {
+        if (!p) return E_POINTER;
+        if (!(*data = band_engine_of(p))) return E_NOINTERFACE;
+    } else if (prm == PRM_BANDPARAM) {
+        if (!p || IsBadReadPtr(p, 8)) return E_POINTER;
+        const DMUS_BAND_PARAM *bp = p;
+        if (!(dt->bp.band = band_engine_of(bp->pBand))) return E_NOINTERFACE;
+        dt->bp.physical = bp->mtTimePhysical;
+        *data = &dt->bp;
     }
     return S_OK;
 }
@@ -529,7 +540,7 @@ static HRESULT WINAPI seg_setparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb,
     if (h) dm_host_lock(h);
     hr = dm_segment_setparam(sgm(i)->seg, prm, gb, n, t, data);
     if (h) dm_host_unlock(h);
-    if (prm == PRM_OTHER || prm == PRM_IBAND || prm == PRM_BANDPARAM) LOG_INFO("music: Segment::SetParam(%s) -> %08x (not supported)", guidstr(g, b), (unsigned)hr);
+    if (prm == PRM_OTHER) LOG_INFO("music: Segment::SetParam(%s) -> %08x (not supported)", guidstr(g, b), (unsigned)hr);
     else LOG_CALL("music: Segment::SetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, (unsigned)hr);
     return hr;
 }
@@ -2981,6 +2992,13 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
 
 #include "dmcomsty.c"
 static struct dms_style *style_engine_of(void *p) { rm_style *s = style_of(p); return s ? s->s : NULL; }
+static dm_band *band_engine_of(void *p)
+{
+    if (!p || IsBadReadPtr(p, sizeof(void *))) return NULL;
+    void *vt = *(void **)p;
+    rm_band *b = vt == &bnd_vtbl ? bnd(p) : vt == &bno_vtbl ? bno(p) : vt == &bnp_vtbl ? bnp(p) : NULL;
+    return b ? b->b : NULL;
+}
 static void prm_out(int prm, int hr, void *p)
 {
     if (prm == PRM_STYLE && hr >= 0 && p) *(void **)p = style_iface(*(dms_style **)p);

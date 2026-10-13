@@ -231,14 +231,29 @@ int main(int argc, char **argv)
     if (getenv("TP_NEXT") && *getenv("TP_NEXT")) {
         char *p;
         next_ms = strtol(getenv("TP_NEXT"), &p, 0);
-        FILE *g = fopen(p + 1, "rb");
-        if (!g) { perror(p + 1); return 1; }
-        fseek(g, 0, SEEK_END); long n2 = ftell(g); fseek(g, 0, SEEK_SET);
-        void *b2 = malloc(n2);
-        if (fread(b2, 1, n2, g) != (size_t)n2) return 1;
-        fclose(g);
-        dm_loadcb cb2 = { gc, getwave, getstyle, NULL };
-        seg2 = dm_segment_load_cb(b2, n2, &cb2);
+        char *colon = strrchr(p + 1, ':');
+        if (colon && colon > p + 3) {       /* <ms>:<style file>:<motif> (as dmgt) */
+            *colon = 0;
+            const char *base = strrchr(p + 1, '/');
+            dms_style *st = getstyle(NULL, NULL, base ? base + 1 : p + 1, NULL);
+            if (!st) { fprintf(stderr, "no style %s\n", p + 1); return 1; }
+            for (int k = 0; k < st->nmotifs && !seg2; k++) {
+                char nm[64]; int j;
+                for (j = 0; j < 63 && st->motifs[k]->name[j]; j++) nm[j] = (char)st->motifs[k]->name[j];
+                nm[j] = 0;
+                if (!strcasecmp(nm, colon + 1)) seg2 = dms_motif_segment(st, st->motifs[k]);
+            }
+            if (!seg2) { fprintf(stderr, "no motif %s\n", colon + 1); return 1; }
+        } else {
+            FILE *g = fopen(p + 1, "rb");
+            if (!g) { perror(p + 1); return 1; }
+            fseek(g, 0, SEEK_END); long n2 = ftell(g); fseek(g, 0, SEEK_SET);
+            void *b2 = malloc(n2);
+            if (fread(b2, 1, n2, g) != (size_t)n2) return 1;
+            fclose(g);
+            dm_loadcb cb2 = { gc, getwave, getstyle, NULL };
+            seg2 = dm_segment_load_cb(b2, n2, &cb2);
+        }
         if (seg2) dm_segment_download(pf, seg2);
     }
     for (int t = 0; t <= ms + 1500; t++) {
@@ -249,7 +264,11 @@ int main(int argc, char **argv)
                 if (t == stop_ms) {      /* as MC2: Stop(segment, state), StopEx(segment), StopEx(state) */
                     dm_perf_stop(pf, seg, ss, 0, 0); dm_perf_stop(pf, seg, NULL, 0, 0); dm_perf_stop(pf, NULL, ss, 0, 0);
                 }
-                if (t == next_ms && seg2) { dm_segstate *s2; dm_perf_play(pf, seg2, flags, 0, NULL, &s2); g_ss2 = s2; }
+                if (t == next_ms && seg2) {
+                    dm_segstate *s2;
+                    uint32_t f2 = getenv("TP_FLAGS2") && *getenv("TP_FLAGS2") ? strtoul(getenv("TP_FLAGS2"), NULL, 0) : flags;
+                    dm_perf_play(pf, seg2, f2, 0, NULL, &s2); g_ss2 = s2;
+                }
             }
             for (int pass = 0; pass < 8; pass++) {
                 int ran = 0;
