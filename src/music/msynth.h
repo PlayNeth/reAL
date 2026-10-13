@@ -23,6 +23,15 @@ void msynth_midi(msynth *s, int64_t t, const uint8_t *msg, uint32_t len, uint32_
 
 /* IDirectMusicSynth::SetChannelPriority (group 1-based); immediate */
 int msynth_set_priority(msynth *s, uint32_t group, uint32_t channel, uint32_t prio);
+int msynth_get_priority(msynth *s, uint32_t group, uint32_t channel, uint32_t *prio);
+
+/* the running statistics of the last completed second (CSynth +50): the milliseconds spent and the samples voices
+ * played (raw), lost notes (note-ons no voice started for), the average voice count, CPU milliseconds per second
+ * of output and the output's peak sample */
+typedef struct { uint32_t ms, vsamples, lost, voices, cpu, peak; } msynth_stats;
+void msynth_get_stats(msynth *s, msynth_stats *st);
+/* the millisecond clock the CPU statistic is measured with */
+void msynth_set_clock(msynth *s, uint32_t (*clock_ms)(void));
 
 /* IDirectMusicSynth::Render: interleaved 16-bit stereo (or mono) frames starting at sample position pos */
 void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos);

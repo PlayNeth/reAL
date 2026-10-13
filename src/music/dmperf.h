@@ -88,6 +88,7 @@ int dm_audiopath_convert(dm_audiopath *ap, uint32_t pch, uint32_t *out);
 void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap);
 dm_audiopath *dm_perf_get_default_audiopath(dm_perf *pf);
 uint32_t dm_perf_pchannels(dm_perf *pf);
+uint32_t dm_perf_port_groups(dm_perf *pf);
 int dm_perf_stop(dm_perf *pf, dm_segment *seg, dm_segstate *ss, mtime_t mt, uint32_t flags);
 int dm_perf_is_playing(dm_perf *pf, dm_segment *seg, dm_segstate *ss);
 void dm_perf_get_time(dm_perf *pf, rtime_t *rt, mtime_t *mt);

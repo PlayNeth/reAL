@@ -6,6 +6,7 @@
 #include <windows.h>
 #include "dmperf.h"
 #include "dmdls.h"
+#include "msynth.h"
 #include "../fx.h"
 
 typedef struct dm_host dm_host;
@@ -45,6 +46,10 @@ void dm_host_buffer_addref(dm_host *h, int idx);
 int dm_host_buffer_inuse(dm_host *h, int idx);     /* held by a path (the shared buffers: beyond the host's own) */
 HRESULT dm_host_buffer_dmo(dm_host *h, int idx, REFGUID g, DWORD n, REFIID iid, void **out);
 HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out);
+int dm_host_priority(dm_host *h, uint32_t group, uint32_t chan, uint32_t *prio, int set);     /* get / set */
+/* the synth's running statistics (IDirectMusicPort::GetRunningStats) */
+void dm_host_stats(dm_host *h, msynth_stats *st);
+rtime_t dm_host_latency(dm_host *h);       /* the latency clock: the time of the next sample to be written */
 int dm_host_reverb_set(dm_host *h, float ingain, float mix, float time, float hfratio);
 
 /* the process-wide collection cache (the loader's) */

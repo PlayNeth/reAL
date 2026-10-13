@@ -402,6 +402,19 @@ static void write_wav_n(const char *path, const short *pcm, DWORD frames, DWORD 
     fwrite(pcm, 2 * ch, frames, f);
     fclose(f);
 }
+
+/* DMGT_STATS: GetRunningStats (voices, lost notes, peak) whenever they change; the CPU figures are timing */
+static void stats_line(DWORD pos)
+{
+    static char last[128];
+    DMUS_SYNTHSTATS st;
+    char l[128];
+    memset(&st, 0, sizeof(st));
+    st.dwSize = sizeof(st);
+    HRESULT hr = IDirectMusicSynth8_GetRunningStats(g_synth, &st);
+    sprintf(l, "%08lx valid %lx voices %lu lost %lu peak %ld", hr, st.dwValidStats, st.dwVoices, st.dwLostNotes, st.lPeakVolume);
+    if (strcmp(l, last)) { printf("stats at %lu: %s\n", pos, l); strcpy(last, l); }
+}
 static void write_wav(const char *path, const short *pcm, DWORD frames, DWORD rate) { write_wav_n(path, pcm, frames, rate, 2); }
 
 /* ------------------------------------------------------------------ synth command */
@@ -572,14 +585,17 @@ static int cmd_synth(const char *dls, const char *out, const char *script)
             }
             for (DWORD k = 0; k < block; k++)
                 for (DWORD i = 0; i < nbus; i++) pcm[(pos + k) * nbus + i] = bufs[i][k];
+            if (getenv("DMGT_STATS")) stats_line(pos + block);
         }
         write_wav_n(out, pcm, frames, rate, (WORD)nbus);
         fprintf(stderr, "wrote %s: %lu frames, %lu buses\n", out, frames, nbus);
         return 0;
     }
     short *pcm = calloc(frames + block, 4);
-    for (DWORD pos = 0; pos < frames; pos += block)
+    for (DWORD pos = 0; pos < frames; pos += block) {
         IDirectMusicSynth8_Render(g_synth, pcm + pos * 2, block, pos);
+        if (getenv("DMGT_STATS")) stats_line(pos + block);
+    }
     write_wav(out, pcm, frames, rate);
     fprintf(stderr, "wrote %s: %lu frames\n", out, frames);
     IDirectMusicSynth8_Activate(g_synth, FALSE);

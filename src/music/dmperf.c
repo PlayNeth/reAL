@@ -1919,6 +1919,14 @@ void dm_audiopath_release(dm_audiopath *ap)
 void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap) { pf->defpath = ap; }
 dm_audiopath *dm_perf_get_default_audiopath(dm_perf *pf) { return pf->defpath; }
 uint32_t dm_perf_pchannels(dm_perf *pf) { return pf->nextpch; }
+/* the channel groups port 0 has: the highest one a PChannel is on */
+uint32_t dm_perf_port_groups(dm_perf *pf)
+{
+    uint32_t g = 0;
+    for (pchblock *b = pf->blocks; b; b = b->next)
+        for (int i = 0; i < 16; i++) if (b->e[i].used && b->e[i].port == 0 && b->e[i].group > g) g = b->e[i].group;
+    return g;
+}
 
 int dm_audiopath_convert(dm_audiopath *ap, uint32_t pch, uint32_t *out)
 {

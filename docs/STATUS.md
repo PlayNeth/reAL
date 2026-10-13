@@ -58,8 +58,24 @@ Doppler, and WASAPI output.
   table) into mix-in buffers, which are written after the buffers that send to them.
 - GetObjectInPath for configured paths: buffers (dwBuffer across the maps), their effects, mix-ins (PChannel 0 only),
   the primary buffer; ConvertPChannel as dmime (broadcast values pass, others DMUS_E_NOT_FOUND).
-- `tests/cfgcmp.sh` runs `tests/cfgtest.c`'s configurations one by one against Microsoft's: all match, but for the
-  port and sink stages (reAL-Music has no port objects).
+- `tests/cfgcmp.sh` runs `tests/cfgtest.c`'s configurations one by one against Microsoft's: all match, the port and
+  sink stages included.
+
+**DirectMusic: port objects** (`src/music/dmport.c`)
+- The synth port, as dmusic's DirectX 8 software synth port: IDirectMusicPort, IDirectMusicPortDownload and
+  IKsControl. It is what PChannelInfo, the audiopath port stage (DMUS_PATH_PORT, by PChannel as dmime converts it)
+  and the configuration's ports return.
+- GetCaps (Microsoft Synthesizer, flags 0xe85), GetNumChannelGroups (the groups the performance uses), channel
+  priorities (dmsynth's defaults: channel 9 0x8000000f, then 0x8000000e down the others), GetFormat, the KS properties
+  (GM/GS/XG, DLS1/DLS2, sample memory, playback rate, volume and effects sets), GetRunningStats, PlayBuffer, Read,
+  and the methods Microsoft leaves E_NOTIMPL.
+- GetRunningStats is dmsynth's (7748fcd4, 77485a00): average voices, lost notes (preallocation steals and note-ons no
+  voice started for), CPU, and the output's peak in dB, published once per second of samples, with dmsynth's MMX peak
+  quirk (the first sample of each four is not checked for the minimum). `DMGT_STATS` (dmgt) and `MS_STATS`
+  (test_msynth) print them for an offline comparison; they match on both render paths.
+- The sink stage (0x5000): an object with IReferenceClock (the master clock; GetLatencyClock's gives the latency
+  clock) and IKsControl. Microsoft's also answers its private IDirectSoundSynthSink, which reAL-Music does not offer.
+- `tests/comcmp.sh porttest.exe` matches but for that interface (`COMCMP_DIR=/tmp/real/sp/port`).
 
 **DirectMusic: COM methods**
 - GetParam, SetParam and GetParamEx.
@@ -92,12 +108,11 @@ Doppler, and WASAPI output.
 
 1. Scripts (dmscript; needs an AudioVBScript interpreter)
 2. Styles and chordmaps (dmstyle, dmcompos)
-3. Audiopath configurations: port objects for the port and sink stages
-4. Surround / CMSS
-5. EAX 5
+3. Surround / CMSS
+4. EAX 5
 
 Smaller items still open:
-- Audiopath stages for ports (and the sink): reAL-Music has no IDirectMusicPort objects.
+- The sink object does not answer IDirectSoundSynthSink (Microsoft's private interface between dmusic and dsound).
 - Standard audiopaths still use the host's fixed buffers rather than the configuration machinery (they match
   Microsoft's in every test so far).
 - Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the

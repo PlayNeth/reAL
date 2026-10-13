@@ -12,6 +12,7 @@
 #include "dmcom.h"
 #include "dmgraph.h"
 #include "dmapcfg.h"
+#include "dmport.h"
 #include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
@@ -88,6 +89,7 @@ struct rm_perf {
     DSFXWavesReverb revparams;              /* the shared reverb's parameters as last set */
     rm_path *defpath;
     DWORD audioflags;                       /* InitAudio's (DMUS_AUDIOF_*) */
+    rm_port *port;                          /* the synth port (dmport.c) */
     rm_buf *bufs;
     IDirectMusic8 *dm;
     BOOL closed;
@@ -1435,6 +1437,12 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
     }
     return r;
 }
+/* the port stage: the synth port, by GUID_All_Objects or its own GUID (index 0: there is one) */
+static HRESULT port_object(rm_perf *p, REFGUID g, DWORD n, REFIID iid, void **o)
+{
+    if (n || !p->port || (!IsEqualGUID(g, &GUID_All_Objects) && !IsEqualGUID(g, &RM_GUID_SynthPort))) return DMUS_E_NOT_FOUND;
+    return rm_port_query(p->port, iid, o);
+}
 /* a buffer's object at the buffer stages: the buffer (index 0), or its effects (IDirectSoundBuffer8::GetObjectInPath) */
 static HRESULT buf_object(rm_path *a, rm_buf *b, DWORD stage, REFGUID g, DWORD n, REFIID iid, void **o)
 {
@@ -1450,10 +1458,16 @@ static HRESULT cfg_getobj(rm_path *a, DWORD pch, DWORD stage, DWORD buf, REFGUID
     HRESULT hr = DMUS_E_NOT_FOUND;
     if (!a->perf->host) return hr;
     dm_host_lock(a->perf->host);
-    if (stage == DMUS_PATH_PORT || stage == 0x5000) {
-        /* the port (and the sink): reAL-Music has no port objects */
-        char b1[64];
-        LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s): no port objects", (unsigned long)stage, guidstr(iid, b1));
+    if (stage == DMUS_PATH_PORT) {
+        /* the port configurations whose PChannels include pch: one port (the synth) */
+        for (DWORD k = 0; k < a->nports; k++) {
+            rm_pcfg *pc = &a->ports[k];
+            if (pch != DMUS_PCHANNEL_ALL && (pch < pc->base || pch >= pc->base + pc->count)) continue;
+            hr = port_object(a->perf, g, n, iid, o);
+            break;
+        }
+    } else if (stage == 0x5000) {
+        if (!n && !pch && a->perf->port) hr = rm_port_sink(a->perf->port, iid, o);
     } else if (stage == DMUS_PATH_BUFFER || stage == DMUS_PATH_BUFFER_DMO) {
         /* the port configurations whose PChannels include pch (DMUS_PCHANNEL_ALL: all), then their maps; dwBuffer
          * counts the maps' buffers */
@@ -1539,8 +1553,14 @@ static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage
         IDirectMusicGraph_Release(gr);
         return hr;
     }
-    switch (stage) {        /* stages an audiopath knows that are not here (the port, mix-in buffers, ...) */
-    case DMUS_PATH_PORT: case 0x5000: case DMUS_PATH_MIXIN_BUFFER: case DMUS_PATH_MIXIN_BUFFER_DMO: {
+    if (stage == DMUS_PATH_PORT) {          /* the synth port, for the path's PChannels */
+        uint32_t r;
+        if (pch != DMUS_PCHANNEL_ALL && dm_audiopath_convert(a->ap, pch, &r) < 0) return DMUS_E_NOT_FOUND;
+        return port_object(a->perf, g, n, iid, o);
+    }
+    if (stage == 0x5000) return n || pch || !a->perf->port ? DMUS_E_NOT_FOUND : rm_port_sink(a->perf->port, iid, o);
+    switch (stage) {        /* stages an audiopath knows that are not here (mix-in buffers of a standard path) */
+    case DMUS_PATH_MIXIN_BUFFER: case DMUS_PATH_MIXIN_BUFFER_DMO: {
         char b1[64];
         LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s) not supported", (unsigned long)stage, guidstr(iid, b1));
         return DMUS_E_NOT_FOUND;
@@ -1667,6 +1687,8 @@ static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
         pf_closedown(p);
         if (s_clockperf == p) s_clockperf = NULL;
         if (g_lastperf == p) g_lastperf = NULL;
+        rm_port_detach(p->port);
+        rm_port_release(p->port);
         dm_host_free(p->host);
         if (p->dm) IDirectMusic8_Release(p->dm);
         free(p);
@@ -1680,6 +1702,7 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     if (p->host) return S_OK;
     p->host = dm_host_new(rate ? rate : 22050, voices ? voices : 64, 64);
     if (!p->host) return E_OUTOFMEMORY;
+    p->port = rm_port_new(p->host);
     p->revparams.fInGain = 0; p->revparams.fReverbMix = 0; p->revparams.fReverbTime = 1000; p->revparams.fHighFreqRTRatio = 0.001f;
     if (!s_clockperf) s_clockperf = p;
     g_lastperf = p;
@@ -2386,6 +2409,7 @@ static HRESULT WINAPI pf_assignblock(IDirectMusicPerformance8 *i, DWORD b, IDire
 {
     rm_perf *p = prf(i);
     int hr;
+    if (!port) return E_POINTER;
     PERF_LOCKED(p, hr = dm_perf_assign_block(dm_host_perf(p->host), b, 0, g));
     return hr;
 }
@@ -2393,10 +2417,11 @@ static HRESULT WINAPI pf_assignpch(IDirectMusicPerformance8 *i, DWORD pch, IDire
 {
     rm_perf *p = prf(i);
     int hr;
+    if (!port) return E_POINTER;
     PERF_LOCKED(p, hr = dm_perf_assign_pchannel(dm_host_perf(p->host), pch, 0, g, c));
     return hr;
 }
-/* 7730672d: reAL-Music has no IDirectMusicPort objects, so *port comes back NULL */
+/* 7730672d */
 static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirectMusicPort **port, DWORD *g, DWORD *c)
 {
     rm_perf *p = prf(i);
@@ -2406,7 +2431,7 @@ static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirect
     int idx = 0, hr; uint32_t grp = 0, ch = 0;
     PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch));
     if (hr < 0) return E_INVALIDARG;
-    if (port) *port = NULL;
+    if (port) { *port = NULL; if (p->port) rm_port_query(p->port, &IID_IDirectMusicPort, (void **)port); }
     if (g) *g = grp;
     if (c) *c = ch;
     return S_OK;

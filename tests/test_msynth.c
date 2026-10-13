@@ -18,6 +18,18 @@ static void *readall(const char *p, long *n)
     return b;
 }
 
+/* MS_STATS: the running statistics (voices, lost notes, peak in dB) whenever they change, as dmgt's DMGT_STATS */
+static void stats_line(msynth *s, uint32_t pos)
+{
+    static char last[128];
+    msynth_stats st;
+    char l[128];
+    msynth_get_stats(s, &st);
+    long peak = st.peak < 1 ? -96 : (long)(20.0 * log10(st.peak / 32768.0));
+    sprintf(l, "00000000 valid 1f voices %u lost %u peak %ld", st.voices, st.lost, peak);
+    if (strcmp(l, last)) { printf("stats at %u: %s\n", pos, l); strcpy(last, l); }
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 4) { fprintf(stderr, "usage: test_msynth dl.bin script ref.wav [out.wav]\n"); return 2; }
@@ -94,11 +106,15 @@ int main(int argc, char **argv)
         for (uint32_t pos = 0; pos < frames; pos += 256) {
             for (uint32_t i = 0; i < nb; i++) memset(b[i], 0, 512);
             msynth_read(s, b, ids, fn, pitch, nb, 256);
+            if (getenv("MS_STATS")) stats_line(s, pos + 256);
             for (uint32_t k = 0; k < 256 && pos + k < frames; k++)
                 for (uint32_t i = 0; i < nb; i++) out[(pos + k) * nch + i] = b[i][k];
         }
     } else
-        for (uint32_t pos = 0; pos < frames; pos += 256) msynth_render(s, out + pos * 2, 256, pos);
+        for (uint32_t pos = 0; pos < frames; pos += 256) {
+            msynth_render(s, out + pos * 2, 256, pos);
+            if (getenv("MS_STATS")) stats_line(s, pos + 256);
+        }
     long bad = 0, first = -1, maxd = 0;
     double se = 0, sr = 0;
     for (uint32_t i = 0; i < frames * nch; i++) {

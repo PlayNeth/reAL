@@ -390,6 +390,10 @@ struct msynth {
     ms_wartic *wartic[NBUCKET];     /* +a8+100 */
     uint32_t imrate;        /* +a8+fc */
     int64_t readpos;        /* IDirectSoundSource position */
+    /* running statistics (+30..+64): the period's start, the accumulating period and the last completed one */
+    int64_t statstart;      /* +30 */
+    msynth_stats acc, last; /* +38 / +50 */
+    uint32_t (*clock_ms)(void);     /* 7748edc0's millisecond clock (NULL: no CPU time) */
 };
 
 /* ================================================================== downloads (CInstManager) */
@@ -1752,7 +1756,7 @@ static void cl_reset(ms_cl *c)
         c->rpn[i] = 0x3fff;
         c->coarse[i] = 0;
         c->chan[i] = ms_chanmap[i];
-        c->prio[i] = 0x80000010u - (uint32_t)i;
+        c->prio[i] = 0x8000000fu - (uint32_t)i;   /* channel 9 0x8000000f, then 0x8000000e down (GetChannelPriority) */
         c->mono[i] = 0;
         c->bankmsb[i] = 0;
         c->banklsb[i] = 0;
@@ -1984,6 +1988,7 @@ static void cl_process(ms_cl *c, int64_t start, int64_t end)
             }
             if (!in) continue;
             s->seq++;
+            int lost = 1;   /* a note no voice started for (77483089) */
             for (ms_region *r = next_region(in, NULL, note, vel); r; r = next_region(in, r, note, vel)) {
                 if (!r->nonexcl)
                     for (ms_voice *v = s->active; v; v = v->next)
@@ -2012,8 +2017,10 @@ static void cl_process(ms_cl *c, int64_t start, int64_t end)
                 } else {
                     v->active = 1;
                     synth_insert(s, v);
+                    lost = 0;
                 }
             }
+            s->acc.lost += (uint32_t)lost;
             continue;
         }
         switch (code) {
@@ -2168,7 +2175,7 @@ static void synth_prealloc(msynth *s, int64_t end)   /* 77484ad0 */
     }
     for (ms_voice *v = s->active; v; v = v->next) if (v->stealing) k--;
     ms_voice *v;
-    while (k > 0 && (v = synth_candidate(s))) { voice_stop(v, end); k--; }
+    while (k > 0 && (v = synth_candidate(s))) { voice_stop(v, end); s->acc.lost++; k--; }   /* a lost note (77484b48) */
 }
 
 msynth *msynth_new(uint32_t rate, int voices, int groups, int stereo)
@@ -2273,6 +2280,14 @@ int msynth_set_priority(msynth *s, uint32_t group, uint32_t channel, uint32_t pr
     return 0;
 }
 
+int msynth_get_priority(msynth *s, uint32_t group, uint32_t channel, uint32_t *prio)
+{
+    if (group - 1u >= s->ncl || channel >= 16) return -1;
+    ms_cl *c = s->cl[group - 1];
+    for (int i = 0; i < 16; i++) if (c->chan[i] == channel) { *prio = c->prio[i]; return 0; }
+    return -1;
+}
+
 void msynth_midi(msynth *s, int64_t t, const uint8_t *msg, uint32_t len, uint32_t group)
 {
     if (group > s->ncl) return;
@@ -2293,11 +2308,30 @@ static void halve(msynth *s, int16_t *b, uint32_t n)
 static void twice(msynth *s, int16_t *b, uint32_t n)
 {
     uint32_t i = 0;
-    if (s->mmx && n > 3) for (; i < (n & ~3u); i++) b[i] = packss(b[i] * 2);
+    int32_t peak = (int32_t)s->acc.peak;     /* the output's peak (+4c) */
+    if (s->mmx && n > 3) {
+        int32_t hi = peak, lo = -peak;
+        for (; i < (n & ~3u); i++) b[i] = packss(b[i] * 2);
+        /* sic: the minimum is taken over the last three samples of each four (the second twice) */
+        for (uint32_t j = 0; j < (n & ~3u); j += 4) {
+            if (b[j] > hi) hi = b[j];
+            if (b[j + 1] < lo) lo = b[j + 1];
+            for (int k = 1; k < 4; k++) {
+                if (b[j + k] > hi) hi = b[j + k];
+                if (b[j + k] < lo) lo = b[j + k];
+            }
+        }
+        if (peak < (int16_t)hi) peak = (int16_t)hi;
+        if (peak < -(int32_t)(int16_t)lo) peak = -(int32_t)(int16_t)lo;
+    }
     for (; i < n; i++) {
         int v = b[i] * 2;
-        b[i] = (int16_t)(v < -0x7fff ? -0x7fff : v > 0x7fff ? 0x7fff : v);
+        v = v < -0x7fff ? -0x7fff : v > 0x7fff ? 0x7fff : v;
+        b[i] = (int16_t)v;
+        if (v > peak) peak = v;
+        else if (v < 0 && -v > peak) peak = -v;
     }
+    s->acc.peak = (uint32_t)peak;
 }
 
 /* ================================================================== DirectX 8 voices (PlayVoice / StopVoice) */
@@ -2483,9 +2517,16 @@ static void cl_voices(ms_cl *c, int64_t end)
 }
 
 /* 77485a00 */
+/* the samples a voice played in this statistics period: from its start (or the period's) to t */
+static void stat_voice(msynth *s, ms_voice *v, int64_t t)
+{
+    s->acc.vsamples += (uint32_t)(t - (v->start < s->statstart ? s->statstart : v->start));
+}
+
 static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, uint32_t frames, int64_t pos)
 {
     int64_t end = pos + frames;
+    uint32_t t0 = s->clock_ms ? s->clock_ms() : 0;
     synth_prealloc(s, end);
     for (uint32_t i = 0; i < nbuf; i++) {
         if ((flags & 1) && i) break;
@@ -2499,6 +2540,7 @@ static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, 
         if (!v->active) {
             synth_remove(s, v);
             voice_push(&s->freelist, v);
+            stat_voice(s, v, v->stop);
         }
     }
     for (uint32_t i = 0; i < s->ncl; i++) cl_retire(s->cl[i], end);
@@ -2507,7 +2549,23 @@ static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, 
         twice(s, bufs[i], frames << (flags & 1));
     }
     if (s->lastrender < end) s->lastrender = end;
+    /* the running statistics, published once a second of samples has been rendered (77485c72) */
+    s->acc.ms += (s->clock_ms ? s->clock_ms() : 0) - t0;
+    if (s->statstart + (int64_t)s->rate <= s->lastrender) {
+        uint32_t n = (uint32_t)(s->lastrender - s->statstart);
+        for (ms_voice *v = s->active; v; v = v->next) stat_voice(s, v, s->lastrender);
+        if (!n) n = 1;
+        if (!s->acc.vsamples) s->acc.vsamples = 1;
+        s->acc.voices = (s->acc.vsamples + n / 2) / n;
+        s->acc.cpu = (uint32_t)(((uint64_t)s->acc.ms * s->rate + n / 2) / n);    /* MulDiv */
+        s->last = s->acc;
+        memset(&s->acc, 0, sizeof(s->acc));
+        s->statstart = s->lastrender;
+    }
 }
+
+void msynth_get_stats(msynth *s, msynth_stats *st) { *st = s->last; }
+void msynth_set_clock(msynth *s, uint32_t (*clock_ms)(void)) { s->clock_ms = clock_ms; }
 
 void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos)
 {

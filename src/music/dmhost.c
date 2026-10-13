@@ -424,6 +424,16 @@ static DWORD WINAPI realtime_thread(LPVOID p)
     return 0;
 }
 
+/* dmsynth's millisecond clock (7748edc0: QueryPerformanceCounter in milliseconds) */
+static uint32_t host_clock_ms(void)
+{
+    static LARGE_INTEGER f;
+    LARGE_INTEGER c;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (uint32_t)(c.QuadPart / (f.QuadPart / 1000));
+}
+
 /* ------------------------------------------------------------------ construction */
 dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
 {
@@ -443,6 +453,7 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     }
     if (FAILED(rl_device_acquire(&h->dev))) { free(h); return NULL; }
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, 1);
+    if (h->syn) msynth_set_clock(h->syn, host_clock_ms);
     if (h->syn) msynth_set_fixes(h->syn, MS_FIX_WAVE_END | MS_FIX_WAVE_PASTEND);
     msynth_set_gain(h->syn, 0);
     dls_sink sk = { sink_dl, sink_ul };
@@ -721,6 +732,28 @@ HRESULT dm_host_buffer_dmo(dm_host *h, int idx, REFGUID g, DWORD n, REFIID iid, 
     if (idx >= 0 && idx < MAXHB && h->hb[idx].b && h->hb[idx].fx) hr = rl_fxchain_get_object(h->hb[idx].fx, g, n, iid, out);
     LeaveCriticalSection(&h->lock);
     return hr;
+}
+
+/* the port's side (dmport.c): channel priorities, the latency clock */
+int dm_host_priority(dm_host *h, uint32_t g, uint32_t c, uint32_t *prio, int set)
+{
+    EnterCriticalSection(&h->lock);
+    int r = set ? msynth_set_priority(h->syn, g, c, *prio) : msynth_get_priority(h->syn, g, c, prio);
+    LeaveCriticalSection(&h->lock);
+    return r;
+}
+void dm_host_stats(dm_host *h, msynth_stats *st)
+{
+    EnterCriticalSection(&h->lock);
+    msynth_get_stats(h->syn, st);
+    LeaveCriticalSection(&h->lock);
+}
+rtime_t dm_host_latency(dm_host *h)
+{
+    EnterCriticalSection(&h->lock);
+    rtime_t t = h->rt0 + h->written * 10000000 / h->rate;
+    LeaveCriticalSection(&h->lock);
+    return t;
 }
 
 /* the buffer object (AudioPath::GetObjectInPath, DMUS_PATH_BUFFER) */
