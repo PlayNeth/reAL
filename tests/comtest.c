@@ -150,6 +150,8 @@ static void segstate(void)
     printf("seek a %08lx %s\n", hr, seek >= 0 && seek <= la ? "in range" : "out of range");
     printf("seek NULL %08lx\n", IDirectMusicSegmentState_GetSeek(sa, NULL));
     printf("getsegstate NULL %08lx\n", IDirectMusicPerformance8_GetSegmentState(perf, NULL, 0));
+    Sleep(100);                         /* (so the stop comes after s0 + 1: GetSegmentState finds a stopped state only
+                                           while its start..last span has the time) */
     IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
     Sleep(300);
     got = NULL;

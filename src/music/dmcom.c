@@ -606,15 +606,15 @@ static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirect
     if ((a && (IsBadReadPtr(a, 4) || IsBadReadPtr(*(void **)a, 4))) || (b && (IsBadReadPtr(b, 4) || IsBadReadPtr(*(void **)b, 4))) ||
         (c && IsBadWritePtr(c, 4)))
         return E_POINTER;
-    if (a || b) return rm_notimpl("Segment::Compose from or to a segment (transitions)");
-    rm_segment *s = sgm(i);
+    rm_segment *s = sgm(i), *fa = a ? unsafe_segment((IUnknown *)a) : NULL, *fb = b ? unsafe_segment((IUnknown *)b) : NULL;
+    if ((a && !fa) || (b && !fb)) return rm_notimpl("Segment::Compose from or to a segment not made by reDM");
     if (!s->seg) return DMUS_E_NOT_INIT;
     dm_host *h = any_host();
     if (h) dm_host_lock(h);
     int hr = DM_OK;
     dm_segment *g = s->seg;
     if (c) { g = dm_segment_clone(s->seg, 0, s->seg->length, &hr); if (!g) hr = E_OUTOFMEMORY; }
-    if (g) hr = dmc_segment_compose(g);
+    if (g) hr = dmc_segment_compose_ex(g, t, fa ? fa->seg : NULL, fb ? fb->seg : NULL);
     if (h) dm_host_unlock(h);
     if (c && g) {
         rm_segment *o = new_segment(g);
@@ -938,10 +938,10 @@ static rm_track *unsafe_track(IUnknown *u)
 static HRESULT WINAPI trk_qi(IDirectMusicTrack8 *i, REFIID riid, void **out)
 {
     if (!out) return E_POINTER;
-    /* dmime's tracks: IDirectMusicTrack8 except the time signature track's (7731cc26); IPersist only on dmband's */
+    /* dmime's tracks: IDirectMusicTrack8 except the time signature and marker tracks' (7731cc26); IPersist only on dmband's */
     int kind = trk(i)->t->kind;
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicTrack) ||
-        (IsEqualIID(riid, &IID_IDirectMusicTrack8) && kind != TRK_TIMESIG)) *out = i;
+        (IsEqualIID(riid, &IID_IDirectMusicTrack8) && kind != TRK_TIMESIG && kind != TRK_MARKER)) *out = i;
     else if (IsEqualIID(riid, &IID_IPersistStream) || (IsEqualIID(riid, &IID_IPersist) && kind == TRK_BAND))
         *out = &trk(i)->IPersistStream_iface;
     else { *out = NULL; return E_NOINTERFACE; }
@@ -1042,7 +1042,33 @@ static HRESULT WINAPI trk_setparamex(IDirectMusicTrack8 *i, REFGUID g, REFERENCE
     return trk_setparam(i, g, (MUSIC_TIME)((f & 1) ? t / 10000 : t), p);
 }
 static HRESULT WINAPI trk_compose(IDirectMusicTrack8 *i, IUnknown *c, DWORD id, IDirectMusicTrack **o) { return E_NOTIMPL; }
-static HRESULT WINAPI trk_join(IDirectMusicTrack8 *i, IDirectMusicTrack *t, MUSIC_TIME j, IUnknown *c, DWORD id, IDirectMusicTrack **o) { return E_NOTIMPL; }
+/* Join (tempo 7731caa4, chord 77402abe, command 77404040, style 7741305c, band 772027cc, chord map 7728c90c,
+ * signpost 7728b802; E_NOTIMPL for the others) */
+static rm_segment *unsafe_segment(IUnknown *u);
+static HRESULT WINAPI trk_join(IDirectMusicTrack8 *i, IDirectMusicTrack *t, MUSIC_TIME j, IUnknown *c, DWORD id, IDirectMusicTrack **o)
+{
+    dm_track *me = trk(i)->t;
+    switch (me->kind) {
+    case TRK_TEMPO: case TRK_CHORD: case TRK_COMMAND: case TRK_STYLE: case TRK_BAND: case TRK_CHORDMAP: case TRK_SIGNPOST: break;
+    default: return E_NOTIMPL;
+    }
+    if (!t || IsBadReadPtr(t, 4) || IsBadReadPtr(*(void **)t, 4) || (o && IsBadWritePtr(o, 4)) ||
+        (c && (IsBadReadPtr(c, 4) || IsBadReadPtr(*(void **)c, 4))))
+        return E_POINTER;
+    rm_track *r = unsafe_track((IUnknown *)t);
+    rm_segment *g = c ? unsafe_segment(c) : NULL;
+    if (!r || (c && !g)) return rm_notimpl("Track::Join (a track or segment not made by reDM)");
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    dm_track *res = NULL;
+    int hr = dm_track_join(me, r->t, j, g ? g->seg : NULL, id, o ? &res : NULL);
+    if (h) dm_host_unlock(h);
+    if (o) {
+        *o = NULL;
+        if (res) { *o = (IDirectMusicTrack *)track_object(res); dm_track_release(res); if (!*o) return E_OUTOFMEMORY; }
+    }
+    return hr;
+}
 static IDirectMusicTrack8Vtbl trk_vtbl = { trk_qi, trk_addref, trk_release, trk_init, trk_initplay, trk_endplay, trk_play,
     trk_getparam, trk_setparam, trk_isparam, trk_addnotif, trk_remnotif, trk_clone, trk_playex, trk_getparamex, trk_setparamex,
     trk_compose, trk_join };

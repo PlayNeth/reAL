@@ -390,6 +390,10 @@ void dm_track_release(dm_track *t);
  * dm_set_clone_fix: keep what the original's clones lose (wave item ranges, a band carried over without a later band) */
 dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr);
 dm_segment *dm_segment_clone(const dm_segment *s, mtime_t start, mtime_t end, int *hr);
+/* IDirectMusicTrack8::Join: `other` (a track of the same kind) appended at mtjoin, in place or into *result (a new
+ * track holding [0, mtjoin) of t); ctx is the segment whose time signatures count the measures */
+dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr);
+int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment *ctx, uint32_t group, dm_track **result);
 void dm_set_clone_fix(int on);
 /* insert in segment track order (position, then sysex before band before the rest); takes over one reference */
 void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority);

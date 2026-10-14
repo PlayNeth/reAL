@@ -435,6 +435,204 @@ static int trans(IDirectMusicLoader8 *ld)
     return 0;
 }
 
+/* a track's parameters, read through the track itself */
+static void dump_track(IDirectMusicTrack *tr, IDirectMusicStyle8 *const *styles, IDirectMusicChordMap *const *maps)
+{
+    for (MUSIC_TIME t = 0; t < 40 * BAR; ) {
+        DMUS_CHORD_KEY ch; MUSIC_TIME nx = 0;
+        memset(&ch, 0, sizeof(ch));
+        HRESULT hr = IDirectMusicTrack_GetParam(tr, &GUID_ChordParam, t, &nx, &ch);
+        if (hr != S_OK) { if (t == 0) printf("    chords %08lx\n", hr); break; }
+        printf("    chord %ld: '", t); wout(ch.wszName, 16);
+        printf("' m %u b %u key %u scale %lx subs %u root %u next %ld\n", ch.wMeasure, ch.bBeat, ch.bKey, ch.dwScale, ch.bSubChordCount,
+               ch.SubChordList[0].bChordRoot, nx);
+        if (nx <= 0) break;
+        t += nx;
+    }
+    for (MUSIC_TIME t = 0; t < 40 * BAR; ) {
+        DMUS_COMMAND_PARAM_2 c; MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicTrack_GetParam(tr, &GUID_CommandParam2, t, &nx, &c);
+        if (hr != S_OK) { if (t == 0) printf("    commands %08lx\n", hr); break; }
+        printf("    command %ld: t %ld %u/%u next %ld\n", t, c.mtTime, c.bCommand, c.bGrooveLevel, nx);
+        if (nx <= 0) break;
+        t += nx;
+    }
+    for (MUSIC_TIME t = 0; t < 40 * BAR; ) {
+        DMUS_TEMPO_PARAM tp; MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicTrack_GetParam(tr, &GUID_TempoParam, t, &nx, &tp);
+        if (hr != S_OK) { if (t == 0) printf("    tempo %08lx\n", hr); break; }
+        printf("    tempo %ld: t %ld %.2f next %ld\n", t, tp.mtTime, tp.dblTempo, nx);
+        if (nx <= 0) break;
+        t += nx;
+    }
+    for (MUSIC_TIME t = 0; t < 40 * BAR; ) {
+        IDirectMusicStyle *st = NULL; MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicTrack_GetParam(tr, &GUID_IDirectMusicStyle, t, &nx, &st);
+        if (hr != S_OK) { if (t == 0) printf("    style %08lx\n", hr); break; }
+        int w = -1;
+        for (int k = 0; k < 3; k++) if ((void *)st == (void *)styles[k]) w = k;
+        printf("    style %ld: %d next %ld\n", t, w, nx);
+        if (st) IDirectMusicStyle_Release(st);
+        if (nx <= 0) break;
+        t += nx;
+    }
+    for (MUSIC_TIME t = 0; t < 40 * BAR; ) {
+        IDirectMusicChordMap *m = NULL; MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicTrack_GetParam(tr, &GUID_IDirectMusicChordMap_, t, &nx, &m);
+        if (hr != S_OK) { if (t == 0) printf("    chordmap %08lx\n", hr); break; }
+        int w = -1;
+        for (int k = 0; k < 3; k++) if ((void *)m == (void *)maps[k]) w = k;
+        printf("    chordmap %ld: %d next %ld\n", t, w, nx);
+        if (m) IDirectMusicChordMap_Release(m);
+        if (nx <= 0) break;
+        t += nx;
+    }
+    for (MUSIC_TIME t = 0; t < 40 * BAR; ) {
+        DMUS_BAND_PARAM bp = { 0 }; MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicTrack_GetParam(tr, &GUID_BandParam, t, &nx, &bp);
+        if (hr != S_OK) { if (t == 0) printf("    band %08lx\n", hr); break; }
+        printf("    band %ld: physical %ld next %ld\n", t, bp.mtTimePhysical, nx);
+        if (bp.pBand) IDirectMusicBand_Release(bp.pBand);
+        if (nx <= t) break;
+        t = nx;
+    }
+    IPersistStream *ps = NULL;
+    CLSID c = { 0 };
+    if (SUCCEEDED(IDirectMusicTrack_QueryInterface(tr, &IID_IPersistStream, (void **)&ps))) {
+        IPersistStream_GetClassID(ps, &c);
+        if (c.Data1 == 0xf17e8672) {
+            IStream *st = NULL;
+            CreateStreamOnHGlobal(NULL, TRUE, &st);
+            HRESULT hr = IPersistStream_Save(ps, st, FALSE);
+            HGLOBAL hg = NULL; GetHGlobalFromStream(st, &hg);
+            ULARGE_INTEGER sz = { 0 }; LARGE_INTEGER zero = { 0 };
+            IStream_Seek(st, zero, STREAM_SEEK_END, &sz);
+            BYTE *b = GlobalLock(hg);
+            printf("    signposts %08lx:", hr);
+            for (ULONG q = 12; q + 12 <= sz.LowPart; q += 12) printf(" %ld/%u:%lx", *(LONG *)(b + q), (unsigned)*(WORD *)(b + q + 8), *(DWORD *)(b + q + 4));
+            printf("\n");
+            GlobalUnlock(hg);
+            IStream_Release(st);
+        }
+        IPersistStream_Release(ps);
+    }
+}
+
+/* Track8::Join on each track class, and Segment::Compose with from and to segments */
+static int join(IDirectMusicLoader8 *ld)
+{
+    IDirectMusicComposer *cp = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);
+    printf("create composer %08lx\n", hr);
+    IDirectMusicChordMap *maps[3] = { 0 };
+    IDirectMusicStyle8 *st[3] = { 0 };
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapa.cdm", (void **)&maps[0]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapb.cdm", (void **)&maps[1]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapc.cdm", (void **)&maps[2]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"compsty.sty", (void **)&st[0]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"compsty3.sty", (void **)&st[1]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"shapesty.sty", (void **)&st[2]);
+    static const WCHAR *const tn[] = { L"t1.sgt", L"t2.sgt", L"t3.sgt", L"t4.sgt", L"t6.sgt" };
+    IDirectMusicSegment *t6c = NULL;
+    IDirectMusicSegment *cs[6] = { 0 };
+    for (int k = 0; k < 4; k++) {
+        IDirectMusicSegment *tp = NULL;
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, tn[k], (void **)&tp);
+        hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, NULL, tp, 1, NULL, &cs[k]);
+        printf("composed %d %08lx\n", k, hr);
+        if (tp) IDirectMusicSegment_Release(tp);
+    }
+    {
+        IDirectMusicSegment *tp = NULL;
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, tn[4], (void **)&tp);
+        hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, NULL, tp, 2, NULL, &t6c);
+        printf("composed t6 %08lx\n", hr);
+        if (tp) IDirectMusicSegment_Release(tp);
+    }
+    hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, (IDirectMusicStyle *)st[2], 6, 3, 1, FALSE, FALSE, maps[1], &cs[4]);
+    printf("shape %08lx\n", hr);
+    /* Join: each track of A with B's of its class, into a result and in place, at two times */
+    static const int pairs[][2] = { { 0, 1 }, { 1, 3 }, { 2, 0 }, { 4, 0 }, { 0, 4 } };
+    for (int pi = 0; pi < 5; pi++) {
+        IDirectMusicSegment *A = cs[pairs[pi][0]], *B = cs[pairs[pi][1]];
+        if (!A || !B) continue;
+        for (DWORD k = 0; k < 12; k++) {
+            IDirectMusicTrack *ta = NULL, *tb = NULL;
+            IDirectMusicSegment_GetTrack(A, &GUID_NULL_, 0xffffffff, k, &ta);
+            if (!ta) break;
+            IPersistStream *ps = NULL; CLSID c = { 0 };
+            if (SUCCEEDED(IDirectMusicTrack_QueryInterface(ta, &IID_IPersistStream, (void **)&ps))) { IPersistStream_GetClassID(ps, &c); IPersistStream_Release(ps); }
+            IDirectMusicSegment_GetTrack(B, &c, 0xffffffff, 0, &tb);
+            printf("pair %d track %lu class %08lx: other %d\n", pi, k, c.Data1, tb != NULL);
+            IDirectMusicTrack8 *t8 = NULL;
+            if (tb && SUCCEEDED(IDirectMusicTrack_QueryInterface(ta, &IID_IDirectMusicTrack8, (void **)&t8))) {
+                for (int w = 0; w < 2; w++) {
+                    MUSIC_TIME at = w ? 3 * BAR + 512 : 2 * BAR;
+                    IDirectMusicTrack *res = NULL;
+                    hr = IDirectMusicTrack8_Join(t8, tb, at, (IUnknown *)A, 0xffffffff, &res);
+                    printf("  join at %ld into a new track: %08lx %d\n", at, hr, res != NULL);
+                    if (res) { dump_track(res, st, maps); IDirectMusicTrack_Release(res); }
+                }
+                IDirectMusicTrack *cl = NULL;
+                IDirectMusicTrack_Clone(ta, 0, 8 * BAR, &cl);
+                IDirectMusicTrack8 *c8 = NULL;
+                if (cl && SUCCEEDED(IDirectMusicTrack_QueryInterface(cl, &IID_IDirectMusicTrack8, (void **)&c8))) {
+                    hr = IDirectMusicTrack8_Join(c8, tb, 2 * BAR + 768, (IUnknown *)A, 1, NULL);
+                    printf("  join in place: %08lx\n", hr);
+                    dump_track(cl, st, maps);
+                    hr = IDirectMusicTrack8_Join(c8, tb, BAR, NULL, 1, NULL);
+                    printf("  join without a segment: %08lx\n", hr);
+                    IDirectMusicTrack8_Release(c8);
+                }
+                if (cl) IDirectMusicTrack_Release(cl);
+                IDirectMusicTrack8_Release(t8);
+            }
+            if (tb) IDirectMusicTrack_Release(tb);
+            IDirectMusicTrack_Release(ta);
+        }
+    }
+    /* Segment::Compose from and to segments */
+    static const WCHAR *const cn[] = { L"c1.sgt", L"c2.sgt", L"c3.sgt", L"c4.sgt", L"c5.sgt", L"c6.sgt" };
+    static const int ft[][3] = { { 0, 1, 2 * BAR + 300 }, { 0, -1, 5 * BAR }, { -1, 3, 0 }, { 1, 0, 500 }, { 2, 2, 3 * BAR }, { 0, 4, BAR }, { 4, 0, BAR },
+                                 { 5, 5, 2 * BAR + 100 }, { 5, -1, 3 * BAR }, { -1, 5, 0 }, { 5, 5, 300 }, { 5, 5, 0 } };
+    for (int a = 0; a < 6; a++)
+        for (int f = 0; f < 12; f++) {
+            if ((a < 3) != (f < 7)) continue;
+            IDirectMusicSegment8 *tp = NULL;
+            IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, cn[a], (void **)&tp);
+            if (!tp) continue;
+            IDirectMusicSegment *from = ft[f][0] == 5 ? t6c : ft[f][0] >= 0 ? cs[ft[f][0]] : NULL;
+            IDirectMusicSegment *to = ft[f][1] == 5 ? t6c : ft[f][1] >= 0 ? cs[ft[f][1]] : NULL;
+            IDirectMusicSegment *out = NULL;
+            hr = IDirectMusicSegment8_Compose(tp, ft[f][2], from, to, &out);
+            printf("compose %d from %d to %d at %d: %08lx\n", a, ft[f][0], ft[f][1], ft[f][2], hr);
+            if (out) {
+                IDirectMusicSegment8 *o8 = NULL;
+                IDirectMusicSegment_QueryInterface(out, &IID_IDirectMusicSegment8, (void **)&o8);
+                dump(o8, "composed");
+                for (DWORD k = 0; k < 12; k++) {
+                    IDirectMusicTrack *tr = NULL;
+                    IDirectMusicSegment8_GetTrack(o8, &GUID_NULL_, 0xffffffff, k, &tr);
+                    if (!tr) break;
+                    printf("  track %lu\n", k);
+                    dump_track(tr, st, maps);
+                    IDirectMusicTrack_Release(tr);
+                }
+                IDirectMusicSegment8_Release(o8);
+                IDirectMusicSegment_Release(out);
+            }
+            hr = IDirectMusicSegment8_Compose(tp, ft[f][2], from, to, NULL);
+            printf("in place: %08lx\n", hr);
+            dump(tp, "in place");
+            IDirectMusicSegment8_Release(tp);
+        }
+    for (int k = 0; k < 5; k++) if (cs[k]) IDirectMusicSegment_Release(cs[k]);
+    if (t6c) IDirectMusicSegment_Release(t6c);
+    for (int k = 0; k < 3; k++) { if (st[k]) IDirectMusicStyle8_Release(st[k]); if (maps[k]) IDirectMusicChordMap_Release(maps[k]); }
+    IDirectMusicComposer_Release(cp);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -457,6 +655,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "shape")) return shapes(ld);
     if (argc > 1 && !strcmp(argv[1], "change")) return change(ld);
     if (argc > 1 && !strcmp(argv[1], "trans")) return trans(ld);
+    if (argc > 1 && !strcmp(argv[1], "join")) return join(ld);
     if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
         IDirectMusicComposer *cp = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);

@@ -404,11 +404,11 @@ def cmap_dag(name, guid, seed, layers=10, width=3, scale=0x00ab5ab5, flags=1, ho
     pal = [c if r not in holes else None for r, c in enumerate(pal)]
     return chordmap(guid, name, scale, subs, pal, entries, sps, flags=flags)
 
-def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4), spconfig=None):
+def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4), spconfig=None, timesig=True, cmconfig=None):
     bar = 768 * ts[0] * 4 // ts[1]
     seg = Segment(guid, name, nbars * bar)
     seg.tempo([(0, 100.0)])
-    seg.timesig([(0, ts[0], ts[1], ts[2])])
+    if timesig: seg.timesig([(0, ts[0], ts[1], ts[2])])
     seg.style([(0, style + '.sty', None, style)])
     cmds, m = [], 0
     while m < nbars:
@@ -421,7 +421,7 @@ def comp_template(name, guid, R, nbars, style, cmaps, ts=(4, 4, 4), spconfig=Non
         sp.append((m * bar, R.choice(groups), m))
         m += R.choice([1, 2, 2, 3, 4])
     seg.signposts(sp, config=spconfig)
-    seg.chordmaps([(t * bar, f + '.cdm', None, f) for t, f in cmaps])
+    seg.chordmaps([(t * bar, f + '.cdm', None, f) for t, f in cmaps], config=cmconfig)
     return seg.build()
 
 def case_compose2(out, seed=16):
@@ -454,6 +454,12 @@ def case_compose2(out, seed=16):
     for nm, ms, emb in (('intro', 2, 4), ('fill', 1, 1), ('break', 2, 2), ('end', 3, 8)):
         sh.pattern(nm, measures=ms, groove=(1, 100), embellish=emb).partref(sh.parts[0], pchannel=0)
     files['shapesty.sty'] = sh.build()
+    # Segment::Compose from and to segments: no time signature track (not an IDirectMusicTrack8, it fails the joins)
+    R2 = random.Random(seed + 1)
+    files['c4.sgt'] = comp_template('c4', '8f6d1a10-1000-4000-8000-000000000049', R2, 12, 'compsty', [(0, 'cmapa')], spconfig=0x238, timesig=False)
+    files['c5.sgt'] = comp_template('c5', '8f6d1a10-1000-4000-8000-00000000004a', R2, 10, 'compsty', [(0, 'cmapb'), (4, 'cmapc')], spconfig=0x238, timesig=False, cmconfig=0x838)
+    files['c6.sgt'] = comp_template('c6', '8f6d1a10-1000-4000-8000-00000000004b', R2, 9, 'compsty3', [(0, 'cmapc')], ts=(3, 4, 4), spconfig=0x238, timesig=False, cmconfig=0x1038)
+    files['t6.sgt'] = comp_template('t6', '8f6d1a10-1000-4000-8000-00000000004c', R2, 14, 'compsty', [(0, 'cmapb')], timesig=False)
     # ChangeChordMap: another key and scale, the old (not DMUS_CHORDMAPF_VERSION8) transposition, a palette with holes
     files['cmapd.cdm'] = cmap_dag('cmapd', '8f6d1a10-0006-4000-8000-00000000000d', 4, scale=0x00ad5ad5, flags=0)
     files['cmape.cdm'] = cmap_dag('cmape', '8f6d1a10-0006-4000-8000-00000000000e', 5, scale=0x0756b56b, flags=1)

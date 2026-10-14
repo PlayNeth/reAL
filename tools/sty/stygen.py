@@ -307,10 +307,11 @@ class Segment:
         styh = chunk('styh', struct.pack('<BBH', *timesig) + struct.pack('<d', tempo))
         self.track(CLSID['patterntrack'], None, 'DMPT', RIFF('DMPT', styh, pat.build()), group=group)
 
-    def chordmaps(self, refs, group=1):
-        """refs: (time, file, guid, name)"""
+    def chordmaps(self, refs, group=1, config=None):
+        """refs: (time, file, guid, name); config: the track's (trkx)"""
         items = [LIST('pfrf', chunk('stmp', struct.pack('<i', t)), reference(CLSID['chordmap'], g, n, f)) for t, f, g, n in refs]
-        self.track(CLSID['chordmaptrack'], None, 'pftr', LIST('pftr', *items), group=group)
+        self.track(CLSID['chordmaptrack'], None, 'pftr', LIST('pftr', *items), group=group,
+                   extras=(config, 0) if config is not None else None)
 
     def signposts(self, items, group=1, config=None):
         """items: (time, chords, measure); config: the track's (0x238 to compose)"""

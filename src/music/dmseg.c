@@ -1207,3 +1207,153 @@ int dm_segment_remove_notification(dm_segment *s, const dm_guid *g, int fromperf
     for (int t = 0; t < s->ntracks; t++) dm_track_remove_notification(s->tracks[t].t, g);
     return DM_OK;
 }
+
+/* ------------------------------------------------------------------ IDirectMusicTrack8::Join */
+#include "dmperf.h"
+/* the measures before mtJoin by the context segment's time signatures (dmstyle 77402803 / dmcompos 7728b802).  The
+ * carry from one time signature to the next is the step modulo the measure count, as the originals compute it. */
+static int32_t join_measures(dm_segment *ctx, uint32_t group, mtime_t mtjoin)
+{
+    int32_t total = 0, rem = 0;
+    if (!ctx) return 0;
+    for (mtime_t c = 0; c < mtjoin; ) {
+        struct { mtime_t t; uint8_t bpm, beat; uint16_t grids; } ts;
+        mtime_t next = 0;
+        if (dm_segment_getparam(ctx, PRM_TIMESIG, group, 0, c, &next, &ts) < 0) break;
+        mtime_t step = next ? next : mtjoin - c;
+        uint32_t ml = (ts.beat ? 0xc00u / ts.beat : 0) * ts.bpm;
+        uint32_t n = ml ? (uint32_t)(step + rem) / ml : 0;
+        rem = (n & 0xffff) ? (int32_t)step % (int32_t)(n & 0xffff) : 0;
+        total += (int32_t)n;
+        c += step;
+    }
+    return total;
+}
+/* Join: `other`'s data appended at mtjoin (into a clone of [0, mtjoin) when result is asked for).  Tempo 7731caa4,
+ * chord 77402abe, command 77404040, style 7741305c, band 772027cc, chord map 7728c90c, signpost 7728b802; the
+ * others answer E_NOTIMPL.  In place, the command and signpost tracks drop what they have from mtjoin on, the others
+ * keep it (their lists then run out of order).  The chord, command and signpost tracks need the segment (their
+ * measure numbers move by its measures before mtjoin). */
+int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment *ctx, uint32_t group, dm_track **result)
+{
+    switch (t->kind) {
+    case TRK_TEMPO: case TRK_CHORD: case TRK_COMMAND: case TRK_STYLE: case TRK_BAND: case TRK_CHORDMAP: case TRK_SIGNPOST: break;
+    default: return DM_E_NOTIMPL;
+    }
+    if (!other || other->kind != t->kind) return DM_E_POINTER;     /* (the originals read the other as their own class) */
+    if ((t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_SIGNPOST) && !ctx) return DM_E_POINTER;
+    dm_track *d = t;
+    int hr = DM_OK;
+    if (result) {
+        *result = dm_track_clone(t, 0, mtjoin, &hr);
+        if (!*result) return hr < 0 ? hr : DM_E_OUTOFMEMORY;
+        d = *result;
+    }
+    switch (t->kind) {
+    case TRK_TEMPO: {                                   /* 7731ca05: appended */
+        dm_tempotrack *T = d->data;
+        const dm_tempotrack *O = other->data;
+        if (!O->n) break;
+        dm_tempoitem *x = realloc(T->items, (size_t)(T->n + O->n) * sizeof(*x));
+        if (!x) return DM_E_OUTOFMEMORY;
+        T->items = x;
+        for (int i = 0; i < O->n; i++) { x[T->n].mt = O->items[i].mt + mtjoin; x[T->n].tempo = O->items[i].tempo; T->n++; }
+        break;
+    }
+    case TRK_CHORD: {                                   /* 77402803: appended; the chords' silence is not copied */
+        dms_chordtrack *T = d->data;
+        int32_t m = join_measures(ctx, group, mtjoin);
+        dms_chord **pp = &T->chords;
+        while (*pp) pp = &(*pp)->next;
+        for (const dms_chord *c = ((const dms_chordtrack *)other->data)->chords; c; c = c->next) {
+            dms_chord *n = calloc(1, sizeof(*n));
+            if (!n) return DM_E_OUTOFMEMORY;
+            memcpy(n->name, c->name, sizeof(n->name));
+            n->t = c->t + mtjoin;
+            n->measure = (uint16_t)(c->measure + m);
+            n->beat = c->beat; n->key = c->key; n->scale = c->scale;
+            if (c->nsub && (n->sub = malloc(c->nsub * sizeof(*n->sub)))) { memcpy(n->sub, c->sub, c->nsub * sizeof(*n->sub)); n->nsub = c->nsub; }
+            *pp = n; pp = &n->next;
+        }
+        break;
+    }
+    case TRK_COMMAND: {                                 /* 77404040: what is before mtjoin, then the other's */
+        dms_cmdtrack *T = d->data;
+        if (!result) {
+            dms_command **pp = &T->cmds;
+            while (*pp && (*pp)->t < mtjoin) pp = &(*pp)->next;
+            for (dms_command *c = *pp, *n; c; c = n) { n = c->next; free(c); }
+            *pp = NULL;
+        }
+        int32_t m = join_measures(ctx, group, mtjoin);
+        dms_command **pp = &T->cmds;
+        while (*pp) pp = &(*pp)->next;
+        for (const dms_command *c = ((const dms_cmdtrack *)other->data)->cmds; c; c = c->next) {
+            dms_command *n = malloc(sizeof(*n));
+            if (!n) return DM_E_OUTOFMEMORY;
+            *n = *c; n->next = NULL;
+            n->t += mtjoin; n->measure = (uint16_t)(n->measure + m);
+            *pp = n; pp = &n->next;
+        }
+        break;
+    }
+    case TRK_STYLE: {                                   /* 77412d3a: appended (the PChannel list is not updated) */
+        dms_styletrack *T = d->data;
+        dms_stynode **pp = &T->styles;
+        while (*pp) pp = &(*pp)->next;
+        for (const dms_stynode *s = ((const dms_styletrack *)other->data)->styles; s; s = s->next) {
+            dms_stynode *n = calloc(1, sizeof(*n));
+            if (!n) return DM_E_OUTOFMEMORY;
+            n->t = s->t + mtjoin; n->style = s->style;
+            if (n->style) dms_style_addref(n->style);
+            *pp = n; pp = &n->next;
+        }
+        break;
+    }
+    case TRK_BAND: {                                    /* 7720202e: a copy of each band, added at its time + mtjoin */
+        const dm_bandtrack *O = other->data;
+        for (int i = 0; i < O->nbands && hr >= 0; i++) {
+            dm_band *b = dm_band_copy(O->bands[i]);
+            if (!b) return DM_E_OUTOFMEMORY;
+            memset(b->name, 0, sizeof(b->name)); b->hasguid = 0;
+            b->logical += mtjoin; b->physical += mtjoin;
+            dm_bandtrack_add(d->data, b);
+        }
+        break;
+    }
+    case TRK_CHORDMAP: {                                /* 7728c7f5: appended */
+        dmc_cmtrack *T = d->data;
+        dmc_cmnode **pp = &T->items;
+        while (*pp) pp = &(*pp)->next;
+        for (const dmc_cmnode *c = ((const dmc_cmtrack *)other->data)->items; c; c = c->next) {
+            dmc_cmnode *n = calloc(1, sizeof(*n));
+            if (!n) return DM_E_OUTOFMEMORY;
+            n->t = c->t + mtjoin; n->map = c->map;
+            if (n->map) dmc_chordmap_addref(n->map);
+            *pp = n; pp = &n->next;
+        }
+        break;
+    }
+    case TRK_SIGNPOST: {                                /* 7728b802: what is before mtjoin, then the other's */
+        dmc_sptrack *T = d->data;
+        if (!result) {
+            dmc_sp **pp = &T->items;
+            while (*pp && (*pp)->t < mtjoin) pp = &(*pp)->next;
+            for (dmc_sp *c = *pp, *n; c; c = n) { n = c->next; free(c); }
+            *pp = NULL;
+        }
+        int32_t m = join_measures(ctx, group, mtjoin);
+        dmc_sp **pp = &T->items;
+        while (*pp) pp = &(*pp)->next;
+        for (const dmc_sp *c = ((const dmc_sptrack *)other->data)->items; c; c = c->next) {
+            dmc_sp *n = malloc(sizeof(*n));
+            if (!n) return DM_E_OUTOFMEMORY;
+            *n = *c; n->next = NULL;
+            n->t += mtjoin; n->measure = (uint16_t)(n->measure + m);
+            *pp = n; pp = &n->next;
+        }
+        break;
+    }
+    }
+    return hr;
+}

@@ -96,6 +96,8 @@ struct dms_style;
 dm_segment *dmc_compose_template(dm_segment *tmpl, struct dms_style *style, dmc_chordmap *cm, int activity, int *hr);
 /* Segment::Compose (dmime 77314b64): the composing tracks composed and their results put in the segment */
 int dmc_segment_compose(dm_segment *s);
+/* Segment::Compose (dmime 77314ccc): with from / to segments joined around the segment for the composition */
+int dmc_segment_compose_ex(dm_segment *s, mtime_t mt, dm_segment *from, dm_segment *to);
 /* ComposeTemplateFromShape (77286629; intro, fill and break lengths 1 from the COM method): a template with a command
  * and a signpost track */
 dm_segment *dmc_template_from_shape(unsigned measures, unsigned shape, int intro, int end, int introlen, int fill, int brk,

@@ -1826,3 +1826,94 @@ done:
     composer_free(&cp);
     return seg;
 }
+
+/* ------------------------------------------------------------------ Segment::Compose with from and to segments (dmime 77314ccc) */
+static dm_segtrack *seg_track_clsid(dm_segment *s, const dm_guid *clsid, uint32_t group)   /* GetTrack(clsid, group, 0) */
+{
+    if (!s) return NULL;
+    for (int i = 0; i < s->ntracks; i++)
+        if (!memcmp(&s->tracks[i].t->clsid, clsid, sizeof(*clsid)) && (s->tracks[i].group & group)) return &s->tracks[i];
+    return NULL;
+}
+static void seg_replace(dm_segtrack *st, dm_track *t) { dm_track *o = st->t; st->t = t; dm_track_release(o); }
+
+/* Each track is composed with the end of `from` (the measure before mt) joined in front and the start of `to` (a
+ * measure) joined behind, the segment's length grown to match; afterwards the joined tracks are cut back.  The
+ * composed tracks themselves (the signpost track's new chord track) keep the joined span, from part and all.  A
+ * track's DMUS_TRACKCONFIG_TRANS1_* flags first replace it by the from or to segment's track of its class.  A from
+ * or to segment without a track of a class the segment has fails the call there (the tracks so far stay joined
+ * and cut back). */
+int dmc_segment_compose_ex(dm_segment *s, mtime_t mt, dm_segment *from, dm_segment *to)
+{
+    uint8_t bpm = 4, beat = 4;
+    if (from) {
+        struct { mtime_t t; uint8_t bpm, beat; uint16_t grids; } ts;
+        if (dm_segment_getparam(from, PRM_TIMESIG, 0xffffffff, 0, mt, NULL, &ts) >= 0) { bpm = ts.bpm; beat = ts.beat; }
+        else bpm = 4;
+        if (!beat) beat = 4;
+    }
+    mtime_t measure = (mtime_t)((uint32_t)bpm * 0xc00 / beat);
+    mtime_t fromlen = from ? (mt <= measure ? mt : measure) : 0;
+    mtime_t tolen = to ? (to->length <= measure ? to->length : measure) : 0;
+    int n = s->ntracks, hr = DM_OK, joined = 0;
+    dm_track **jt = calloc(n ? n : 1, sizeof(*jt));
+    uint8_t *fl = calloc(n ? n : 1, 1);
+    if (!jt || !fl) { free(jt); free(fl); return DM_E_OUTOFMEMORY; }
+    for (int i = 0; i < n && hr >= 0; i++) {
+        dm_segtrack *st = &s->tracks[i];
+        uint32_t group = st->group, cfg = st->config;
+        dm_guid clsid = st->t->clsid;
+        dm_track *cur = NULL;
+        if (cfg & 0x1c00) {
+            mtime_t off = (cfg & 0x800) ? mt : 0;
+            dm_segment *src = (cfg & 0xc00) ? from : (cfg & 0x1000) ? to : NULL;
+            if (src) {
+                dm_segtrack *x = seg_track_clsid(src, &clsid, group);
+                if (!x) hr = DMUS_E_NOT_FOUND;
+                else cur = dm_track_clone(x->t, off, s->length + off, &hr);
+            }
+        }
+        if (!cur) { cur = st->t; dm_track_addref(cur); }
+        dm_track *fc = NULL, *tc = NULL;
+        if (from && fromlen) {
+            dm_segtrack *x = seg_track_clsid(from, &clsid, group);
+            if (!x) hr = DMUS_E_NOT_FOUND;
+            else { hr = DM_OK; fc = dm_track_clone(x->t, mt - fromlen, mt, &hr); }
+        }
+        if (to && tolen) {
+            dm_segtrack *x = seg_track_clsid(to, &clsid, group);
+            if (!x) hr = DMUS_E_NOT_FOUND;
+            else { hr = DM_OK; tc = dm_track_clone(x->t, 0, tolen, &hr); }
+        }
+        int t8 = cur->kind != TRK_TIMESIG && cur->kind != TRK_MARKER;    /* (IDirectMusicTrack8 tracks) */
+        if (tc) {
+            if (t8 && dm_track_join(cur, tc, s->length, s, group, NULL) >= 0) { fl[i] |= 2; joined = 1; }
+            dm_track_release(tc);
+        }
+        if (hr < 0) { if (fc) dm_track_release(fc); }
+        else if (fc && !t8) { hr = (int)0x80004002; dm_track_release(fc);   /* (E_NOINTERFACE) */ }
+        else if (fc) {
+            if (dm_track_join(fc, cur, fromlen, s, group, NULL) < 0) dm_track_release(fc);
+            else { fl[i] |= 1; joined = 1; dm_track_release(cur); cur = fc; }
+        }
+        seg_replace(st, cur);
+        jt[i] = cur;
+    }
+    mtime_t len = s->length;
+    if (joined) s->length = tolen + len + fromlen;
+    if (hr >= 0) hr = dmc_segment_compose(s);
+    if (joined) {
+        for (int k = 0; k < s->ntracks; k++) {
+            int i;
+            for (i = 0; i < n && jt[i] != s->tracks[k].t; i++) {}
+            if (i == n || !(fl[i] & 3)) continue;
+            int h;
+            dm_track *c = (fl[i] & 1) ? dm_track_clone(s->tracks[k].t, fromlen, fromlen + len, &h)
+                                      : dm_track_clone(s->tracks[k].t, 0, len, &h);
+            if (c) seg_replace(&s->tracks[k], c);
+        }
+        s->length = len;
+    }
+    free(jt); free(fl);
+    return hr;
+}
