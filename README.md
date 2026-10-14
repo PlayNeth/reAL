@@ -9,7 +9,14 @@ HRTF, CMSS-3D, an "HRvb" reverb and all 12 EAX 4/5 effects. That second engine i
 is chasing, so reAL is **its own mixer outputting to WASAPI**, not another OpenAL wrapper.
 See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 
-## Status — milestone 2 (in progress)
+## Status
+
+reAL has two halves in one DLL:
+- **The DirectSound side** is the ALchemy reimplementation. It is done except for CMSS / surround and EAX 5.
+- **reDM** is its own DirectMusic, switched on with `music=true` (see "reDM" below). It is a faithful port of
+  Windows XP's DirectMusic.
+
+### DirectSound
 
 | | |
 |---|---|
@@ -22,15 +29,39 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 | DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ |
 | HRTF 3D (headphones) | ✅ from `reAL_hrtf.bin` (measured with hrtfprobe); stereo panning if absent |
 | Reports hardware-accelerated 3D voices (LOCHARDWARE), like ALchemy | ✅ |
+| Output | ✅ WASAPI |
 | Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
 | EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's own reverb (CHRvbReverb) ported and verified sample-for-sample against ALchemy, incl. its stereo virtualizer |
 | Volume/pan/send smoothing, declicked position jumps | ✅ |
 | EAX 2.0 and 3.0 (listener reverb incl. environment size scaling, EAX 3 reflections/reverb panning, per-buffer direct/room/HF, obstruction, occlusion, exclusion, roll-off, air absorption) | ✅ ALchemy's property handling and per-source model ported; verified bit-for-bit against ALchemy in the emulator |
 | EAX 4.0 (context, 4 FX slots, a reverb engine per slot, per-source sends / occlusion / exclusion per slot, properties of all 12 effects) | ✅ ALchemy's handling and source model ported; bit-for-bit against ALchemy in the emulator. Audio: all 12 effects (reverb, AGC compressor, autowah, chorus, distortion, echo, equalizer, flanger, frequency shifter, pitch shifter, ring modulator, vocal morpher), the 11 non-reverb ones ported from ALchemy's `CPlug*` DSP and matching it to >310 dB SNR |
-| EAX 5.0 | ⏳ reported unsupported (games fall back to EAX 4) |
 | Doppler (DS3D factor, EAX 3 per-buffer factor) | ✅ ALchemy's formula, bit-identical in the emulator |
-| CMSS | ⏳ |
+| DirectSound effects (SetFX): Gargle, Echo, ParamEq, Chorus, Flanger, Distortion, Compressor, Waves reverb, I3DL2 reverb | ✅ bit-exact ports of Microsoft's dsdmo (Windows 11's; I3DL2 from XP SP3); SetFX's validation and placement match Windows 7's dsound |
+| CMSS-3D upmix, speaker configs > 2.0 | ⏳ left for last |
+| EAX 5.0 | ⏳ left for last; reported unsupported until then (games fall back to EAX 4) |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
+
+### reDM (DirectMusic)
+
+Checked against Microsoft's own DLLs running under Wine: COM test programs run against both and their output is
+diffed line by line, and offline captures are compared event by event.
+
+| | |
+|---|---|
+| Loader, segments (sequence, band, tempo, time signature, SysEx, wave, marker tracks), MIDI files | ✅ |
+| Performance: playback, transitions, loops, control and secondary segments, notifications, GetParam/SetParam, tool graphs and application tools | ✅ |
+| DLS synth (dmsynth port, incl. wave voices and streaming), the Waves reverb, SoundFont banks converted to DLS | ✅ |
+| Audiopaths: the standard ones and audiopath configurations (buffers, effects, sends, PChannel maps) | ✅ |
+| Port objects (the synth port, its sink and master clock) | ✅ |
+| MIDI through winmm (midiOut, midiStream, MCI) for games that play General MIDI | ✅ |
+| Styles: style and motif tracks, the pattern chooser, variations, chord mapping, mute and pattern tracks | ✅ |
+| Chord maps and the composer: chord map, chord map and signpost tracks, ComposeSegmentFromTemplate, ComposeSegmentFromShape, ComposeTemplateFromShape, ChangeChordMap, Segment::Compose | ✅ |
+| Composer: ComposeTransition / AutoTransition | 🔧 in progress |
+| Composer: Segment::Compose with from/to segments, recomposing while a segment plays | ⏳ |
+| Scripts (dmscript, AudioVBScript) | ⏳ |
+
+As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REAL_MUSIC_NOFIXES` in the environment
+turns the fixes off for comparison runs. `docs/STATUS.md` has the details and the testing setup.
 
 Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; a
 windowed-sinc resampler instead of linear interpolation (a 9 kHz tone in a 22 kHz sound: −5 dB and a
@@ -47,14 +78,13 @@ comes out reversed in ~20 ms chunks); the AGC compressor gets its look-ahead bac
 morpher's reset no longer zeroes phoneme A's first formant; the chorus / flanger delay lines are long enough
 for 192 kHz; a slot's volume is applied after the effect (it matters for distortion / AGC).
 
-Tested under Wine 9.0 (32-bit prefix → winepulse → PulseAudio). `tests/dstest.c` passes and the
-recorded output matches the expected 3D gains.
+Tested under Wine (9.0 with winepulse → PulseAudio; 9.22 WoW64 for the reDM comparisons).
 
 ## Build
 
 ```sh
 pip install ziglang     # or have i686-w64-mingw32-gcc in PATH
-./build.sh              # -> build/dsound.dll (+ runs the native mixer unit tests)
+./build.sh              # -> build/dsound.dll (DirectSound + reDM), the tracers and the test programs
 ```
 
 ## Install (Wine)
@@ -80,20 +110,26 @@ ALchemy's own `dsound.ini` keys (`buffers`, `duration`, `maxvoicecount`, `disabl
 `logdirectsound*`) are also accepted, from a `dsound.ini` next to the DLL. `REAL_LOG=2` in the
 environment turns on API logging to `reAL.log` next to the game's exe.
 
+## reDM
+
+`music=true` in `reAL.ini` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except
+the GM instrument collection (`gm.dls`), and `gmdls=` can point at another DLS file or a SoundFont instead.
+reAL takes over DirectMusic when the game loads `dsound.dll`, which nearly every game does before its music
+starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reAL-music.dll` and register it with
+`regsvr32` (other programs are handed on to the DirectMusic registered before). `midi=true` adds a GM synth
+MIDI output for games that play General MIDI through winmm. `reAL.ini.example` has the details.
+
 ## Roadmap
 
 1. ~~DirectSound core + WASAPI mixer~~
-2. ~~EAX 1/2/3 via IKsPropertySet: listener reverb props + per-source direct/room/occlusion/obstruction~~
-   done (src/eax.c)
-3. ~~HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), doppler~~ done
-4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ done (src/alrv*.c)
-5. ~~EAX 4: FX slots, sends, all 12 effects~~ done (src/eax4dsp.c); EAX 5 only if a DirectSound game needs it
-6. CMSS-3D upmix, speaker configs > 2.0
-7. Later, once reAL is (close to) feature complete: a DirectMusic drop-in for Wine ("reDM") that works
-   alongside reAL. Start with a DirectMusic tracer to see what games use (loader, segment playback,
-   DLS synth first; styles/chord maps only if needed); the synth could mix straight into reAL.
-   Motivation: Wine's dmime/dmsynth still stub parts of shutdown (Midnight Club II crashes in mc2.exe
-   right after `performance_CloseDown`), and `gm.dls` is missing without Microsoft's files.
+2. ~~EAX 1/2/3 via IKsPropertySet~~ (src/eax.c)
+3. ~~HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), Doppler~~
+4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ (src/alrv*.c)
+5. ~~EAX 4: FX slots, sends, all 12 effects~~ (src/eax4dsp.c)
+6. ~~DirectSound effects (SetFX)~~ (src/fx.c, src/dsfx.c, src/i3dl2.c)
+7. reDM, reAL's own DirectMusic (src/music/): playback, synth, audiopaths, tools and styles done; the composer
+   nearly done; scripts next
+8. Last: CMSS-3D upmix and speaker configs > 2.0, then EAX 5
 
 ## Repo layout
 
@@ -104,8 +140,11 @@ src/        the DLL (C11, Win32 COM by hand)
   spatial.* placeholder DS3D model            (unit tested natively)
   device.c  WASAPI render thread
   buffer.c  DSB8 / 3DBuffer / Notify / KsPropertySet / 3DListener
-tests/      test_mixcore.c (native), dstest.c (runs under Wine)
-tools/      pe.py, rtti.py — RE helpers (pefile + capstone); mkdls.py — tiny test DLS collection
+  fx.c, dsfx.c, i3dl2.c  DirectSound effects (SetFX)
+  music/    reDM: engine (dm*.c), synth (msynth.c), DLS / SoundFont, COM layer (dmcom*.c)
+tests/      unit tests (native) and COM test programs (run under Wine; comcmp.sh diffs them against Microsoft's)
+tools/      RE helpers (pe.py, rtti.py), dmgt (drives Microsoft's DirectMusic offline), sty/ (style, chord map and
+            segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py
 dmtrace/    DirectMusic API tracer (gen.py generates the logging wrappers from the MinGW headers)
 docs/       RE notes, vtables.json (every ALchemy class + vtable)
 ```
@@ -129,7 +168,7 @@ Run with `WINEDLLOVERRIDES=dsound=n,b`. Output: `dstrace.log` next to the game e
 
 ## dmtrace — DirectMusic API tracer
 
-First step towards reAL-Music (a DirectMusic replacement): logs what a game asks DirectMusic to do.
+Logs what a game asks DirectMusic to do (it started reDM).
 DirectMusic is a set of COM classes, so dmtrace is installed as their server for the current user instead of
 being dropped into the game folder:
 
