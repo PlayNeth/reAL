@@ -114,6 +114,9 @@ struct dm_chord_key_;
 dm_segment *dmc_compose_transition(struct dms_style *fs, dm_band *band, const double *tempo_from, const dmc_cmdparam *cmdp,
                                    const dm_chord_key *fk, const dm_chord_key *tk, dm_segment *to, unsigned cmd,
                                    uint32_t flags, dmc_chordmap *cm, int *side, int *hr);
+/* recomposing on DMUS_TRACKF_RECOMPOSE (77287974 with flags 0): the segment's chord track composed again; rnd is the
+ * playing thread's rand() state (app: the application thread's) */
+int dmc_recompose(dm_segment *seg, uint32_t *rnd, int app);
 /* ChangeChordMap (77284b30): the segment's chord track rewritten in the chord map's palette chords and key */
 int dmc_change_chordmap(dm_segment *seg, int trackscale, dmc_chordmap *cm);
 /* fixes of dmcompos's (and its use of dmstyle's) flaws: on unless REDM_NOFIXES */

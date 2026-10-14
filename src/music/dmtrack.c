@@ -809,7 +809,8 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
     case TRK_STYLE: stytrack_initplay(pf, ss, e, flags); break;
     case TRK_MOTIF: motiftrack_initplay(pf, ss, e, flags); break;
     case TRK_PATTERN: patterntrack_initplay(pf, ss, e, flags); break;
-    case TRK_SIGNPOST: dm_style_srand(); break;      /* 7728aac2: a composer for recomposing (its constructor seeds rand()) */
+    case TRK_SIGNPOST: dm_perf_srand(pf); break;     /* 7728aac2: a composer for recomposing (its constructor seeds the
+                                                     * rand() of the thread playing) */
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));

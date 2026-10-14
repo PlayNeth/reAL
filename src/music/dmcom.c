@@ -3395,11 +3395,11 @@ static IDirectMusicLoader8Vtbl ld_vtbl = { ld_qi, ld_addref, ld_release, ld_geto
 
 /* ------------------------------------------------------------------ class creation */
 /* test hooks: REDM_TIME fixes time() for the rand() seeds (as tests do to Microsoft's DLLs); REDM_RANDLOG
- * logs the application thread's rand() calls */
+ * logs the rand() calls (R: the application thread's, T: the transport thread's) */
 static long g_fixtime;
 static long fixed_time(void) { return g_fixtime; }
 static FILE *g_randlog;
-static void randlog(int app, int v, void *caller) { if (g_randlog && app) { fprintf(g_randlog, "R %p %d\n", caller, v); fflush(g_randlog); } }
+static void randlog(int app, int v, void *caller) { if (g_randlog) { fprintf(g_randlog, "%c %p %d\n", app ? 'R' : 'T', caller, v); fflush(g_randlog); } }
 static void test_hooks(void)
 {
     static int done;

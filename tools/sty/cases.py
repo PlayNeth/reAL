@@ -459,6 +459,8 @@ def case_compose2(out, seed=16):
     files['c4.sgt'] = comp_template('c4', '8f6d1a10-1000-4000-8000-000000000049', R2, 12, 'compsty', [(0, 'cmapa')], spconfig=0x238, timesig=False)
     files['c5.sgt'] = comp_template('c5', '8f6d1a10-1000-4000-8000-00000000004a', R2, 10, 'compsty', [(0, 'cmapb'), (4, 'cmapc')], spconfig=0x238, timesig=False, cmconfig=0x838)
     files['c6.sgt'] = comp_template('c6', '8f6d1a10-1000-4000-8000-00000000004b', R2, 9, 'compsty3', [(0, 'cmapc')], ts=(3, 4, 4), spconfig=0x238, timesig=False, cmconfig=0x1038)
+    files['c7.sgt'] = comp_template('c7', '8f6d1a10-1000-4000-8000-00000000004d', R2, 4, 'compsty', [(0, 'cmapa')], spconfig=0x2b8)
+    files['c8.sgt'] = comp_template('c8', '8f6d1a10-1000-4000-8000-00000000004e', R2, 2, 'compsty', [(0, 'cmapb')], spconfig=0x338)
     files['t6.sgt'] = comp_template('t6', '8f6d1a10-1000-4000-8000-00000000004c', R2, 14, 'compsty', [(0, 'cmapb')], timesig=False)
     # ChangeChordMap: another key and scale, the old (not DMUS_CHORDMAPF_VERSION8) transposition, a palette with holes
     files['cmapd.cdm'] = cmap_dag('cmapd', '8f6d1a10-0006-4000-8000-00000000000d', 4, scale=0x00ad5ad5, flags=0)

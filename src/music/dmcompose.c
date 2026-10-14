@@ -10,13 +10,16 @@
 #include <stdio.h>
 #include <stddef.h>
 
-/* msvcrt's rand() on the application thread (the composer's constructor seeded it with time()) */
+/* msvcrt's rand() on the application thread (the composer's constructor seeded it with time()); recomposing from
+ * a track's Play uses the thread that plays (g_crnd) */
+static uint32_t *g_crnd;
+static int g_capp = 1;
 static int cm_rand(void)
 {
-    uint32_t *r = dm_app_rand_state();
+    uint32_t *r = g_crnd ? g_crnd : dm_app_rand_state();
     *r = *r * 214013u + 2531011u;
     int v = (int)((*r >> 16) & 0x7fff);
-    if (dm_rand_hook) dm_rand_hook(1, v, __builtin_return_address(0));
+    if (dm_rand_hook) dm_rand_hook(g_crnd ? g_capp : 1, v, __builtin_return_address(0));
     return v;
 }
 
@@ -1915,5 +1918,65 @@ int dmc_segment_compose_ex(dm_segment *s, mtime_t mt, dm_segment *from, dm_segme
         s->length = len;
     }
     free(jt); free(fl);
+    return hr;
+}
+
+/* ------------------------------------------------------------------ recomposing (77287974 with flags 0, from the
+ * signpost track's Play 7728aeaf on DMUS_TRACKF_RECOMPOSE) */
+/* The segment's chords composed again (activity mode off) from its style, chord map track, signpost track and
+ * command track (the signpost track's group, else all), the chord track of that group loaded with them (one made
+ * and inserted when there is none).  S_FALSE when no chord comes out; E_INVALIDARG without a style or chord map. */
+int dmc_recompose(dm_segment *seg, uint32_t *rnd, int app)
+{
+    composer cp = { 0 };
+    dms_style *style = NULL;
+    if (dm_segment_getparam(seg, PRM_STYLE, 0xffffffff, 0, 0, NULL, &style) < 0) return DM_E_INVALIDARG;
+    dmc_chordmap *m = NULL;
+    dm_segtrack *mt0 = seg_track(seg, TRK_CHORDMAP, 0xffffffff, 0);
+    if (!mt0 || dmc_cmtrack_getparam(mt0->t->data, 0, NULL, &m) < 0) { dms_style_release(style); return DM_E_INVALIDARG; }
+    dmc_chordmap_release(m);
+    dm_segtrack *spt = seg_track(seg, TRK_SIGNPOST, 0xffffffff, 0);
+    uint32_t group = spt ? spt->group : 0xffffffff;
+    dms_style_release(style);
+    style = NULL;
+    if (dm_segment_getparam(seg, PRM_STYLE, group, 0, 0, NULL, &style) < 0) return DM_E_INVALIDARG;
+    dm_segtrack *cmt = seg_track(seg, TRK_CHORDMAP, group, 0);
+    if (!cmt) { dms_style_release(style); return DM_E_INVALIDARG; }
+    dm_segtrack *cmdt = seg_track(seg, TRK_COMMAND, group, 0);
+    uint8_t key = 0;
+    uint32_t scale = 0;
+    int hr;
+    g_crnd = rnd; g_capp = app;
+    cnode *chords = compose_chords(&cp, style->ts, NULL, cmt->t->data, spt ? spt->t->data : NULL,
+                                   cmdt ? cmdt->t->data : NULL, seg->length, 0, 0, &key, &scale, &hr);
+    g_crnd = NULL; g_capp = 1;
+    if (hr >= 0) {
+        if (chords) {               /* 772832d6 */
+            dm_segtrack *ct = seg_track(seg, TRK_CHORD, group, 0);
+            dm_track *t = ct ? ct->t : NULL;
+            if (!t) {
+                dms_chordtrack *E = calloc(1, sizeof(*E));
+                if (E && (t = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, E))) dm_segment_insert_track(seg, t, 0, group, 0x38, 0);
+                else free(E);
+            }
+            size_t len;
+            uint8_t ts[2] = { style->ts[0], style->ts[1] };
+            uint8_t *b = t ? chords_cord(chords, key, scale, ts, &len) : NULL;
+            int32_t h = DM_E_OUTOFMEMORY;
+            dms_chordtrack *N = b ? dms_chordtrack_load(b, len, &h) : NULL;
+            free(b);
+            hr = h;
+            if (N) {
+                dms_chordtrack *T = t->data;
+                dms_chord *old = T->chords;
+                T->chords = N->chords; T->root = N->root; T->scale = N->scale;
+                N->chords = old;
+                dms_chordtrack_free(N);
+            }
+        } else hr = 1;                  /* (S_FALSE) */
+    }
+    clist_free(chords);
+    composer_free(&cp);
+    dms_style_release(style);
     return hr;
 }

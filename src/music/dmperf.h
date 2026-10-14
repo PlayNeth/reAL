@@ -9,6 +9,7 @@
 #include "dmi.h"
 
 typedef struct dm_perf dm_perf;
+void dm_perf_srand(dm_perf *pf);          /* srand(time(NULL)) on the thread playing now */
 typedef struct dm_segstate dm_segstate;
 typedef struct dm_audiopath dm_audiopath;
 

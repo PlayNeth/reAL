@@ -32,6 +32,21 @@ static int __cdecl rand_log(void)
     }
     return v;
 }
+static void (__cdecl *g_srand)(unsigned);
+static void __cdecl srand_log(unsigned seed)
+{
+    g_srand(seed);
+    if (g_randlog) {
+        fprintf(g_randlog, "S %p %u %lu", __builtin_return_address(0), seed, GetCurrentThreadId());
+        if (getenv("COMP_STACK")) {
+            void *fr[16];
+            USHORT n = RtlCaptureStackBackTrace(1, 16, fr, NULL);
+            for (USHORT k = 0; k < n; k++) fprintf(g_randlog, " %p", fr[k]);
+        }
+        fprintf(g_randlog, "\n");
+        fflush(g_randlog);
+    }
+}
 static void patch_import_name(HMODULE m, const char *dll, const char *name, void *fn)
 {
     BYTE *base = (BYTE *)m;
@@ -633,6 +648,66 @@ static int join(IDirectMusicLoader8 *ld)
     return 0;
 }
 
+/* recomposing while playing: PLAY_COMPOSE (c7) and LOOP_COMPOSE (c8, looped) signpost tracks */
+static int recomp(IDirectMusicLoader8 *ld)
+{
+    if (g_randlog) fprintf(g_randlog, "app thread %lu\n", GetCurrentThreadId());
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    HRESULT hr = IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL);
+    printf("init %08lx\n", hr);
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    IDirectMusicPerformance8_SetNotificationHandle(pf, ev, 0);
+    hr = IDirectMusicPerformance8_AddNotificationType(pf, &GUID_NOTIFICATION_RECOMPOSE);
+    printf("add recompose notification %08lx\n", hr);
+    static const WCHAR *const names[] = { L"c7.sgt", L"c8.sgt", L"c1.sgt" };
+    for (int a = 0; a < 3; a++) {
+        IDirectMusicSegment8 *sg = NULL;
+        hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, names[a], (void **)&sg);
+        printf("load %d %08lx\n", a, hr);
+        if (!sg) continue;
+        if (a == 1) IDirectMusicSegment8_SetRepeats(sg, 2);
+        dump(sg, "before");
+        IDirectMusicSegmentState *ss = NULL;
+        /* started a second ahead so the start is always played on the transport thread (its rand) */
+        REFERENCE_TIME now = 0;
+        IDirectMusicPerformance8_GetTime(pf, &now, NULL);
+        hr = IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)sg, NULL, NULL, DMUS_SEGF_REFTIME, now + 10000000, &ss, NULL, NULL);
+        printf("play %08lx\n", hr);
+        /* notifications are collected as they arrive: the performance drops delivered ones after two seconds */
+        /* played up to a music time (not a wall time: the clocks may run at the audio device's pace), clear of the
+         * measures where patterns are chosen even with the second played ahead; notifications are collected as
+         * they arrive (the performance drops delivered ones after two seconds) */
+        MUSIC_TIME st = 0, mt = 0, until = a == 1 ? 13000 : a == 0 ? 3800 : 1500;
+        if (ss) IDirectMusicSegmentState_GetStartTime(ss, &st);
+        DMUS_NOTIFICATION_PMSG *n;
+        int count = 0;
+        DWORD deadline = GetTickCount() + 30000;
+        for (;;) {
+            while (IDirectMusicPerformance8_GetNotificationPMsg(pf, &n) == S_OK) {
+                if (getenv("COMP_DEBUG")) fprintf(stderr, "notification %08lx %lu at %ld\n", n->guidNotificationType.Data1, n->dwNotificationOption, n->mtTime);
+                if (IsEqualGUID(&n->guidNotificationType, &GUID_NOTIFICATION_RECOMPOSE)) {
+                    printf("  recompose notification: option %lu group %lx user %d\n", n->dwNotificationOption, n->dwGroupID, n->punkUser != NULL);
+                    count++;
+                }
+                IDirectMusicPerformance8_FreePMsg(pf, (DMUS_PMSG *)n);
+            }
+            IDirectMusicPerformance8_GetTime(pf, NULL, &mt);
+            if (mt - st >= until || (LONG)(deadline - GetTickCount()) <= 0) break;
+            WaitForSingleObject(ev, 20);
+        }
+        IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);
+        Sleep(200);
+        printf("  %d recompose notifications\n", count);
+        dump(sg, "after");
+        if (ss) IDirectMusicSegmentState_Release(ss);
+        IDirectMusicSegment8_Release(sg);
+    }
+    IDirectMusicPerformance8_CloseDown(pf);
+    IDirectMusicPerformance8_Release(pf);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -640,11 +715,13 @@ int main(int argc, char **argv)
     static const char *const dlls[] = { "dmcompos.dll", "dmstyle.dll", "dmime.dll" };
     if (getenv("COMP_RANDLOG")) g_randlog = fopen(getenv("COMP_RANDLOG"), "w");
     g_rand = (void *)GetProcAddress(LoadLibraryA("msvcrt.dll"), "rand");
+    g_srand = (void *)GetProcAddress(LoadLibraryA("msvcrt.dll"), "srand");
     for (int k = 0; k < 3; k++) {
         HMODULE m = LoadLibraryA(dlls[k]);
         if (!m) continue;
         patch_import_name(m, "msvcrt.dll", "time", (void *)fixed_time);
         if (g_randlog) patch_import_name(m, "msvcrt.dll", "rand", (void *)rand_log);
+        if (g_randlog) patch_import_name(m, "msvcrt.dll", "srand", (void *)srand_log);
     }
     CoInitialize(NULL);
     IDirectMusicLoader8 *ld;
@@ -656,6 +733,7 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "change")) return change(ld);
     if (argc > 1 && !strcmp(argv[1], "trans")) return trans(ld);
     if (argc > 1 && !strcmp(argv[1], "join")) return join(ld);
+    if (argc > 1 && !strcmp(argv[1], "recomp")) return recomp(ld);
     if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
         IDirectMusicComposer *cp = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);

@@ -2056,8 +2056,9 @@ int dm_audiopath_set_volume(dm_audiopath *ap, int32_t vol, uint32_t dur)
 dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx)
 {
     dm_perf *pf = calloc(1, sizeof(*pf));
-    if (pf) pf->rnd = pf->rndapp = 1;
     if (!pf) return NULL;
+    pf->rndapp = 1;
+    dm_perf_srand(pf);                  /* the transport thread's srand(time(NULL)) (7730eb7f) */
     pf->ops = *ops; pf->ctx = ctx;
     pf->bumper = 500000; pf->bumper_ms = 50; pf->prepare_ms = 1000; pf->period = 10;
     pf->master = 1.0f; pf->dxver = 8; pf->stopped = 1;
@@ -2095,6 +2096,8 @@ uint32_t *dm_app_rand_state(void) { return &g_apprnd; }
 void dm_perf_set_app_seed(dm_perf *pf, uint32_t seed) { (void)pf; g_apprnd = seed; }
 void dm_set_time_source(long (*fn)(void)) { g_timefn = fn; }
 void dm_style_srand(void) { g_apprnd = g_timefn ? (uint32_t)g_timefn() : (uint32_t)time(NULL); }
+/* srand(time(NULL)) on the thread the performance is running on now (the application's or the transport's) */
+void dm_perf_srand(dm_perf *pf) { *(pf->apprand ? &g_apprnd : &pf->rnd) = g_timefn ? (uint32_t)g_timefn() : (uint32_t)time(NULL); }
 void (*dm_rand_hook)(int app, int value, void *caller);
 
 

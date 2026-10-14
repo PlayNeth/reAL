@@ -183,7 +183,12 @@ static int sty_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
     case TRK_MOTIF: return motiftrack_play(pf, ss, e, start, end, off, flags);
     case TRK_PATTERN: return patterntrack_play(pf, ss, e, start, end, off, flags);
     case TRK_CHORDMAP: return DM_OK;      /* 7728bd46 */
-    case TRK_SIGNPOST: return DM_OK;      /* 7728aeaf: TODO recomposing (DMUS_TRACKF_RECOMPOSE) */
+    case TRK_SIGNPOST:                  /* 7728aeaf: recomposing at the start or a loop (PLAY_COMPOSE / LOOP_COMPOSE) */
+        if ((flags & (TF_START | TF_LOOP)) && (flags & 0x200) && !(flags & TF_PLAY_OFF) && ss->seg) {
+            dmc_recompose(ss->seg, pf->apprand ? dm_app_rand_state() : &pf->rnd, pf->apprand);
+            if (e->t->notify) sty_notify(pf, ss, e, &GUID_NOTIFICATION_RECOMPOSE_, 0, start + off, flags);   /* 7728ab6e */
+        }
+        return DM_OK;
     }
     return DM_OK;
 }
