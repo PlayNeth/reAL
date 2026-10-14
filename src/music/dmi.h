@@ -290,9 +290,15 @@ typedef struct dm_wavetrack {
     struct dm_mutenode *mutes;              /* +0x4c the mute track's answers, by PChannel (7731e1ff) */
 } dm_wavetrack;
 
-enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE,
+enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE, TRK_MARKER,
        TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF, TRK_PATTERN,   /* TRK_CHORD on are dmstyle's (dmsty.h) */
        TRK_CHORDMAP, TRK_SIGNPOST };      /* dmcompos's (dmcomp.h) */
+/* the marker track (dmime CMarkerTrack 77321d13): valid start points ('vals') and play markers ('play'), sorted */
+typedef struct dm_marker { struct dm_marker *next; mtime_t t; } dm_marker;
+typedef struct { dm_marker *starts, *plays; } dm_markertrack;
+/* the 'MARK' list's chunks (the data after the list type) */
+dm_markertrack *dm_markertrack_load(const uint8_t *p, size_t n, int32_t *hr);
+void dm_markertrack_free(dm_markertrack *T);
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */
@@ -368,6 +374,8 @@ void dm_band_addref(dm_band *b);
 void dm_band_release(dm_band *b);
 /* a band into a band track (dmband 7720271c: before the first at its time or later; the caller's reference) */
 void dm_bandtrack_add(dm_bandtrack *t, dm_band *b);
+/* a copy of a band (one reference; the instruments in reverse order, as dmband copies them) */
+dm_band *dm_band_copy(const dm_band *b);
 /* dmband 7720322d IDirectMusicBand::CreateSegment: a segment with a band track holding the band (auto-download off) */
 dm_segment *dm_band_segment(dm_band *b);
 /* a Standard MIDI File (or RMID) as dmime imports it (dmsmf.c) */

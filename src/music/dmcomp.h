@@ -3,6 +3,7 @@
 #ifndef DMCOMP_H
 #define DMCOMP_H
 #include "dmi.h"
+#include "dmtheory.h"
 
 /* DMUS_IO_CHORDMAP_SUBCHORD, shared by the chords that name it (0x18) */
 typedef struct dmc_sub {
@@ -104,6 +105,13 @@ dm_segment *dmc_template_from_shape(unsigned measures, unsigned shape, int intro
 dm_segment *dmc_segment_from_shape(struct dms_style *style, dmc_chordmap *cm, unsigned measures, unsigned shape,
                                    int activity, int intro, int end, int introlen, int fill, int brk, int endlen, int *hr);
 
+/* ComposeTransition (772853bb): DMUS_COMMAND_PARAM_2 of the from segment; *side 1/2 when the transition takes the from
+ * or to segment's graph and audiopath configuration */
+typedef struct { mtime_t mt; uint8_t cmd, groove, range, repeat; } dmc_cmdparam;
+struct dm_chord_key_;
+dm_segment *dmc_compose_transition(struct dms_style *fs, dm_band *band, const double *tempo_from, const dmc_cmdparam *cmdp,
+                                   const dm_chord_key *fk, const dm_chord_key *tk, dm_segment *to, unsigned cmd,
+                                   uint32_t flags, dmc_chordmap *cm, int *side, int *hr);
 /* ChangeChordMap (77284b30): the segment's chord track rewritten in the chord map's palette chords and key */
 int dmc_change_chordmap(dm_segment *seg, int trackscale, dmc_chordmap *cm);
 /* fixes of dmcompos's (and its use of dmstyle's) flaws: on unless REDM_NOFIXES */

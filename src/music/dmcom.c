@@ -448,6 +448,7 @@ DMG(G_IDirectMusicStyle, 0xd2ac28a1, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x0
 DMG(G_SeedVariations, 0x65b76fa5, 0xff37, 0x11d2, 0x81, 0x4e, 0x00, 0xc0, 0x4f, 0xa3, 0x6e, 0x58);
 DMG(G_StyleTimeSig, 0x76612507, 0x4f37, 0x4b35, 0x80, 0x92, 0x50, 0x48, 0x4e, 0xd4, 0xba, 0x92);
 DMG(G_ValidStartTime, 0x7f6b1760, 0x1fdb, 0x11d3, 0x82, 0x26, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00);
+DMG(G_PlayMarker, 0xd8761a41, 0x801a, 0x11d3, 0x9b, 0xd1, 0xda, 0xf7, 0xe1, 0xc3, 0xd8, 0x34);
 DMG(G_IDirectMusicChordMap_, 0xd2ac28ad, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_PerfMasterGrooveLevel, 0xd2ac28b2, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_PrivateTempo, 0xe8dbd832, 0xbcf0, 0x4c8c, 0xa0, 0x75, 0xa3, 0xf1, 0x5e, 0x67, 0xfd, 0x63);
@@ -460,7 +461,7 @@ static const struct { const GUID *g; int prm; } s_params[] = {
     { &G_BandParam, PRM_BANDPARAM }, { &G_StandardMIDIFile, PRM_SMF }, { &G_ConnectToDLSCollection, PRM_CONNECTDLS },
     { &G_MuteParam, PRM_MUTE }, { &G_PrivateTempo, PRM_PRIVTEMPO }, { &G_ChordParam, PRM_CHORD }, { &G_RhythmParam, PRM_RHYTHM },
     { &G_CommandParam, PRM_COMMAND }, { &G_CommandParam2, PRM_COMMAND2 }, { &G_CommandParamNext, PRM_COMMANDNEXT },
-    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &G_IDirectMusicChordMap_, PRM_CHORDMAP }, { &GUID_NULL, PRM_ANY },
+    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &G_PlayMarker, PRM_PLAYMARKER }, { &G_IDirectMusicChordMap_, PRM_CHORDMAP }, { &GUID_NULL, PRM_ANY },
 };
 static int prm_of(REFGUID g)
 {
@@ -2592,7 +2593,15 @@ static HRESULT WINAPI pf_adjust(IDirectMusicPerformance8 *i, REFERENCE_TIME t)
     return hr;
 }
 static HRESULT WINAPI pf_closedown_m(IDirectMusicPerformance8 *i) { LOG_CALL("music: Performance::CloseDown"); pf_closedown(prf(i)); return S_OK; }
-static HRESULT WINAPI pf_resolved(IDirectMusicPerformance8 *i, REFERENCE_TIME t, REFERENCE_TIME *o, DWORD f) { if (!o) return E_POINTER; *o = t; return S_OK; }
+/* 7730a4e3 */
+static HRESULT WINAPI pf_resolved(IDirectMusicPerformance8 *i, REFERENCE_TIME t, REFERENCE_TIME *o, DWORD f)
+{
+    if (!o) return E_POINTER;
+    rm_perf *p = prf(i);
+    if (!p->host) { *o = t; return S_OK; }
+    PERF_LOCKED(p, *o = dm_perf_resolved_time(dm_host_perf(p->host), t, f));
+    return S_OK;
+}
 /* MIDIToMusic 773082a6 / MusicToMIDI 773085af (dmtheory.c) */
 static HRESULT WINAPI pf_midi2music(IDirectMusicPerformance8 *i, BYTE v, DMUS_CHORD_KEY *c, BYTE m, BYTE l, WORD *o)
 {
@@ -3050,6 +3059,13 @@ static void prm_out(int prm, int hr, void *p)
 {
     if (prm == PRM_STYLE && hr >= 0 && p) *(void **)p = style_iface(*(dms_style **)p);
     if (prm == PRM_CHORDMAP && hr >= 0 && p) *(void **)p = chordmap_iface(*(dmc_chordmap **)p);
+    if (prm == PRM_BANDPARAM && hr >= 0 && p) {         /* the band copy as a band object (its own reference) */
+        DMUS_BAND_PARAM *bp = p;
+        dm_band *b = (dm_band *)bp->pBand;
+        rm_band *o = b ? new_band(b) : NULL;
+        if (b) dm_band_release(b);
+        bp->pBand = o ? &o->IDirectMusicBand_iface : NULL;
+    }
 }
 
 /* a wave track item's reference (773248af: the loader's GetObject of a DirectSoundWave by guid, file or name) */

@@ -45,6 +45,7 @@ static const dm_guid CLSID_MotifTrack   = { 0xd2ac288e, 0xb39b, 0x11d1, { 0x87, 
 static const dm_guid CLSID_StyleTrack   = { 0xd2ac288d, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_MuteTrack    = { 0xd2ac2898, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_ChordMapTrack = { 0xd2ac2896, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_MarkerTrack = { 0x55a8fd00, 0x4288, 0x11d3, { 0x9b, 0xd1, 0x8a, 0x0d, 0x61, 0xc8, 0x88, 0x35 } };
 static const dm_guid CLSID_SignPostTrack = { 0xf17e8672, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_WaveTrack    = { 0xeed36461, 0x9ea5, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
 
@@ -598,6 +599,10 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
                 int32_t hr;
                 t.data = dmc_sptrack_load(c.p, (size_t)(c.e - c.p), &hr);
                 t.kind = t.data ? TRK_SIGNPOST : TRK_OTHER;
+            } else if (guid_eq(&t.clsid, &CLSID_MarkerTrack) && id == FCC('L','I','S','T') && type == FCC('M','A','R','K')) {
+                int32_t hr;
+                t.data = dm_markertrack_load(c.p, (size_t)(c.e - c.p), &hr);
+                t.kind = t.data ? TRK_MARKER : TRK_OTHER;
             } else if (guid_eq(&t.clsid, &CLSID_MuteTrack) && id == FCC('m','u','t','e')) {
                 int32_t hr;
                 t.data = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr);
@@ -760,6 +765,7 @@ static void free_track(dm_track *t)
     case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN: dms_styletrack_free(t->data); break;
     case TRK_CHORDMAP: dmc_cmtrack_free(t->data); break;
     case TRK_SIGNPOST: dmc_sptrack_free(t->data); break;
+    case TRK_MARKER: dm_markertrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
@@ -924,7 +930,9 @@ static void inst_copy(dm_inst *d, const dm_inst *s)
     d->pch = s->pch; d->flags = s->flags; memcpy(d->ranges, s->ranges, sizeof(d->ranges)); d->coll = s->coll;
     if (g_clonefix) { d->priority = s->priority; d->pbrange = s->pbrange; d->notinfile = s->notinfile; d->smf = s->smf; d->sendpatch = s->sendpatch; }
 }
-static dm_band *band_copy(const dm_band *b)        /* 77202d94's copy of a band: instruments re-added, so reversed */
+dm_band *dm_band_copy(const dm_band *b);
+static dm_band *band_copy(const dm_band *b) { return dm_band_copy(b); }
+dm_band *dm_band_copy(const dm_band *b)        /* 77202d94's copy of a band: instruments re-added, so reversed */
 {
     dm_band *n = calloc(1, sizeof(*n));
     if (!n) return NULL;
@@ -938,6 +946,88 @@ static dm_band *band_copy(const dm_band *b)        /* 77202d94's copy of a band:
     }
     return n;
 }
+/* ------------------------------------------------------------------ the marker track (dmime CMarkerTrack) */
+static void markers_free(dm_marker *m) { while (m) { dm_marker *n = m->next; free(m); m = n; } }
+void dm_markertrack_free(dm_markertrack *T)
+{
+    if (!T) return;
+    markers_free(T->starts); markers_free(T->plays);
+    free(T);
+}
+static void markers_append(dm_marker **l, dm_marker *m) { while (*l) l = &(*l)->next; *l = m; }
+/* 77321a28 / 77321958: the record size, then a time a record (a short record fills the time's first bytes) */
+static int32_t markers_load(dm_marker **l, rd c)
+{
+    if (c.e - c.p < 4) return (int32_t)0x88781133;
+    uint32_t rs = u32(c.p);
+    c.p += 4;
+    int32_t left = (int32_t)(c.e - c.p), hr = DM_OK;
+    if (!rs) return (int32_t)0x88781133;
+    uint32_t take = rs < 5 ? rs : 4, skip = rs < 5 ? 0 : rs - 4;
+    while (left > 0) {
+        dm_marker *m = calloc(1, sizeof(*m));
+        if (!m) continue;
+        if ((uint32_t)(c.e - c.p) < take) { free(m); hr = (int32_t)0x88781133; break; }
+        uint8_t b[4] = { 0 };
+        memcpy(b, c.p, take);
+        c.p += take;
+        m->t = (int32_t)u32(b);
+        markers_append(l, m);           /* (prepended, then the list reversed: file order) */
+        left -= (int32_t)take;
+        if (skip) {
+            if ((uint32_t)(c.e - c.p) < skip) { hr = (int32_t)0x88781115; break; }
+            c.p += skip;
+            left -= (int32_t)skip;
+        }
+    }
+    return hr;
+}
+/* 77321d13: the 'vals' and 'play' chunks */
+dm_markertrack *dm_markertrack_load(const uint8_t *p, size_t n, int32_t *hr)
+{
+    dm_markertrack *T = calloc(1, sizeof(*T));
+    *hr = DM_E_OUTOFMEMORY;
+    if (!T) return NULL;
+    *hr = DM_OK;
+    rd r = { p, p + n }, c;
+    uint32_t id;
+    while (next_chunk(&r, &id, &c, NULL)) {
+        if (id == FCC('v','a','l','s')) *hr = markers_load(&T->starts, c);
+        else if (id == FCC('p','l','a','y')) *hr = markers_load(&T->plays, c);
+    }
+    return T;
+}
+/* 77321e28: the markers in [start, end) moved to 0, in order; the last one before `start` (none at it) put first, at 0 */
+static dm_marker *markers_clone(const dm_marker *m, mtime_t start, mtime_t end)
+{
+    dm_marker *out = NULL;
+    const dm_marker *before = NULL;
+    for (; m; m = m->next) {
+        const dm_marker *keep = m;
+        if (start <= m->t) {
+            if (end <= m->t) break;
+            if (m->t == start) before = NULL;
+            dm_marker *x = calloc(1, sizeof(*x));
+            if (x) { x->t = m->t - start; markers_append(&out, x); }
+            keep = before;
+        }
+        before = keep;
+    }
+    if (before) {
+        dm_marker *x = calloc(1, sizeof(*x));
+        if (x) { x->next = out; out = x; }
+    }
+    return out;
+}
+static void *markertrack_clone(const dm_markertrack *T, mtime_t start, mtime_t end)
+{
+    dm_markertrack *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    C->starts = markers_clone(T->starts, start, end);
+    C->plays = markers_clone(T->plays, start, end);
+    return C;
+}
+
 /* dmband 77202d94: from start > 0, one band at 0 with each PChannel's latest instrument before start (made only when
  * a band follows at or after start: without one the original drops them; kept with the clone fix), then the bands
  * in [start, end) moved by start */
@@ -1004,6 +1094,7 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_PATTERN: d = dms_styletrack_clone(t->data, start, end); break;      /* 7740d4bf: no srand */
     case TRK_CHORDMAP: d = dmc_cmtrack_clone(t->data, start, end); break;      /* 7728c49d */
     case TRK_SIGNPOST: d = dmc_sptrack_clone(t->data, start, end); break;      /* 7728b155 */
+    case TRK_MARKER: d = markertrack_clone(t->data, start, end); break;      /* 77321e28 */
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }

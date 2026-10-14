@@ -120,6 +120,7 @@ enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND,
        PRM_VALIDSTART,
        PRM_VARIATIONS,      /* GUID_Variations */      /* GUID_Valid_Start_Time (DMUS_VALID_START_PARAM) */         /* dmstyle's private 76612507-4f37-4b35-8092-50484ed4ba92 (the composer's signature) */
        PRM_CHORDMAP,        /* GUID_IDirectMusicChordMap: a dmc_chordmap * (the getter takes a reference) */
+       PRM_PLAYMARKER,      /* GUID_Play_Marker (DMUS_PLAY_MARKER_PARAM) */
        PRM_ANY, PRM_OTHER };
 /* PRM_BANDPARAM (DMUS_BAND_PARAM); PRM_IBAND takes the dm_band itself */
 typedef struct { mtime_t physical; dm_band *band; } dm_bandparam;
@@ -138,6 +139,7 @@ int dm_track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, voi
 int dm_track_setparam(dm_track *t, int prm, mtime_t mt, void *data);
 int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
 int dm_segment_setparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
+rtime_t dm_perf_resolved_time(dm_perf *pf, rtime_t rt, uint32_t flags);   /* GetResolvedTime */
 int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
 int dm_perf_setparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
 int dm_segment_download(dm_perf *pf, dm_segment *seg);

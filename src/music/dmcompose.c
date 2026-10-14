@@ -755,6 +755,7 @@ static const dm_guid CLSID_ChordMapTrack_ = { 0xd2ac2896, 0xb39b, 0x11d1, { 0x87
 static const dm_guid CLSID_TempoTrack_   = { 0xd2ac2885, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_BandTrack_    = { 0xd2ac2894, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_CommandTrack_ = { 0xd2ac288c, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_MarkerTrack_ = { 0x55a8fd00, 0x4288, 0x11d3, { 0x9b, 0xd1, 0x8a, 0x0d, 0x61, 0xc8, 0x88, 0x35 } };
 static const dm_guid CLSID_SignPostTrack_ = { 0xf17e8672, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 
 dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordmap *cm, int activity, int *hr)
@@ -1350,6 +1351,131 @@ dm_segment *dmc_template_from_shape(unsigned measures, unsigned shape, int intro
     return s;
 }
 
+/* 7740b2ae (dmstyle's private interface): the n-th time all the style's patterns for the command and groove range
+ * (lo/hi the level less/plus half the range) can start at, by their start markers; 1 (S_FALSE) when there is none */
+static int style_valid_start(const dms_style *st, unsigned n, const cmdsp *c, mtime_t *out)
+{
+    int lo = (int)c->groove - (c->range >> 1), hi = (int)(c->range >> 1) + c->groove;
+    if (lo < 0) lo = 0;
+    if (hi > 100) hi = 100;
+    const dms_mtime *ptr[64];
+    int k = 0;
+    for (int i = st->npatterns - 1; i >= 0 && k < 64; i--) {     /* (gathered in front, so last first) */
+        const dms_pattern *p = st->patterns[i];
+        if (!(p->groovelo <= (uint8_t)hi && (uint8_t)lo <= p->groovehi)) continue;
+        uint8_t cmd = c->command, eh = (uint8_t)(p->embellish >> 8);
+        int ok = (cmd == 1 && p->embellish == 1) || (cmd == 2 && p->embellish == 4) || (cmd == 3 && p->embellish == 2) ||
+                 (cmd == 4 && p->embellish == 8) || (cmd == 0 && p->embellish == 0) || (eh && eh == cmd);
+        if (ok && p->markers) ptr[k++] = p->markers;
+    }
+    if (!k) return 1;
+    mtime_t cur = 0;
+    for (unsigned j = 0; ; j++) {
+        if (n < j) break;
+        mtime_t mn = ptr[0]->t, mx = mn;
+        for (int i = 0; i < k; i++) { if (ptr[i]->t < mn) mn = ptr[i]->t; if (mx < ptr[i]->t) mx = ptr[i]->t; }
+        for (;;) {
+            cur = mx;
+            if (mx == mn) break;
+            mtime_t nm = mx;
+            for (int i = 0; i < k; i++) {
+                if (ptr[i]->t >= cur) continue;
+                if (!(ptr[i] = ptr[i]->next)) return 1;
+                mtime_t v = ptr[i]->t;
+                if (v < nm) nm = v;
+                if (cur < v) cur = v;
+            }
+            mn = nm; mx = cur;
+        }
+        if (j < n) for (int i = 0; i < k; i++) if (!(ptr[i] = ptr[i]->next)) return 1;
+    }
+    *out = cur;
+    return 0;
+}
+/* 77283810 / 77281e6b: the marker track ('MARK' with 'vals') of the valid starts for the first command (empty and E_FAIL
+ * without one) */
+static dm_track *marker_track(const dms_style *st, const cmdsp *c, int *hr)
+{
+    buf b = { 0 };
+    put(&b, "vals", 4); put32(&b, 0); put32(&b, 4);
+    int n = 0;
+    mtime_t t;
+    while (!style_valid_start(st, (unsigned)n, c, &t)) { put32(&b, (uint32_t)t); n++; }
+    if (!n || !b.p) {                   /* E_FAIL: the track stays empty (it is inserted all the same) */
+        free(b.p);
+        *hr = DM_E_FAIL;
+        dm_markertrack *E = calloc(1, sizeof(*E));
+        dm_track *tr = E ? dm_track_new(TRK_MARKER, &CLSID_MarkerTrack_, E) : NULL;
+        if (E && !tr) free(E);
+        return tr;
+    }
+    uint32_t sz = (uint32_t)b.n - 8;
+    b.p[4] = (uint8_t)sz; b.p[5] = (uint8_t)(sz >> 8); b.p[6] = (uint8_t)(sz >> 16); b.p[7] = (uint8_t)(sz >> 24);
+    int32_t h;
+    dm_markertrack *T = dm_markertrack_load(b.p, b.n, &h);
+    free(b.p);
+    dm_track *tr = T ? dm_track_new(TRK_MARKER, &CLSID_MarkerTrack_, T) : NULL;
+    if (T && !tr) dm_markertrack_free(T);
+    *hr = tr ? DM_OK : DM_E_OUTOFMEMORY;
+    return tr;
+}
+/* 77283810: a composed segment: the chord track (when there are chords), the command track, with `align` (and a
+ * dmstyle style) a marker track of the first command's valid starts, the style, chord map, tempo (given, else the
+ * style's) and band (given, else the style's default) tracks.  With no band the band's SetParam fails: the segment
+ * has only its tempo track and the error is returned with it. */
+static dm_segment *build_segment(const cmdsp *cmds, const cnode *chords, dms_style *style, dmc_chordmap *cm, int measures,
+                                 uint8_t key, uint32_t scale, const double *tempo, dm_band *band, int align, int *hr)
+{
+    uint8_t ts[2] = { style->ts[0], style->ts[1] };
+    int32_t mlen = ts[1] ? 0xc00 / ts[1] * ts[0] : 0;
+    dm_segment *s = new_seg();
+    if (!s) { *hr = DM_E_OUTOFMEMORY; return NULL; }
+    dm_track *chordt = NULL, *cmdt = NULL, *mark = NULL;
+    if (chords) {
+        size_t len;
+        uint8_t *b = chords_cord(chords, key, scale, ts, &len);
+        int32_t h;
+        dms_chordtrack *ct = b ? dms_chordtrack_load(b, len, &h) : NULL;
+        free(b);
+        if (ct && !(chordt = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct))) dms_chordtrack_free(ct);
+    }
+    cmdt = t_cmdtrack(cmds, mlen);
+    if (align && cmds) {
+        int h;
+        mark = marker_track(style, cmds, &h);
+    }
+    dm_track *stt = NULL, *cmt = NULL, *tt = NULL, *bt = NULL;
+    dm_style_srand();                   /* (the new style track's constructor) */
+    dms_styletrack *ST = calloc(1, sizeof(*ST));
+    if (ST && !(stt = dm_track_new(TRK_STYLE, &CLSID_StyleTrack_, ST))) free(ST);
+    if (stt) dm_track_setparam(stt, PRM_STYLE, 0, style);
+    dmc_cmtrack *CT = calloc(1, sizeof(*CT));
+    if (CT && !(cmt = dm_track_new(TRK_CHORDMAP, &CLSID_ChordMapTrack_, CT))) free(CT);
+    if (cmt && cm) dmc_cmtrack_setparam(cmt->data, 0, cm);
+    dm_tempotrack *TT = calloc(1, sizeof(*TT));
+    if (TT && (TT->items = calloc(1, sizeof(*TT->items)))) {
+        TT->active = 1; TT->n = 1; TT->items[0].mt = 0; TT->items[0].tempo = tempo ? *tempo : style->tempo;
+        if ((tt = dm_track_new(TRK_TEMPO, &CLSID_TempoTrack_, TT))) dm_segment_insert_track(s, tt, 0, 1, 0x38, 0);
+    } else free(TT);
+    dm_bandtrack *BT = calloc(1, sizeof(*BT));
+    if (BT && !(bt = dm_track_new(TRK_BAND, &CLSID_BandTrack_, BT))) free(BT);
+    int r = DM_E_OUTOFMEMORY;
+    if (bt) {
+        dm_bandparam bp = { -64, band ? band : style->defband };
+        r = dm_track_setparam(bt, PRM_BANDPARAM, 0, &bp);
+    }
+    dm_track *all[6] = { bt, stt, cmt, cmdt, mark, chordt };
+    if (r < 0) {
+        for (int i = 0; i < 6; i++) if (all[i]) dm_track_release(all[i]);
+    } else {
+        s->repeats = 0;
+        if ((mtime_t)mlen * measures > 0) s->length = (mtime_t)mlen * measures;     /* (SetLength refuses 0) */
+        for (int i = 0; i < 6; i++) if (all[i]) dm_segment_insert_track(s, all[i], 0, 1, 0x38, 0);
+    }
+    *hr = r;
+    return s;
+}
+
 /* 77286edd / 77283810: ComposeSegmentFromShape after the style's embellishment lengths (77287754 adjusts the
  * measures): the shape's commands with chords composed from the chord map, as a segment with the tempo, band, style,
  * chord map, command and chord tracks.  With no default band the band's SetParam fails: the segment has only its
@@ -1387,63 +1513,8 @@ dm_segment *dmc_segment_from_shape(dms_style *style, dmc_chordmap *cm, unsigned 
         *pp = x; pp = &x->next;
     }
     dm_segment *s = NULL;
-    if (*hr >= 0) {
-        uint8_t key = (uint8_t)(cm->scale >> 24);
-        uint32_t scale = cm->scale & 0xffffff;
-        int32_t mlen = ts[1] ? 0xc00 / ts[1] * ts[0] : 0;
-        s = new_seg();
-        if (!s) *hr = DM_E_OUTOFMEMORY;
-        dm_track *chordt = NULL, *cmdt = NULL;
-        if (s && chords) {
-            size_t len;
-            uint8_t *b = chords_cord(chords, key, scale, ts, &len);
-            int32_t h;
-            dms_chordtrack *ct = b ? dms_chordtrack_load(b, len, &h) : NULL;
-            free(b);
-            if (ct && !(chordt = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct))) dms_chordtrack_free(ct);
-        }
-        if (s) cmdt = t_cmdtrack(cmds, mlen);
-        dms_styletrack *ST = NULL;
-        dm_track *stt = NULL, *cmt = NULL, *tempo = NULL, *band = NULL;
-        if (s) {
-            dm_style_srand();                   /* (the new style track's constructor) */
-            ST = calloc(1, sizeof(*ST));
-            if (ST && !(stt = dm_track_new(TRK_STYLE, &CLSID_StyleTrack_, ST))) free(ST);
-            if (stt) dm_track_setparam(stt, PRM_STYLE, 0, style);
-            dmc_cmtrack *CT = calloc(1, sizeof(*CT));
-            if (CT && !(cmt = dm_track_new(TRK_CHORDMAP, &CLSID_ChordMapTrack_, CT))) free(CT);
-            if (cmt) dmc_cmtrack_setparam(cmt->data, 0, cm);
-            dm_tempotrack *TT = calloc(1, sizeof(*TT));
-            if (TT && (TT->items = calloc(1, sizeof(*TT->items)))) {
-                TT->active = 1; TT->n = 1; TT->items[0].mt = 0; TT->items[0].tempo = style->tempo;
-                if ((tempo = dm_track_new(TRK_TEMPO, &CLSID_TempoTrack_, TT))) dm_segment_insert_track(s, tempo, 0, 1, 0x38, 0);
-            } else free(TT);
-            dm_bandtrack *BT = calloc(1, sizeof(*BT));
-            if (BT && !(band = dm_track_new(TRK_BAND, &CLSID_BandTrack_, BT))) free(BT);
-            int r = DM_E_OUTOFMEMORY;
-            if (band) {
-                dm_bandparam bp = { -64, style->defband };
-                r = dm_track_setparam(band, PRM_BANDPARAM, 0, &bp);
-            }
-            if (r < 0) {
-                *hr = r;
-                if (band) dm_track_release(band);
-                if (stt) dm_track_release(stt);
-                if (cmt) dm_track_release(cmt);
-                if (cmdt) dm_track_release(cmdt);
-                if (chordt) dm_track_release(chordt);
-            } else {
-                s->repeats = 0;
-                s->length = (mtime_t)mlen * (int)measures;
-                dm_segment_insert_track(s, band, 0, 1, 0x38, 0);
-                if (stt) dm_segment_insert_track(s, stt, 0, 1, 0x38, 0);
-                if (cmt) dm_segment_insert_track(s, cmt, 0, 1, 0x38, 0);
-                if (cmdt) dm_segment_insert_track(s, cmdt, 0, 1, 0x38, 0);
-                if (chordt) dm_segment_insert_track(s, chordt, 0, 1, 0x38, 0);
-                *hr = r;
-            }
-        }
-    }
+    if (*hr >= 0) s = build_segment(cmds, chords, style, cm, (int)measures, (uint8_t)(cm->scale >> 24), cm->scale & 0xffffff,
+                                    NULL, NULL, 0, hr);
     tlist_free(cmds);
     clist_free(chords);
     tlist_free(T.list);
@@ -1560,4 +1631,198 @@ int dmc_change_chordmap(dm_segment *seg, int trackscale, dmc_chordmap *cm)
     clist_free(list);
     composer_free(&cp);
     return hr;
+}
+
+/* ------------------------------------------------------------------ ComposeTransition (772853bb) */
+/* 7728264a: a DMUS_CHORD_KEY as a chord (the name, then its subchords) */
+static void chord_from_key(composer *cp, dmc_chord *d, const dm_chord_key *k)
+{
+    memset(d, 0, sizeof(*d));
+    d->hasname = 1;
+    for (int i = 0; i < 16 && k->name[i]; i++) d->name[i] = k->name[i];
+    dmc_subnode **pp = &d->subs;
+    for (int i = 0; i < k->nsub && i < 8; i++) {
+        dmc_subnode *x = calloc(1, sizeof(*x));
+        dmc_sub *u = calloc(1, sizeof(*u));
+        if (!x || !u) { free(x); free(u); break; }
+        u->chordpat = k->sub[i].chord; u->scalepat = k->sub[i].scale; u->invpat = k->sub[i].inversion;
+        u->levels = k->sub[i].levels; u->chordroot = k->sub[i].chordroot; u->scaleroot = k->sub[i].scaleroot;
+        u->refs = 1;
+        x->sub = u;
+        *pp = x; pp = &x->next;
+    }
+    (void)cp;
+}
+static void chord_free_subs_(dmc_chord *c) { for (dmc_subnode *x = c->subs, *y; x; x = y) { y = x->next; free(x->sub); free(x); } c->subs = NULL; }
+
+/* 774085da: the longest embellishment of a type (as the command numbers it) and groove level; S_FALSE without */
+static int style_emblength(const dms_style *st, unsigned type, unsigned level, uint32_t *mx)
+{
+    uint32_t mn = 0;
+    *mx = 0;
+    if (!st || !st->npatterns) return 1;
+    for (int k = 0; k < st->npatterns; k++) {
+        const dms_pattern *p = st->patterns[k];
+        int ok;
+        switch (type) {
+        case 0: ok = p->embellish == 0 && p->groovelo <= (uint8_t)level && (uint8_t)level <= p->groovehi; break;
+        case 1: ok = p->embellish == 1; break;
+        case 2: ok = p->embellish == 4; break;
+        case 3: ok = p->embellish == 2; break;
+        case 4: ok = p->embellish == 8; break;
+        default: ok = (p->embellish >> 8) && (uint16_t)(p->embellish >> 8) == (uint16_t)type; break;
+        }
+        if (!ok) continue;
+        if (*mx < p->measures) *mx = p->measures;
+        if (p->measures < mn || mn == 0) mn = p->measures;
+    }
+    return mn && *mx ? 0 : 1;
+}
+/* 7728219d: the segment's first tempo track's tempo at 0 */
+static int seg_tempo(dm_segment *s, double *t)
+{
+    dm_segtrack *tt = seg_track(s, TRK_TEMPO, 0xffffffff, 0);
+    if (!tt) return DMUS_E_NOT_FOUND;
+    struct { mtime_t t; double tempo; } tp;
+    int r = dm_track_getparam(tt->t, PRM_TEMPO, 0, NULL, &tp);
+    if (r >= 0) *t = tp.tempo;
+    return r;
+}
+
+/* 772853bb: the transition from what plays (its style `fs`, band, tempo, command and chord) into `to` (its first
+ * chord `tk`): the chords (the from chord, or with DMUS_COMPOSEF_MODULATE a chord map signpost's cadences into the
+ * to chord), the command's embellishment (and with DMUS_COMPOSEF_LONG a groove measure, and an intro from the to
+ * style) as commands, and the segment built from them.  *side: whose graph and audiopath configuration it takes
+ * (1 from, 2 to, 0 none).  NULL with S_OK when there is no style to compose with. */
+dm_segment *dmc_compose_transition(dms_style *fs, dm_band *band, const double *tempo_from, const dmc_cmdparam *cmdp,
+                                   const dm_chord_key *fk, const dm_chord_key *tk, dm_segment *to, unsigned cmd,
+                                   uint32_t flags, dmc_chordmap *cm, int *side, int *hr)
+{
+    composer cp = { 0 };
+    uint8_t key = fk->key;
+    uint32_t scale = fk->scale;
+    dmc_chord fromc, toc;
+    chord_from_key(&cp, &fromc, fk);
+    chord_from_key(&cp, &toc, tk);
+    cmd = (uint16_t)cmd;
+    int islong = (flags >> 13) & 1, modulate = (flags >> 12) & 1;
+    int isend = cmd == 4 || cmd == 5, isintro = cmd == 2 || cmd == 5;
+    int entire = (flags & 0x4000) || (isend && !(flags & 0x8000));
+    int addition = (flags >> 16) & 1, align = flags & 1;
+    dms_style *ts_ = NULL;
+    dm_segment *seg = NULL;
+    *hr = DM_OK;
+    *side = 0;
+    if (to) {
+        *hr = dm_segment_getparam(to, PRM_STYLE, 0xffffffff, 0, 0, NULL, &ts_);
+        if (*hr < 0) ts_ = NULL;
+    }
+    if (!ts_ && !fs) { *hr = DM_OK; goto done; }
+    double tfrom = 120.0, tto = 120.0;
+    const double *tempo = tempo_from;
+    if (tempo_from) tfrom = *tempo_from;
+    if (!to || seg_tempo(to, &tto) < 0) {
+        if (tempo_from) tto = tfrom;
+        else { tfrom = tto; tempo = &tfrom; }
+    } else if (!tempo_from) { tfrom = tto; tempo = &tfrom; }
+    uint8_t fbpm = 4, fbeat = 4, tbpm = 4, tbeat = 4;
+    if (fs) { fbpm = fs->ts[0]; fbeat = fs->ts[1]; }
+    if (ts_) { tbpm = ts_->ts[0]; tbeat = ts_->ts[1]; }
+    if (!tbpm) tbpm = 4;
+    int16_t half = (int16_t)((tbpm >> 1) + ((tbpm >> 1) * 2 != tbpm));
+    cnode *chords = NULL;
+    cmdsp *head = calloc(1, sizeof(*head)), *tail = head;
+    if (!head) { *hr = DM_E_OUTOFMEMORY; goto done; }
+    if (cmd != 2) {
+        dmc_signpost *sp = modulate ? pick_signpost(cm, &toc, isend, scale, (int8_t)key) : NULL;
+        int cad1 = sp && (sp->flags & 2), cad2 = sp && (sp->flags & 4);
+        if (!cad1 && !cad2) add_chord(&cp, &chords, &fromc, 0, 0);
+        else {
+            const dmc_chord *first = cad1 ? ((!islong && isend && cad2) ? &sp->cadence[1] : &sp->cadence[0]) : &sp->cadence[1];
+            add_chord(&cp, &chords, first, 0, 0);
+            int bottom;
+            if (!cad1 || !cad2) bottom = isend;
+            else {
+                if (islong == isend) add_chord(&cp, &chords, &sp->cadence[1], 0, half);
+                if (!islong) bottom = isend;
+                else if (!isend) { add_chord(&cp, &chords, &sp->cadence[1], 1, 0); bottom = 0; }
+                else bottom = 1;
+            }
+            if (bottom) add_chord(&cp, &chords, &sp->chord, (int16_t)(islong ? 1 : 0), (int16_t)(islong ? 0 : half));
+        }
+    }
+    head->command = cmdp->cmd; head->groove = cmdp->groove; head->range = cmdp->range; head->repeat = cmdp->repeat;
+    int total = 0, introat = 0;
+    uint32_t len = 1;
+    if (fs) {
+        if (cmd != 2) {
+            unsigned type = isend ? 4 : cmd;
+            if (!entire) total = 1;
+            else { if (style_emblength(fs, type, cmdp->groove, &len)) len = 1; total = (int)len; }
+        }
+        if (!islong) { if (cmd != 2) head->command = (uint8_t)(cmd == 5 ? 4 : cmd); }
+        else {
+            if (!addition || style_emblength(fs, 0, cmdp->groove, &len)) len = 1;
+            total += (int)len;
+            if (cmd != 2) {
+                if (cmd == 0) head->command = 0;            /* (a dmstyle style: else a groove command after it) */
+                else {
+                    cmdsp *n = calloc(1, sizeof(*n));
+                    if (n) { n->measure = (int16_t)len; n->command = (uint8_t)(cmd == 5 ? 4 : cmd); tail->next = n; tail = n; }
+                }
+            }
+        }
+    }
+    int before = total;
+    if (ts_ && isintro) {
+        introat = total;
+        uint32_t il;
+        if (!entire) total += 1;
+        else total += style_emblength(ts_, 2, cmdp->groove, &il) ? 1 : (int)il;
+        add_chord(&cp, &chords, &toc, (int16_t)before, 0);
+        if (before < 1) head->command = 2;
+        else {
+            if (cmd == 2) add_chord(&cp, &chords, &fromc, 0, 0);
+            cmdsp *n = calloc(1, sizeof(*n));
+            if (n) { n->measure = (int16_t)before; n->command = 2; tail->next = n; tail = n; }
+        }
+    }
+    if (!isintro || isend || !ts_) { if (fs) *side = 1; }
+    else *side = 2;
+    if (!isintro) {
+        if (fs) seg = build_segment(head, chords, fs, cm, total, key, scale, tempo, band, align, hr);
+        else *hr = DM_OK;
+    } else if (!fs) {
+        if (ts_) seg = build_segment(head, chords, ts_, cm, total, key, scale, &tto, band, align, hr);
+    } else {
+        seg = build_segment(head, chords, fs, cm, total, key, scale, tempo, band, align, hr);
+        if (*hr >= 0 && ts_) {
+            mtime_t at = (mtime_t)(0xc00 / fbeat) * fbpm * introat;
+            dm_segtrack *st = seg_track(seg, TRK_STYLE, 0xffffffff, 0);
+            if (st) dm_track_setparam(st->t, PRM_STYLE, at, ts_);
+            dm_segtrack *tt = seg_track(seg, TRK_TEMPO, 0xffffffff, 0);
+            *hr = tt ? DM_OK : DMUS_E_NOT_FOUND;
+            if (tt) {
+                struct { mtime_t t; double tempo; } tp = { at, tto };
+                dm_track_setparam(tt->t, PRM_TEMPO, at, &tp);
+            }
+            if (at == 0) dm_segment_setparam(seg, PRM_CLEARBANDS, 0xffffffff, 0, 0, NULL);
+            dm_bandparam bp;
+            if (to && dm_segment_getparam(to, PRM_BANDPARAM, 0xffffffff, DM_SEG_ANYTRACK, 0, NULL, &bp) >= 0) {
+                bp.physical = at;
+                dm_segment_setparam(seg, PRM_BANDPARAM, 0xffffffff, 0, at, &bp);
+                dm_band_release(bp.band);
+            }
+            if (introat < total && (mtime_t)(0xc00 / tbeat) * (total - introat) * tbpm + at > 0)
+                seg->length = (mtime_t)(0xc00 / tbeat) * (total - introat) * tbpm + at;
+        }
+    }
+    tlist_free(head);
+    clist_free(chords);
+done:
+    if (ts_) dms_style_release(ts_);
+    chord_free_subs_(&fromc);
+    chord_free_subs_(&toc);
+    composer_free(&cp);
+    return seg;
 }

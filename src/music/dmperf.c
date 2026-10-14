@@ -447,6 +447,7 @@ static int track_isparam(const dm_track *t, int prm)
         }
         return DMUS_E_TYPE_UNSUPPORTED;
     case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 77307918 */
+    case TRK_MARKER: return prm == PRM_VALIDSTART || prm == PRM_PLAYMARKER ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;    /* 77321af8 */
     }
     return DMUS_E_TYPE_UNSUPPORTED;
 }
@@ -489,6 +490,42 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
         if (next) *next = i < ts->n ? ts->items[i].mt - mt : 0;
         return DM_OK;
     }
+    if (t->kind == TRK_MARKER && (prm == PRM_VALIDSTART || prm == PRM_PLAYMARKER)) {    /* 77321b69 */
+        const dm_markertrack *T = t->data;
+        mtime_t *o = data;
+        if (!o) return DM_E_POINTER;
+        if (prm == PRM_VALIDSTART) {    /* the first valid start at or after mt */
+            for (const dm_marker *m = T->starts; m; m = m->next)
+                if (mt <= m->t) { *o = m->t - mt; if (next) *next = m->next ? m->next->t - mt : 0; return DM_OK; }
+            return DMUS_E_NOT_FOUND;
+        }
+        *o = -mt;                       /* the last play marker at or before mt (S_FALSE: none) */
+        const dm_marker *cur, *nx = T->plays;
+        if (!nx) return 1;
+        do {
+            cur = nx; nx = cur->next;
+            if (mt < cur->t) { if (next) *next = cur->t - mt; return 1; }
+        } while (nx && nx->t <= mt);
+        *o = cur->t - mt;
+        if (next && nx) *next = nx->t - mt;
+        return DM_OK;
+    }
+    if (t->kind == TRK_BAND && prm == PRM_BANDPARAM) {     /* 77201c85: a copy of the band in effect (else the first) */
+        const dm_bandtrack *T = t->data;
+        dm_bandparam *o = data;
+        if (!o) return DM_E_POINTER;
+        if (!T->nbands) return DMUS_E_NOT_FOUND;
+        int k = 0;
+        while (k + 1 < T->nbands && T->bands[k + 1]->logical <= mt) k++;
+        dm_band *c = dm_band_copy(T->bands[k]);
+        if (!c) return DM_E_OUTOFMEMORY;
+        memset(c->name, 0, sizeof(c->name));    /* (a new band object: no name or guid) */
+        c->hasguid = 0;
+        o->physical = c->physical;
+        o->band = c;
+        if (next) *next = k + 1 < T->nbands ? T->bands[k + 1]->logical : 0;    /* (the next band's time, not relative) */
+        return DM_OK;
+    }
     if (t->kind >= TRK_CHORD) return sty_getparam(t, prm, mt, next, data);
     if (t->kind == TRK_SEQ || t->kind == TRK_SYSEX) return DM_E_NOTIMPL;    /* 7730790b */
     return DMUS_E_GET_UNSUPPORTED;      /* (BandParam would need band objects; the wave track's is private) */
@@ -523,7 +560,7 @@ static int seg_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, 
     dm_segtrack *t = seg_findtrack(s, NULL, prm, group, any ? 0 : index, 0);
     while (t) {
         hr = track_getparam(t->t, prm, mt, next, data);
-        if (t->t->kind == TRK_TIMESIG && next && (*next == 0 || s->length - mt < *next)) *next = s->length - mt;
+        if ((t->t->kind == TRK_TIMESIG || t->t->kind == TRK_MARKER) && next && (*next == 0 || s->length - mt < *next)) *next = s->length - mt;
         if (!any || hr != DMUS_E_NOT_FOUND) break;
         t = seg_findtrack(s, t, prm, group, 0, 0);
     }
@@ -652,7 +689,10 @@ int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uin
             for (dm_segstate *s = pf->lists[k]; s && !ctx; s = s->lnext)
                 for (int i = 0; i < s->ntr; i++) if (s->tr[i].vid == trackid) { ctx = s; cf = s->tr[i].cfg & 7; break; }
     if ((prm == PRM_TEMPO || prm == PRM_TIMESIG) && !data) return DM_E_POINTER;
-    return perf_getparam_ex(pf, ctx, cf, prm, group, index, mt, next, data);
+    pf->apprand = 1;                    /* (called from the application) */
+    int hr = perf_getparam_ex(pf, ctx, cf, prm, group, index, mt, next, data);
+    pf->apprand = 0;
+    return hr;
 }
 
 /* 7730bed9: fill the tempo map from the tempo parameter (control segments, primary) ahead of time */
@@ -812,6 +852,15 @@ static rtime_t resolved_time(dm_perf *pf, rtime_t rt, uint32_t flags)
     else if (flags & SEGF_AFTERQUEUETIME) { t = dm_perf_queue_time(pf); if (t > rt) rt = t; }
     if (flags & 0x1803800) return M2R(pf, resolve_mt(pf, R2M(pf, rt), flags));
     return rt;
+}
+
+/* GetResolvedTime from the application: its rand() for a style's pattern choice is the application thread's */
+rtime_t dm_perf_resolved_time(dm_perf *pf, rtime_t rt, uint32_t flags)
+{
+    pf->apprand = 1;
+    rtime_t r = resolved_time(pf, rt, flags);
+    pf->apprand = 0;
+    return r;
 }
 
 /* ------------------------------------------------------------------ SendPMsg 77304e7e, StampPMsg */

@@ -311,13 +311,209 @@ static HRESULT WINAPI cpo_fromshape(IDirectMusicComposer *i, IDirectMusicStyle *
     seg_release(&o->IDirectMusicSegment8_iface);
     return FAILED(q) ? q : r;
 }
+/* the transition's inputs from segments (77282111 / 77282156 / 7728219d and the segment's GetParam) */
+static dmc_chordmap *seg_chordmap_at(dm_segment *s, mtime_t t)      /* 77282156: the first chord map track's */
+{
+    if (!s) return NULL;
+    for (int i = 0; i < s->ntracks; i++) {
+        if (s->tracks[i].t->kind != TRK_CHORDMAP) continue;
+        dmc_chordmap *m = NULL;
+        return dmc_cmtrack_getparam(s->tracks[i].t->data, t, NULL, &m) >= 0 ? m : NULL;
+    }
+    return NULL;
+}
+static void key_default(dm_chord_key *k)    /* a C major seventh, when the to segment answers no chord */
+{
+    memset(k, 0, sizeof(*k));
+    k->name[0] = 'M'; k->name[1] = '7';
+    k->nsub = 1; k->key = 12; k->scale = 0xab5ab5;
+    k->sub[0].chord = 0x891; k->sub[0].scale = 0xab5ab5; k->sub[0].inversion = 0xffffff; k->sub[0].levels = 0xffffffff;
+    k->sub[0].chordroot = 12;
+}
+/* Microsoft sets only the name here; the rest of its buffer is what the stack held, which in practice is the
+ * default chord a previous call left there.  The default chord is taken. */
+static void key_m7(dm_chord_key *k) { key_default(k); }
+static rm_segment *transition_segment(dm_segment *g, int side, rm_segment *from, rm_segment *to)
+{
+    rm_segment *o = new_segment(g);
+    if (!o) return NULL;
+    rm_segment *src = side == 1 ? from : side == 2 ? to : NULL;      /* 77282219: a clone of its graph */
+    if (src && src->graph) { IDirectMusicGraph *c = NULL; if (SUCCEEDED(rm_graph_clone(src->graph, &c))) o->graph = c; }
+    return o;
+}
+/* 77285b86 */
 static HRESULT WINAPI cpo_transition(IDirectMusicComposer *i, IDirectMusicSegment *from, IDirectMusicSegment *to, MUSIC_TIME t,
                                      WORD cmd, DWORD fl, IDirectMusicChordMap *cm, IDirectMusicSegment **out)
-{ return rm_notimpl("Composer::ComposeTransition"); }
+{
+    if ((to && IsBadWritePtr(to, 4)) || (from && IsBadWritePtr(from, 4)) || (cm && IsBadWritePtr(cm, 4)) || IsBadWritePtr(out, 4))
+        return E_POINTER;
+    int isend = cmd == 4 || cmd == 5, isintro = cmd == 2 || cmd == 5;
+    if (!to && !isend && (fl & 0x1000)) return E_INVALIDARG;
+    rm_segment *fo = from ? unsafe_segment((IUnknown *)from) : NULL, *tob = to ? unsafe_segment((IUnknown *)to) : NULL;
+    if ((from && !fo) || (to && !tob)) return rm_notimpl("Composer::ComposeTransition (a segment not made by reDM)");
+    dm_segment *fs = fo ? fo->seg : NULL, *ts = tob ? tob->seg : NULL;
+    dmc_chordmap *mx = NULL;
+    if (cm && !(mx = chordmap_engine_of(cm))) return rm_notimpl("Composer::ComposeTransition (a chord map not made by reDM)");
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    dms_style *fst = NULL;
+    if (fs && dm_segment_getparam(fs, PRM_STYLE, 0xffffffff, 0, t, NULL, &fst) < 0) fst = NULL;
+    int owncm = 0;
+    if (!mx) {
+        if (!isend && ts) mx = seg_chordmap_at(ts, 0);
+        if (!mx && fs) mx = seg_chordmap_at(fs, t);
+        owncm = mx != NULL;
+    }
+    double tempo = 120.0;
+    const double *tp = NULL;
+    if (fs) {
+        for (int k = 0; k < fs->ntracks; k++) {
+            if (fs->tracks[k].t->kind != TRK_TEMPO) continue;
+            struct { mtime_t t; double tempo; } x;
+            if (dm_track_getparam(fs->tracks[k].t, PRM_TEMPO, t, NULL, &x) >= 0) { tempo = x.tempo; tp = &tempo; }
+            break;
+        }
+    }
+    dmc_cmdparam cp = { 0, 0, 62, 0, 0 };
+    if (fs && dm_segment_getparam(fs, PRM_COMMAND2, 0xffffffff, DM_SEG_ANYTRACK, t, NULL, &cp) < 0) { memset(&cp, 0, sizeof(cp)); cp.groove = 62; }
+    else if (!fs) { memset(&cp, 0, sizeof(cp)); cp.groove = 62; }
+    dm_chord_key fk, tk;
+    if (!fs || dm_segment_getparam(fs, PRM_CHORD, 0xffffffff, DM_SEG_ANYTRACK, t, NULL, &fk) < 0) key_m7(&fk);    /* (see key_m7) */
+    dm_segment *tks = ((!(fl & 0x1000) && !isintro) || !ts) ? fs : ts;
+    if (!tks || dm_segment_getparam(tks, PRM_CHORD, 0xffffffff, DM_SEG_ANYTRACK, 0, NULL, &tk) < 0) key_default(&tk);
+    int side = 0, hr;
+    dm_segment *g = dmc_compose_transition(fst, NULL, tp, &cp, &fk, &tk, ts, cmd, fl, mx, &side, &hr);
+    if (h) dm_host_unlock(h);
+    if (fst) dms_style_release(fst);
+    if (owncm) dmc_chordmap_release(mx);
+    LOG_CALL("music: Composer::ComposeTransition(%ld, command %u, flags %lx) -> %08x", (long)t, cmd, (unsigned long)fl, hr);
+    *out = NULL;
+    if (!g) return hr;
+    rm_segment *o = transition_segment(g, side, fo, tob);
+    if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
+    HRESULT q = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)out);
+    seg_release(&o->IDirectMusicSegment8_iface);
+    return FAILED(q) ? q : hr;
+}
+/* 77285f1c: the transition from what the performance plays at the next time the flags allow, played there, and the
+ * to segment queued after it (or played, or the playing segment stopped, when there is no transition) */
 static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPerformance *p, IDirectMusicSegment *to, WORD cmd,
-                                         DWORD fl, IDirectMusicChordMap *cm, IDirectMusicSegment **out,
+                                         DWORD fl, IDirectMusicChordMap *cm, IDirectMusicSegment **trans,
                                          IDirectMusicSegmentState **tostate, IDirectMusicSegmentState **trstate)
-{ return rm_notimpl("Composer::AutoTransition"); }
+{
+    if ((to && IsBadWritePtr(to, 4)) || (cm && IsBadWritePtr(cm, 4)) || IsBadWritePtr(p, 4) || (trans && IsBadWritePtr(trans, 4)) ||
+        (tostate && IsBadWritePtr(tostate, 4)) || (trstate && IsBadWritePtr(trstate, 4)))
+        return E_POINTER;
+    DWORD segf = (fl & 0x20) ? 0x2000 : (fl & 0x10) ? 0x1000 : (fl & 8) ? 0x800 : (fl & 0x80000) ? 0x4000 : ((~fl & 4) << 11);
+    if (fl & 1) segf = (segf & 0xffff) | 0x10000;
+    if (fl & 0x40000) segf |= 0x08000000;
+    if (fl & 0x80) segf |= 0x20000;
+    if (fl & 0x100) segf |= 0x40000;
+    if (fl & 0x200) segf |= 0x80000;
+    if (fl & 0x40) segf |= 0x400;
+    if (fl & 0x100000) segf |= 0x8000;
+    if (fl & 0x400000) segf |= 0x10000000;
+    if (fl & 0x200000) segf |= 0x4000000;
+    DWORD queuef = segf & 0x4000000;
+    IDirectMusicSegment *mytrans = NULL;
+    if (!trans) trans = &mytrans;
+    int isend = cmd == 4 || cmd == 5, isintro = cmd == 2 || cmd == 5;
+    if (!to && !isend && (fl & 0x1000)) return E_INVALIDARG;
+    IDirectMusicPerformance8 *pf = (IDirectMusicPerformance8 *)p;
+    REFERENCE_TIME rq, rr;
+    MUSIC_TIME mt, mq;
+    HRESULT hr;
+    if (FAILED(hr = IDirectMusicPerformance8_GetQueueTime(pf, &rq))) return hr;
+    if (FAILED(hr = IDirectMusicPerformance8_GetResolvedTime(pf, rq, &rr, segf))) return hr;
+    if (FAILED(hr = IDirectMusicPerformance8_ReferenceToMusicTime(pf, rr, &mt))) return hr;
+    if (FAILED(hr = IDirectMusicPerformance8_ReferenceToMusicTime(pf, rq, &mq))) return hr;
+    if (rr > rq) mt--;
+    IDirectMusicSegmentState *st = NULL;
+    IDirectMusicSegment *fromseg = NULL;
+    MUSIC_TIME start = 0;
+    if (SUCCEEDED(IDirectMusicPerformance8_GetSegmentState(pf, &st, mt))) {
+        if (FAILED(hr = IDirectMusicSegmentState_GetStartTime(st, &start)) || FAILED(hr = IDirectMusicSegmentState_GetSegment(st, &fromseg))) {
+            IDirectMusicSegmentState_Release(st);
+            return hr;
+        }
+        MUSIC_TIME len;
+        if ((fl & 0x400) && SUCCEEDED(IDirectMusicSegment_GetLength(fromseg, &len))) { mt = len - 1; start = 0; }
+    } else st = NULL;
+    IDirectMusicStyle *style = NULL;
+    if (FAILED(IDirectMusicPerformance8_GetParam(pf, &GUID_IDirectMusicStyle, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, &style))) style = NULL;
+    rm_segment *fo = fromseg ? unsafe_segment((IUnknown *)fromseg) : NULL, *tob = to ? unsafe_segment((IUnknown *)to) : NULL;
+    dmc_chordmap *mx = cm ? chordmap_engine_of(cm) : NULL;
+    int owncm = 0;
+    if (!cm) {
+        if (!isend && tob && tob->seg) mx = seg_chordmap_at(tob->seg, 0);
+        if (!mx && fo && fo->seg) mx = seg_chordmap_at(fo->seg, 0);
+        owncm = mx != NULL;
+    }
+    DMUS_COMMAND_PARAM_2 c2;
+    if (FAILED(IDirectMusicPerformance8_GetParam(pf, &GUID_CommandParam2, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, &c2))) {
+        memset(&c2, 0, sizeof(c2)); c2.bGrooveLevel = 62;
+    }
+    dm_chord_key fk, tk;
+    if (FAILED(IDirectMusicPerformance8_GetParam(pf, &GUID_ChordParam, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, (DMUS_CHORD_KEY *)&fk))) key_m7(&fk);
+    IDirectMusicSegment *tks = (((fl & 0x1000) || isintro) && to) ? to : fromseg;
+    if (!tks || FAILED(IDirectMusicSegment_GetParam(tks, &GUID_ChordParam, 0xffffffff, DMUS_SEG_ANYTRACK, 0, NULL, (DMUS_CHORD_KEY *)&tk))) key_default(&tk);
+    struct dms_style *sx = style ? style_engine_of(style) : NULL;
+    if (!sx || (fl & 0x400)) {
+        hr = cpo_transition(i, st ? fromseg : NULL, to, st ? mt - start : 0, cmd, fl, cm, trans);
+    } else {
+        DMUS_TEMPO_PARAM tpp;
+        double tempo = 120.0;
+        const double *tp = NULL;
+        if (SUCCEEDED(IDirectMusicPerformance8_GetParam(pf, &GUID_TempoParam, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, &tpp))) { tempo = tpp.dblTempo; tp = &tempo; }
+        DMUS_BAND_PARAM bp;
+        IDirectMusicBand *band = NULL;
+        if (SUCCEEDED(IDirectMusicPerformance8_GetParam(pf, &GUID_BandParam, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, &bp))) band = bp.pBand;
+        dmc_cmdparam cp = { c2.mtTime, c2.bCommand, c2.bGrooveLevel, c2.bGrooveRange, c2.bRepeatMode };
+        int side = 0, r;
+        dm_host *h = any_host();
+        if (h) dm_host_lock(h);
+        dm_segment *g = dmc_compose_transition(sx, band ? band_engine_of(band) : NULL, tp, &cp, &fk, &tk, tob ? tob->seg : NULL,
+                                               cmd, fl, mx, &side, &r);
+        if (h) dm_host_unlock(h);
+        if (band) IDirectMusicBand_Release(band);
+        *trans = NULL;
+        hr = r;
+        if (g) {
+            rm_segment *o = transition_segment(g, side, fo, tob);
+            if (!o) { dm_segment_release(g); hr = E_OUTOFMEMORY; }
+            else {
+                HRESULT q = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)trans);
+                seg_release(&o->IDirectMusicSegment8_iface);
+                if (FAILED(q)) hr = q;
+            }
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        if (*trans && to) {
+            DMUS_COMMAND_PARAM_2 nx;
+            if (SUCCEEDED(IDirectMusicSegment_GetParam(to, &GUID_CommandParam2, 0xffffffff, DMUS_SEG_ANYTRACK, 0, NULL, &nx)))
+                IDirectMusicSegment_SetParam(*trans, &GUID_CommandParamNext, 0xffffffff, 0, 0, &nx);
+            DWORD res;
+            if (SUCCEEDED(IDirectMusicSegment_GetDefaultResolution(to, &res))) IDirectMusicSegment_SetDefaultResolution(*trans, res);
+        }
+        if (fl & 0x400) segf |= 0x800000;
+        if (fl & 0x800) segf |= 0x1000000;
+        if (!*trans) {
+            if (!to) { if (!(fl & 0x400)) hr = IDirectMusicPerformance8_Stop(pf, fromseg, NULL, 0, segf); }
+            else hr = IDirectMusicPerformance8_PlaySegment(pf, to, segf, 0, tostate);
+        } else {
+            hr = IDirectMusicPerformance8_PlaySegment(pf, *trans, segf, 0, trstate);
+            if (SUCCEEDED(hr) && to) hr = IDirectMusicPerformance8_PlaySegment(pf, to, queuef | 0x100, 0, tostate);
+        }
+    }
+    if (style) IDirectMusicStyle_Release(style);
+    if (mytrans) IDirectMusicSegment_Release(mytrans);
+    if (st) IDirectMusicSegmentState_Release(st);
+    if (fromseg) IDirectMusicSegment_Release(fromseg);
+    if (owncm) dmc_chordmap_release(mx);
+    (void)mq;
+    return hr;
+}
 /* 77286b27 / 77286629: intro, fill and break lengths of 1 */
 static HRESULT WINAPI cpo_templatefromshape(IDirectMusicComposer *i, WORD n, WORD shape, BOOL intro, BOOL end, WORD endlen,
                                             IDirectMusicSegment **out)

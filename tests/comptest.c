@@ -20,7 +20,16 @@ static int (__cdecl *g_rand)(void);
 static int __cdecl rand_log(void)
 {
     int v = g_rand();
-    if (g_randlog) { fprintf(g_randlog, "R %p %d\n", __builtin_return_address(0), v); fflush(g_randlog); }
+    if (g_randlog) {
+        fprintf(g_randlog, "R %p %d %lu", __builtin_return_address(0), v, GetCurrentThreadId());
+        if (getenv("COMP_STACK")) {
+            void *fr[16];
+            USHORT n = RtlCaptureStackBackTrace(1, 16, fr, NULL);
+            for (USHORT k = 0; k < n; k++) fprintf(g_randlog, " %p", fr[k]);
+        }
+        fprintf(g_randlog, "\n");
+        fflush(g_randlog);
+    }
     return v;
 }
 static void patch_import_name(HMODULE m, const char *dll, const char *name, void *fn)
@@ -283,6 +292,149 @@ static int change(IDirectMusicLoader8 *ld)
     return 0;
 }
 
+/* a transition: dump plus its valid starts, tempo, styles and next command */
+static void dump_trans(IDirectMusicSegment *sg0, IDirectMusicStyle8 *const *styles, int nst)
+{
+    IDirectMusicSegment8 *sg = NULL;
+    IDirectMusicSegment_QueryInterface(sg0, &IID_IDirectMusicSegment8, (void **)&sg);
+    dump(sg, "transition");
+    MUSIC_TIME len = 0;
+    IDirectMusicSegment8_GetLength(sg, &len);
+    for (MUSIC_TIME t = 0; t < len && t < 64 * BAR; ) {
+        MUSIC_TIME v = -1, nx = 0;
+        HRESULT hr = IDirectMusicSegment8_GetParam(sg, &GUID_Valid_Start_Time, 0xffffffff, 0, t, &nx, &v);
+        printf("  valid start %ld: %08lx %ld next %ld\n", t, hr, v, nx);
+        if (hr != S_OK || nx <= 0) break;
+        t += v + 1;
+    }
+    for (MUSIC_TIME t = 0; t < len; t += BAR) {
+        DMUS_TEMPO_PARAM tp = { 0 };
+        MUSIC_TIME nx = 0;
+        HRESULT hr = IDirectMusicSegment8_GetParam(sg, &GUID_TempoParam, 0xffffffff, 0, t, &nx, &tp);
+        IDirectMusicStyle *st = NULL;
+        HRESULT h2 = IDirectMusicSegment8_GetParam(sg, &GUID_IDirectMusicStyle, 0xffffffff, 0, t, NULL, &st);
+        int which = -1;
+        for (int k = 0; k < nst; k++) if (st && (void *)st == (void *)styles[k]) which = k;
+        DMUS_BAND_PARAM bp = { 0 };
+        MUSIC_TIME bn = 0;
+        HRESULT h3 = IDirectMusicSegment8_GetParam(sg, &GUID_BandParam, 0xffffffff, 0, t, &bn, &bp);
+        printf("  at %ld: tempo %08lx %.2f t %ld next %ld; style %08lx %d; band %08lx physical %ld next %ld\n", t, hr, tp.dblTempo,
+               tp.mtTime, nx, h2, which, h3, bp.mtTimePhysical, h3 == S_OK ? bn : 0);
+        if (st) IDirectMusicStyle_Release(st);
+        if (bp.pBand) IDirectMusicBand_Release(bp.pBand);
+    }
+    DMUS_COMMAND_PARAM_2 cn;
+    memset(&cn, 0xcc, sizeof(cn));
+    HRESULT hr = IDirectMusicSegment8_GetParam(sg, &GUID_CommandParamNext, 0xffffffff, 0, 0, NULL, &cn);
+    printf("  next command %08lx %u/%u\n", hr, cn.bCommand, cn.bGrooveLevel);
+    IDirectMusicGraph *g = NULL;
+    hr = IDirectMusicSegment8_GetGraph(sg, &g);
+    printf("  graph %08lx\n", hr);
+    if (g) IDirectMusicGraph_Release(g);
+    IDirectMusicSegment8_Release(sg);
+}
+
+/* ComposeTransition between composed segments, and AutoTransition with nothing playing */
+static int trans(IDirectMusicLoader8 *ld)
+{
+    IDirectMusicComposer *cp = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);
+    printf("create composer %08lx\n", hr);
+    if (!cp) return 1;
+    IDirectMusicChordMap *ca = NULL, *cb = NULL;
+    IDirectMusicStyle8 *st[3] = { 0 };
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapa.cdm", (void **)&ca);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, L"cmapb.cdm", (void **)&cb);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"shapesty.sty", (void **)&st[0]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"shapesty3.sty", (void **)&st[1]);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle8, L"compsty.sty", (void **)&st[2]);
+    IDirectMusicSegment *seg[4] = { 0 };
+    hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, (IDirectMusicStyle *)st[0], 12, 3, 1, TRUE, TRUE, ca, &seg[0]);
+    printf("seg0 %08lx\n", hr);
+    hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, (IDirectMusicStyle *)st[1], 9, 7, 2, TRUE, FALSE, cb, &seg[1]);
+    printf("seg1 %08lx\n", hr);
+    hr = IDirectMusicComposer_ComposeSegmentFromShape(cp, (IDirectMusicStyle *)st[0], 30, 8, 0, FALSE, TRUE, cb, &seg[2]);
+    printf("seg2 %08lx\n", hr);
+    IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, L"basic.sgt", (void **)&seg[3]);
+    static const DWORD fls[] = { 0, 0x1000, 0x2000, 0x4000, 0x8000, 0x10000, 0x1, 0x3000, 0x7000, 0x16001, 0x1001, 0x6000, 0x2001, 0x1000 | 0x14000 };
+    static const int pairs[][2] = { { 0, 1 }, { 1, 0 }, { 0, 2 }, { 2, 0 }, { 0, -1 }, { -1, 1 }, { 1, 1 }, { 3, 0 }, { 0, 3 } };
+    int n = 0;
+    for (int pi = 0; pi < 9; pi++)
+        for (WORD cmd = 0; cmd < 6; cmd++)
+            for (int f = 0; f < 14; f++) {
+                n++;
+                if ((n % 3) && pi > 1) continue;            /* (a sample of the combinations) */
+                IDirectMusicSegment *from = pairs[pi][0] >= 0 ? seg[pairs[pi][0]] : NULL;
+                IDirectMusicSegment *to = pairs[pi][1] >= 0 ? seg[pairs[pi][1]] : NULL;
+                MUSIC_TIME t = (n % 4) * BAR + (n % 5 == 0 ? 700 : 0);
+                IDirectMusicChordMap *cm = (n % 3 == 0) ? cb : NULL;
+                IDirectMusicSegment *out = (IDirectMusicSegment *)0x1;
+                hr = IDirectMusicComposer_ComposeTransition(cp, from, to, t, cmd, fls[f], cm, &out);
+                printf("transition %d->%d at %ld command %u flags %lx map %d: %08lx %s\n", pairs[pi][0], pairs[pi][1], t, cmd, fls[f], cm != NULL,
+                       hr, out == (IDirectMusicSegment *)0x1 ? "untouched" : out ? "segment" : "none");
+                if (out && out != (IDirectMusicSegment *)0x1) { dump_trans(out, st, 3); IDirectMusicSegment_Release(out); }
+            }
+    /* AutoTransition with nothing playing */
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    hr = IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL);
+    printf("init %08lx\n", hr);
+    Sleep(300);                         /* (the performance's threads have prepared ahead) */
+    for (WORD cmd = 0; cmd < 6; cmd++) {
+        IDirectMusicSegment *tr = NULL;
+        IDirectMusicSegmentState *s1 = NULL, *s2 = NULL;
+        hr = IDirectMusicComposer_AutoTransition(cp, (IDirectMusicPerformance *)pf, seg[cmd % 3], cmd, cmd == 4 ? 0x1000 : 0x2000, NULL, &tr, &s1, &s2);
+        printf("auto %u: %08lx %d %d %d\n", cmd, hr, tr != NULL, s1 != NULL, s2 != NULL);
+        if (tr) { dump_trans(tr, st, 3); IDirectMusicSegment_Release(tr); }
+        if (s1) IDirectMusicSegmentState_Release(s1);
+        if (s2) IDirectMusicSegmentState_Release(s2);
+        Sleep(100);
+        IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);
+        Sleep(100);
+        REFERENCE_TIME rq = 0; MUSIC_TIME mq = 0;
+        IDirectMusicPerformance8_GetQueueTime(pf, &rq);
+        IDirectMusicPerformance8_ReferenceToMusicTime(pf, rq, &mq);
+        IDirectMusicSegmentState *ss = NULL;
+        HRESULT h2 = IDirectMusicPerformance8_GetSegmentState(pf, &ss, mq);
+        printf("  after stop: state %08lx\n", h2);
+        if (getenv("COMP_DEBUG")) {
+            MUSIC_TIME st0 = 0; if (ss) IDirectMusicSegmentState_GetStartTime(ss, &st0);
+            fprintf(stderr, "queue mt %ld state start %ld\n", mq, st0);
+        }
+        if (ss) IDirectMusicSegmentState_Release(ss);
+    }
+    /* from a playing segment's end (DMUS_COMPOSEF_SEGMENTEND: the time does not depend on the clock) */
+    for (WORD cmd = 0; cmd < 6; cmd++) {
+        IDirectMusicSegmentState *ps = NULL;
+        hr = IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)seg[cmd % 2 ? 2 : 0], NULL, NULL, 0, 0, &ps, NULL, NULL);
+        Sleep(150);
+        /* (how far PlaySegmentEx plays in this thread, and so its rand() calls, depends on the clock: a new composer
+         * reseeds rand()) */
+        IDirectMusicComposer *c2 = NULL;
+        CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&c2);
+        IDirectMusicSegment *tr = NULL;
+        IDirectMusicSegmentState *s1 = NULL, *s2 = NULL;
+        hr = IDirectMusicComposer_AutoTransition(c2, (IDirectMusicPerformance *)pf, cmd == 3 ? NULL : seg[1], cmd, 0x400 | (cmd & 1 ? 0x2000 : 0x1000),
+                                                 cmd == 2 ? cb : NULL, &tr, &s1, &s2);
+        printf("auto from the end %u: %08lx %d %d %d\n", cmd, hr, tr != NULL, s1 != NULL, s2 != NULL);
+        if (tr) { dump_trans(tr, st, 3); IDirectMusicSegment_Release(tr); }
+        if (s1) IDirectMusicSegmentState_Release(s1);
+        if (s2) IDirectMusicSegmentState_Release(s2);
+        if (ps) IDirectMusicSegmentState_Release(ps);
+        IDirectMusicComposer_Release(c2);
+        IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);
+        Sleep(100);
+    }
+    IDirectMusicPerformance8_CloseDown(pf);
+    IDirectMusicPerformance8_Release(pf);
+    for (int k = 0; k < 4; k++) if (seg[k]) IDirectMusicSegment_Release(seg[k]);
+    for (int k = 0; k < 3; k++) if (st[k]) IDirectMusicStyle8_Release(st[k]);
+    if (ca) IDirectMusicChordMap_Release(ca);
+    if (cb) IDirectMusicChordMap_Release(cb);
+    IDirectMusicComposer_Release(cp);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -304,6 +456,7 @@ int main(int argc, char **argv)
     IDirectMusicLoader8_SetSearchDirectory(ld, &GUID_DirectMusicAllTypes, dir, FALSE);
     if (argc > 1 && !strcmp(argv[1], "shape")) return shapes(ld);
     if (argc > 1 && !strcmp(argv[1], "change")) return change(ld);
+    if (argc > 1 && !strcmp(argv[1], "trans")) return trans(ld);
     if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
         IDirectMusicComposer *cp = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);

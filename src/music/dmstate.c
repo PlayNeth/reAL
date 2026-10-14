@@ -75,17 +75,14 @@ static int ss_outside(const dm_segstate *s, mtime_t t)
     return pos < 0 || s->length <= pos;
 }
 
-/* GetSegmentState 77304d68 / 77304c92: the primary segment state playing at music time t.  Among the finished
- * ones (list 6), the first that spans t, else the last that started by t; a playing one (list 3, then the queued
- * list 0) that has t inside it wins. */
+/* GetSegmentState 77304d68 / 77304c92: the primary segment state playing at music time t: a playing one (list 3)
+ * that has t inside it, else a finished one (list 6) whose span [start, last] has t, else a queued one (list 0) that
+ * has t inside it */
 dm_segstate *dm_perf_get_segstate(dm_perf *pf, mtime_t t)
 {
     dm_segstate *found = NULL;
-    for (dm_segstate *s = pf->lists[6]; s; s = s->lnext) {
-        if (t < s->mtstart) continue;
-        found = s;
-        if (!(s->mtlast < t)) break;
-    }
+    for (dm_segstate *s = pf->lists[6]; s; s = s->lnext)
+        if (s->mtstart <= t && !(s->mtlast < t)) { found = s; break; }
     for (dm_segstate *s = pf->lists[3]; s; s = s->lnext) if (!ss_outside(s, t)) return s;
     if (found) return found;
     for (dm_segstate *s = pf->lists[0]; s; s = s->lnext) if (!ss_outside(s, t)) return s;
