@@ -14,6 +14,8 @@
  * a track's Play uses the thread that plays (g_crnd) */
 static uint32_t *g_crnd;
 static int g_capp = 1;
+static int g_fixes = 1;
+void dmc_set_fixes(int on) { g_fixes = on; }
 static int cm_rand(void)
 {
     uint32_t *r = g_crnd ? g_crnd : dm_app_rand_state();
@@ -138,6 +140,8 @@ typedef struct creq {
     int16_t minchords, maxchords;   /* +0x28 +0x2a */
     int16_t activity;               /* +0x2c */
     int16_t f_short, f_long, f_many, f_few;    /* +0x2e +0x30 +0x32 +0x34 why paths failed */
+    dmc_next **path;                /* (fixes) the connection taken at each count, kept while searching */
+    int pathcap, pathend;           /* (fixes) its size; the count the path ended at */
 } creq;
 /* 77282f45: a copy (the names copied, the subchord lists shared) */
 static void req_copy(creq *d, const creq *s)
@@ -175,6 +179,8 @@ static int path_via(dmc_next *x, creq *R)
     R->count--; R->minsum -= x->minbeats; R->maxsum -= x->maxbeats;
     return ok;
 }
+/* (fixes) the connection taken from the entry at the path's current count */
+static void path_took(creq *R, dmc_next *x) { if (R->path && R->count >= 0 && R->count < R->pathcap) R->path[R->count] = x; }
 /* 77282817: from an entry to one that may end on the end chord, within the request's bounds; the path's connections
  * marked 2 (tried and failed: 4) */
 static int path_from(dmc_entry *e, creq *R)
@@ -185,18 +191,18 @@ static int path_from(dmc_entry *e, creq *R)
         if (R->count < R->minchords) R->f_few++;
         else if (R->maxsum < R->beats) R->f_long++;
         else if (R->beats < R->minsum) R->f_short++;
-        else { e->flags |= 0x10; return 1; }
+        else { e->flags |= 0x10; R->pathend = R->count; return 1; }
     }
     e->flags &= ~0x10u;
     if (R->reuse) R->reuse = R->reuse->next;
     if (R->reuse && R->reuse->chord && R->reuse->link) {
         dmc_next *x = R->reuse->link;
-        if (path_via(x, R)) { x->flags |= 2; e->flags |= 0x10; return 1; }
+        if (path_via(x, R)) { x->flags |= 2; e->flags |= 0x10; path_took(R, x); return 1; }
         x->flags |= 4;
         R->reuse = NULL;
     }
     for (dmc_next *x; (x = pick_next(e)); ) {
-        if (path_via(x, R)) { x->flags |= 2; e->flags |= 0x10; return 1; }
+        if (path_via(x, R)) { x->flags |= 2; e->flags |= 0x10; path_took(R, x); return 1; }
         x->flags |= 4;
     }
     return 0;
@@ -225,6 +231,13 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
     creq saved;
     memset(&saved, 0, sizeof(saved));
     req_copy(&saved, R);
+    /* (fixes) the connections taken, kept as the path is found */
+    int base = R->count;
+    R->path = NULL; R->pathcap = 0; R->pathend = -1;
+    if (g_fixes && R->maxchords >= 0) {
+        R->pathcap = R->maxchords + 1;
+        R->path = calloc((size_t)R->pathcap, sizeof(*R->path));
+    }
     dmc_entry *e = NULL;
     if (R->reuse && R->reuse_entry) {
         e = R->reuse_entry;
@@ -240,8 +253,11 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
             R->f_short = fs; R->f_long = fl; R->f_many = fm; R->f_few = ff;
             if (path_from(e, R)) break;
         }
-        if (!e) return 0;
+        if (!e) { free(R->path); R->path = NULL; return 0; }
     }
+    dmc_next **path = R->path;
+    int pathend = R->pathend;
+    R->path = NULL; R->pathcap = 0;
     cnode *n = calloc(1, sizeof(*n));
     int16_t k = 0;
     if (n) {
@@ -250,10 +266,29 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
         s->start = e;
         clist_append(&s->out, n);
     }
-    while (e) {
-        dmc_next *x = e->nexts;
-        for (; x && !(x->flags & 2); x = x->next) {}
-        if (!x) break;
+    /* the path is read back along the marked connections, the first marked one of each entry; when it came back to
+     * an entry, the marks can lead round a cycle for ever (Microsoft hangs there).  Fixed: such a path is followed
+     * as it was found instead */
+    int found = 0;
+    if (path) {
+        int ne = 0, steps = 0;
+        for (dmc_entry *q = entries; q; q = q->next) ne++;
+        for (dmc_entry *q = e; q; ) {
+            dmc_next *x = q->nexts;
+            for (; x && !(x->flags & 2); x = x->next) {}
+            if (!x) break;
+            if (++steps > ne) { found = 1; break; }
+            q = x->to;
+        }
+    }
+    for (int i = base; e; i++) {
+        dmc_next *x;
+        if (found) {
+            if (i >= pathend || !(x = path[i])) break;
+        } else {
+            for (x = e->nexts; x && !(x->flags & 2); x = x->next) {}
+            if (!x) break;
+        }
         cnode *m = calloc(1, sizeof(*m));
         if (m) {
             m->chord = &x->to->chord;
@@ -264,6 +299,7 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
         }
         e = x->to;
     }
+    free(path);
     return 1;
 }
 
@@ -1554,8 +1590,6 @@ static uint8_t scale_tonic(uint32_t scale, uint8_t key)
  * silence of each chord, its name and subchords; sorted by measure and beat), each chord replaced by the chord map's
  * palette chord on its root's degree in the old key (moved by the change of tonic when `trackscale`); the track
  * reloaded with the chord map's key and scale (dmstyle's Save writes no times: they come from the style's measure) */
-static int g_fixes = 1;
-void dmc_set_fixes(int on) { g_fixes = on; }
 
 int dmc_change_chordmap(dm_segment *seg, int trackscale, dmc_chordmap *cm)
 {

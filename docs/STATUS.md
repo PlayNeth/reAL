@@ -121,14 +121,39 @@ Doppler, and WASAPI output.
 - `tools/sty/cases.py` writes the cases. `tools/sty/cap.sh <case>` compares dmgt with test_perf; every case matches
   event for event. `tests/comcmp.sh styletest.exe` gives 927 lines and `stylecom.exe` gives 186, all identical.
 - Open: IDirectMusicPatternTrack (audition, used by Producer); GUID_Variations with play state and dmstyle's private
-  GetParams; chord regeneration (DMUS_SEGF... regenerate flags); the style's chordmap methods (stubs until dmcompos).
+  GetParams; chord regeneration (DMUS_SEGF... regenerate flags).
+
+**DirectMusic: chord maps and the composer** (`src/music/dmcompose.c`, `dmcomcmp.c`, `dmtheory.c`, from dmcompos)
+- Chord map files ('DMPR'): the chord palette, the chord graph (entries and their connections) and the
+  signposts with their cadences. IDirectMusicChordMap (GetScale) and the chord map, signpost and chord map
+  tracks, with their parameters, Clone and Save.
+- IDirectMusicComposer8: ComposeSegmentFromTemplate(Ex) (with and without activity), ComposeSegmentFromShape,
+  ComposeTemplateFromShape(Ex), ChangeChordMap (DMUS_CHORDMAPF_VERSION8 or the old transposition),
+  ComposeTransition and AutoTransition (embellishments, the transition's band, tempo, marker track and valid
+  starts). The path search, signpost choice, cadences, beat spreading and measure alignment follow Microsoft's,
+  rand() call for rand() call.
+- IDirectMusicSegment::Compose (the signpost track's Compose), with from and to segments (each track's Join;
+  time signature and marker tracks are not IDirectMusicTrack8, so joins with them fail as on Microsoft's).
+- Recomposing while playing: the signpost track recomposes at the start (DMUS_TRACKCONFIG_PLAY_COMPOSE) or on a
+  loop (DMUS_TRACKCONFIG_LOOP_COMPOSE) and sends GUID_NOTIFICATION_RECOMPOSE. The transport thread's rand() is
+  seeded from time() when it starts, as Microsoft's is, so these compose the same chords.
+- Microsoft's flaws fixed (off with REDM_NOFIXES):
+  - On a chord map with cycles, the path the search found is read back along its marks, which can lead round a
+    cycle for ever: Microsoft hangs. reDM follows the path as found when that happens (`c10.sgt`).
+  - ChangeChordMap drops the chord track's chord names, failing or not; reDM keeps them.
+- Not emulated: a missing "from" chord in ComposeTransition leaves stack contents in Microsoft's buffer; reDM
+  uses the default chord there (which is what the stack held in every test).
+- `python3 tools/sty/cases.py <dir> compose2` writes the chord maps, styles and templates. `tests/comcmp.sh
+  comptest.exe` with the templates (c1..c9, t1..t6) and the modes shape, change, trans, join and recomp, and
+  `cmapcom.exe` and `theorytest.exe`, all match.
+- Open: the performance does not yet start segments at valid start times (the marker track) when asked to with
+  the align or valid-start flags; transitions are built right, but play from the usual boundary.
 
 ## Remaining, in the agreed order
 
 1. Scripts (dmscript; needs an AudioVBScript interpreter)
-2. Chordmaps and the composer (dmcompos); styles are done but for the open items above
-3. Surround / CMSS
-4. EAX 5
+2. Surround / CMSS
+3. EAX 5
 
 Smaller items still open:
 - The sink object does not answer IDirectSoundSynthSink (Microsoft's private interface between dmusic and dsound).
@@ -178,3 +203,7 @@ Smaller items still open:
   - ALMOSTEND notification times.
   - First-chunk tempo note-offs in a few segments, including t_temple.
   - One wave-voice allocation interleave in a cloned wave segment.
+  - GetSegmentState right after a segment is played: whether the transport thread has started the state yet
+    (comtest sleeps before stopping to keep clear of it).
+  - Whether a segment's first Play happens in PlaySegmentEx or on the transport thread (which rand() a
+    recompose at the start uses); comptest's recomp mode starts its segments a second ahead to keep clear of it.

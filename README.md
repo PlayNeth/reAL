@@ -56,8 +56,7 @@ diffed line by line, and offline captures are compared event by event.
 | MIDI through winmm (midiOut, midiStream, MCI) for games that play General MIDI | ✅ |
 | Styles: style and motif tracks, the pattern chooser, variations, chord mapping, mute and pattern tracks | ✅ |
 | Chord maps and the composer: chord map, chord map and signpost tracks, ComposeSegmentFromTemplate, ComposeSegmentFromShape, ComposeTemplateFromShape, ChangeChordMap, Segment::Compose | ✅ |
-| Composer: ComposeTransition / AutoTransition | 🔧 in progress |
-| Composer: Segment::Compose with from/to segments, recomposing while a segment plays | ⏳ |
+| Composer: ComposeTransition / AutoTransition, Segment::Compose with from/to segments, recomposing while a segment plays | ✅ |
 | Scripts (dmscript, AudioVBScript) | ⏳ |
 
 As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REDM_NOFIXES` in the environment
@@ -127,8 +126,8 @@ MIDI output for games that play General MIDI through winmm. `reAL.ini.example` h
 4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ (src/alrv*.c)
 5. ~~EAX 4: FX slots, sends, all 12 effects~~ (src/eax4dsp.c)
 6. ~~DirectSound effects (SetFX)~~ (src/fx.c, src/dsfx.c, src/i3dl2.c)
-7. reDM, reAL's own DirectMusic (src/music/): playback, synth, audiopaths, tools and styles done; the composer
-   nearly done; scripts next
+7. reDM, reAL's own DirectMusic (src/music/): playback, synth, audiopaths, tools, styles and the composer done;
+   scripts next
 8. Last: CMSS-3D upmix and speaker configs > 2.0, then EAX 5
 
 ## Repo layout

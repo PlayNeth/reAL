@@ -357,9 +357,9 @@ def case_compose(out, seed=15):
             'cmap2.cdm': cmap1('cmap2', '8f6d1a10-0006-4000-8000-000000000002', loadname='Second Map'),
             'compsty.sty': st.build(), 'template.sgt': seg.build()}
 
-def cmap_dag(name, guid, seed, layers=10, width=3, scale=0x00ab5ab5, flags=1, holes=()):
-    """a layered chord map (connections only go deeper, so no path comes back to an entry), with signposts and
-    cadences for the common chords"""
+def cmap_dag(name, guid, seed, layers=10, width=3, scale=0x00ab5ab5, flags=1, holes=(), back=0.0):
+    """a layered chord map (connections only go deeper, so no path comes back to an entry, unless `back` adds
+    connections to earlier layers: cycles), with signposts and cadences for the common chords"""
     import random
     R = random.Random(seed)
     sc = CMAJ_SCALE
@@ -384,6 +384,7 @@ def cmap_dag(name, guid, seed, layers=10, width=3, scale=0x00ab5ab5, flags=1, ho
         for e in layer_ids[L]:
             targets = R.sample(layer_ids[L + 1], min(len(layer_ids[L + 1]), R.choice([1, 2, 3])))
             if L + 2 < layers and R.random() < 0.3: targets.append(R.choice(layer_ids[L + 2]))
+            if back and L and R.random() < back: targets.append(R.choice(layer_ids[R.randrange(L)]))
             for t in targets:
                 mn = R.choice([1, 1, 2])
                 ents[e][3].append((0, R.randrange(1, 60), mn, mn + R.choice([0, 1, 2, 3]), ents[t][1]))
@@ -473,6 +474,12 @@ def case_compose2(out, seed=16):
     sh3.pattern('end', measures=1, embellish=8).partref(p, pchannel=0)
     sh3.bands.append(band('8f6d1a10-0005-4000-8000-000000000012', 'Default Band', [(0, 0x000005, 90, 64, None)]))
     files['shapesty3.sty'] = sh3.build()
+    # chord maps with cycles: on cmapg's the paths come back to entries but Microsoft's composer gets through; on
+    # cmaph's it reads a path back round a cycle for ever (c10: reDM only, with its fixes)
+    files['cmapg.cdm'] = cmap_dag('cmapg', '8f6d1a10-0006-4000-8000-000000000010', 107, layers=6, back=0.9)
+    files['c9.sgt'] = comp_template('c9', '8f6d1a10-1000-4000-8000-00000000004f', random.Random(7), 16, 'compsty', [(0, 'cmapg')], spconfig=0x238)
+    files['cmaph.cdm'] = cmap_dag('cmaph', '8f6d1a10-0006-4000-8000-000000000011', 100, layers=6, back=0.9)
+    files['c10.sgt'] = comp_template('c10', '8f6d1a10-1000-4000-8000-000000000050', random.Random(0), 16, 'compsty', [(0, 'cmaph')], spconfig=0x238)
     return files
 
 CASES = {'compose2': case_compose2, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
