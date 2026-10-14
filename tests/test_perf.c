@@ -1,4 +1,4 @@
-/* test_perf <segment.sgt> <out.log> <ms> [flags]: play a segment through reAL-Music's performance with the threads
+/* test_perf <segment.sgt> <out.log> <ms> [flags]: play a segment through reDM's performance with the threads
  * scheduled in virtual time the way tools/dmgt (DMGT_VTIME=1) schedules Microsoft's, and log every event handed to
  * the port as "<rt> <group> <bytes>" (same format as dmgt perf). */
 #include "../src/music/dmperf.h"

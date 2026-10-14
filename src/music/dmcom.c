@@ -1,4 +1,4 @@
-/* reAL-Music: the DirectMusic COM objects a game creates (dmloader/dmime/dmusic classes), backed by the ported
+/* reDM: the DirectMusic COM objects a game creates (dmloader/dmime/dmusic classes), backed by the ported
  * performance engine.  Covers what DirectMusic games built on segments use: the loader (files, memory, streams, the
  * default GM collection), the performance (Init/InitAudio, standard audiopaths, PlaySegment(Ex), Stop(Ex), IsPlaying,
  * time conversion, global and track parameters, messages and notifications), segments, segment states and audiopaths
@@ -19,7 +19,7 @@
 #include <mmreg.h>
 #include <msacm.h>
 
-/* methods reAL-Music does not implement: logged, so a game that relies on one shows up in reAL.log */
+/* methods reDM does not implement: logged, so a game that relies on one shows up in reAL.log */
 static HRESULT rm_notimpl(const char *fn)
 {
     LOG_INFO("music: %s not implemented", fn);
@@ -230,7 +230,7 @@ static HRESULT WINAPI dmu_enumport(IDirectMusic8 *i, DWORD n, LPDMUS_PORTCAPS c)
     c->dwMemorySize = DMUS_PC_SYSTEMMEMORY;
     c->dwMaxChannelGroups = 1000; c->dwMaxVoices = 1000; c->dwMaxAudioChannels = 2;
     c->dwEffectFlags = DMUS_EFFECT_REVERB;
-    lstrcpyW(c->wszDescription, L"reAL-Music Synthesizer");
+    lstrcpyW(c->wszDescription, L"reDM Synthesizer");
     return S_OK;
 }
 static HRESULT WINAPI dmu_createbuffer(IDirectMusic8 *i, LPDMUS_BUFFERDESC d, LPDIRECTMUSICBUFFER *b, LPUNKNOWN o) { return rm_notimpl(__func__); }
@@ -1101,13 +1101,13 @@ static HRESULT WINAPI seg_gettrackgroup(IDirectMusicSegment8 *i, IDirectMusicTra
     return DMUS_E_NOT_FOUND;
 }
 /* 773131cb / 77311b2c InsertTrack: config DMUS_TRACKCONFIG_DEFAULT, position and priority 0, in track order; the track
- * takes the segment's notification types.  Only reAL-Music's own tracks can go in. */
+ * takes the segment's notification types.  Only reDM's own tracks can go in. */
 static HRESULT WINAPI seg_inserttrack(IDirectMusicSegment8 *i, IDirectMusicTrack *t, DWORD g)
 {
     if (!t || IsBadReadPtr(t, sizeof(void *))) return E_POINTER;
     if (!g) return E_INVALIDARG;
     rm_track *r = unsafe_track((IUnknown *)t);
-    if (!r) return rm_notimpl("Segment::InsertTrack (a track not made by reAL-Music)");
+    if (!r) return rm_notimpl("Segment::InsertTrack (a track not made by reDM)");
     dm_segment *s = sgm(i)->seg;
     if (!s) return DMUS_E_NOT_INIT;
     dm_host *h = any_host();
@@ -3352,7 +3352,7 @@ static IDirectMusicLoader8Vtbl ld_vtbl = { ld_qi, ld_addref, ld_release, ld_geto
     ld_cacheobj, ld_releaseobj, ld_clearcache, ld_enablecache, ld_enum, ld_gc, ld_releasebyunk, ld_loadfile };
 
 /* ------------------------------------------------------------------ class creation */
-/* test hooks: REAL_MUSIC_TIME fixes time() for the rand() seeds (as tests do to Microsoft's DLLs); REAL_MUSIC_RANDLOG
+/* test hooks: REDM_TIME fixes time() for the rand() seeds (as tests do to Microsoft's DLLs); REDM_RANDLOG
  * logs the application thread's rand() calls */
 static long g_fixtime;
 static long fixed_time(void) { return g_fixtime; }
@@ -3364,8 +3364,8 @@ static void test_hooks(void)
     char b[MAX_PATH];
     if (done) return;
     done = 1;
-    if (GetEnvironmentVariableA("REAL_MUSIC_TIME", b, sizeof(b))) { g_fixtime = strtol(b, NULL, 0); dm_set_time_source(fixed_time); }
-    if (GetEnvironmentVariableA("REAL_MUSIC_RANDLOG", b, sizeof(b)) && (g_randlog = fopen(b, "w"))) dm_rand_hook = randlog;
+    if (GetEnvironmentVariableA("REDM_TIME", b, sizeof(b))) { g_fixtime = strtol(b, NULL, 0); dm_set_time_source(fixed_time); }
+    if (GetEnvironmentVariableA("REDM_RANDLOG", b, sizeof(b)) && (g_randlog = fopen(b, "w"))) dm_rand_hook = randlog;
 }
 
 HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)

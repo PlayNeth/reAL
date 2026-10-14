@@ -1,7 +1,7 @@
 /* mc2sim <dir> <segment.sgt> [ms] [segment2.sgt]: drives DirectMusic the way Midnight Club II does (shared
  * stereo+reverb InitAudio, four standard audiopaths, SetSearchDirectory + LoadObjectFromFile, Download,
  * PlaySegmentEx 0x280 on an audiopath, volume changes, IsPlaying polling, Stop + StopEx x2, CloseDown).
- * Run next to reAL's dsound.dll with music=true to exercise reAL-Music. */
+ * Run next to reAL's dsound.dll with music=true to exercise reDM. */
 #define COBJMACROS
 #include <windows.h>
 #include <dmusici.h>

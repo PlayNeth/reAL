@@ -1,4 +1,4 @@
-/* reAL-Music: the chord, command and mute tracks' parameters and Play (dmstyle), included by dmtrack.c.
+/* reDM: the chord, command and mute tracks' parameters and Play (dmstyle), included by dmtrack.c.
  * Their data and loading are in dmstyload.c. */
 #include "dmsty.h"
 #include "dmcomp.h"

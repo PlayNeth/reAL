@@ -1,4 +1,4 @@
-/* reAL-Music: audiopath configurations, see dmapcfg.h.
+/* reDM: audiopath configurations, see dmapcfg.h.
  *
  * The 'DMAP' form (dmime 773204da):
  *   'guid' 'vers' 'catg' 'date', LIST 'UNFO' ('UNAM')  the descriptor

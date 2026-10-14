@@ -35,10 +35,10 @@ typedef struct rl_config {
     int  hrtf_mode;             /* 0 off, 1 auto (use reAL_hrtf.bin if found) */
     char hrtf_path[MAX_PATH];   /* explicit file, overrides the search */
     int  resampler;             /* RL_INTERP_* (default sinc) */
-    int  music;                 /* reAL-Music: serve DirectMusic (loader/performance) ourselves */
+    int  music;                 /* reDM: serve DirectMusic (loader/performance) ourselves */
     char gm_dls[MAX_PATH];      /* custom GM collection; "" = the system's gm.dls */
     int  midi_trace;            /* log the game's winmm MIDI / MCI calls */
-    int  midi;                  /* reAL-Music GM Synth as the MIDI mapper / an extra MIDI output */
+    int  midi;                  /* reDM GM Synth as the MIDI mapper / an extra MIDI output */
     int  midi_rate;             /* its sample rate */
     int  midi_reverb;           /* reverb send (CC91) through the Waves reverb */
 } rl_config;

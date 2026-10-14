@@ -1,4 +1,4 @@
-/* reAL-Music: chord maps and the chord map and signpost tracks (dmcompos: loading, parameters, Clone, Save).
+/* reDM: chord maps and the chord map and signpost tracks (dmcompos: loading, parameters, Clone, Save).
  * The addresses are XP dmcompos's. */
 #include "dmcomp.h"
 #include "dmsty.h"      /* dms_msort */

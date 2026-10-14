@@ -1,4 +1,4 @@
-/* reAL-Music: internal data structures of the DirectMusic performance port (dmime.dll / dmband.dll, DirectX 9 5.3.x).
+/* reDM: internal data structures of the DirectMusic performance port (dmime.dll / dmband.dll, DirectX 9 5.3.x).
  *
  * The objects mirror Microsoft's: performance messages (pmsgs) with their queues, segments with their tracks, segment
  * states, bands.  Field comments give the original offsets where code depends on them.  All MUSIC_TIME values are int32

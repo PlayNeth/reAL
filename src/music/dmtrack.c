@@ -1,4 +1,4 @@
-/* reAL-Music: track playback (included by dmperf.c).  Sequence track 7731a0b4, tempo track 7731c274, time signature
+/* reDM: track playback (included by dmperf.c).  Sequence track 7731a0b4, tempo track 7731c274, time signature
  * track 7731d59e (dmime), band track 7720211c (dmband). */
 
 #define TF_SEEK 1

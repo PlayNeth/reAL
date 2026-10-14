@@ -1,4 +1,4 @@
-/* reAL-Music: the composer's chord composition (dmcompos 772873cd and below): signposts and commands into steps, a
+/* reDM: the composer's chord composition (dmcompos 772873cd and below): signposts and commands into steps, a
  * chord map signpost chosen for each, and between each two a path through the chord map's connections, its chords
  * spread over the beats and aligned to measures.  The result is written as a chord track ('cord') the way dmcompos
  * writes it for dmstyle to load.  The addresses are XP dmcompos's; the shapes of its structures are kept. */

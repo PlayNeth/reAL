@@ -48,7 +48,7 @@ HMODULE rl_real_dsound(void)
 
 #define REAL_PROC(name) (rl_real_dsound() ? (void *)GetProcAddress(rl_real_dsound(), name) : NULL)
 
-/* ---------------------------------------------------------------- reAL-Music: COM hooks
+/* ---------------------------------------------------------------- reDM: COM hooks
  * DirectMusic is a set of COM servers, so a game gets it from CoCreateInstance (or CoCreateInstanceEx /
  * CoGetClassObject).  With music enabled those functions are hot-patched in ole32/combase themselves, so every
  * caller is covered (protected executables, dynamic lookups, other DLLs), and the DirectMusic classes reAL
@@ -64,7 +64,7 @@ static HRESULT WINAPI hook_cocreate(REFCLSID clsid, LPUNKNOWN outer, DWORD ctx, 
 {
     if (clsid && rm_handles(clsid)) {
         char gb[64];
-        LOG_CALL("CoCreateInstance(%s): reAL-Music", rl_guid_str(clsid, gb));
+        LOG_CALL("CoCreateInstance(%s): reDM", rl_guid_str(clsid, gb));
         if (!out) return E_POINTER;
         *out = NULL;
         if (outer) return CLASS_E_NOAGGREGATION;
@@ -77,7 +77,7 @@ static HRESULT WINAPI hook_cocreateex(REFCLSID clsid, IUnknown *outer, DWORD ctx
 {
     if (clsid && rm_handles(clsid) && n && qi) {
         char gb[64];
-        LOG_CALL("CoCreateInstanceEx(%s): reAL-Music", rl_guid_str(clsid, gb));
+        LOG_CALL("CoCreateInstanceEx(%s): reDM", rl_guid_str(clsid, gb));
         if (outer) return CLASS_E_NOAGGREGATION;
         IUnknown *u = NULL;
         HRESULT hr = rm_create(clsid, &IID_IUnknown, (void **)&u);
@@ -123,7 +123,7 @@ static HRESULT WINAPI hook_cogetclass(REFCLSID clsid, DWORD ctx, COSERVERINFO *s
 {
     if (clsid && rm_handles(clsid)) {
         char gb[64];
-        LOG_CALL("CoGetClassObject(%s): reAL-Music", rl_guid_str(clsid, gb));
+        LOG_CALL("CoGetClassObject(%s): reDM", rl_guid_str(clsid, gb));
         if (!out) return E_POINTER;
         *out = NULL;
         rm_factory *f = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*f));
@@ -229,7 +229,7 @@ void rl_music_hook(int can_load)
             return;
         }
         mine = m;
-        /* reAL-Music's threads, objects and COM hooks live in this module: games that FreeLibrary dsound.dll when
+        /* reDM's threads, objects and COM hooks live in this module: games that FreeLibrary dsound.dll when
          * they release DirectSound (Midnight Club II does) must not unload it under them */
         HMODULE pin;
         if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_music_hook, &pin))
@@ -421,9 +421,9 @@ static IClassFactoryVtbl cf_vtbl = { cf_QueryInterface, cf_AddRef, cf_Release, c
 static rl_factory s_cf_ds  = { { &cf_vtbl }, FALSE };
 static rl_factory s_cf_ds8 = { { &cf_vtbl }, TRUE };
 
-/* ---------------------------------------------------------------- reAL-Music as a registered COM server
+/* ---------------------------------------------------------------- reDM as a registered COM server
  * A game that creates DirectMusic before anything loads dsound.dll (or never loads it from its own folder) is out of
- * reach of the COM hooks.  For those, a copy of reAL (reAL-music.dll) can be registered as the DirectMusic classes'
+ * reach of the COM hooks.  For those, a copy of reAL (reDM.dll) can be registered as the DirectMusic classes'
  * server with regsvr32; it then serves them where music is enabled for the game, and elsewhere hands the request to
  * the server that was registered before it (normally Windows' dmloader/dmime/dmusic), so other programs are unaffected. */
 static const CLSID s_CLSID_DirectSoundWave = { 0x8a667154, 0xf9cb, 0x11d2, { 0xad, 0x8a, 0x00, 0x60, 0xb0, 0x57, 0x5a, 0xbc } };

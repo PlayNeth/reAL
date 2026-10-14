@@ -1,5 +1,5 @@
 """dlcanon.py <dl.bin>: canonical text of captured synth download buffers (everything the synth reads; offsets,
-extension chunks and copyright strings left out), for comparing dmusic's downloads with reAL-Music's"""
+extension chunks and copyright strings left out), for comparing dmusic's downloads with reDM's"""
 import sys, struct, hashlib
 d = open(sys.argv[1], 'rb').read()
 p = 0

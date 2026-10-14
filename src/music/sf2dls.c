@@ -1,4 +1,4 @@
-/* reAL-Music: SoundFont 2 -> DLS Level 2.
+/* reDM: SoundFont 2 -> DLS Level 2.
  *
  * A soundfont is rewritten as a DLS collection in memory and then loaded like any DLS file, so the synth and the
  * download path stay the ones verified against Microsoft's.  Each preset becomes an instrument (bank 128 = the

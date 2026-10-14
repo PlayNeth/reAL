@@ -1,5 +1,5 @@
 #!/bin/sh
-# capperf.sh tag segment ms flags stop_ms next_ms segment2: capture dmime (dmgt perf) and reAL-Music (test_perf) event
+# capperf.sh tag segment ms flags stop_ms next_ms segment2: capture dmime (dmgt perf) and reDM (test_perf) event
 # streams for a segment, optionally stopped (Stop, StopEx x2 as MC2) and followed by a second segment, and compare them.
 # cap2.sh tag seg ms flags stopms nextms seg2
 tag=$1; n=$2; ms=$3; fl=$4; st=$5; nx=$6; n2=$7

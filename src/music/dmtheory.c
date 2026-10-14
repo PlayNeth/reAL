@@ -1,4 +1,4 @@
-/* reAL-Music: music values (dmime's MusicToMIDI / MIDIToMusic), translated from XP dmime's code (77307a02..773086a0).
+/* reDM: music values (dmime's MusicToMIDI / MIDIToMusic), translated from XP dmime's code (77307a02..773086a0).
  * The helpers take some arguments in registers in the original; they keep its byte and word arithmetic, its signed
  * remainders and its shift counts (taken modulo 32, as x86 does). */
 #include "dmtheory.h"

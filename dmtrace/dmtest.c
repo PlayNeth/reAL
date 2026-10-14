@@ -1,4 +1,4 @@
-/* dmtest - plays test.mid through DirectMusic (for dmtrace / reAL-Music) */
+/* dmtest - plays test.mid through DirectMusic (for dmtrace / reDM) */
 #define COBJMACROS
 #include <windows.h>
 #include <dmusici.h>

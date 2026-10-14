@@ -1,4 +1,4 @@
-/* reAL-Music: the style track's playback (dmstyle CStyleTrack / StyleTrackState on PatternTrackState), included by
+/* reDM: the style track's playback (dmstyle CStyleTrack / StyleTrackState on PatternTrackState), included by
  * dmstytrack.c.  The addresses are XP dmstyle's (5.3.2600.5512); docs/dmstyle_notes.md has the layouts.
  *
  * Every Play picks the patterns (the style's pattern chooser 7740b74f, by the command track's groove and embellishment

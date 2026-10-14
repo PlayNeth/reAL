@@ -1,5 +1,5 @@
 /* test_sf2 <bank.sf2|.dls> <script.txt> <out.wav> [rate]: renders a MIDI script ("ms status d1 d2" per line) with
- * reAL-Music's synth, every instrument of the bank downloaded (SF2 banks go through the DLS conversion) */
+ * reDM's synth, every instrument of the bank downloaded (SF2 banks go through the DLS conversion) */
 #include "../src/music/dmdls.h"
 #include "../src/music/msynth.h"
 #include "../src/music/sf2dls.h"

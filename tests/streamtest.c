@@ -1,4 +1,4 @@
-/* streamtest: midiStream on the MIDI mapper (reAL-Music GM Synth with midi=true): two buffers, 480 PPQN, a tempo
+/* streamtest: midiStream on the MIDI mapper (reDM GM Synth with midi=true): two buffers, 480 PPQN, a tempo
  * change with MEVT_F_CALLBACK, position polling, pause / restart, stop, close.  Expected notes: C4 at 0 ms (500 ms
  * long), E4 at 500 ms (250 ms, tempo doubled), G4 at 750 ms, C5 after a 300 ms pause at ~1300 ms. */
 #include <windows.h>

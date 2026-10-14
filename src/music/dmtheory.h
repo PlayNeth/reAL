@@ -1,4 +1,4 @@
-/* reAL-Music: DirectMusic's music values, as dmime converts them (IDirectMusicPerformance8::MusicToMIDI 773085af,
+/* reDM: DirectMusic's music values, as dmime converts them (IDirectMusicPerformance8::MusicToMIDI 773085af,
  * MIDIToMusic 773082a6) and the chord analysis dmstyle builds on. */
 #ifndef REAL_DMTHEORY_H
 #define REAL_DMTHEORY_H

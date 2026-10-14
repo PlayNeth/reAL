@@ -1,4 +1,4 @@
-/* reAL-Music: the synth port object (IDirectMusicPort, IDirectMusicPortDownload, IKsControl) and the sink object,
+/* reDM: the synth port object (IDirectMusicPort, IDirectMusicPortDownload, IKsControl) and the sink object,
  * as an application meets them through an audiopath's port and sink stages and Performance::PChannelInfo.  The port
  * is the performance's one synth port ("Microsoft Synthesizer", dmusic's CDirectMusicSynthPort); what it reports is
  * what tests/porttest.c finds on Windows.  Downloads go through the performance, not the port. */
@@ -73,7 +73,7 @@ static HRESULT WINAPI dp_PlayBuffer(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b)
     rm_port *p = pt(i);
     if (!b) return E_POINTER;
     if (!p->host) return DMUS_E_NOT_INIT;
-    /* the buffer's events, played now (reAL-Music hands out no buffers of its own; an application's works) */
+    /* the buffer's events, played now (reDM hands out no buffers of its own; an application's works) */
     IDirectMusicBuffer_ResetReadPtr(b);
     REFERENCE_TIME t; DWORD g, len; BYTE *d;
     while (IDirectMusicBuffer_GetNextEvent(b, &t, &g, &len, &d) == S_OK) dm_host_midi(p->host, d, len);

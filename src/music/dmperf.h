@@ -1,4 +1,4 @@
-/* reAL-Music performance engine: a port of DirectMusic's performance (dmime.dll + dmband.dll, DirectX 9 5.3.x).
+/* reDM performance engine: a port of DirectMusic's performance (dmime.dll + dmband.dll, DirectX 9 5.3.x).
  *
  * The engine is single-threaded and driven from outside: the host runs dm_perf_transport() and dm_perf_realtime()
  * the way dmime's transport and realtime threads run (each returns how long its thread would wait), wakes them

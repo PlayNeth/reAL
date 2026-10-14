@@ -1,4 +1,4 @@
-/* reAL-Music: the chord map object (dmcompos CDMChordMap 77288f66), included by dmcom.c.
+/* reDM: the chord map object (dmcompos CDMChordMap 77288f66), included by dmcom.c.
  * IDirectMusicChordMap8 on dmc_chordmap (dmcomp.c). */
 #include "dmcomp.h"
 
@@ -258,7 +258,7 @@ static HRESULT WINAPI cpo_fromtemplate(IDirectMusicComposer *i, IDirectMusicStyl
     if (!t || !t->seg) return E_INVALIDARG;
     struct dms_style *sx = style ? style_engine_of(style) : NULL;
     dmc_chordmap *mx = cm ? chordmap_engine_of(cm) : NULL;
-    if ((style && !sx) || (cm && !mx)) return rm_notimpl("Composer: a style or chord map not made by reAL-Music");
+    if ((style && !sx) || (cm && !mx)) return rm_notimpl("Composer: a style or chord map not made by reDM");
     dm_host *h = any_host();
     if (h) dm_host_lock(h);
     int hr;
@@ -280,7 +280,7 @@ static HRESULT WINAPI cpo_fromshape(IDirectMusicComposer *i, IDirectMusicStyle *
     if (IsBadWritePtr(s, 4) || IsBadWritePtr(cm, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
     struct dms_style *sx = style_engine_of(s);
     dmc_chordmap *mx = chordmap_engine_of(cm);
-    if (!sx || !mx) return rm_notimpl("Composer: a style or chord map not made by reAL-Music");
+    if (!sx || !mx) return rm_notimpl("Composer: a style or chord map not made by reDM");
     IDirectMusicStyle8 *s8 = (IDirectMusicStyle8 *)s;
     DWORD mn, len;
     int introlen = 1, fill = 1, brk = 1, endlen = 1;
@@ -343,7 +343,7 @@ static HRESULT WINAPI cpo_changechordmap(IDirectMusicComposer *i, IDirectMusicSe
     if (IsBadWritePtr(s, 4) || IsBadWritePtr(cm, 4)) return E_POINTER;
     rm_segment *t = unsafe_segment((IUnknown *)s);
     dmc_chordmap *mx = chordmap_engine_of(cm);
-    if (!t || !mx) return rm_notimpl("Composer::ChangeChordMap (a segment or chord map not made by reAL-Music)");
+    if (!t || !mx) return rm_notimpl("Composer::ChangeChordMap (a segment or chord map not made by reDM)");
     if (!t->seg) return DMUS_E_NOT_FOUND;
     dm_host *h = any_host();
     if (h) dm_host_lock(h);
@@ -362,7 +362,7 @@ static HRESULT composer_create(REFIID riid, void **out)
     o->IDirectMusicComposer_iface.lpVtbl = &cpo_vtbl;
     o->ref = 1;
     dm_style_srand();
-    dmc_set_fixes(!GetEnvironmentVariableA("REAL_MUSIC_NOFIXES", NULL, 0));
+    dmc_set_fixes(!GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0));
     HRESULT hr = cpo_qi(&o->IDirectMusicComposer_iface, riid, out);
     cpo_release(&o->IDirectMusicComposer_iface);
     return hr;

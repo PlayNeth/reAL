@@ -1,4 +1,4 @@
-/* reAL-Music: the tool graph (dmime's CGraph, vtables 0x77301194 / 0x77301174 / 0x7730115c / 0x7730114c).
+/* reDM: the tool graph (dmime's CGraph, vtables 0x77301194 / 0x77301174 / 0x7730115c / 0x7730114c).
  *
  * A graph is an ordered list of tools.  StampPMsg moves a message on to the next tool after its pTool that takes the
  * message's type on its PChannel, and sets the message's delivery from that tool; after the last one it answers

@@ -1,4 +1,4 @@
-/* reAL-Music: segment file (.sgt, RIFF 'DMSG') loading: the segment header and the sequence, tempo, time signature
+/* reDM: segment file (.sgt, RIFF 'DMSG') loading: the segment header and the sequence, tempo, time signature
  * and band tracks, kept in the forms the original track objects keep them (dmime CSeqTrack/CTempoTrack/CTimeSigTrack
  * Load, dmband CBandTrack/CBand Load).  Other tracks (chord, command, ...) are kept as placeholders for track order. */
 #include "dmi.h"

@@ -1,4 +1,4 @@
-/* reAL-Music performance engine, a port of dmime.dll's CPerformance/CSegmentState and the sequence, tempo, time
+/* reDM performance engine, a port of dmime.dll's CPerformance/CSegmentState and the sequence, tempo, time
  * signature and band tracks (dmime/dmband, DirectX 9 5.3.x).  See dmperf.h.
  *
  * Comments give the original function addresses (dmime image base 0x77300000, dmband 0x77200000) and offsets.  The

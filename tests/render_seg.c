@@ -1,4 +1,4 @@
-/* render_seg <segment.sgt> <out.wav> <seconds> [flags]: play a segment through reAL-Music offline (performance,
+/* render_seg <segment.sgt> <out.wav> <seconds> [flags]: play a segment through reDM offline (performance,
  * DLS downloads, msynth) and write what DirectMusic's shared stereo+reverb audiopath plays: the dry stereo buses plus
  * the reverb send through the Waves reverb (default parameters).  DLS files are looked up next to the segment.
  * RS_DRY=1: dry only. */

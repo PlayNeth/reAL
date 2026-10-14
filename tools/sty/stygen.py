@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """stygen.py: write DirectMusic styles (.sty, the 'DMST' form) and segments (.sgt) that play them, for comparing
-reAL-Music's style engine with Microsoft's dmstyle.  The structures follow dmusicf.h (pack 2 where it says so).
+reDM's style engine with Microsoft's dmstyle.  The structures follow dmusicf.h (pack 2 where it says so).
 
 Used as a module by the scenario scripts (tools/sty/cases.py); everything is plain data:
 

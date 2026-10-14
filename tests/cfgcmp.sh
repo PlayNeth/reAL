@@ -1,6 +1,6 @@
 #!/bin/sh
 # cfgcmp.sh [config...]: tests/cfgtest.c's configurations one at a time (Microsoft's sink does not always recover
-# from a failed one) under Microsoft's DirectMusic and reAL-Music, through comcmp.sh with the probe DMO's logs.
+# from a failed one) under Microsoft's DirectMusic and reDM, through comcmp.sh with the probe DMO's logs.
 # The port and sink stages are compared too (the port objects of src/music/dmport.c).
 cd "$(dirname "$0")/.." || exit 1
 D=${COMCMP_DIR:-/tmp/real/sp/cfg}

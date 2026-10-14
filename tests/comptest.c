@@ -1,6 +1,6 @@
 /* comptest: the composer (IDirectMusicComposer8) on the compose case (tools/sty/cases.py compose: cmap1.cdm, cmap2.cdm,
  * compsty.sty, template.sgt in the current directory).  time() is fixed in dmcompos, dmstyle and dmime (their
- * srand(time(NULL)) seeds) by patching their imports; reAL-Music takes REAL_MUSIC_TIME.  COMP_RANDLOG=<file> logs
+ * srand(time(NULL)) seeds) by patching their imports; reDM takes REDM_TIME.  COMP_RANDLOG=<file> logs
  * dmcompos's rand() calls with their callers. */
 #define COBJMACROS
 #define INITGUID

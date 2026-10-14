@@ -1,4 +1,4 @@
-/* reAL-Music: DLS collections (Level 1 and 2) and the instrument downloads dmusic.dll builds from them for a
+/* reDM: DLS collections (Level 1 and 2) and the instrument downloads dmusic.dll builds from them for a
  * software synth (DMUS_DOWNLOADINFO buffers: one per wave, one INSTRUMENT2 per instrument). */
 #ifndef REAL_DMDLS_H
 #define REAL_DMDLS_H

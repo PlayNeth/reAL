@@ -1,4 +1,4 @@
-/* reAL-Music: the wave track (included by dmperf.c): dmime's CWavTrack (DirectX 9 5.3.x).
+/* reDM: the wave track (included by dmperf.c): dmime's CWavTrack (DirectX 9 5.3.x).
  *
  * Init 77326edc (item order: dmseg.c), InitPlay 77327312, EndPlay 77326fda, Play/PlayEx 77325abd, variations
  * 77324677 / 773250ea / 773242a8, downloads 7732664a / 77326958 (the process-wide download list 7732d4f0 is kept per

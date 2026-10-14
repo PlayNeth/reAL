@@ -1,4 +1,4 @@
-/* reAL-Music host (Windows): one performance with its synth, the transport and realtime threads, and a sink that
+/* reDM host (Windows): one performance with its synth, the transport and realtime threads, and a sink that
  * renders the synth into reAL's own buffers, as DirectMusic's default audiopath (shared stereo + Waves reverb)
  * plays it through DirectSound. */
 #ifndef REAL_DMHOST_H

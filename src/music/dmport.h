@@ -1,4 +1,4 @@
-/* reAL-Music: the synth port object and the sink object (see dmport.c) */
+/* reDM: the synth port object and the sink object (see dmport.c) */
 #ifndef REAL_DMPORT_H
 #define REAL_DMPORT_H
 #include <windows.h>

@@ -1,4 +1,4 @@
-/* reAL-Music: SoundFont 2 banks, converted to DLS Level 2 (see sf2dls.c) */
+/* reDM: SoundFont 2 banks, converted to DLS Level 2 (see sf2dls.c) */
 #ifndef REAL_SF2DLS_H
 #define REAL_SF2DLS_H
 #include <stddef.h>

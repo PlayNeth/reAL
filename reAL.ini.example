@@ -35,15 +35,15 @@ logeax=false
 ; realdsound= at Microsoft's dsound.dll for those games (confirmed with Midnight Club II).
 ; disabledirectmusic=true refuses them, as in ALchemy.
 
-; reAL-Music: reAL's own DirectMusic (loader, performance, segments, DLS synth, Waves reverb), played
+; reDM: reAL's own DirectMusic (loader, performance, segments, DLS synth, Waves reverb), played
 ; through reAL instead of Microsoft's DirectMusic. Needs nothing from Microsoft except the GM collection.
 ;music=true
 ; Segments (.sgt) and MIDI files (.mid) both play. reAL takes over DirectMusic when the game loads
 ; dsound.dll, which nearly every game does before it starts its music. For a game that creates DirectMusic
-; first (or never loads dsound.dll from its folder): copy dsound.dll to reAL-music.dll, anywhere, and run
-;   regsvr32 /s C:\path\to\reAL-music.dll        (under Wine: wine regsvr32 /s ...)
+; first (or never loads dsound.dll from its folder): copy dsound.dll to reDM.dll, anywhere, and run
+;   regsvr32 /s C:\path\to\reDM.dll        (under Wine: wine regsvr32 /s ...)
 ; That makes it DirectMusic's server for the whole Wine prefix (or Windows install). Games with music=true
-; get reAL-Music, and every other program is handed on to the DirectMusic that was registered before.
+; get reDM, and every other program is handed on to the DirectMusic that was registered before.
 ; regsvr32 /u undoes it. A Wine update re-registers Wine's own DirectMusic; run it again after one.
 ; GM instrument collection: by default DirectMusic's own gm.dls (registry GMFilePath, else
 ; system32\drivers\gm.dls, also outside WOW64 redirection, then the game's folder). Point this at another
@@ -51,7 +51,7 @@ logeax=false
 ; Under Wine a Linux path works too (gmdls=/home/me/SoundFonts/bank.sf2).
 ;gmdls=D:\Sound\MyGM.dls
 ; MIDI music (games that play General MIDI through Windows' MIDI API, e.g. Claw): midi=true adds the
-; "reAL-Music GM Synth" output and makes it the MIDI mapper, so the game's music plays through reAL with
+; "reDM GM Synth" output and makes it the MIDI mapper, so the game's music plays through reAL with
 ; the GM collection above (gm.dls or gmdls=). midirate= sets its sample rate (default 22050),
 ; midireverb=false turns its reverb off. miditrace=true logs every MIDI / MCI call the game makes.
 ;midi=true

@@ -26,9 +26,9 @@ static void hexs(char *out, int n, const BYTE *p, DWORD len)
     if (len * 3 >= (DWORD)n - 4 && o + 4 < n) snprintf(out + o, n - o, "...");
 }
 
-/* ------------------------------------------------------------------ the reAL-Music MIDI device
- * midi=true: a General MIDI software synth device, "reAL-Music GM Synth", added after the system's MIDI outputs and
- * standing in for the MIDI mapper.  It is reAL-Music's synth (Microsoft's DLS synth) with every instrument of gm.dls
+/* ------------------------------------------------------------------ the reDM MIDI device
+ * midi=true: a General MIDI software synth device, "reDM GM Synth", added after the system's MIDI outputs and
+ * standing in for the MIDI mapper.  It is reDM's synth (Microsoft's DLS synth) with every instrument of gm.dls
  * (or gmdls=) loaded, as the Microsoft GS Wavetable synth has them, playing through reAL like any game sound. */
 #include "music/dmhost.h"
 
@@ -46,7 +46,7 @@ typedef struct {
 static dm_host *s_host;
 static CRITICAL_SECTION s_mcs;
 static rm_midiout *s_outs[16];
-static const char RM_NAME[] = "reAL-Music GM Synth";
+static const char RM_NAME[] = "reDM GM Synth";
 
 static rm_midiout *ours(HMIDIOUT h)
 {
@@ -175,7 +175,7 @@ static MMRESULT WINAPI h_open(LPHMIDIOUT ph, UINT id, DWORD_PTR cb, DWORD_PTR in
             if (!r) { *ph = (HMIDIOUT)o; s_host_failed = 0; midi_host(); callback(o, MOM_OPEN, 0); }
             else free(o);
         } else { free(o); r = MMSYSERR_INVALPARAM; }
-        LOG_INFO("midi: midiOutOpen(%d) -> reAL-Music GM Synth (%u)", (int)id, r);
+        LOG_INFO("midi: midiOutOpen(%d) -> reDM GM Synth (%u)", (int)id, r);
     } else r = o_open(ph, id, cb, inst, fl);
     LEAVE();
     TRACE("midi: %smidiOutOpen(dev %d, callback %p, inst %p, flags %lx) -> %u handle %p", IND, (int)id, (void *)cb,
@@ -365,7 +365,7 @@ static MMRESULT WINAPI h_getid(HMIDIOUT h, LPUINT id)
 }
 
 /* ------------------------------------------------------------------ midiStream
- * Streams on the reAL-Music device: buffers of MIDIEVENTs (delta ticks, stream id, event, long data) queued with
+ * Streams on the reDM device: buffers of MIDIEVENTs (delta ticks, stream id, event, long data) queued with
  * midiStreamOut and played by a thread per stream, in stream time (it stops while paused).  Ticks follow the time
  * division (PPQN with the current tempo, or SMPTE frames) and MEVT_TEMPO events.  A stream opens paused; Stop and
  * midiOutReset return the queued buffers; MOM_DONE goes out when a buffer is finished, MOM_POSITIONCB for events
@@ -550,7 +550,7 @@ static MMRESULT WINAPI hs_open(LPHMIDISTRM ph, LPUINT dev, DWORD n, DWORD_PTR cb
             }
         }
         if (r) { if (st) { if (st->wake) CloseHandle(st->wake); free(st); } free(o); if (!ph) r = MMSYSERR_INVALPARAM; }
-        LOG_INFO("midi: midiStreamOpen(%d) -> reAL-Music GM Synth (%u)", (int)d, r);
+        LOG_INFO("midi: midiStreamOpen(%d) -> reDM GM Synth (%u)", (int)d, r);
     } else r = s_open(ph, dev, n, cb, inst, fl);
     LEAVE();
     TRACE("midi: %smidiStreamOpen(dev %d, %lu, callback %p, flags %lx) -> %u handle %p", IND, (int)d, (unsigned long)n,
@@ -791,7 +791,7 @@ void rl_midi_hook(int can_load)
     HMODULE pin;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_midi_hook, &pin);
     InitializeCriticalSection(&s_mcs);
-    if (g_cfg.midi) LOG_INFO("midi: reAL-Music GM Synth replaces the MIDI mapper");
+    if (g_cfg.midi) LOG_INFO("midi: reDM GM Synth replaces the MIDI mapper");
     if (g_cfg.midi_trace) LOG_INFO("midi: tracing winmm MIDI and MCI calls");
     HOOK("midiOutGetNumDevs", o_getnumdevs, h_getnumdevs);
     HOOK("midiOutGetDevCapsA", o_getcapsA, h_getcapsA);

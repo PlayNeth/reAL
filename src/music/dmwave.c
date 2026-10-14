@@ -1,4 +1,4 @@
-/* reAL-Music: wave files as DirectMusic loads them (dswave.dll CDirectSoundWave, Windows XP 5.3.2600).
+/* reDM: wave files as DirectMusic loads them (dswave.dll CDirectSoundWave, Windows XP 5.3.2600).
  *
  * Load 6c781e31 reads the RIFF WAVE chunks: 'fmt ', 'data', 'fact', 'wavh' (DMUS_IO_WAVE_HEADER: read-ahead and
  * the streaming / no-preroll flags), 'wavu' (DirectMusic Producer's compressed-wave header: the decompressed format

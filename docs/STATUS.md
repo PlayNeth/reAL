@@ -1,14 +1,14 @@
 # reAL status and handoff notes
 
 reAL is a personal-use reimplementation of Creative ALchemy's `dsound.dll`, reverse-engineered faithfully,
-with the original's flaws fixed. reAL-Music is its own DirectMusic, built into the same DLL and selected
+with the original's flaws fixed. reDM is its own DirectMusic, built into the same DLL and selected
 with `music=1` in `reAL.ini`. It is a faithful port of Windows XP's dmime, dmusic, dmsynth, dmband and dswave.
 
 Ground rules carried through the project:
 - Match Microsoft's behaviour exactly, and check it against Microsoft's own DLLs running under Wine.
 - When the original has a bug, fix it behind a flag. Fixes are on in games and off in comparison tests.
   The flags are `DM_FIX_*` in `src/music/dmperf.h`, `MS_FIX_*` in `msynth.h`, plus `dm_wave_set_fix_length`
-  and `dm_set_clone_fix`. Setting `REAL_MUSIC_NOFIXES` in the environment turns all of them off.
+  and `dm_set_clone_fix`. Setting `REDM_NOFIXES` in the environment turns all of them off.
 - For gm.dls, use the system's copy by default. `gmdls=` in `reAL.ini` points to a custom DLS or SoundFont,
   and Linux paths work under Wine.
 
@@ -28,7 +28,7 @@ Doppler, and WASAPI output.
   Its code is translated instruction for instruction by `tools/i3dl2/asm2c.py` (`tools/i3dl2/gen.sh` makes
   `src/i3dl2.inc`) and runs on a small emulated 32-bit machine; bit-exact for every format, quality and preset.
   Notes in `docs/i3dl2_notes.md`.
-- Fixes (off with `REAL_NOFIXES` / `REAL_MUSIC_NOFIXES`): Echo keeps a PanDelay set before Play
+- Fixes (off with `REAL_NOFIXES` / `REDM_NOFIXES`): Echo keeps a PanDelay set before Play
   (`DSFX_FIX_ECHO_PANDELAY`); I3DL2 runs at the quality GetQuality reports (2) until SetQuality, where XP runs at
   half rate (`DSFX_FIX_I3DL2_QUALITY`).
 
@@ -74,7 +74,7 @@ Doppler, and WASAPI output.
   quirk (the first sample of each four is not checked for the minimum). `DMGT_STATS` (dmgt) and `MS_STATS`
   (test_msynth) print them for an offline comparison; they match on both render paths.
 - The sink stage (0x5000): an object with IReferenceClock (the master clock; GetLatencyClock's gives the latency
-  clock) and IKsControl. Microsoft's also answers its private IDirectSoundSynthSink, which reAL-Music does not offer.
+  clock) and IKsControl. Microsoft's also answers its private IDirectSoundSynthSink, which reDM does not offer.
 - `tests/comcmp.sh porttest.exe` matches but for that interface (`COMCMP_DIR=/tmp/real/sp/port`).
 
 **DirectMusic: COM methods**
@@ -143,7 +143,7 @@ Smaller items still open:
 
 ## Testing
 
-- `tests/comcmp.sh comtest.exe` runs `comtest` under Microsoft's DirectMusic and under reAL-Music, then diffs
+- `tests/comcmp.sh comtest.exe` runs `comtest` under Microsoft's DirectMusic and under reDM, then diffs
   the output. It currently gives 776 identical lines.
 - `tests/comcmp.sh tooltest.exe` does the same for graphs and tools (the graph object, every owner's graph,
   GetObjectInPath stages, the messages tools receive while bells1 and fe_hard_04 play, Flush, loading).

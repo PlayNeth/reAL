@@ -1,4 +1,4 @@
-/* reAL-Music: the style and band objects (dmstyle CDMStyle 7740bd9d, dmband CBand), included by dmcom.c.
+/* reDM: the style and band objects (dmstyle CDMStyle 7740bd9d, dmband CBand), included by dmcom.c.
  * IDirectMusicStyle8 / IDirectMusicBand on dms_style / dm_band (dmstyload.c, dmseg.c). */
 #include "dmsty.h"
 

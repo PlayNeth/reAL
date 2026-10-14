@@ -1,4 +1,4 @@
-/* reAL-Music: Standard MIDI Files as segments, a port of dmime's importer (77318500 and helpers).
+/* reDM: Standard MIDI Files as segments, a port of dmime's importer (77318500 and helpers).
  *
  * What dmime builds from a MIDI file (group 1 tracks):
  *  - a sequence track with every note (note-on / note-off pairs as one item with a duration), controller, pitch

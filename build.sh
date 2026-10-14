@@ -19,7 +19,7 @@ fi
 SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
-# reAL-Music: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
+# reDM: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
 MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
 CFLAGS="$CFLAGS_EXACT -ffast-math"
@@ -116,7 +116,7 @@ if command -v cc >/dev/null 2>&1; then
     cc -O2 -std=gnu11 -Wall -o build/test_eax tests/test_eax.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_eax4 tests/test_eax4.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_fx tests/test_fx.c src/eax4dsp.c -lm
-    # reAL-Music performance engine against dmime captures (tools/dmgt perf, DMGT_VTIME=1)
+    # reDM performance engine against dmime captures (tools/dmgt perf, DMGT_VTIME=1)
     cc -O1 -std=gnu11 -Wall -o build/test_perf tests/test_perf.c src/music/dmperf.c src/music/dmseg.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmtheory.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c -lm
     cc -O1 -std=gnu11 -Wall -o build/test_dls tests/test_dls.c src/music/dmdls.c
     cc -O1 -std=gnu11 -Wall -o build/test_sf2 tests/test_sf2.c src/music/sf2dls.c src/music/dmdls.c src/music/msynth.c -lm

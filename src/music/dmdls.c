@@ -1,4 +1,4 @@
-/* reAL-Music: DLS collections and dmusic-style instrument downloads.  See dmdls.h.
+/* reDM: DLS collections and dmusic-style instrument downloads.  See dmdls.h.
  *
  * What dmusic sends a DirectX 8 synth (from captures of dmusic.dll 5.3.x):
  *  - each wave once per port, as its own DMUS_DOWNLOADTYPE_WAVE buffer (DMUS_WAVE + WAVEFORMATEX + DMUS_WAVEDATA),

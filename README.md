@@ -60,7 +60,7 @@ diffed line by line, and offline captures are compared event by event.
 | Composer: Segment::Compose with from/to segments, recomposing while a segment plays | ⏳ |
 | Scripts (dmscript, AudioVBScript) | ⏳ |
 
-As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REAL_MUSIC_NOFIXES` in the environment
+As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REDM_NOFIXES` in the environment
 turns the fixes off for comparison runs. `docs/STATUS.md` has the details and the testing setup.
 
 Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; a
@@ -115,7 +115,7 @@ environment turns on API logging to `reAL.log` next to the game's exe.
 `music=true` in `reAL.ini` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except
 the GM instrument collection (`gm.dls`), and `gmdls=` can point at another DLS file or a SoundFont instead.
 reAL takes over DirectMusic when the game loads `dsound.dll`, which nearly every game does before its music
-starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reAL-music.dll` and register it with
+starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reDM.dll` and register it with
 `regsvr32` (other programs are handed on to the DirectMusic registered before). `midi=true` adds a GM synth
 MIDI output for games that play General MIDI through winmm. `reAL.ini.example` has the details.
 

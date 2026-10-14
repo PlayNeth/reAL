@@ -1,4 +1,4 @@
-/* reAL-Music: the chord, command and mute tracks of dmstyle (loading, parameters, Clone).  Notes in
+/* reDM: the chord, command and mute tracks of dmstyle (loading, parameters, Clone).  Notes in
  * docs/dmstyle_notes.md; the addresses are XP dmstyle's. */
 #include "dmsty.h"
 #include <stdlib.h>

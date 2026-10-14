@@ -1,4 +1,4 @@
-/* reAL-Music host: see dmhost.h.
+/* reDM host: see dmhost.h.
  *
  * Audio: like DirectMusic's DirectSound sink, the synth is read in bus form (dry left/right and the reverb send)
  * into 16-bit stereo buffers: the dry one, and the shared reverb one whose Waves reverb we run ourselves before
@@ -53,7 +53,7 @@ struct dm_host {
     hbuf hb[MAXHB];
     uint32_t nextbus, nextseq;
     rl_buffer *primary;
-    int buslog, peak[MAXHB];        /* REAL_MUSIC_BUSLOG: each sink buffer's peak, once a second */
+    int buslog, peak[MAXHB];        /* REDM_BUSLOG: each sink buffer's peak, once a second */
     uint32_t bufframes;
     /* clock */
     LARGE_INTEGER qpf, qlast;
@@ -64,7 +64,7 @@ struct dm_host {
     HANDLE th[3], ev[2], quit;
     volatile LONG stop;
     int noreverb;
-    FILE *dump;                 /* REAL_MUSIC_DUMP=file: raw 16-bit stereo of the dry + wet output (debugging) */
+    FILE *dump;                 /* REDM_DUMP=file: raw 16-bit stereo of the dry + wet output (debugging) */
 };
 
 /* ------------------------------------------------------------------ clocks */
@@ -448,8 +448,8 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->lastclock = h->rt0;
     {
         char dp[MAX_PATH];
-        if (GetEnvironmentVariableA("REAL_MUSIC_DUMP", dp, MAX_PATH)) h->dump = fopen(dp, "wb");
-        h->buslog = GetEnvironmentVariableA("REAL_MUSIC_BUSLOG", dp, MAX_PATH) != 0;
+        if (GetEnvironmentVariableA("REDM_DUMP", dp, MAX_PATH)) h->dump = fopen(dp, "wb");
+        h->buslog = GetEnvironmentVariableA("REDM_BUSLOG", dp, MAX_PATH) != 0;
     }
     if (FAILED(rl_device_acquire(&h->dev))) { free(h); return NULL; }
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, 1);
@@ -469,8 +469,8 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->nextbus = 0x1000;
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
-    /* fixes of Microsoft's flaws: on, except for comparison runs (REAL_MUSIC_NOFIXES in the environment) */
-    int fixes = !GetEnvironmentVariableA("REAL_MUSIC_NOFIXES", NULL, 0);
+    /* fixes of Microsoft's flaws: on, except for comparison runs (REDM_NOFIXES in the environment) */
+    int fixes = !GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0);
     if (h->pf && fixes) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER | DM_FIX_WAVE_SEEK |
                                           DM_FIX_WAVE_SYNCVAR | DM_FIX_STATE_TRACKCONFIG);
     if (!fixes) msynth_set_fixes(h->syn, 0);

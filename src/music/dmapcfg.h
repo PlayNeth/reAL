@@ -1,4 +1,4 @@
-/* reAL-Music: audiopath configurations (CLSID_DirectMusicAudioPathConfig, the 'DMAP' form of .aud files), as dmime
+/* reDM: audiopath configurations (CLSID_DirectMusicAudioPathConfig, the 'DMAP' form of .aud files), as dmime
  * loads them (773210de / 773204da / 77320245) with the buffer configurations ('DSBC' forms) that dsound loads
  * (CLSID_DirectSoundBufferConfig, 6efdb7de / 6efdb574). */
 #ifndef REAL_DMAPCFG_H

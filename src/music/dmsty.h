@@ -1,4 +1,4 @@
-/* reAL-Music: the style engine's data (dmstyle.dll, XP 5.3.2600.5512): the chord, command and mute tracks, kept the
+/* reDM: the style engine's data (dmstyle.dll, XP 5.3.2600.5512): the chord, command and mute tracks, kept the
  * way dmstyle keeps them (lists in its order, its merge sort).  Notes in docs/dmstyle_notes.md. */
 #ifndef REAL_DMSTY_H
 #define REAL_DMSTY_H

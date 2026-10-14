@@ -1,4 +1,4 @@
-/* reAL-Music: the tool graph object (dmime's CGraph, CLSID_DirectMusicGraph) */
+/* reDM: the tool graph object (dmime's CGraph, CLSID_DirectMusicGraph) */
 #ifndef REAL_DMGRAPH_H
 #define REAL_DMGRAPH_H
 #include <windows.h>

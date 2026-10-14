@@ -1,4 +1,4 @@
-/* reAL-Music: segment states, the transport thread, PlaySegment, Invalidate and Stop (included by dmperf.c). */
+/* reDM: segment states, the transport thread, PlaySegment, Invalidate and Stop (included by dmperf.c). */
 
 /* ------------------------------------------------------------------ segment-state lists */
 static void list_push(dm_perf *pf, int k, dm_segstate *s) { s->lnext = pf->lists[k]; pf->lists[k] = s; }
