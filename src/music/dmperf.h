@@ -67,11 +67,15 @@ uint32_t dm_perf_realtime(dm_perf *pf);
 #define SEGF_DEFAULT          0x4000
 #define SEGF_NOINVALIDATE     0x8000
 #define SEGF_ALIGN            0x10000
+#define SEGF_VALID_START_BEAT 0x20000
+#define SEGF_VALID_START_GRID 0x40000
+#define SEGF_VALID_START_TICK 0x80000
 #define SEGF_AFTERQUEUETIME   0x200000
 #define SEGF_AFTERLATENCYTIME 0x400000
 #define SEGF_SEGMENTEND       0x800000
 #define SEGF_MARKER           0x1000000
 #define SEGF_TIMESIG_ALWAYS   0x2000000
+#define SEGF_VALID_START_MEASURE 0x8000000
 
 int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out);
 
@@ -101,6 +105,7 @@ void **dm_segstate_wrapper(dm_segstate *ss);
 dm_segment *dm_segstate_segment(dm_segstate *ss);   /* NULL once the state has left the performance */
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);
 mtime_t dm_segstate_seek(dm_segstate *ss);
+mtime_t dm_segstate_start_point(dm_segstate *ss);
 dm_segstate *dm_perf_get_segstate(dm_perf *pf, mtime_t t);
 int dm_perf_pchannel_info(dm_perf *pf, uint32_t pch, int *port, uint32_t *group, uint32_t *chan);
 int dm_perf_adjust_time(dm_perf *pf, rtime_t rt);
@@ -122,6 +127,8 @@ enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND,
        PRM_VARIATIONS,      /* GUID_Variations */      /* GUID_Valid_Start_Time (DMUS_VALID_START_PARAM) */         /* dmstyle's private 76612507-4f37-4b35-8092-50484ed4ba92 (the composer's signature) */
        PRM_CHORDMAP,        /* GUID_IDirectMusicChordMap: a dmc_chordmap * (the getter takes a reference) */
        PRM_PLAYMARKER,      /* GUID_Play_Marker (DMUS_PLAY_MARKER_PARAM) */
+       PRM_PATSTYLE,        /* dmstyle's private 689821f4: the pattern track's style (a dms_style *, referenced) */
+       PRM_PATPART,         /* dmstyle's private 09f25101 (the pattern track's, while playing) */
        PRM_ANY, PRM_OTHER };
 /* PRM_BANDPARAM (DMUS_BAND_PARAM); PRM_IBAND takes the dm_band itself */
 typedef struct { mtime_t physical; dm_band *band; } dm_bandparam;

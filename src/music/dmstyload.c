@@ -574,6 +574,36 @@ static void pattern_release(dms_pattern *p)
     free(p);
 }
 void dms_pattern_addref(dms_pattern *p) { if (p) p->refs++; }
+/* a pattern as saved and loaded again (7740ac0a / 7740c5f3: IDirectMusicPatternTrack::SetPatternByName): its own
+ * header, rhythm, part references and markers; the parts and the motif's band shared */
+dms_pattern *dms_pattern_copy(const dms_pattern *P)
+{
+    dms_pattern *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    *C = *P;
+    C->refs = 1; C->rhythm = NULL; C->prefs = NULL; C->markers = NULL;
+    if (P->rhythm && P->measures) {
+        if (!(C->rhythm = malloc(P->measures * sizeof(*C->rhythm)))) { C->band = NULL; pattern_release(C); return NULL; }
+        memcpy(C->rhythm, P->rhythm, P->measures * sizeof(*C->rhythm));
+    }
+    if (C->band) dm_band_addref(C->band);
+    dms_partref **pr = &C->prefs;
+    for (const dms_partref *r = P->prefs; r; r = r->next) {
+        dms_partref *x = malloc(sizeof(*x));
+        if (!x) { pattern_release(C); return NULL; }
+        *x = *r; x->next = NULL;
+        if (x->part) x->part->refs++;
+        *pr = x; pr = &x->next;
+    }
+    dms_mtime **mp = &C->markers;
+    for (const dms_mtime *m = P->markers; m; m = m->next) {
+        dms_mtime *x = malloc(sizeof(*x));
+        if (!x) { pattern_release(C); return NULL; }
+        *x = *m; x->next = NULL;
+        *mp = x; mp = &x->next;
+    }
+    return C;
+}
 void dms_pattern_release(dms_pattern *p) { pattern_release(p); }
 void dms_style_release(dms_style *s)
 {
@@ -937,7 +967,9 @@ void dms_styletrack_free(dms_styletrack *T)
 {
     if (!T) return;
     for (dms_stynode *n = T->styles, *x; n; n = x) { x = n->next; dms_style_release(n->style); free(n); }
-    free(T->pchs); free(T->pvar); free(T->pnorep);
+    free(T->pchs); free(T->pvar); free(T->pnorep); free(T->varbuf);
+    for (int i = 0; i < T->nretired; i++) pattern_release(T->retired[i]);
+    free(T->retired);
     pattern_release(T->motif);
     free(T);
 }
@@ -1154,6 +1186,7 @@ dms_styletrack *dms_styletrack_clone(const dms_styletrack *T, mtime_t start, mti
     C->pchschanged = T->pchschanged; C->notify = T->notify; C->tsenabled = T->tsenabled; C->tsset = T->tsset;
     if (T->motif && T->kind == TRK_PATTERN) {
         C->kind = TRK_PATTERN;
+        C->au_byguid = 1; C->au_all = 0;   /* 77413246: (sic) the clone auditions the part on PChannel 0 with no guid */
         C->motif = pattern_clone(T->motif, start, end);    /* 77413246 */
         if (C->motif) motif_vars(C);
     } else if (T->motif) { C->motif = T->motif; C->motif->refs++; motif_vars(C); }     /* 7740dd73 */
@@ -1176,6 +1209,19 @@ dms_styletrack *dms_motiftrack_new(dms_style *s, dms_pattern *p)
 }
 
 /* ------------------------------------------------------------------ pattern track (CPatternTrack 7741484d) */
+/* 77414d0e / 774147e9: the track's pattern replaced (the old one returned, still referenced) and its variation
+ * arrays made again */
+dms_pattern *dms_patterntrack_swap(dms_styletrack *T, dms_pattern *p)
+{
+    dms_pattern *old = T->motif;
+    T->motif = p;
+    motif_vars(T);
+    free(T->varbuf); T->varbuf = NULL;
+    /* the old one is kept until the track goes: states still playing it take the new one at their next Play */
+    dms_pattern **r = realloc(T->retired, (T->nretired + 1) * sizeof(*r));
+    if (r) { T->retired = r; r[T->nretired++] = old; } else pattern_release(old);
+    return old;
+}
 /* 77414f43 / 77414b48: a 'DMPT' form's data: a private style ('styh') holding the pattern's parts, the pattern itself
  * the track's (not among the style's patterns) */
 dms_styletrack *dms_patterntrack_load(const uint8_t *data, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr)
@@ -1219,6 +1265,7 @@ dms_styletrack *dms_patterntrack_load(const uint8_t *data, size_t n, dm_getcoll_
     nd->style = s;
     T->styles = nd;
     T->kind = TRK_PATTERN;
+    T->au_byguid = T->au_all = 1;       /* 7741338c */
     T->gen++;
     dms_styletrack_pchs(T);
     return T;

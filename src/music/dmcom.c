@@ -451,6 +451,9 @@ DMG(G_ValidStartTime, 0x7f6b1760, 0x1fdb, 0x11d3, 0x82, 0x26, 0x44, 0x45, 0x53, 
 DMG(G_PlayMarker, 0xd8761a41, 0x801a, 0x11d3, 0x9b, 0xd1, 0xda, 0xf7, 0xe1, 0xc3, 0xd8, 0x34);
 DMG(G_IDirectMusicChordMap_, 0xd2ac28ad, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_PerfMasterGrooveLevel, 0xd2ac28b2, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DMG(G_Variations, 0x11f72cce, 0x26e6, 0x4ecd, 0xaf, 0x2e, 0xd6, 0x68, 0xe6, 0x67, 0x07, 0xd8);
+DMG(G_PatternStyle, 0x689821f4, 0xb3bc, 0x44dd, 0x80, 0xd4, 0x0c, 0xf3, 0x2f, 0xe4, 0xd2, 0x1b);    /* dmstyle's private */
+DMG(G_PatternPart, 0x09f25101, 0x505d, 0x4c7c, 0xbe, 0x15, 0x66, 0x2b, 0x33, 0xe7, 0x8a, 0x7c);     /* dmstyle's private */
 DMG(G_PrivateTempo, 0xe8dbd832, 0xbcf0, 0x4c8c, 0xa0, 0x75, 0xa3, 0xf1, 0x5e, 0x67, 0xfd, 0x63);
 static const struct { const GUID *g; int prm; } s_params[] = {
     { &G_TempoParam, PRM_TEMPO }, { &G_TimeSignature, PRM_TIMESIG }, { &G_EnableTempo, PRM_ENABLETEMPO },
@@ -461,7 +464,8 @@ static const struct { const GUID *g; int prm; } s_params[] = {
     { &G_BandParam, PRM_BANDPARAM }, { &G_StandardMIDIFile, PRM_SMF }, { &G_ConnectToDLSCollection, PRM_CONNECTDLS },
     { &G_MuteParam, PRM_MUTE }, { &G_PrivateTempo, PRM_PRIVTEMPO }, { &G_ChordParam, PRM_CHORD }, { &G_RhythmParam, PRM_RHYTHM },
     { &G_CommandParam, PRM_COMMAND }, { &G_CommandParam2, PRM_COMMAND2 }, { &G_CommandParamNext, PRM_COMMANDNEXT },
-    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &G_PlayMarker, PRM_PLAYMARKER }, { &G_IDirectMusicChordMap_, PRM_CHORDMAP }, { &GUID_NULL, PRM_ANY },
+    { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &G_PlayMarker, PRM_PLAYMARKER }, { &G_IDirectMusicChordMap_, PRM_CHORDMAP },
+    { &G_Variations, PRM_VARIATIONS }, { &G_PatternStyle, PRM_PATSTYLE }, { &G_PatternPart, PRM_PATPART }, { &GUID_NULL, PRM_ANY },
 };
 static int prm_of(REFGUID g)
 {
@@ -903,11 +907,13 @@ static int acm_decode(const uint8_t *wfx, uint32_t wfxlen, const uint8_t *in, ui
 struct rm_track {
     IDirectMusicTrack8 IDirectMusicTrack8_iface;
     IPersistStream IPersistStream_iface;
+    IDirectMusicPatternTrack IDirectMusicPatternTrack_iface;   /* the pattern track's */
     LONG ref;
     dm_track *t;
 };
 static IDirectMusicTrack8Vtbl trk_vtbl;
 static IPersistStreamVtbl trp_vtbl;
+static IDirectMusicPatternTrackVtbl ptk_vtbl;
 static rm_track *trk(IDirectMusicTrack8 *i) { return impl_from(i, rm_track, IDirectMusicTrack8_iface); }
 static dm_host *any_host(void) { return g_lastperf ? g_lastperf->host : NULL; }
 
@@ -919,6 +925,7 @@ static IDirectMusicTrack8 *track_object(dm_track *t)
     if (!(r = calloc(1, sizeof(*r)))) return NULL;
     r->IDirectMusicTrack8_iface.lpVtbl = &trk_vtbl;
     r->IPersistStream_iface.lpVtbl = &trp_vtbl;
+    r->IDirectMusicPatternTrack_iface.lpVtbl = &ptk_vtbl;
     r->ref = 1; r->t = t;
     dm_track_addref(t);
     t->wrapper = r;
@@ -944,6 +951,8 @@ static HRESULT WINAPI trk_qi(IDirectMusicTrack8 *i, REFIID riid, void **out)
         (IsEqualIID(riid, &IID_IDirectMusicTrack8) && kind != TRK_TIMESIG && kind != TRK_MARKER)) *out = i;
     else if (IsEqualIID(riid, &IID_IPersistStream) || (IsEqualIID(riid, &IID_IPersist) && kind == TRK_BAND))
         *out = &trk(i)->IPersistStream_iface;
+    else if (IsEqualIID(riid, &IID_IDirectMusicPatternTrack) && kind == TRK_PATTERN)     /* 77413466 */
+        *out = &trk(i)->IDirectMusicPatternTrack_iface;
     else { *out = NULL; return E_NOINTERFACE; }
     InterlockedIncrement(&trk(i)->ref);
     return S_OK;
@@ -1253,7 +1262,16 @@ static HRESULT WINAPI st_getseek(IDirectMusicSegmentState8 *i, MUSIC_TIME *t)
     if (s->perf->host) dm_host_unlock(s->perf->host);
     return S_OK;
 }
-static HRESULT WINAPI st_getstartpoint(IDirectMusicSegmentState8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; *t = sst(i)->seg && sst(i)->seg->seg ? sst(i)->seg->seg->playstart : 0; return S_OK; }
+/* 77315e8c: where in the segment the state started (the segment's start point, moved on by DMUS_SEGF_ALIGN) */
+static HRESULT WINAPI st_getstartpoint(IDirectMusicSegmentState8 *i, MUSIC_TIME *t)
+{
+    rm_state *s = sst(i);
+    if (!t || IsBadWritePtr(t, sizeof(*t))) return E_POINTER;
+    if (s->perf->host) dm_host_lock(s->perf->host);
+    *t = dm_segstate_start_point(s->ss);
+    if (s->perf->host) dm_host_unlock(s->perf->host);
+    return S_OK;
+}
 static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off)
 {
     rm_state *s = sst(i);
@@ -3074,6 +3092,65 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
 #include "dmcomsty.c"
 #include "dmcomcmp.c"
 static struct dms_style *style_engine_of(void *p) { rm_style *s = style_of(p); return s ? s->s : NULL; }
+
+/* ------------------------------------------------------------------ IDirectMusicPatternTrack (774019c8) */
+static rm_track *ptk(IDirectMusicPatternTrack *i) { return impl_from(i, rm_track, IDirectMusicPatternTrack_iface); }
+static HRESULT WINAPI ptk_qi(IDirectMusicPatternTrack *i, REFIID r, void **o) { return trk_qi(&ptk(i)->IDirectMusicTrack8_iface, r, o); }
+static ULONG WINAPI ptk_addref(IDirectMusicPatternTrack *i) { return trk_addref(&ptk(i)->IDirectMusicTrack8_iface); }
+static ULONG WINAPI ptk_release(IDirectMusicPatternTrack *i) { return trk_release(&ptk(i)->IDirectMusicTrack8_iface); }
+static BOOL bad_iface(void *p) { return IsBadReadPtr(p, 4) || IsBadReadPtr(*(void **)p, 4) || IsBadCodePtr(**(FARPROC **)p); }
+/* 77415094 */
+static HRESULT WINAPI ptk_createsegment(IDirectMusicPatternTrack *i, IDirectMusicStyle *style, IDirectMusicSegment **out)
+{
+    if (bad_iface(style) || IsBadWritePtr(out, sizeof(*out))) return E_POINTER;
+    struct dms_style *st = style_engine_of(style);
+    if (!st) return E_NOINTERFACE;      /* (dmstyle's private style interface) */
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    dm_segment *g = NULL;
+    HRESULT hr = dms_patterntrack_create_segment(ptk(i)->t, st, &g);
+    if (h) dm_host_unlock(h);
+    if (FAILED(hr)) return hr;
+    rm_segment *n = new_segment(g);
+    if (!n) { dm_segment_release(g); return E_OUTOFMEMORY; }
+    *out = (IDirectMusicSegment *)&n->IDirectMusicSegment8_iface;
+    return S_OK;
+}
+/* 774143af */
+static HRESULT WINAPI ptk_setvariation(IDirectMusicPatternTrack *i, IDirectMusicSegmentState *ss, DWORD flags, DWORD part)
+{
+    if (ss && bad_iface(ss)) return E_POINTER;
+    rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    HRESULT hr = dms_patterntrack_set_variation(ptk(i)->t, st ? st->ss : NULL, flags, part);
+    if (h) dm_host_unlock(h);
+    return hr;
+}
+/* 77413c30: the style's pattern (0) or motif (1) of that name (DMUS_E_NOT_FOUND without one) */
+static HRESULT WINAPI ptk_setpatternbyname(IDirectMusicPatternTrack *i, IDirectMusicSegmentState *ss, WCHAR *name,
+                                           IDirectMusicStyle *style, DWORD type, DWORD *length)
+{
+    if ((ss && bad_iface(ss)) || IsBadReadPtr(name, 4) || bad_iface(style) || IsBadWritePtr(length, 4)) return E_POINTER;
+    struct dms_style *sty = style_engine_of(style);
+    if (!sty) return E_NOINTERFACE;
+    rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    const dms_pattern *p = NULL;
+    dms_pattern **list = type == 0 ? sty->patterns : type == 1 ? sty->motifs : NULL;
+    int n = type == 0 ? sty->npatterns : type == 1 ? sty->nmotifs : 0;
+    for (int k = 0; k < n && !p; k++) if (!_wcsicmp((const WCHAR *)list[k]->name, name)) p = list[k];     /* 7740ac84 */
+    HRESULT hr = (int32_t)0x88781161;
+    if (p) {
+        mtime_t len = 0;
+        hr = dms_patterntrack_set_pattern(ptk(i)->t, st ? st->ss : NULL, p, &len);
+        if (SUCCEEDED(hr) || hr != (int32_t)0x88781162) *length = (DWORD)len;
+    }
+    if (h) dm_host_unlock(h);
+    return hr;
+}
+static IDirectMusicPatternTrackVtbl ptk_vtbl = { ptk_qi, ptk_addref, ptk_release, ptk_createsegment, ptk_setvariation, ptk_setpatternbyname };
 static dm_band *band_engine_of(void *p)
 {
     if (!p || IsBadReadPtr(p, sizeof(void *))) return NULL;
@@ -3083,7 +3160,7 @@ static dm_band *band_engine_of(void *p)
 }
 static void prm_out(int prm, int hr, void *p)
 {
-    if (prm == PRM_STYLE && hr >= 0 && p) *(void **)p = style_iface(*(dms_style **)p);
+    if ((prm == PRM_STYLE || prm == PRM_PATSTYLE) && hr >= 0 && p) *(void **)p = style_iface(*(dms_style **)p);
     if (prm == PRM_CHORDMAP && hr >= 0 && p) *(void **)p = chordmap_iface(*(dmc_chordmap **)p);
     if (prm == PRM_BANDPARAM && hr >= 0 && p) {         /* the band copy as a band object (its own reference) */
         DMUS_BAND_PARAM *bp = p;

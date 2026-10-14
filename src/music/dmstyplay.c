@@ -53,7 +53,41 @@ typedef struct {
     int nparts;
     int kind;                                   /* TRK_STYLE, TRK_MOTIF, TRK_PATTERN */
     int noinv;                                  /* +0x388 (pattern track state: vtable[3] 774132f8): no inversions */
+    /* the pattern track state's audition (77413ff2) */
+    uint32_t au_flags, au_part;                 /* +0x368 +0x36c */
+    dm_guid au_guid;                            /* +0x370 */
+    int au_byguid, au_all;                      /* +0x380 +0x384 */
+    uint8_t au_lock;                            /* +0x38c the auditioned part's variation lock */
 } stystate;
+
+/* 7740f577 / 774132ff (the pattern track state's): the variations a part reference plays: the one chosen, or
+ * those auditioned (IDirectMusicPatternTrack::SetVariation) on its part, or on any part sharing its lock */
+static uint32_t st_varbits(const stystate *S, const dms_partref *pr, int idx)
+{
+    if (S->kind == TRK_PATTERN) {
+        if (S->au_lock && pr->lock == S->au_lock) return S->au_flags;
+        if (!S->au_all) {
+            if (!S->au_byguid) { if (pr->pch == S->au_part) return S->au_flags; }
+            else if (pr->part && pr->pch == S->au_part && guid_same(&pr->part->guid, &S->au_guid)) return S->au_flags;
+        }
+    }
+    return S->var[idx] == 0xff ? 0 : 1u << (S->var[idx] & 31);
+}
+/* 77413ff2: the audition settings; a part named by guid (unless all) gives its variation lock */
+static int st_audition(stystate *S, uint32_t flags, uint32_t part, const dm_guid *g, int byguid, int all)
+{
+    static const dm_guid null = { 0 };
+    S->au_flags = flags; S->au_part = part; S->au_guid = *g; S->au_byguid = byguid; S->au_all = all;
+    if (!S->pattern) return (int)0x88781162;
+    if (guid_same(g, &null)) { S->au_lock = 0; return DM_OK; }
+    for (const dms_partref *pr = S->pattern->prefs; pr; pr = pr->next) {
+        if (all) continue;
+        if (!byguid) { if (pr->pch != part) continue; }
+        else if (!pr->part || !guid_same(&pr->part->guid, &S->au_guid)) continue;
+        S->au_lock = pr->lock;
+    }
+    return DM_OK;
+}
 
 static int32_t sty_beat(const uint8_t *ts) { return dms_beat_clocks(ts); }
 static int32_t sty_meas(const uint8_t *ts) { return dms_beat_clocks(ts) * ts[0]; }
@@ -640,7 +674,7 @@ static void st_event(dm_perf *pf, stystate *S, mtime_t t, const dms_event *ev, c
 {
     uint32_t map = 0;
     if (st_mute_lookup(S, pr->pch, &map)) return;
-    uint32_t vbit = S->var[idx] == 0xff ? 0 : 1u << (S->var[idx] & 31);       /* 7740f577 */
+    uint32_t vbit = st_varbits(S, pr, idx);
     if (!(ev->var & vbit)) return;
     if (ev->type == EV_MARKER) {
         if (pr->part && (pr->part->flags & 1) && (ev->mflags & 2) && t != S->patt &&
@@ -790,7 +824,7 @@ static int st_play_parts(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, m
             do {
                 if (stop <= t) break;
                 if (rep && seek && t < start) {
-                    uint32_t vbit = S->var[idx] == 0xff ? 0 : 1u << (S->var[idx] & 31);
+                    uint32_t vbit = st_varbits(S, pr, idx);
                     if (ev->type == EV_CURVE && (ev->var & vbit)) chase_add(&C, ev, t);
                 } else if (start <= t) {
                     if (t < lastt) { st_chord(pf, S, t, off, seek, 0); lastt = t; }
@@ -1391,6 +1425,7 @@ static void stytrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t
     S->tsenabled = T->tsset ? T->tsenabled : (segflags & (SEGF_SECONDARY | SEGF_CONTROL)) == 0;
     if (T->seed) st_seed(S, T->seed);
     S->group = e->group;
+    st_audition(S, T->au_flags, T->au_part, &T->au_guid, T->au_byguid, T->au_all);
     e->state = S;
 }
 
@@ -1523,6 +1558,7 @@ static void motiftrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32
     S->tsenabled = T->tsset ? T->tsenabled : (segflags & (SEGF_SECONDARY | SEGF_CONTROL)) == 0;
     if (T->seed) st_seed(S, T->seed);
     S->group = e->group;
+    st_audition(S, T->au_flags, T->au_part, &T->au_guid, T->au_byguid, T->au_all);
     e->state = S;
 }
 
@@ -1628,6 +1664,7 @@ static void patterntrack_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint
     S->tsenabled = T->tsset ? T->tsenabled : (segflags & (SEGF_SECONDARY | SEGF_CONTROL)) == 0;
     if (T->seed) st_seed(S, T->seed);
     S->group = e->group;
+    st_audition(S, T->au_flags, T->au_part, &T->au_guid, T->au_byguid, T->au_all);
     e->state = S;
 }
 
@@ -1688,6 +1725,135 @@ static int patterntrack_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t s
 /* 77413a39 */
 static int patterntrack_isparam(const dm_track *t, int prm)
 {
-    if (prm == PRM_VARIATIONS) return DM_OK;
+    if (!t->data) return (int)0x88781162;
+    if (prm == PRM_VARIATIONS || prm == PRM_PATSTYLE || prm == PRM_PATPART) return DM_OK;
     return motiftrack_isparam(t, prm);
+}
+
+/* ------------------------------------------------------------------ IDirectMusicPatternTrack */
+static stystate *pt_state(dm_track *t, dm_segstate *ss)     /* 77410218: the track's state in a segment state */
+{
+    if (!ss) return NULL;
+    for (int i = 0; i < ss->ntr; i++) if (ss->tr[i].t == t && ss->tr[i].state) return ss->tr[i].state;
+    return NULL;
+}
+/* 774143af SetVariation: the variations to play on the part with this PChannel, from now on in every state (and
+ * at once in the segment state's) */
+int dms_patterntrack_set_variation(dm_track *t, dm_segstate *ss, uint32_t flags, uint32_t part)
+{
+    dms_styletrack *T = t->kind == TRK_PATTERN ? t->data : NULL;
+    if (!T) return (int)0x88781162;
+    static const dm_guid null = { 0 };
+    T->au_byguid = 0; T->au_all = 0; T->au_flags = flags; T->au_part = part;
+    stystate *S = pt_state(t, ss);
+    if (S) st_audition(S, flags, part, &null, 0, 0);
+    return DM_OK;
+}
+/* 77414d0e (from SetPatternByName 77413c30): a copy of the pattern becomes the track's (and the segment state's);
+ * *length its length (in the style's signature when it has none) */
+int dms_patterntrack_set_pattern(dm_track *t, dm_segstate *ss, const dms_pattern *src, mtime_t *length)
+{
+    dms_styletrack *T = t->kind == TRK_PATTERN ? t->data : NULL;
+    if (!T || !T->styles || !T->styles->style) return (int)0x88781162;
+    stystate *S = pt_state(t, ss);
+    dms_pattern *p = dms_pattern_copy(src);
+    if (!p) return DM_E_OUTOFMEMORY;
+    const uint8_t *ts = p->ts[1] ? p->ts : T->styles->style->ts;
+    *length = dms_beat_clocks(ts) * p->measures * ts[0];
+    dms_patterntrack_swap(T, p);
+    if (S) st_set_pattern(S, p, 0);
+    T->gen++;                           /* (the other states take it at their next Play) */
+    return dms_styletrack_pchs(T);
+}
+
+/* 77415094 CreateSegment: a segment of one measure (in the style's signature, at its tempo: a tempo track) that
+ * plays this track; the track gets a copy of the style (its name, guid, signature, tempo and PChannels) after its
+ * own */
+int dms_patterntrack_create_segment(dm_track *t, const dms_style *style, dm_segment **out)
+{
+    dms_styletrack *T = t->kind == TRK_PATTERN ? t->data : NULL;
+    if (!T) return (int)0x88781162;
+    dms_style *ns = calloc(1, sizeof(*ns));
+    dms_stynode *nd = calloc(1, sizeof(*nd));
+    dm_tempotrack *tt = calloc(1, sizeof(*tt));
+    dm_segment *seg = calloc(1, sizeof(*seg));
+    if (tt) tt->items = calloc(1, sizeof(*tt->items));
+    if (!ns || !nd || !tt || !tt->items || !seg) {
+        free(ns); free(nd); if (tt) free(tt->items); free(tt); free(seg);
+        return DM_E_OUTOFMEMORY;
+    }
+    ns->refs = 1;
+    ns->guid = style->guid; ns->hasguid = style->hasguid;
+    memcpy(ns->category, style->category, sizeof(ns->category));
+    memcpy(ns->name, style->name, sizeof(ns->name));
+    memcpy(ns->vers, style->vers, sizeof(ns->vers));
+    memcpy(ns->ts, style->ts, 4);
+    ns->tempo = style->tempo;
+    if (style->npchs && (ns->pchs = malloc(style->npchs * sizeof(*ns->pchs)))) {    /* (copied in reverse) */
+        for (int i = 0; i < style->npchs; i++) ns->pchs[i] = style->pchs[style->npchs - 1 - i];
+        ns->npchs = style->npchs;
+    }
+    nd->style = ns;
+    dms_stynode **pp = &T->styles;
+    while (*pp) pp = &(*pp)->next;
+    *pp = nd;
+    tt->active = 1; tt->n = 1; tt->items[0].mt = 0; tt->items[0].tempo = ns->tempo;
+    seg->refs = 1;
+    seg->length = dms_beat_clocks(ns->ts) * ns->ts[0];
+    if (seg->length <= 0) seg->length = 1;      /* (SetLength refuses it) */
+    dm_track_addref(t);
+    dm_segment_insert_track(seg, t, 0, 1, 0x38, 0);
+    static const dm_guid clsid_tempo = { 0xd2ac2885, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+    dm_track *tr = dm_track_new(TRK_TEMPO, &clsid_tempo, tt);
+    if (tr) dm_segment_insert_track(seg, tr, 0, 1, 0x38, 0);
+    *out = seg;
+    return DM_OK;
+}
+
+/* 774148cd: GUID_Valid_Start_Time (the pattern's), GUID_Variations (while playing: each part's PChannel and the
+ * variations it plays), the private 689821f4 (the track's style) and 09f25101 (while playing) */
+static int patterntrack_getparam(const dm_track *t, stystate *S, int prm, mtime_t mt, mtime_t *next, void *data)
+{
+    dms_styletrack *T = t->data;
+    if (!data) return STY_E_POINTER;
+    if (!T) return (int)0x88781162;
+    if (prm == PRM_VALIDSTART) return motiftrack_getparam(t, prm, mt, next, data);
+    if (prm == PRM_VARIATIONS) {
+        if (!T->motif || !S || !S->pattern) return STY_E_POINTER;
+        dms_varparam *o = data;
+        int n = 0;
+        for (const dms_partref *pr = S->pattern->prefs; pr; pr = pr->next) n++;
+        uint32_t *v = realloc(T->varbuf, (n ? n : 1) * sizeof(*v));
+        if (!v) return DM_E_OUTOFMEMORY;
+        T->varbuf = v;
+        int k = 0;
+        for (const dms_partref *pr = S->pattern->prefs; pr; pr = pr->next, k++) v[k] = st_varbits(S, pr, k);
+        o->n = (uint32_t)n; o->pchs = S->partpch; o->vars = v;
+        if (next) {
+            const dms_pattern *p = T->motif;
+            mtime_t c = S->nextchordt ? S->nextchordt - mt : 0;
+            mtime_t len = dms_beat_clocks(p->ts) * p->measures * p->ts[0];
+            *next = (c == 0 || len < c) ? len : c;
+        }
+        return DM_OK;
+    }
+    if (prm == PRM_PATSTYLE) {
+        if (!T->styles) return DMUS_E_NOT_FOUND;
+        if (!T->styles->style) return STY_E_POINTER;
+        dms_style_addref(T->styles->style);
+        *(dms_style **)data = T->styles->style;
+        if (next) *next = 0;
+        return DM_OK;
+    }
+    if (prm == PRM_PATPART) {
+        /* (data: a PChannel, which of the parts on it, then 0 put after them; Microsoft writes the part's variations
+         * to the address the PChannel makes: not done) */
+        if (!S) return STY_E_POINTER;
+        uint32_t *d = data, pch = d[0], nth = d[1];
+        if (S->pattern)
+            for (const dms_partref *pr = S->pattern->prefs; pr; pr = pr->next)
+                if (pr->pch == pch && !nth--) { d[2] = 0; return DM_OK; }
+        return DMUS_E_NOT_FOUND;
+    }
+    return DMUS_E_GET_UNSUPPORTED;
 }

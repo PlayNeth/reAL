@@ -708,6 +708,208 @@ static int recomp(IDirectMusicLoader8 *ld)
     return 0;
 }
 
+/* align: the performance's start times for DMUS_SEGF_ALIGN, the VALID_START flags, MARKER and SEGMENTEND (each played
+ * as a secondary segment against a primary started at a known time), and GetResolvedTime */
+static IDirectMusicSegment8 *ld_seg(IDirectMusicLoader8 *ld, const WCHAR *name)
+{
+    IDirectMusicSegment8 *sg = NULL;
+    HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, name, (void **)&sg);
+    if (FAILED(hr)) printf("load %ls %08lx\n", name, hr);
+    return sg;
+}
+static int align(IDirectMusicLoader8 *ld)
+{
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    HRESULT hr = IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL);
+    printf("init %08lx\n", hr);
+    static const WCHAR *const prims[] = { L"aprim.sgt", L"aprim3.sgt" };
+    static const WCHAR *const segs[] = { L"avs.sgt", L"anovs.sgt", L"aloop.sgt" };
+    static const DWORD flags[] = {
+        DMUS_SEGF_MEASURE, DMUS_SEGF_BEAT, DMUS_SEGF_GRID, DMUS_SEGF_MARKER, DMUS_SEGF_SEGMENTEND,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_MEASURE, DMUS_SEGF_ALIGN | DMUS_SEGF_BEAT, DMUS_SEGF_ALIGN | DMUS_SEGF_GRID,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_MEASURE | DMUS_SEGF_VALID_START_BEAT,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_MEASURE | DMUS_SEGF_VALID_START_GRID,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_MEASURE | DMUS_SEGF_VALID_START_TICK,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_MEASURE | DMUS_SEGF_VALID_START_MEASURE,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_BEAT | DMUS_SEGF_VALID_START_TICK,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_MARKER, DMUS_SEGF_ALIGN | DMUS_SEGF_MARKER | DMUS_SEGF_VALID_START_BEAT,
+        DMUS_SEGF_ALIGN | DMUS_SEGF_SEGMENTEND, DMUS_SEGF_ALIGN | DMUS_SEGF_SEGMENTEND | DMUS_SEGF_VALID_START_MEASURE,
+        DMUS_SEGF_ALIGN, DMUS_SEGF_ALIGN | DMUS_SEGF_VALID_START_GRID,
+    };
+    static const MUSIC_TIME offs[] = { 0, 500, 1000, 3100, 4000, 5000, 7000, 9050, 13000 };
+    for (int p = 0; p < 2; p++) {
+        IDirectMusicSegment8 *pr = ld_seg(ld, prims[p]);
+        IDirectMusicSegment8 *sg[3];
+        for (int k = 0; k < 3; k++) sg[k] = ld_seg(ld, segs[k]);
+        if (!pr || !sg[0] || !sg[1] || !sg[2]) return 1;
+        IDirectMusicSegment8_SetLoopPoints(sg[2], 3072, 9216);
+        MUSIC_TIME now = 0, pst = 0;
+        IDirectMusicPerformance8_GetTime(pf, NULL, &now);
+        IDirectMusicSegmentState *ps = NULL;
+        hr = IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)pr, NULL, NULL, 0, now + 3000, &ps, NULL, NULL);
+        IDirectMusicSegmentState_GetStartTime(ps, &pst);
+        printf("primary %ls %08lx\n", prims[p], hr);
+        for (int k = 0; k < 3; k++)
+            for (int sp = 0; sp < 2; sp++) {
+                IDirectMusicSegment8_SetStartPoint(sg[k], sp ? 1300 : 0);
+                for (unsigned f = 0; f < sizeof(flags) / sizeof(*flags); f++)
+                    for (unsigned o = 0; o < sizeof(offs) / sizeof(*offs); o++) {
+                        IDirectMusicSegmentState *ss = NULL;
+                        hr = IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)sg[k], NULL, NULL, flags[f] | DMUS_SEGF_SECONDARY,
+                                                                   pst + offs[o], &ss, NULL, NULL);
+                        MUSIC_TIME st = 0, spt = 0;
+                        if (ss) { IDirectMusicSegmentState_GetStartTime(ss, &st); IDirectMusicSegmentState_GetStartPoint(ss, &spt); }
+                        printf("  %ls sp %d flags %08lx at %d: %08lx start %d point %d\n", segs[k], sp ? 1300 : 0, flags[f], offs[o], hr,
+                               ss ? (int)(st - pst) : -1, (int)spt);
+                        if (ss) {
+                            IDirectMusicPerformance8_StopEx(pf, (IUnknown *)ss, 0, 0);
+                            IDirectMusicSegmentState_Release(ss);
+                        }
+                    }
+            }
+        for (unsigned f = 0; f < 5; f++)
+            for (unsigned o = 0; o < sizeof(offs) / sizeof(*offs); o++) {
+                REFERENCE_TIME rt = 0, out = 0;
+                MUSIC_TIME mt = 0;
+                IDirectMusicPerformance8_MusicToReferenceTime(pf, pst + offs[o], &rt);
+                hr = IDirectMusicPerformance8_GetResolvedTime(pf, rt, &out, flags[f]);
+                IDirectMusicPerformance8_ReferenceToMusicTime(pf, out, &mt);
+                printf("  resolved flags %08lx at %d: %08lx %d\n", flags[f], offs[o], hr, (int)(mt - pst));
+            }
+        IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);
+        Sleep(100);
+        IDirectMusicSegmentState_Release(ps);
+        IDirectMusicSegment8_Release(pr);
+        for (int k = 0; k < 3; k++) IDirectMusicSegment8_Release(sg[k]);
+    }
+    IDirectMusicPerformance8_CloseDown(pf);
+    IDirectMusicPerformance8_Release(pf);
+    return 0;
+}
+
+/* pattrack: the pattern track's parameters and IDirectMusicPatternTrack (CreateSegment, SetVariation,
+ * SetPatternByName), the variations seen through the performance's GUID_Variations */
+DEFINE_GUID(G_PatStyle, 0x689821f4, 0xb3bc, 0x44dd, 0x80, 0xd4, 0x0c, 0xf3, 0x2f, 0xe4, 0xd2, 0x1b);
+DEFINE_GUID(G_PatPart, 0x09f25101, 0x505d, 0x4c7c, 0xbe, 0x15, 0x66, 0x2b, 0x33, 0xe7, 0x8a, 0x7c);
+static void pt_vars(IDirectMusicPerformance8 *pf, MUSIC_TIME t, const char *what)
+{
+    DMUS_VARIATIONS_PARAM v;
+    memset(&v, 0, sizeof(v));
+    MUSIC_TIME nx = 0;
+    HRESULT hr = IDirectMusicPerformance8_GetParam(pf, &GUID_Variations, 0xffffffff, 0, t, &nx, &v);
+    printf("  %s: variations %08lx next %ld:", what, hr, nx);
+    if (SUCCEEDED(hr))
+        for (DWORD k = 0; k < v.dwPChannelsUsed; k++) printf(" [%lu %08lx]", v.padwPChannels[k], v.padwVariations[k]);
+    printf("\n");
+}
+static int pattrack(IDirectMusicLoader8 *ld)
+{
+    IDirectMusicSegment8 *sg = ld_seg(ld, L"pattrk.sgt");
+    IDirectMusicStyle *st = NULL;
+    HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicStyle, &IID_IDirectMusicStyle, L"pat.sty", (void **)&st);
+    printf("style %08lx\n", hr);
+    if (!sg || !st) return 1;
+    IDirectMusicTrack *tr = NULL;
+    hr = IDirectMusicSegment8_GetTrack(sg, &CLSID_DirectMusicPatternTrack, 0xffffffff, 0, &tr);
+    printf("track %08lx\n", hr);
+    if (!tr) return 1;
+    IUnknown *u = NULL;
+    IDirectMusicPatternTrack *pt = NULL;
+    hr = IDirectMusicTrack_QueryInterface(tr, &IID_IDirectMusicPatternTrack, (void **)&pt);
+    printf("qi pattern track %08lx\n", hr);
+    hr = IDirectMusicTrack_QueryInterface(tr, &IID_IPersist, (void **)&u);
+    printf("qi persist %08lx\n", hr);
+    if (u) IUnknown_Release(u);
+    if (!pt) return 1;
+    static const GUID *const gs[] = { &GUID_Variations, &GUID_SeedVariations, &GUID_Valid_Start_Time, &G_PatStyle, &G_PatPart,
+                                      &GUID_TimeSignature, &GUID_EnableTimeSig, &GUID_DisableTimeSig, &GUID_IDirectMusicStyle };
+    for (int k = 0; k < 9; k++) printf("  isparam %d %08lx\n", k, IDirectMusicTrack_IsParamSupported(tr, gs[k]));
+    DMUS_VARIATIONS_PARAM v;
+    MUSIC_TIME nx = 0, vs = 0;
+    printf("  getparam variations %08lx\n", IDirectMusicTrack_GetParam(tr, &GUID_Variations, 0, &nx, &v));
+    hr = IDirectMusicTrack_GetParam(tr, &GUID_Valid_Start_Time, 0, &nx, &vs);
+    printf("  getparam valid start %08lx %ld %ld\n", hr, vs, nx);
+    IDirectMusicStyle *ps = NULL;
+    nx = 5;
+    hr = IDirectMusicTrack_GetParam(tr, &G_PatStyle, 100, &nx, &ps);
+    printf("  getparam style %08lx %d next %ld\n", hr, ps != NULL, nx);
+    if (ps) {
+        DMUS_TIMESIGNATURE ts;
+        memset(&ts, 0, sizeof(ts));
+        IDirectMusicStyle_GetTimeSignature(ps, &ts);
+        printf("    its signature %d/%d %d\n", ts.bBeatsPerMeasure, ts.bBeat, ts.wGridsPerBeat);
+        IDirectMusicStyle_Release(ps);
+    }
+    DWORD pp[3] = { 1, 0, 7 };
+    printf("  getparam part %08lx\n", IDirectMusicTrack_GetParam(tr, &G_PatPart, 0, NULL, pp));
+    printf("  getparam timesig %08lx\n", IDirectMusicTrack_GetParam(tr, &GUID_TimeSignature, 0, NULL, &v));
+
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    hr = IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL);
+    printf("init %08lx\n", hr);
+    /* the variations read once the state has started, well before the second chord (GUID_Variations' next is the
+     * state's next chord) */
+    REFERENCE_TIME now = 0;
+    IDirectMusicPerformance8_GetTime(pf, &now, NULL);
+    IDirectMusicSegmentState *ss = NULL;
+    hr = IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)sg, NULL, NULL, DMUS_SEGF_REFTIME, now + 10000000, &ss, NULL, NULL);
+    MUSIC_TIME s0 = 0, mt = 0;
+    IDirectMusicSegmentState_GetStartTime(ss, &s0);
+    printf("play %08lx\n", hr);
+    do { Sleep(20); IDirectMusicPerformance8_GetTime(pf, NULL, &mt); } while (mt < s0 + 500);
+    pt_vars(pf, s0 + 100, "playing");
+    hr = IDirectMusicPatternTrack_SetVariation(pt, ss, 0x5, 2);
+    printf("set variation %08lx\n", hr);
+    pt_vars(pf, s0 + 100, "part 2 auditioned");
+    hr = IDirectMusicPatternTrack_SetVariation(pt, NULL, 0x30, 1);
+    printf("set variation (no state) %08lx\n", hr);
+    pt_vars(pf, s0 + 100, "unchanged");
+    DWORD len = 0;
+    static const struct { const WCHAR *n; DWORD type; } byname[] = { { L"MID", 0 }, { L"nope", 0 }, { L"mid", 1 }, { L"fast", 2 }, { L"fast", 0 } };
+    for (int k = 0; k < 5; k++) {
+        len = 12345;
+        hr = IDirectMusicPatternTrack_SetPatternByName(pt, ss, (WCHAR *)byname[k].n, st, byname[k].type, &len);
+        printf("set pattern %ls %lu: %08lx length %lu\n", byname[k].n, byname[k].type, hr, len);
+        pt_vars(pf, s0 + 100, "after");
+    }
+    IDirectMusicSegment *ns = NULL;
+    hr = IDirectMusicPatternTrack_CreateSegment(pt, st, &ns);
+    printf("create segment %08lx\n", hr);
+    if (ns) {
+        MUSIC_TIME l = 0;
+        DWORD res = 7;
+        IDirectMusicSegment_GetLength(ns, &l);
+        IDirectMusicSegment_GetDefaultResolution(ns, &res);
+        printf("  length %ld resolution %lu\n", l, res);
+        for (int k = 0; k < 4; k++) {
+            IDirectMusicTrack *x = NULL;
+            hr = IDirectMusicSegment_GetTrack(ns, &GUID_All_Objects, 0xffffffff, k, &x);
+            if (!x) break;
+            DWORD grp = 0;
+            IDirectMusicSegment_GetTrackGroup(ns, x, &grp);
+            printf("  track %d same %d group %lx\n", k, x == tr, grp);
+            IDirectMusicTrack_Release(x);
+        }
+        IDirectMusicSegment_Release(ns);
+    }
+    ps = NULL;
+    hr = IDirectMusicTrack_GetParam(tr, &G_PatStyle, 0, NULL, &ps);
+    printf("  getparam style after %08lx\n", hr);
+    if (ps) IDirectMusicStyle_Release(ps);
+    IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);
+    Sleep(100);
+    IDirectMusicSegmentState_Release(ss);
+    IDirectMusicPerformance8_CloseDown(pf);
+    IDirectMusicPerformance8_Release(pf);
+    IDirectMusicPatternTrack_Release(pt);
+    IDirectMusicTrack_Release(tr);
+    IDirectMusicStyle_Release(st);
+    IDirectMusicSegment8_Release(sg);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -734,6 +936,8 @@ int main(int argc, char **argv)
     if (argc > 1 && !strcmp(argv[1], "trans")) return trans(ld);
     if (argc > 1 && !strcmp(argv[1], "join")) return join(ld);
     if (argc > 1 && !strcmp(argv[1], "recomp")) return recomp(ld);
+    if (argc > 1 && !strcmp(argv[1], "align")) return align(ld);
+    if (argc > 1 && !strcmp(argv[1], "pattrack")) return pattrack(ld);
     if (argc > 1) {         /* templates (compose2): each composed with its own style and chord maps, then given ones */
         IDirectMusicComposer *cp = NULL;
         HRESULT hr = CoCreateInstance(&CLSID_DirectMusicComposer, NULL, CLSCTX_INPROC, &IID_IDirectMusicComposer, (void **)&cp);

@@ -319,6 +319,13 @@ class Segment:
         self.track(CLSID['signposttrack'], 'sgnp', None, chunk('sgnp', body), group=group,
                    extras=(config, 0) if config is not None else None)
 
+    def markers(self, starts=(), plays=(), group=1):
+        """a marker track ('MARK'): valid start times ('vals') and play markers ('play')"""
+        items = []
+        if starts: items.append(chunk('vals', struct.pack('<I', 4) + b''.join(struct.pack('<i', t) for t in starts)))
+        if plays: items.append(chunk('play', struct.pack('<I', 4) + b''.join(struct.pack('<i', t) for t in plays)))
+        self.track('55a8fd00-4288-11d3-9bd1-8a0d61c88835', None, 'MARK', LIST('MARK', *items), group=group)
+
     def build(self):
         segh = struct.pack('<IiiiiI', self.repeats, self.length, 0, 0, 0, self.resolution) + \
             struct.pack('<qII', 0, self.flags, 0)

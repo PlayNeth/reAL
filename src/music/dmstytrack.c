@@ -47,7 +47,8 @@ static int sty_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, v
         if (prm != PRM_MUTE) return DMUS_E_TYPE_UNSUPPORTED;
         return dms_mute_getparam(t->data, mt, next, data);
     case TRK_STYLE: return stytrack_getparam(t, NULL, prm, mt, next, data);
-    case TRK_MOTIF: case TRK_PATTERN: return motiftrack_getparam(t, prm, mt, next, data);
+    case TRK_MOTIF: return motiftrack_getparam(t, prm, mt, next, data);
+    case TRK_PATTERN: return patterntrack_getparam(t, NULL, prm, mt, next, data);
     case TRK_CHORDMAP:                  /* 7728c1d1 */
         if (!data) return DM_E_POINTER;
         if (prm != PRM_CHORDMAP) return DMUS_E_GET_UNSUPPORTED;
@@ -196,5 +197,6 @@ static int sty_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mti
 static int sty_getparam_state(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data)
 {
     if (t->kind == TRK_STYLE) return stytrack_getparam(t, state, prm, mt, next, data);
+    if (t->kind == TRK_PATTERN) return patterntrack_getparam(t, state, prm, mt, next, data);
     return sty_getparam(t, prm, mt, next, data);
 }

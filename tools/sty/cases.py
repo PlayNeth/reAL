@@ -482,7 +482,41 @@ def case_compose2(out, seed=16):
     files['c10.sgt'] = comp_template('c10', '8f6d1a10-1000-4000-8000-000000000050', random.Random(0), 16, 'compsty', [(0, 'cmaph')], spconfig=0x238)
     return files
 
-CASES = {'compose2': case_compose2, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_align(out):
+    """the performance's start times (tests/comptest.c align): a primary with play markers, segments with valid
+    start times or without, one with a start point and a loop"""
+    def note_seg(name, guid, length, ts, starts=None, plays=None, repeats=0):
+        seg = Segment(guid, name, length, repeats=repeats)
+        seg.tempo([(0, 100.0)])
+        seg.timesig([(0,) + ts])
+        seg.seq([(t, 100, 0, 0x90, 60, 100) for t in range(0, length, 768)])
+        if starts is not None or plays is not None: seg.markers(starts or (), plays or ())
+        return seg.build()
+    return {'aprim.sgt': note_seg('aprim', '8f6d1a10-1100-4000-8000-000000000001', 16 * 3072, (4, 4, 4), plays=(1000, 5000, 9000, 9100, 20000)),
+            'aprim3.sgt': note_seg('aprim3', '8f6d1a10-1100-4000-8000-000000000002', 16 * 2304, (3, 4, 2), plays=(2304, 6912)),
+            'avs.sgt': note_seg('avs', '8f6d1a10-1100-4000-8000-000000000003', 8 * 3072, (4, 4, 4), starts=(700, 1500, 3100, 6000, 9300)),
+            'anovs.sgt': note_seg('anovs', '8f6d1a10-1100-4000-8000-000000000004', 8 * 3072, (4, 4, 4)),
+            'aloop.sgt': note_seg('aloop', '8f6d1a10-1100-4000-8000-000000000005', 4 * 3072, (4, 4, 4), starts=(0, 2500, 4000), repeats=3)}
+
+def case_pattrack(out, seed=13):
+    """IDirectMusicPatternTrack (tests/comptest.c pattrack): the pattern case's pattern over two chords far apart (what
+    GUID_Variations gives depends on the state's next chord), and the style it came from"""
+    import random
+    R = random.Random(seed)
+    st = mix_style('pat', seed)
+    pt = Pattern('ptrack', (4, 4, 4), 2, (1, 100), 0, [0x11, 5])
+    for j, p in enumerate(st.parts):
+        pt.parts.append(p)
+        pt.partref(p, pchannel=j, subchord=R.choice([0, 1]), random=[0, 1, 2, 3, 4, 1][j])
+    seg = Segment('8f6d1a10-1000-4000-8000-00000000003e', 'pattrk', 8 * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.pattern(pt)
+    ch = [it for it in mix_chords(R, 8) if it[0] in (0, 4 * BAR)]
+    seg.chords(0x00ab5ab5, ch)
+    return {'pattrk.sgt': seg.build(), 'pat.sty': mix_style('pat', 13).build()}
+
+CASES = {'compose2': case_compose2, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

@@ -824,23 +824,53 @@ static dm_segstate *primary_at(dm_perf *pf, mtime_t mt)
     return NULL;
 }
 
-/* 7730959f: quantise a music time to the grid/beat/measure (only with a primary segment, or TIMESIG_ALWAYS) */
-static mtime_t resolve_mt(dm_perf *pf, mtime_t mt, uint32_t flags)
+static mtime_t ss_end(dm_segstate *ss, mtime_t start);
+/* 7730959f: a music time resolved by the flags: the next play marker (DMUS_SEGF_MARKER), the end of the primary
+ * segment playing (DMUS_SEGF_SEGMENTEND), else the next grid, beat or measure (only with a primary segment, or
+ * TIMESIG_ALWAYS).  `res`, when asked for, gets the step: the distance from the play marker before, the primary's
+ * whole length, or the grid, beat or measure */
+static mtime_t resolve_mt_ex(dm_perf *pf, mtime_t mt, uint32_t flags, mtime_t *res)
 {
+    if (res) *res = 0;
+    if (flags & SEGF_MARKER) {
+        mtime_t next = 0, d = 0;
+        if (perf_getparam(pf, PRM_PLAYMARKER, 0xffffffff, 0, mt, &next, &d) >= 0) {
+            mtime_t prev = d + mt, found = next + mt, t = mt;
+            int hit = 0;
+            while (next) {
+                t += next;
+                if (perf_getparam(pf, PRM_PLAYMARKER, 0xffffffff, 0, t, &next, &d) < 0) break;
+                if (d == 0) { hit = 1; found = t; break; }
+            }
+            if (res) { *res = found - prev; return found; }
+            if (hit) return found;
+        }
+    }
+    if (flags & SEGF_SEGMENTEND) {
+        dm_segstate *ss = primary_at(pf, mt);
+        if (ss) {
+            mtime_t e = ss_end(ss, ss->startpoint);
+            if (res) *res = e;
+            int64_t r = (int64_t)ss->mtstart - ss->startpoint + e;
+            return r > 0x7fffffff ? 0x7fffffff : (mtime_t)r;
+        }
+    }
     if (!(flags & SEGF_TIMESIG_ALWAYS) && !primary_at(pf, mt)) return mt;
     timesig ts;
     if (perf_getparam(pf, PRM_TIMESIG, 0xffffffff, 0, mt, NULL, &ts) < 0) return mt;
     mtime_t el = -ts.t;
-    uint32_t res = 1;
+    uint32_t r = 1;
     if (ts.beat) {
-        if (flags & SEGF_MEASURE) res = (uint32_t)(ts.bpm * 0xc00) / ts.beat;
-        else if (flags & SEGF_BEAT) res = 0xc00u / ts.beat;
-        else if ((flags & SEGF_GRID) && ts.grids) res = (0xc00u / ts.beat) / ts.grids;
+        if (flags & SEGF_MEASURE) r = (uint32_t)(ts.bpm * 0xc00) / ts.beat;
+        else if (flags & SEGF_BEAT) r = 0xc00u / ts.beat;
+        else if ((flags & SEGF_GRID) && ts.grids) r = (0xc00u / ts.beat) / ts.grids;
     }
-    if (!res) res = 1;
-    if (el) el = ((el - 1) / (int32_t)res + 1) * (int32_t)res;
+    if (!r) r = 1;
+    if (res) *res = (mtime_t)r;
+    if (el) el = ((el - 1) / (int32_t)r + 1) * (int32_t)r;
     return el + ts.t + mt;
 }
+static mtime_t resolve_mt(dm_perf *pf, mtime_t mt, uint32_t flags) { return resolve_mt_ex(pf, mt, flags, NULL); }
 
 /* 7730a4e3 GetResolvedTime */
 static rtime_t resolved_time(dm_perf *pf, rtime_t rt, uint32_t flags)

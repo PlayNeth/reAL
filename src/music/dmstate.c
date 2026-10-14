@@ -66,6 +66,7 @@ dm_segment *dm_segstate_segment(dm_segstate *ss) { return ss->seg; }
 
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt) { *mt = ss->mtstart; return DM_OK; }
 mtime_t dm_segstate_seek(dm_segstate *ss) { return ss->segpos; }           /* GetSeek 77315f67 (+0x6c) */
+mtime_t dm_segstate_start_point(dm_segstate *ss) { return ss->startpoint; }   /* GetStartPoint 77315e8c (+0x70) */
 
 /* 773156d6: perf time t in the state's own time, unrolling loops; nonzero when outside the segment */
 static int ss_outside(const dm_segstate *s, mtime_t t)
@@ -443,6 +444,46 @@ static void invalidate(dm_perf *pf, mtime_t mt, uint32_t flags)
     if (pf->ops.signal) pf->ops.signal(pf->ctx, DM_THREAD_TRANSPORT);
 }
 
+/* 7730ae6a: the state's start time.  With DMUS_SEGF_ALIGN it starts at the resolved boundary before its time, as if
+ * it had been playing since, so it comes in partway (its start point moved on by as much): at the segment's first
+ * valid start (its marker track) from there, or, when there is none within the step, at the next measure, beat or
+ * grid (DMUS_SEGF_VALID_START_*) or at its time (_TICK); else (or when that is a step or more in) as without it */
+static void ss_resolve_start(dm_perf *pf, dm_segstate *ss)
+{
+    mtime_t mt = (mtime_t)ss->i64start;
+    uint32_t fl = ss->flags;
+    if (fl & SEGF_ALIGN) {
+        mtime_t res = 0, vs = 0;
+        mtime_t prev = resolve_mt_ex(pf, mt, fl, &res) - res;
+        if (res && ss->startpoint) ss->startpoint = ((res >> 1) + ss->startpoint) / res * res;
+        int hr = dm_segment_getparam(ss->seg, PRM_VALIDSTART, 0xffffffff, 0, ss->startpoint - prev + mt, NULL, &vs);
+        if (hr >= 0 && ss->startpoint + res > vs - prev + mt) {
+            ss->mtstart = vs + mt;
+            ss->startpoint = ss->startpoint - prev + vs + mt;
+        } else if (fl & (SEGF_VALID_START_MEASURE | SEGF_VALID_START_BEAT | SEGF_VALID_START_GRID | SEGF_VALID_START_TICK)) {
+            mtime_t u = mt;
+            if (fl & SEGF_VALID_START_MEASURE) u = resolve_mt(pf, mt, SEGF_MEASURE);
+            else if (fl & SEGF_VALID_START_BEAT) u = resolve_mt(pf, mt, SEGF_BEAT);
+            else if (fl & SEGF_VALID_START_GRID) u = resolve_mt(pf, mt, SEGF_GRID);
+            if (ss->startpoint + res <= u - mt) goto plain;
+            ss->mtstart = u;
+            if (res <= u - prev) u -= res;
+            ss->startpoint = ss->startpoint - prev + u;
+        } else goto plain;
+        while (ss->repeats && ss->startpoint >= ss->loopend) {
+            ss->repeats--;
+            ss->startpoint += ss->loopstart - ss->loopend;
+        }
+        ss->repeatsleft = ss->repeats;
+        if (ss->length < ss->startpoint) ss->startpoint = ss->length;
+        ss->mtoffset = ss->mtlast = ss->mtstart;
+        return;
+    }
+plain:
+    ss->mtstart = resolve_mt(pf, mt, fl);
+    ss->mtoffset = ss->mtlast = ss->mtstart;
+}
+
 /* 7730d00c: start a secondary or control state */
 static void start_secondary(dm_perf *pf, dm_segstate *ss)
 {
@@ -463,9 +504,7 @@ static void start_secondary(dm_perf *pf, dm_segstate *ss)
         ss->flags &= ~SEGF_REFTIME;
         ss->i64start = mt;
     }
-    /* 7730ae6a */
-    ss->mtstart = resolve_mt(pf, (mtime_t)ss->i64start, ss->flags);
-    ss->mtoffset = ss->mtlast = ss->mtstart;
+    ss_resolve_start(pf, ss);
     if (ctl) {
         list_insert(pf, 4, ss);
         if (!(ss->flags & SEGF_NOINVALIDATE)) { track_control(pf); invalidate(pf, ss->mtstart, 0); }
@@ -519,9 +558,7 @@ static void start_primary(dm_perf *pf, dm_segstate *ss)
         ss->i64start = R2M(pf, ss->i64start);
         ss->flags &= ~SEGF_REFTIME;
     }
-    /* 7730ae6a */
-    ss->mtstart = resolve_mt(pf, (mtime_t)ss->i64start, ss->flags);
-    ss->mtoffset = ss->mtlast = ss->mtstart;
+    ss_resolve_start(pf, ss);
     dm_segstate *w;
     while ((w = pf->lists[0])) { pf->lists[0] = w->lnext; w->lnext = NULL; ss_abort(pf, w, ss->mtstart); list_insert(pf, 9, w); }
     dm_segstate *h = pf->lists[3];

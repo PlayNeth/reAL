@@ -81,6 +81,10 @@ Doppler, and WASAPI output.
 - GetParam, SetParam and GetParamEx.
 - SetTrackConfig, SetPChannelsUsed and SendPMsg.
 - GetSegmentState, TimeToRhythm, AdjustTime, ClonePMsg and PChannelInfo.
+- Start times as dmime resolves them (7730959f / 7730ae6a): grid, beat and measure, DMUS_SEGF_MARKER (the next play
+  marker) and SEGMENTEND, and DMUS_SEGF_ALIGN with the VALID_START flags: the segment comes in partway at its first
+  valid start (its marker track), else at the next measure, beat or grid, its start point moved on (GetStartPoint).
+  GetResolvedTime takes the same flags. `comptest.exe align` matches.
 - Track objects: GetTrack, InsertTrack, RemoveTrack, and track and segment Clone.
 - SegmentState::GetObjectInPath.
 
@@ -113,15 +117,17 @@ Doppler, and WASAPI output.
   ranges, curves, chase, and measure-and-beat notifications. It supports several styles, time signature changes,
   loops, transitions, stops, and control and secondary segments.
 - The motif track: IDirectMusicStyle::GetMotif segments, with beat and marker alignment and the motif's band.
-- The pattern track ('DMPT'): load, play (no inversions), and Clone by measures.
+- The pattern track ('DMPT'): load, play (no inversions), and Clone by measures. IDirectMusicPatternTrack:
+  CreateSegment, SetVariation (the audition, also through a part's variation lock) and SetPatternByName;
+  GUID_Variations while playing and dmstyle's private 689821f4 (the track's style) and 09f25101.
 - The mute track on style, sequence and wave tracks. Band objects as track parameters (GUID_IDirectMusicBand,
   GUID_BandParam).
 - rand() is the one Microsoft's code uses. The style and motif tracks reseed it from time() when they are made or
   cloned; the pattern track never does. It plays the same as Microsoft's when time() is fixed (`DMGT_TIME`).
 - `tools/sty/cases.py` writes the cases. `tools/sty/cap.sh <case>` compares dmgt with test_perf; every case matches
   event for event. `tests/comcmp.sh styletest.exe` gives 927 lines and `stylecom.exe` gives 186, all identical.
-- Open: IDirectMusicPatternTrack (audition, used by Producer); GUID_Variations with play state and dmstyle's private
-  GetParams; chord regeneration (DMUS_SEGF... regenerate flags).
+- Open: chord regeneration (DMUS_SEGF... regenerate flags). dmstyle's 09f25101 writes a part's variations to the
+  address its PChannel makes (reDM doesn't).
 
 **DirectMusic: chord maps and the composer** (`src/music/dmcompose.c`, `dmcomcmp.c`, `dmtheory.c`, from dmcompos)
 - Chord map files ('DMPR'): the chord palette, the chord graph (entries and their connections) and the
@@ -144,10 +150,8 @@ Doppler, and WASAPI output.
 - Not emulated: a missing "from" chord in ComposeTransition leaves stack contents in Microsoft's buffer; reDM
   uses the default chord there (which is what the stack held in every test).
 - `python3 tools/sty/cases.py <dir> compose2` writes the chord maps, styles and templates. `tests/comcmp.sh
-  comptest.exe` with the templates (c1..c9, t1..t6) and the modes shape, change, trans, join and recomp, and
+  comptest.exe` with the templates (c1..c9, t1..t6) and the modes shape, change, trans, join, recomp, align and pattrack (`cases.py` align, pattrack), and
   `cmapcom.exe` and `theorytest.exe`, all match.
-- Open: the performance does not yet start segments at valid start times (the marker track) when asked to with
-  the align or valid-start flags; transitions are built right, but play from the usual boundary.
 
 ## Remaining, in the agreed order
 

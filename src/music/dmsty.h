@@ -175,7 +175,16 @@ typedef struct {
     uint8_t *pvar; uint32_t *pnorep;    /* +0x30 +0x34 the parts' variations kept across plays (a pattern with flag 1) */
     dms_pattern *motif;             /* +0x38 the motif track's pattern (MotifTrackInfo) */
     int kind;                       /* TRK_PATTERN: a pattern track (its pattern its own, cloned by measures) */
+    /* the pattern track's audition (PatternTrackInfo, IDirectMusicPatternTrack::SetVariation and the private
+     * interfaces), given to every state it starts */
+    uint32_t *varbuf;               /* +0x3c GUID_Variations' variations, one per part */
+    uint32_t au_flags, au_part;     /* +0x40 +0x44 the variations to play, on the part with this PChannel */
+    dm_guid au_guid;                /* +0x48 or the part with this guid */
+    int au_byguid, au_all;          /* +0x58 +0x5c (1, 1: no audition) */
+    dms_pattern **retired; int nretired;    /* patterns replaced (SetPatternByName), kept for the states */
 } dms_styletrack;
+/* GUID_Variations (DMUS_VARIATIONS_PARAM): the parts' PChannels and variations */
+typedef struct { uint32_t n; uint32_t *pchs; uint32_t *vars; } dms_varparam;
 /* a style reference (DMRF): the loader's style, with a reference for the caller */
 typedef dm_getstyle_fn dms_getstyle_fn;
 /* the 'sttr' list's data (after its type) */
@@ -190,6 +199,13 @@ dms_styletrack *dms_patterntrack_load(const uint8_t *p, size_t n, dm_getcoll_fn 
 /* IDirectMusicStyle::GetMotif (77409532): a segment with the motif track (and the motif's band) */
 dm_segment *dms_motif_segment(dms_style *s, dms_pattern *p);
 void dms_pattern_addref(dms_pattern *p);
+dms_pattern *dms_pattern_copy(const dms_pattern *p);
+dms_pattern *dms_patterntrack_swap(dms_styletrack *T, dms_pattern *p);   /* (the old one kept by the track) */
+/* IDirectMusicPatternTrack (the engine's lock held) */
+struct dm_segstate; struct dm_segment;
+int dms_patterntrack_set_variation(dm_track *t, struct dm_segstate *ss, uint32_t flags, uint32_t part);
+int dms_patterntrack_set_pattern(dm_track *t, struct dm_segstate *ss, const dms_pattern *src, mtime_t *length);
+int dms_patterntrack_create_segment(dm_track *t, const dms_style *style, struct dm_segment **out);
 void dms_pattern_release(dms_pattern *p);
 /* 77410c9b: the PChannels of all the styles */
 int dms_styletrack_pchs(dms_styletrack *T);
