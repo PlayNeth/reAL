@@ -178,25 +178,10 @@ static IDirectMusicChordMap *chordmap_iface(dmc_chordmap *m)
 }
 
 /* a chord map track's reference (7728bdd6: the loader's GetObject of a chord map); the engine map with a reference */
-static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out);
 static struct dmc_chordmap *loader_getcmap(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
-    rm_loader *l = ctx;
-    if (!l) return NULL;
-    DMUS_OBJECTDESC d;
-    memset(&d, 0, sizeof(d));
-    d.dwSize = sizeof(d);
-    d.dwValidData = DMUS_OBJ_CLASS;
-    d.guidClass = RM_CLSID_DirectMusicChordMap;
-    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
-    if (file) {
-        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
-        d.dwValidData |= DMUS_OBJ_FILENAME;
-        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
-    }
-    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
     IDirectMusicChordMap *o = NULL;
-    if (FAILED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &RM_IID_IDirectMusicChordMap, (void **)&o)) || !o) {
+    if (FAILED(ldr_get(ctx, &RM_CLSID_DirectMusicChordMap, &RM_IID_IDirectMusicChordMap, g, file, name, (void **)&o)) || !o) {
         LOG_INFO("music: chord map %s not found", file ? file : name ? name : "(by guid)");
         return NULL;
     }
@@ -204,17 +189,6 @@ static struct dmc_chordmap *loader_getcmap(void *ctx, const dm_guid *g, const ch
     dmc_chordmap_addref(r);
     IDirectMusicChordMap_Release(o);
     return r;
-}
-
-/* the loader's GetObject of a chord map from file, memory or stream data */
-static HRESULT chordmap_from_data(const BYTE *b, DWORD n, IUnknown **out)
-{
-    rm_chordmap *o = new_chordmap(NULL);
-    if (!o) return E_OUTOFMEMORY;
-    HRESULT hr = chordmap_load_data(o->m, b, n);
-    if (FAILED(hr)) { cmp_release(&o->IDirectMusicChordMap_iface); return hr; }
-    *out = (IUnknown *)&o->IDirectMusicChordMap_iface;
-    return S_OK;
 }
 
 /* ------------------------------------------------------------------ the composer (dmcompos CDMCompos 77282d2f) */

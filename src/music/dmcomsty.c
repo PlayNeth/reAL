@@ -96,7 +96,7 @@ static HRESULT WINAPI bno_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d)
     b->desc.dwValidData |= d->dwValidData & (DMUS_OBJ_OBJECT | DMUS_OBJ_NAME);
     return S_OK;
 }
-static HRESULT WINAPI bno_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_notimpl(__func__); }
+static HRESULT WINAPI bno_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_desc_parse(s, d, mmioFOURCC('D','M','B','D'), &RM_CLSID_DirectMusicBand); }
 static IDirectMusicObjectVtbl bno_vtbl = { bno_qi, bno_addref, bno_release, bno_getdesc, bno_setdesc, bno_parse };
 
 static void band_desc(rm_band *o)
@@ -117,7 +117,7 @@ static HRESULT WINAPI bnp_load(IPersistStream *i, IStream *st)
     if (!st) return E_POINTER;
     if (!read_stream(st, &b, &n)) return E_FAIL;
     dm_band *x = NULL;
-    if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "DMBD", 4)) x = dm_band_load(b + 12, n - 12, loader_getcoll, g_styleloader);
+    if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "DMBD", 4)) x = dm_band_load(b + 12, n - 12, loader_getcoll, rm_stream_loader(st));
     free(b);
     if (!x) return DMUS_E_UNSUPPORTED_STREAM;
     dm_band_release(o->b);
@@ -330,7 +330,6 @@ static HRESULT WINAPI sty_getchordmap(IDirectMusicStyle8 *i, WCHAR *name, IDirec
 }
 /* 7740af13 / 7740a17d / 7740a031: the style's 'prrf' list: each named reference's chord map from the loader, put
  * first unless one with its name (the map's own) is there already; the first reference's is the default */
-static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out);
 DMG(RM_IID_IDirectMusicChordMap_, 0xd2ac28be, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 static void style_add_cmap(rm_style *o, IDirectMusicChordMap *m, const WCHAR *refname, int first)
 {
@@ -348,7 +347,7 @@ static void style_add_cmap(rm_style *o, IDirectMusicChordMap *m, const WCHAR *re
     o->ncmaps++;
     if (first) o->defcmap = m;
 }
-static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, rm_loader *l)
+static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, IDirectMusicLoader8 *l)
 {
     if (!l || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMST", 4)) return;
     DWORD end = 8 + *(const DWORD *)(b + 4);
@@ -393,7 +392,7 @@ static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, rm_loader *l)
                     if (!bad && (d.dwValidData & DMUS_OBJ_NAME)) {
                         d.dwSize = sizeof(d);
                         IDirectMusicChordMap *m = NULL;
-                        if (SUCCEEDED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &RM_IID_IDirectMusicChordMap_, (void **)&m)) && m)
+                        if (SUCCEEDED(IDirectMusicLoader8_GetObject(l, &d, &RM_IID_IDirectMusicChordMap_, (void **)&m)) && m)
                             style_add_cmap(o, m, d.wszName, first);
                     }
                     first = 0;
@@ -481,7 +480,7 @@ static HRESULT WINAPI sto_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d)
     s->desc.dwValidData |= d->dwValidData & (DMUS_OBJ_OBJECT | DMUS_OBJ_NAME);
     return S_OK;
 }
-static HRESULT WINAPI sto_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_notimpl(__func__); }
+static HRESULT WINAPI sto_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_desc_parse(s, d, mmioFOURCC('D','M','S','T'), &RM_CLSID_DirectMusicStyle); }
 static IDirectMusicObjectVtbl sto_vtbl = { sto_qi, sto_addref, sto_release, sto_getdesc, sto_setdesc, sto_parse };
 
 /* the band objects of a loaded style, the descriptor */
@@ -509,7 +508,7 @@ static ULONG WINAPI stp_addref(IPersistStream *i) { return sty_addref(&stp(i)->I
 static ULONG WINAPI stp_release(IPersistStream *i) { return sty_release(&stp(i)->IDirectMusicStyle8_iface); }
 static HRESULT WINAPI stp_getclass(IPersistStream *i, CLSID *c) { if (!c) return E_POINTER; *c = RM_CLSID_DirectMusicStyle; return S_OK; }
 static HRESULT WINAPI stp_isdirty(IPersistStream *i) { return S_FALSE; }
-static dms_style *style_from_data(const BYTE *b, DWORD n, rm_loader *l, HRESULT *hr)
+static dms_style *style_from_data(const BYTE *b, DWORD n, IDirectMusicLoader8 *l, HRESULT *hr)
 {
     *hr = DMUS_E_UNSUPPORTED_STREAM;
     if (n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMST", 4)) return NULL;
@@ -525,10 +524,11 @@ static HRESULT WINAPI stp_load(IPersistStream *i, IStream *st)
     if (!st) return E_POINTER;
     if (!read_stream(st, &b, &n)) return E_FAIL;
     HRESULT hr;
-    dms_style *x = style_from_data(b, n, g_styleloader, &hr);
+    IDirectMusicLoader8 *l = rm_stream_loader(st);
+    dms_style *x = style_from_data(b, n, l, &hr);
     if (!x) { free(b); return FAILED(hr) ? hr : E_FAIL; }
     style_take(o, x);
-    style_load_cmaps(o, b, n, g_styleloader);
+    style_load_cmaps(o, b, n, l);
     free(b);
     return S_OK;
 }

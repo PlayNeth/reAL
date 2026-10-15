@@ -125,6 +125,31 @@ Doppler, and WASAPI output.
   keeps the audiopath's buffers and effects); a race in PlaySegment could leave a second state object holding
   the audiopath.
 
+**DirectMusic: the loader and containers** (`src/music/dmldr.c`, from dmloader's CLoader and CContainer)
+- The loader keeps a list of classes, each with its entries (a descriptor, the object once loaded, the garbage
+  collection links). GetObject finds an entry by object GUID, memory, stream, full path, name and category, name,
+  file name, then the object itself (a full path is never matched against a relative file name, as in dmloader),
+  creates the object by class, loads it with IPersistStream::Load from a stream that hands out the loader
+  (IDirectMusicGetLoader), and merges what the object says of itself into the entry, then tells the object.
+  SetObject, SetSearchDirectory, ScanDirectory (no cache file), CacheObject, ReleaseObject, ReleaseObjectByUnknown,
+  ClearCache, EnableCache, EnumObject, CollectGarbage, LoadObjectFromFile, and the private IDirectMusicLoader8P
+  (dynamic references, the streams' references) as dmloader has them; the default GM collection is set up at
+  creation. File streams read on demand (no Stat, a short read fails), so a large gm.dls or SoundFont is opened
+  through the process-wide collection cache.
+- Every object loads from the stream it is given, and its references go through the stream's loader: bands'
+  collections, wave, style, chord map and segment trigger tracks, styles' chord maps. Collections are now objects
+  of their own (CLSID_DirectMusicCollection with IPersistStream). Segments, collections, bands and styles have
+  Get/Set/ParseDescriptor as their DLLs do (segments parse 'DMSG'/'AASE' forms, waves and MIDI files).
+- The container (CLSID_DirectMusicContainer): Load of a 'DMCN' form gives the loader each item (embedded or a
+  reference) with SetObject, then loads them unless DMUS_CONTAINER_NOLOADS; EnumObject with aliases;
+  Get/Set/ParseDescriptor; when it goes it releases its items from the loader (dmloader never keeps the KEEP
+  flag, so every item is released). A segment's embedded container is loaded through the loader while the
+  segment loads and let go of afterwards (dmime 77313c61).
+- A let-go-of entry stays in its class while it has a place to load from or a name (dmloader's 0xc14 mask).
+- `tests/comcmp.sh trktest.exe container` and `loader` (`cases.py container` and `tracks`) match: partial loads,
+  descriptors and flags of every item, lookups by GUID, name, alias and file, NOLOADS, embedded containers,
+  ReleaseObject of a container from the cache, ScanDirectory, SetObject, a disabled cache, EnumObject of all types.
+
 **DirectMusic: tool graphs and application tools**
 - The graph object (CLSID_DirectMusicGraph, `src/music/dmgraph.c`, from dmime's CGraph): InsertTool, GetTool,
   RemoveTool (a removed tool stays referenced until the graph goes), StampPMsg, the descriptor, IPersistStream::Load

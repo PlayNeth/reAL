@@ -586,7 +586,35 @@ def case_paramctl(out):
     files['pctlbad.sgt'] = bad.build()
     return files
 
-CASES = {'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_container(out):
+    """dmloader's containers (tests/trktest.c container): embedded objects and references, aliases, the KEEP and
+    NOLOADS flags, a segment with a container of its own whose segment trigger track finds its segment by GUID"""
+    SEG = CLSID['segment']
+    def seg(name, guid, note):
+        g = Segment(guid, name, BAR)
+        g.tempo([(0, 120.0)])
+        g.seq([(t, 200, 0, 0x90, note, 100) for t in range(0, BAR, 768)])
+        return g.build()
+    files = {'trgA.sgt': seg('trgA', '8f6d1a10-1200-4000-8000-000000000003', 70)}
+    inner = seg('inner', '8f6d1a10-1400-4000-8000-000000000001', 60)
+    kept = seg('kept', '8f6d1a10-1400-4000-8000-000000000002', 62)
+    files['box.con'] = container('8f6d1a10-1400-4000-8000-0000000000c1', 'box', [
+        (SEG, 0, 'alias one', inner),
+        (SEG, 1, None, kept),
+        (SEG, 0, 'by file', objref(SEG, file='trgA.sgt')),
+        (SEG, 0, None, objref(SEG, guid='8f6d1a10-1400-4000-8000-0000000000ff', name='missing'))])
+    lazy = seg('lazy', '8f6d1a10-1400-4000-8000-000000000003', 64)
+    files['lazy.con'] = container('8f6d1a10-1400-4000-8000-0000000000c2', 'lazy', [(SEG, 0, None, lazy)], flags=2)
+    host = Segment('8f6d1a10-1400-4000-8000-000000000010', 'host', 2 * BAR)
+    host.tempo([(0, 120.0)])
+    host.seq([(0, 200, 0, 0x90, 50, 100)])
+    hidden = seg('hidden', '8f6d1a10-1400-4000-8000-000000000011', 66)
+    host.extra = [container(None, None, [(SEG, 0, None, hidden)])]
+    host.segtrigger([(768, 768, 0x80, 0, objref(SEG, guid='8f6d1a10-1400-4000-8000-000000000011'))])
+    files['host.sgt'] = host.build()
+    return files
+
+CASES = {'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

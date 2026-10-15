@@ -238,6 +238,61 @@ static void dump_probe(void)
     fclose(f);
 }
 
+static void show_desc(const char *what, HRESULT hr, const DMUS_OBJECTDESC *d, const WCHAR *alias)
+{
+    const WCHAR *f = d->wszFileName, *b = f;
+    for (const WCHAR *p = f; *p; p++) if (*p == '\\' || *p == '/') b = p + 1;
+    printf("%s %08lx valid %lx class %08lx guid %08lx name '%ls' file '%ls'%s", what, hr, d->dwValidData, d->guidClass.Data1,
+           (d->dwValidData & DMUS_OBJ_OBJECT) ? d->guidObject.Data1 : 0, (d->dwValidData & DMUS_OBJ_NAME) ? d->wszName : L"",
+           (d->dwValidData & DMUS_OBJ_FILENAME) ? b : L"", (d->dwValidData & DMUS_OBJ_STREAM) ? " stream" : "");
+    if (alias) printf(" alias '%ls'", alias);
+    printf("\n");
+}
+static void enum_container(IDirectMusicContainer *c, REFGUID cls, const char *what)
+{
+    for (DWORD k = 0; k < 8; k++) {
+        DMUS_OBJECTDESC d; WCHAR alias[DMUS_MAX_NAME];
+        memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); alias[0] = 0;
+        HRESULT hr = IDirectMusicContainer_EnumObject(c, cls, k, &d, alias);
+        char b[32]; snprintf(b, sizeof(b), "  %s %lu", what, k);
+        if (hr != S_OK) { printf("%s %08lx\n", b, hr); break; }
+        show_desc(b, hr, &d, alias);
+    }
+}
+static void enum_loader(REFGUID cls, const char *what)
+{
+    for (DWORD k = 0; k < 12; k++) {
+        DMUS_OBJECTDESC d;
+        memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d);
+        HRESULT hr = IDirectMusicLoader8_EnumObject(loader, cls, k, &d);
+        char b[32]; snprintf(b, sizeof(b), "  %s %lu", what, k);
+        if (hr != S_OK) { printf("%s %08lx\n", b, hr); break; }
+        show_desc(b, hr, &d, NULL);
+    }
+}
+static HRESULT get_by(REFGUID cls, const GUID *g, const WCHAR *name, const WCHAR *file, REFIID iid, void **o, const char *what)
+{
+    DMUS_OBJECTDESC d;
+    memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d);
+    d.dwValidData = DMUS_OBJ_CLASS; d.guidClass = *cls;
+    if (g) { d.guidObject = *g; d.dwValidData |= DMUS_OBJ_OBJECT; }
+    if (name) { lstrcpyW(d.wszName, name); d.dwValidData |= DMUS_OBJ_NAME; }
+    if (file) { lstrcpyW(d.wszFileName, file); d.dwValidData |= DMUS_OBJ_FILENAME; }
+    *o = NULL;
+    HRESULT hr = IDirectMusicLoader8_GetObject(loader, &d, iid, o);
+    printf("get %s %08lx\n", what, hr);
+    if (*o) {
+        IDirectMusicObject *ob = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)*o, &IID_IDirectMusicObject, (void **)&ob))) {
+            DMUS_OBJECTDESC x; memset(&x, 0, sizeof(x)); x.dwSize = sizeof(x);
+            HRESULT h2 = IDirectMusicObject_GetDescriptor(ob, &x);
+            show_desc("    desc", h2, &x, NULL);
+            IDirectMusicObject_Release(ob);
+        }
+    }
+    return hr;
+}
+
 /* plays a segment on an audiopath from a start point, until the music time is `len` past its start; rt0 gets the
  * reference time of the segment's time 0 */
 static void play_on(IDirectMusicSegment8 *sg, IDirectMusicAudioPath *ap, MUSIC_TIME len, REFERENCE_TIME *rt0)
@@ -336,6 +391,114 @@ int main(int argc, char **argv)
         }
         IDirectMusicSegment8 *bad = load(L"trigbad.sgt");
         if (bad) IDirectMusicSegment8_Release(bad);
+    } else if (!strcmp(mode, "container")) {
+        static const GUID g_inner = { 0x8f6d1a10, 0x1400, 0x4000, { 0x80, 0, 0, 0, 0, 0, 0, 0x01 } };
+        static const GUID g_kept = { 0x8f6d1a10, 0x1400, 0x4000, { 0x80, 0, 0, 0, 0, 0, 0, 0x02 } };
+        static const GUID g_lazy = { 0x8f6d1a10, 0x1400, 0x4000, { 0x80, 0, 0, 0, 0, 0, 0, 0x03 } };
+        static const GUID g_hidden = { 0x8f6d1a10, 0x1400, 0x4000, { 0x80, 0, 0, 0, 0, 0, 0, 0x11 } };
+        IDirectMusicContainer *c = NULL;
+        IUnknown *u = NULL;
+        get_by(&CLSID_DirectMusicContainer, NULL, NULL, L"box.con", &IID_IDirectMusicContainer, (void **)&c, "box.con");
+        if (c) {
+            enum_container(c, &GUID_DirectMusicAllTypes, "all");
+            enum_container(c, &CLSID_DirectMusicSegment, "segments");
+            enum_container(c, &CLSID_DirectMusicStyle, "styles");
+            DMUS_OBJECTDESC d; memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d);
+            printf("  enum null desc %08lx\n", IDirectMusicContainer_EnumObject(c, &GUID_DirectMusicAllTypes, 0, NULL, NULL));
+            IPersistStream *ps = NULL;
+            printf("  qi persist %08lx\n", IDirectMusicContainer_QueryInterface(c, &IID_IPersistStream, (void **)&ps));
+            if (ps) { CLSID cl; printf("  classid %08lx %08lx\n", IPersistStream_GetClassID(ps, &cl), cl.Data1); IPersistStream_Release(ps); }
+        }
+        enum_loader(&CLSID_DirectMusicSegment, "loader segments");
+        enum_loader(&CLSID_DirectMusicContainer, "loader containers");
+        IDirectMusicSegment8 *a = NULL, *b2 = NULL, *k = NULL;
+        get_by(&CLSID_DirectMusicSegment, &g_inner, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a, "inner by guid");
+        get_by(&CLSID_DirectMusicSegment, NULL, L"inner", NULL, &IID_IDirectMusicSegment8, (void **)&b2, "inner by name");
+        printf("  same object %d\n", a && a == b2);
+        get_by(&CLSID_DirectMusicSegment, NULL, L"alias one", NULL, &IID_IDirectMusicSegment8, (void **)&u, "by alias");
+        if (u) { IUnknown_Release(u); u = NULL; }
+        get_by(&CLSID_DirectMusicSegment, &g_kept, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&k, "kept by guid");
+        get_by(&CLSID_DirectMusicSegment, NULL, NULL, L"trgA.sgt", &IID_IUnknown, (void **)&u, "trgA by file");
+        if (u) { IUnknown_Release(u); u = NULL; }
+        if (c) printf("container released %lu\n", IDirectMusicContainer_Release(c));
+        IDirectMusicSegment8 *a2 = NULL, *k2 = NULL;
+        get_by(&CLSID_DirectMusicSegment, &g_inner, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a2, "inner after");
+        printf("  same as before %d\n", a2 && a2 == a);
+        get_by(&CLSID_DirectMusicSegment, &g_kept, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&k2, "kept after");
+        printf("  same as before %d\n", k2 && k2 == k);
+        enum_loader(&CLSID_DirectMusicSegment, "loader segments after");
+        for (IDirectMusicSegment8 **p = (IDirectMusicSegment8 *[]){ a, b2, k, a2, k2 }, **e = p + 5; p < e; p++) if (*p) IDirectMusicSegment8_Release(*p);
+        /* NOLOADS: described, loaded when asked */
+        get_by(&CLSID_DirectMusicContainer, NULL, NULL, L"lazy.con", &IID_IDirectMusicContainer, (void **)&c, "lazy.con");
+        if (c) enum_container(c, &GUID_DirectMusicAllTypes, "lazy");
+        get_by(&CLSID_DirectMusicSegment, &g_lazy, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a, "lazy by guid");
+        if (a) IDirectMusicSegment8_Release(a);
+        if (c) printf("container released %lu\n", IDirectMusicContainer_Release(c));
+        /* a segment with its own container */
+        IDirectMusicSegment8 *h = load(L"host.sgt");
+        if (h) {
+            IDirectMusicTrack *t = NULL;
+            printf("  trigger track %08lx\n", IDirectMusicSegment8_GetTrack(h, &CLSID_DirectMusicSegTriggerTrack, 0xffffffff, 0, &t));
+            if (t) IDirectMusicTrack_Release(t);
+            get_by(&CLSID_DirectMusicSegment, &g_hidden, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a, "hidden by guid");
+            if (a) IDirectMusicSegment8_Release(a);
+            IDirectMusicSegment8_Release(h);
+            get_by(&CLSID_DirectMusicSegment, &g_hidden, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a, "hidden after");
+            if (a) IDirectMusicSegment8_Release(a);
+        }
+        enum_loader(&GUID_DirectMusicAllTypes, "loader all");
+        /* a container let go of from the cache too */
+        get_by(&CLSID_DirectMusicContainer, NULL, NULL, L"box.con", &IID_IDirectMusicContainer, (void **)&c, "box.con again");
+        IDirectMusicSegment8 *i3 = NULL;
+        get_by(&CLSID_DirectMusicSegment, &g_inner, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&i3, "inner");
+        if (c) {
+            printf("release container from cache %08lx\n", IDirectMusicLoader8_ReleaseObjectByUnknown(loader, (IUnknown *)c));
+            printf("container released %lu\n", IDirectMusicContainer_Release(c));
+        }
+        enum_loader(&CLSID_DirectMusicSegment, "loader segments now");
+        enum_loader(&CLSID_DirectMusicContainer, "loader containers now");
+        get_by(&CLSID_DirectMusicSegment, &g_inner, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a, "inner now");
+        printf("  same as before %d\n", a && a == i3);
+        if (a) IDirectMusicSegment8_Release(a);
+        get_by(&CLSID_DirectMusicSegment, &g_kept, NULL, NULL, &IID_IDirectMusicSegment8, (void **)&a, "kept now");
+        if (a) IDirectMusicSegment8_Release(a);
+        if (i3) IDirectMusicSegment8_Release(i3);
+    } else if (!strcmp(mode, "loader")) {
+        static const GUID g_trgA = { 0x8f6d1a10, 0x1200, 0x4000, { 0x80, 0, 0, 0, 0, 0, 0, 0x03 } };
+        IUnknown *x = NULL, *y = NULL;
+        get_by(&CLSID_DirectMusicSegment, NULL, NULL, L"trgA.sgt", &IID_IUnknown, (void **)&x, "trgA by file");
+        get_by(&CLSID_DirectMusicSegment, NULL, NULL, L"trgA.sgt", &IID_IUnknown, (void **)&y, "trgA by file again");
+        printf("  same %d\n", x == y); if (y) IUnknown_Release(y);
+        get_by(&CLSID_DirectMusicSegment, &g_trgA, NULL, NULL, &IID_IUnknown, (void **)&y, "trgA by guid");
+        printf("  same %d\n", x == y); if (y) IUnknown_Release(y);
+        get_by(&CLSID_DirectMusicSegment, NULL, L"trgA", NULL, &IID_IUnknown, (void **)&y, "trgA by name");
+        printf("  same %d\n", x == y); if (y) IUnknown_Release(y);
+        enum_loader(&CLSID_DirectMusicSegment, "segments");
+        printf("release %08lx\n", IDirectMusicLoader8_ReleaseObjectByUnknown(loader, x));
+        printf("release again %08lx\n", IDirectMusicLoader8_ReleaseObjectByUnknown(loader, x));
+        enum_loader(&CLSID_DirectMusicSegment, "segments released");
+        get_by(&CLSID_DirectMusicSegment, &g_trgA, NULL, NULL, &IID_IUnknown, (void **)&y, "trgA by guid after release");
+        printf("  same %d\n", x == y); if (y) IUnknown_Release(y);
+        IUnknown_Release(x);
+        printf("scan %08lx\n", IDirectMusicLoader8_ScanDirectory(loader, &CLSID_DirectMusicSegment, L"sgt", NULL));
+        enum_loader(&CLSID_DirectMusicSegment, "segments scanned");
+        printf("scan none %08lx\n", IDirectMusicLoader8_ScanDirectory(loader, &CLSID_DirectMusicSegment, L"xyz", NULL));
+        get_by(&CLSID_DirectMusicSegment, NULL, L"pctl", NULL, &IID_IUnknown, (void **)&y, "pctl by name after scan");
+        if (y) IUnknown_Release(y);
+        printf("clear %08lx\n", IDirectMusicLoader8_ClearCache(loader, &CLSID_DirectMusicSegment));
+        enum_loader(&CLSID_DirectMusicSegment, "segments cleared");
+        DMUS_OBJECTDESC d; memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d);
+        d.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_FILENAME; d.guidClass = CLSID_DirectMusicSegment; lstrcpyW(d.wszFileName, L"lyr.sgt");
+        HRESULT h = IDirectMusicLoader8_SetObject(loader, &d);
+        show_desc("setobject", h, &d, NULL);
+        get_by(&CLSID_DirectMusicSegment, NULL, L"lyr", NULL, &IID_IUnknown, (void **)&y, "lyr by name");
+        if (y) IUnknown_Release(y);
+        printf("enable cache off %08lx\n", IDirectMusicLoader8_EnableCache(loader, &CLSID_DirectMusicSegment, FALSE));
+        get_by(&CLSID_DirectMusicSegment, NULL, NULL, L"trgA.sgt", &IID_IUnknown, (void **)&x, "trgA uncached");
+        get_by(&CLSID_DirectMusicSegment, NULL, NULL, L"trgA.sgt", &IID_IUnknown, (void **)&y, "trgA uncached again");
+        printf("  same %d\n", x == y); if (y) IUnknown_Release(y); if (x) IUnknown_Release(x);
+        enum_loader(&CLSID_DirectMusicSegment, "segments uncached");
+        enum_loader(&GUID_DirectMusicAllTypes, "all types");
     } else if (!strcmp(mode, "param")) {
         if (getenv("FXPROBE_LOG")) DeleteFileA(getenv("FXPROBE_LOG"));
         IDirectMusicSegment8 *sg = load(L"pctl.sgt");

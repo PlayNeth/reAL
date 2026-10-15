@@ -337,6 +337,8 @@ class Segment:
             body = [chunk('sgih', struct.pack('<iiII', lt, pt, pf, fl))]
             if fl & 1:
                 body += [reference(CLSID['style'], file=ref[0]), chunk('snam', wstr(ref[1]))]
+            elif isinstance(ref, bytes):
+                body.append(ref)
             else:
                 body.append(reference(CLSID['segment'], file=ref))
             ev.append(LIST('lseg', *body))
@@ -371,7 +373,8 @@ class Segment:
         segh = struct.pack('<IiiiiI', self.repeats, self.length, 0, 0, 0, self.resolution) + \
             struct.pack('<qII', 0, self.flags, 0)
         return RIFF('DMSG', chunk('segh', segh), chunk('guid', guid_bytes(self.guid)),
-                    chunk('vers', struct.pack('<II', 0x10000, 0)), unfo(self.name), LIST('trkl', *self.tracks))
+                    chunk('vers', struct.pack('<II', 0x10000, 0)), unfo(self.name), *getattr(self, 'extra', []),
+                    LIST('trkl', *self.tracks))
 
 
 def audiopath_config(buffers, pch_count=16):
@@ -393,3 +396,28 @@ def audiopath_config(buffers, pch_count=16):
             dsbc.append(LIST('fxls', *fl))
         items.append(LIST('dbfl', chunk('ddah', guid_bytes(g) + struct.pack('<I', 0)), RIFF('DSBC', *dsbc)))
     return RIFF('DMAP', *items)
+
+
+def objref(clsid, guid=None, name=None, file=None, extra_valid=0):
+    """a DMRF reference with the DMUS_OBJ_* bits of the chunks it has (as dmloader reads them)"""
+    valid, items = 0x02 | extra_valid, []
+    if guid: valid |= 0x01; items.append(chunk('guid', guid_bytes(guid)))
+    if name: valid |= 0x04; items.append(chunk('name', wstr(name)))
+    if file: valid |= 0x10; items.append(chunk('file', wstr(file)))
+    return LIST('DMRF', chunk('refh', guid_bytes(clsid) + struct.pack('<I', valid)), *items)
+
+def container(guid, name, items, flags=0):
+    """a container ('DMCN'): items (class GUID, DMUS_CONTAINED_OBJF_* flags, alias or None, data); data is an
+    embedded object (a RIFF form) or a DMRF reference"""
+    cl = []
+    for cls, fl, alias, data in items:
+        cid, cty = data[:4], data[8:12]
+        body = []
+        if alias is not None: body.append(chunk('coba', wstr(alias)))
+        body.append(chunk('cobh', guid_bytes(cls) + struct.pack('<I', fl) + b'\0' * 4 + cty))
+        body.append(data)
+        cl.append(LIST('cobl', *body))
+    hdr = [chunk('cnth', struct.pack('<I', flags))]
+    if guid: hdr.append(chunk('guid', guid_bytes(guid)))
+    if name: hdr.append(unfo(name))
+    return RIFF('DMCN', *hdr, LIST('cosl', *cl))

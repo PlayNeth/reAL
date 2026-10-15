@@ -1,6 +1,6 @@
 /* reDM: the DirectMusic COM objects a game creates (dmloader/dmime/dmusic classes), backed by the ported
- * performance engine.  Covers what DirectMusic games built on segments use: the loader (files, memory, streams, the
- * default GM collection), the performance (Init/InitAudio, standard audiopaths, PlaySegment(Ex), Stop(Ex), IsPlaying,
+ * performance engine.  Covers what DirectMusic games built on segments use: the loader's objects (the loader and
+ * containers are dmldr.c), the performance (Init/InitAudio, standard audiopaths, PlaySegment(Ex), Stop(Ex), IsPlaying,
  * time conversion, global and track parameters, messages and notifications), segments, segment states and audiopaths
  * (Activate, SetVolume), and tool graphs with application tools (the graph object itself is dmgraph.c).  Ports,
  * styles and scripts are not implemented. */
@@ -15,6 +15,7 @@
 #include "dmport.h"
 #include "dmtheory.h"
 #include "dmcomp.h"
+#include "dmldr.h"
 #include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
@@ -34,7 +35,6 @@ static HRESULT rm_noiface(const char *fn, REFIID riid, void **out)
 }
 
 /* ------------------------------------------------------------------ objects */
-typedef struct rm_loader rm_loader;
 typedef struct rm_perf rm_perf;
 typedef struct rm_track rm_track;
 
@@ -45,7 +45,6 @@ typedef struct {
     LONG ref;
     dm_segment *seg;
     DMUS_OBJECTDESC desc;
-    rm_loader *loader;                      /* for references while loading from a stream (weak) */
     IDirectMusicGraph *graph;               /* +0x44 SetGraph (a segment state starts with a clone of it) */
 } rm_segment;
 
@@ -101,6 +100,7 @@ struct rm_perf {
 typedef struct {
     IDirectMusicCollection IDirectMusicCollection_iface;
     IDirectMusicObject IDirectMusicObject_iface;
+    IPersistStream IPersistStream_iface;
     LONG ref;
     dm_collection *c;
     DMUS_OBJECTDESC desc;
@@ -117,58 +117,13 @@ typedef struct {
 typedef struct { IDirectMusic8 IDirectMusic8_iface; LONG ref; } rm_dmusic;
 typedef struct { IReferenceClock IReferenceClock_iface; LONG ref; } rm_clock;
 
-typedef struct {                            /* the loader's object cache */
-    WCHAR path[MAX_PATH];
-    GUID guid;
-    BOOL hasguid;
-    IUnknown *obj;                          /* rm_segment, rm_collection or rm_wave */
-} cache_entry;
-
-static struct rm_loader *g_styleloader;     /* the loader a stream Load resolves references with (the newest) */
-struct rm_loader {
-    IDirectMusicLoader8 IDirectMusicLoader8_iface;
-    LONG ref;
-    WCHAR dir[MAX_PATH];
-    BOOL cache;
-    cache_entry *ce; int nce;
-};
-
 static const GUID RM_GUID_DefaultGMCollection = { 0xf17e8673, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const GUID RM_CLSID_DirectSoundWave = { 0x8a667154, 0xf9cb, 0x11d2, { 0xad, 0x8a, 0x00, 0x60, 0xb0, 0x57, 0x5a, 0xbc } };
 
 static char *guidstr(const GUID *g, char b[64]) { return (char *)rl_guid_str(g, b); }
 
-static void w2a(char *out, const WCHAR *in, int n)
-{
-    if (!WideCharToMultiByte(CP_ACP, 0, in, -1, out, n, NULL, NULL)) out[0] = 0;
-}
-
-static BOOL read_whole_file(const WCHAR *path, BYTE **data, DWORD *size)
-{
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    if (f == INVALID_HANDLE_VALUE) return FALSE;
-    DWORD sz = GetFileSize(f, NULL), got = 0;
-    BYTE *b = malloc(sz ? sz : 1);
-    BOOL ok = b && ReadFile(f, b, sz, &got, NULL) && got == sz;
-    CloseHandle(f);
-    if (!ok) { free(b); return FALSE; }
-    *data = b; *size = sz;
-    return TRUE;
-}
-
-static BOOL read_stream(IStream *s, BYTE **data, DWORD *size)
-{
-    STATSTG st;
-    LARGE_INTEGER zero = { { 0, 0 } };
-    ULARGE_INTEGER pos;
-    if (FAILED(IStream_Seek(s, zero, STREAM_SEEK_CUR, &pos))) return FALSE;
-    if (FAILED(IStream_Stat(s, &st, STATFLAG_NONAME))) return FALSE;
-    DWORD sz = (DWORD)(st.cbSize.QuadPart - pos.QuadPart), got = 0;
-    BYTE *b = malloc(sz ? sz : 1);
-    if (!b || FAILED(IStream_Read(s, b, sz, &got))) { free(b); return FALSE; }
-    *data = b; *size = got;
-    return TRUE;
-}
+/* the form at the stream's position (the loader's file streams have no Stat) */
+static BOOL read_stream(IStream *s, BYTE **data, DWORD *size) { return rm_read_form(s, data, size); }
 
 /* ------------------------------------------------------------------ the master clock */
 static rm_perf *s_clockperf;
@@ -271,6 +226,7 @@ static HRESULT WINAPI col_qi(IDirectMusicCollection *i, REFIID riid, void **out)
     rm_collection *c = col(i);
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicCollection)) *out = &c->IDirectMusicCollection_iface;
     else if (IsEqualIID(riid, &IID_IDirectMusicObject)) *out = &c->IDirectMusicObject_iface;
+    else if (IsEqualIID(riid, &IID_IPersistStream) || IsEqualIID(riid, &IID_IPersist)) *out = &c->IPersistStream_iface;
     else { return rm_noiface(__func__, riid, out); }
     InterlockedIncrement(&c->ref);
     return S_OK;
@@ -286,13 +242,13 @@ static ULONG WINAPI col_release(IDirectMusicCollection *i)
 static HRESULT WINAPI col_getinst(IDirectMusicCollection *i, DWORD patch, IDirectMusicInstrument **out)
 {
     if (out) *out = NULL;
-    return dls_find(col(i)->c, patch) < 0 ? DMUS_E_NOT_FOUND : E_NOTIMPL;
+    return !col(i)->c || dls_find(col(i)->c, patch) < 0 ? DMUS_E_NOT_FOUND : E_NOTIMPL;
 }
 static HRESULT WINAPI col_enum(IDirectMusicCollection *i, DWORD n, DWORD *patch, LPWSTR name, DWORD len)
 {
     const char *nm;
     uint32_t p;
-    if (dls_enum(col(i)->c, (int)n, &p, &nm) < 0) return S_FALSE;
+    if (!col(i)->c || dls_enum(col(i)->c, (int)n, &p, &nm) < 0) return S_FALSE;
     if (patch) *patch = p;
     if (name && len) MultiByteToWideChar(CP_ACP, 0, nm, -1, name, (int)len);
     return S_OK;
@@ -308,10 +264,127 @@ static rm_collection *colo(IDirectMusicObject *i) { return impl_from(i, rm_colle
 static HRESULT WINAPI colo_qi(IDirectMusicObject *i, REFIID r, void **o) { return col_qi(&colo(i)->IDirectMusicCollection_iface, r, o); }
 static ULONG WINAPI colo_addref(IDirectMusicObject *i) { return col_addref(&colo(i)->IDirectMusicCollection_iface); }
 static ULONG WINAPI colo_release(IDirectMusicObject *i) { return col_release(&colo(i)->IDirectMusicCollection_iface); }
-static HRESULT WINAPI colo_getdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { if (!d) return E_POINTER; DWORD sz = d->dwSize; memcpy(d, &colo(i)->desc, sz < sizeof(*d) ? sz : sizeof(*d)); d->dwSize = sz; return S_OK; }
-static HRESULT WINAPI colo_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { return S_OK; }
-static HRESULT WINAPI colo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_notimpl(__func__); }
+static HRESULT WINAPI colo_getdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { return rm_desc_get(&colo(i)->desc, &CLSID_DirectMusicCollection, d); }
+static HRESULT WINAPI colo_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { return rm_desc_set(&colo(i)->desc, d, TRUE); }
+/* a DLS form's 'dlid', 'vers' and INFO list's INAM (dmusic's collection) */
+static void dls_desc(const BYTE *b, DWORD n, DMUS_OBJECTDESC *d)
+{
+    if (n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DLS ", 4)) return;
+    DWORD end = 8 + *(const DWORD *)(b + 4);
+    if (end > n) end = n;
+    for (DWORD off = 12; off + 8 <= end; ) {
+        DWORD sz = *(const DWORD *)(b + off + 4), cn = end - (off + 8) < sz ? end - (off + 8) : sz;
+        const BYTE *c = b + off + 8;
+        if (!memcmp(b + off, "dlid", 4) && cn >= 16) { memcpy(&d->guidObject, c, 16); d->dwValidData |= DMUS_OBJ_OBJECT; }
+        else if (!memcmp(b + off, "vers", 4) && cn >= 8) { memcpy(&d->vVersion, c, 8); d->dwValidData |= DMUS_OBJ_VERSION; }
+        else if (!memcmp(b + off, "LIST", 4) && cn >= 4 && !memcmp(c, "INFO", 4)) {
+            for (DWORD q = 4; q + 8 <= cn; ) {
+                DWORD qs = *(const DWORD *)(c + q + 4), qn = cn - (q + 8) < qs ? cn - (q + 8) : qs;
+                if (!memcmp(c + q, "INAM", 4)) {
+                    char nm[DMUS_MAX_NAME];
+                    DWORD k = qn < DMUS_MAX_NAME - 1 ? qn : DMUS_MAX_NAME - 1;
+                    memcpy(nm, c + q + 8, k); nm[k] = 0;
+                    MultiByteToWideChar(CP_ACP, 0, nm, -1, d->wszName, DMUS_MAX_NAME);
+                    d->dwValidData |= DMUS_OBJ_NAME;
+                }
+                q += 8 + qn + (qn & 1);
+            }
+        }
+        off += 8 + cn + (cn & 1);
+    }
+}
+static HRESULT WINAPI colo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d)
+{
+    if (!s || !d) return E_POINTER;
+    BYTE h[12];
+    ULONG got = 0;
+    LARGE_INTEGER z = { { 0, 0 } };
+    ULARGE_INTEGER at;
+    if (FAILED(IStream_Seek(s, z, STREAM_SEEK_CUR, &at))) return E_FAIL;
+    if (FAILED(IStream_Read(s, h, 12, &got)) || got != 12) return DMUS_E_INVALIDFILE;
+    if (memcmp(h, "RIFF", 4) || memcmp(h + 8, "DLS ", 4)) return DMUS_E_NOTADLSCOL;
+    /* the collection's header chunks only (an instrument set can be large) */
+    DWORD n = *(DWORD *)(h + 4), cap = 12, len = 12;
+    BYTE *b = malloc(4096);
+    if (!b) return E_OUTOFMEMORY;
+    cap = 4096;
+    memcpy(b, h, 12);
+    for (DWORD used = 4; used + 8 <= n; ) {
+        BYTE ch[8];
+        if (FAILED(IStream_Read(s, ch, 8, &got)) || got != 8) break;
+        DWORD cs = *(DWORD *)(ch + 4);
+        used += 8 + cs + (cs & 1);
+        BOOL want = !memcmp(ch, "dlid", 4) || !memcmp(ch, "vers", 4) || !memcmp(ch, "LIST", 4);
+        if (want && !memcmp(ch, "LIST", 4)) {
+            BYTE t[4];
+            if (FAILED(IStream_Read(s, t, 4, &got)) || got != 4) break;
+            LARGE_INTEGER back; back.QuadPart = -4;
+            IStream_Seek(s, back, STREAM_SEEK_CUR, NULL);
+            want = !memcmp(t, "INFO", 4);
+        }
+        DWORD pad = cs + (cs & 1);
+        if (want) {
+            if (len + 8 + pad > cap) { while (len + 8 + pad > cap) cap *= 2; BYTE *nb = realloc(b, cap); if (!nb) break; b = nb; }
+            memcpy(b + len, ch, 8);
+            if (FAILED(IStream_Read(s, b + len + 8, pad, &got)) || got < cs) break;
+            len += 8 + pad;
+        } else {
+            LARGE_INTEGER sk; sk.QuadPart = pad;
+            if (FAILED(IStream_Seek(s, sk, STREAM_SEEK_CUR, NULL))) break;
+        }
+    }
+    *(DWORD *)(b + 4) = len - 8;
+    d->dwValidData = DMUS_OBJ_CLASS;
+    d->guidClass = CLSID_DirectMusicCollection;
+    dls_desc(b, len, d);
+    free(b);
+    return S_OK;
+}
 static IDirectMusicObjectVtbl colo_vtbl = { colo_qi, colo_addref, colo_release, colo_getdesc, colo_setdesc, colo_parse };
+
+static rm_collection *colp(IPersistStream *i) { return impl_from(i, rm_collection, IPersistStream_iface); }
+static HRESULT WINAPI colp_qi(IPersistStream *i, REFIID r, void **o) { return col_qi(&colp(i)->IDirectMusicCollection_iface, r, o); }
+static ULONG WINAPI colp_addref(IPersistStream *i) { return col_addref(&colp(i)->IDirectMusicCollection_iface); }
+static ULONG WINAPI colp_release(IPersistStream *i) { return col_release(&colp(i)->IDirectMusicCollection_iface); }
+static HRESULT WINAPI colp_getclass(IPersistStream *i, CLSID *c) { if (!c) return E_POINTER; *c = CLSID_DirectMusicCollection; return S_OK; }
+static HRESULT WINAPI colp_isdirty(IPersistStream *i) { return S_FALSE; }
+/* a collection from the loader's file is read through the process-wide collection cache (a SoundFont converted, the
+ * default GM set marked as such); any other stream's DLS form is parsed as it is */
+static HRESULT WINAPI colp_load(IPersistStream *i, IStream *st)
+{
+    rm_collection *o = colp(i);
+    if (!st) return E_POINTER;
+    const WCHAR *path = rm_stream_path(st);
+    dm_collection *c = NULL;
+    if (path) {
+        char a[MAX_PATH], full[MAX_PATH], gm[MAX_PATH];
+        if (!WideCharToMultiByte(CP_ACP, 0, path, -1, a, MAX_PATH, NULL, NULL)) return DMUS_E_LOADER_FAILEDOPEN;
+        if (!GetFullPathNameA(a, MAX_PATH, full, NULL)) lstrcpynA(full, a, MAX_PATH);
+        const char *g = dm_gm_dls_path();
+        if (!g || !GetFullPathNameA(g, MAX_PATH, gm, NULL)) gm[0] = 0;
+        c = dm_collection_from_file(full, gm[0] && !lstrcmpiA(full, gm));
+        if (!c) return DMUS_E_NOTADLSCOL;
+        /* the descriptor from the form's header */
+        DMUS_OBJECTDESC d;
+        memset(&d, 0, sizeof(d));
+        if (SUCCEEDED(colo_parse(&o->IDirectMusicObject_iface, st, &d)))
+            o->desc.dwValidData |= d.dwValidData & ~DMUS_OBJ_CLASS, o->desc.guidObject = d.guidObject,
+            o->desc.vVersion = d.vVersion, memcpy(o->desc.wszName, d.wszName, sizeof(d.wszName));
+    } else {
+        BYTE *b; DWORD n;
+        if (!read_stream(st, &b, &n)) return DMUS_E_INVALIDFILE;
+        if (n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DLS ", 4)) { free(b); return DMUS_E_NOTADLSCOL; }
+        dls_desc(b, n, &o->desc);
+        c = dls_load_owned(b, n, 0);
+        if (!c) return DMUS_E_NOTADLSCOL;
+    }
+    o->c = c;
+    o->desc.dwValidData |= DMUS_OBJ_LOADED;
+    return S_OK;
+}
+static HRESULT WINAPI colp_save(IPersistStream *i, IStream *s, BOOL c) { return E_NOTIMPL; }
+static HRESULT WINAPI colp_getsize(IPersistStream *i, ULARGE_INTEGER *s) { return E_NOTIMPL; }
+static IPersistStreamVtbl colp_vtbl = { colp_qi, colp_addref, colp_release, colp_getclass, colp_isdirty, colp_load, colp_save, colp_getsize };
 
 static rm_collection *new_collection(dm_collection *c)
 {
@@ -319,10 +392,11 @@ static rm_collection *new_collection(dm_collection *c)
     if (!o) return NULL;
     o->IDirectMusicCollection_iface.lpVtbl = &col_vtbl;
     o->IDirectMusicObject_iface.lpVtbl = &colo_vtbl;
+    o->IPersistStream_iface.lpVtbl = &colp_vtbl;
     o->ref = 1;
     o->c = c;
     o->desc.dwSize = sizeof(o->desc);
-    o->desc.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_LOADED;
+    o->desc.dwValidData = DMUS_OBJ_CLASS | (c ? DMUS_OBJ_LOADED : 0);
     o->desc.guidClass = CLSID_DirectMusicCollection;
     return o;
 }
@@ -657,9 +731,28 @@ static rm_segment *sgo(IDirectMusicObject *i) { return impl_from(i, rm_segment, 
 static HRESULT WINAPI sgo_qi(IDirectMusicObject *i, REFIID r, void **o) { return seg_qi(&sgo(i)->IDirectMusicSegment8_iface, r, o); }
 static ULONG WINAPI sgo_addref(IDirectMusicObject *i) { return seg_addref(&sgo(i)->IDirectMusicSegment8_iface); }
 static ULONG WINAPI sgo_release(IDirectMusicObject *i) { return seg_release(&sgo(i)->IDirectMusicSegment8_iface); }
-static HRESULT WINAPI sgo_getdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { if (!d) return E_POINTER; DWORD sz = d->dwSize; memcpy(d, &sgo(i)->desc, sz < sizeof(*d) ? sz : sizeof(*d)); d->dwSize = sz; return S_OK; }
-static HRESULT WINAPI sgo_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { return S_OK; }
-static HRESULT WINAPI sgo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_notimpl(__func__); }
+static HRESULT WINAPI sgo_getdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { return rm_desc_get(&sgo(i)->desc, &CLSID_DirectMusicSegment, d); }
+static HRESULT WINAPI sgo_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d) { return rm_desc_set(&sgo(i)->desc, d, TRUE); }
+/* 773136a4: a segment form's descriptor ('DMSG' or 'AASE' chunks), a wave's (what the wave class says of it), a MIDI
+ * file's (the class only); the flags start from none */
+static void wave_desc_of(const BYTE *b, DWORD n, DMUS_OBJECTDESC *d);
+static HRESULT WINAPI sgo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d)
+{
+    if (!s || !d) return E_POINTER;
+    BYTE *b; DWORD n;
+    if (!read_stream(s, &b, &n)) return DMUS_E_CHUNKNOTFOUND;
+    HRESULT hr = S_OK;
+    d->dwValidData = 0;
+    if (n >= 12 && !memcmp(b, "RIFF", 4) && (!memcmp(b + 8, "DMSG", 4) || !memcmp(b + 8, "AASE", 4)))
+        rm_desc_from_form(b + 12, n - 12, d);
+    else if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WAVE", 4)) wave_desc_of(b, n, d);
+    else if (!dm_is_midi(b, n)) hr = DMUS_E_CHUNKNOTFOUND;
+    free(b);
+    if (FAILED(hr)) return hr;
+    d->dwValidData |= DMUS_OBJ_CLASS;
+    d->guidClass = CLSID_DirectMusicSegment;
+    return S_OK;
+}
 static IDirectMusicObjectVtbl sgo_vtbl = { sgo_qi, sgo_addref, sgo_release, sgo_getdesc, sgo_setdesc, sgo_parse };
 
 static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *file);
@@ -667,7 +760,7 @@ static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, co
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name);
 static struct dmc_chordmap *loader_getcmap(void *ctx, const dm_guid *g, const char *file, const char *name);
 static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, const char *name);
-static dm_segment *segment_from_data(const BYTE *b, DWORD n, rm_loader *l)
+static dm_segment *segment_from_data(const BYTE *b, DWORD n, IDirectMusicLoader8 *l)
 {
     if (dm_is_midi(b, n)) return dm_segment_from_midi(b, n, loader_getcoll, l);
     if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WAVE", 4)) {      /* a wave as a segment */
@@ -716,15 +809,59 @@ static IDirectMusicGraph *segment_graph_from_data(const BYTE *b, DWORD n, HRESUL
     }
     return NULL;
 }
+/* 77313c61: a segment form's embedded containers ('DMCN' forms), loaded through the loader from the segment's own
+ * stream so that the objects in them can be found while the tracks load; let go of when the segment is loaded */
+static int segment_containers(IStream *st, ULONGLONG at, const BYTE *b, DWORD n, IDirectMusicLoader8 *l,
+                              IDirectMusicObject ***out)
+{
+    *out = NULL;
+    if (!l || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMSG", 4)) return 0;
+    DWORD end = 8 + *(const DWORD *)(b + 4);
+    if (end > n) end = n;
+    int k = 0;
+    for (DWORD off = 12; off + 12 <= end; ) {
+        DWORD sz = *(const DWORD *)(b + off + 4);
+        if (!memcmp(b + off, "RIFF", 4) && !memcmp(b + off + 8, "DMCN", 4)) {
+            LARGE_INTEGER p; p.QuadPart = (LONGLONG)(at + off);
+            DMUS_OBJECTDESC d;
+            memset(&d, 0, sizeof(d));
+            d.dwSize = sizeof(d);
+            d.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_STREAM;
+            d.guidClass = CLSID_DirectMusicContainer;
+            d.pStream = st;
+            IDirectMusicObject *o = NULL;
+            if (SUCCEEDED(IStream_Seek(st, p, STREAM_SEEK_SET, NULL)) &&
+                SUCCEEDED(IDirectMusicLoader8_GetObject(l, &d, &IID_IDirectMusicObject, (void **)&o)) && o) {
+                IDirectMusicObject **a = realloc(*out, (k + 1) * sizeof(*a));
+                if (a) { *out = a; a[k++] = o; } else IDirectMusicObject_Release(o);
+            }
+        }
+        off += 8 + sz + (sz & 1);
+    }
+    return k;
+}
 static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
 {
     rm_segment *s = sgp(i);
     BYTE *b; DWORD n;
-    if (!read_stream(st, &b, &n)) return E_FAIL;
-    dm_segment *g = segment_from_data(b, n, s->loader);
+    LARGE_INTEGER z = { { 0, 0 } };
+    ULARGE_INTEGER at;
+    if (!st) return E_POINTER;
+    if (FAILED(IStream_Seek(st, z, STREAM_SEEK_CUR, &at)) || !read_stream(st, &b, &n)) return E_FAIL;
+    IDirectMusicLoader8 *l = rm_stream_loader(st);
+    IDirectMusicObject **cont;
+    int ncont = segment_containers(st, at.QuadPart, b, n, l, &cont);
+    dm_segment *g = segment_from_data(b, n, l);
     HRESULT ghr;
     IDirectMusicGraph *gr = g ? segment_graph_from_data(b, n, &ghr) : NULL;
+    if (g && n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "DMSG", 4)) rm_desc_from_form(b + 12, n - 12, &s->desc);
+    else if (g && n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WAVE", 4)) wave_desc_of(b, n, &s->desc);
     free(b);
+    for (int k = 0; k < ncont; k++) {
+        IDirectMusicLoader8_ReleaseObject(l, cont[k]);
+        IDirectMusicObject_Release(cont[k]);
+    }
+    free(cont);
     if (!g) return DMUS_E_UNSUPPORTED_STREAM;
     if (gr && FAILED(ghr)) { IDirectMusicGraph_Release(gr); dm_segment_release(g); return ghr; }
     if (s->seg) { if (s->seg->wrapper == s) s->seg->wrapper = NULL; dm_segment_release(s->seg); }
@@ -749,9 +886,8 @@ static rm_segment *new_segment(dm_segment *g)
     s->seg = g;
     if (g) g->wrapper = s;
     s->desc.dwSize = sizeof(s->desc);
-    s->desc.dwValidData = DMUS_OBJ_CLASS | (g ? DMUS_OBJ_LOADED : 0);
+    s->desc.dwValidData = g ? DMUS_OBJ_LOADED : 0;
     s->desc.guidClass = CLSID_DirectMusicSegment;
-    if (g && g->name[0]) { MultiByteToWideChar(CP_ACP, 0, g->name, -1, s->desc.wszName, DMUS_MAX_NAME); s->desc.dwValidData |= DMUS_OBJ_NAME; }
     return s;
 }
 
@@ -796,6 +932,16 @@ static HRESULT WINAPI wvo_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d)
     if (d->dwValidData & DMUS_OBJ_VERSION) w->desc.vVersion = d->vVersion;
     w->desc.dwValidData |= d->dwValidData & (DMUS_OBJ_OBJECT | DMUS_OBJ_NAME | DMUS_OBJ_VERSION);
     return (d->dwValidData & ~(DMUS_OBJ_OBJECT | DMUS_OBJ_NAME | DMUS_OBJ_VERSION | DMUS_OBJ_CLASS)) ? S_FALSE : S_OK;
+}
+/* what dswave says of a wave file: its guid, name and version */
+static void wave_desc_of(const BYTE *b, DWORD n, DMUS_OBJECTDESC *d)
+{
+    dm_wave *w = dm_wave_load(b, n);
+    if (!w) return;
+    if (w->hasguid) { memcpy(&d->guidObject, &w->guid, sizeof(GUID)); d->dwValidData |= DMUS_OBJ_OBJECT; }
+    if (w->name[0]) { MultiByteToWideChar(CP_ACP, 0, w->name, -1, d->wszName, DMUS_MAX_NAME); d->dwValidData |= DMUS_OBJ_NAME; }
+    if (w->hasvers) { d->vVersion.dwVersionMS = w->vers[0]; d->vVersion.dwVersionLS = w->vers[1]; d->dwValidData |= DMUS_OBJ_VERSION; }
+    dm_wave_release(w);
 }
 static HRESULT WINAPI wvo_parse(IDirectMusicObject *i, LPSTREAM st, LPDMUS_OBJECTDESC d)
 {
@@ -3074,83 +3220,48 @@ static IDirectMusicPerformance8Vtbl pf_vtbl = { pf_qi, pf_addref, pf_release, pf
     pf_music2midi, pf_time2rhythm, pf_rhythm2time, pf_initaudio, pf_playex, pf_stopex, pf_clonepmsg, pf_createpath,
     pf_createstdpath, pf_setdefpath, pf_getdefpath, pf_getparamex };
 
-/* ------------------------------------------------------------------ the loader */
-static rm_loader *ldr(IDirectMusicLoader8 *i) { return impl_from(i, rm_loader, IDirectMusicLoader8_iface); }
-static HRESULT WINAPI ld_qi(IDirectMusicLoader8 *i, REFIID riid, void **out)
+/* ------------------------------------------------------------------ references through the loader (dmldr.c) */
+/* GetObject of a reference by class, guid, file and name (a file name with a drive or a root taken as a full path) */
+static HRESULT ldr_get(IDirectMusicLoader8 *l, REFCLSID cls, REFIID iid, const dm_guid *g, const char *file,
+                       const char *name, void **out)
 {
-    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicLoader) || IsEqualIID(riid, &IID_IDirectMusicLoader8)) {
-        *out = i; InterlockedIncrement(&ldr(i)->ref); return S_OK;
-    }
     *out = NULL;
-    return E_NOINTERFACE;
-}
-static ULONG WINAPI ld_addref(IDirectMusicLoader8 *i) { return InterlockedIncrement(&ldr(i)->ref); }
-static void ld_clear(rm_loader *l)
-{
-    for (int k = 0; k < l->nce; k++) if (l->ce[k].obj) IUnknown_Release(l->ce[k].obj);
-    free(l->ce); l->ce = NULL; l->nce = 0;
-}
-static ULONG WINAPI ld_release(IDirectMusicLoader8 *i)
-{
-    rm_loader *l = ldr(i);
-    LONG r = InterlockedDecrement(&l->ref);
-    LOG_CALL("music: Loader::Release(%p) -> %ld", (void *)i, (long)r);
-    if (!r) { if (g_styleloader == l) g_styleloader = NULL; ld_clear(l); free(l); }
-    return r;
-}
-
-static void full_path(rm_loader *l, const DMUS_OBJECTDESC *d, WCHAR *out)
-{
-    if ((d->dwValidData & DMUS_OBJ_FULLPATH) || !l->dir[0] || d->wszFileName[1] == L':' || d->wszFileName[0] == L'\\') {
-        lstrcpynW(out, d->wszFileName, MAX_PATH);
-        return;
+    if (!l) return E_FAIL;
+    DMUS_OBJECTDESC d;
+    memset(&d, 0, sizeof(d));
+    d.dwSize = sizeof(d);
+    d.dwValidData = DMUS_OBJ_CLASS;
+    d.guidClass = *cls;
+    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
+    if (file) {
+        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
+        d.dwValidData |= DMUS_OBJ_FILENAME;
+        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
     }
-    lstrcpynW(out, l->dir, MAX_PATH);
-    int n = lstrlenW(out);
-    if (n && out[n - 1] != L'\\' && out[n - 1] != L'/' && n < MAX_PATH - 1) { out[n++] = L'\\'; out[n] = 0; }
-    lstrcpynW(out + n, d->wszFileName, MAX_PATH - n);
+    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
+    return IDirectMusicLoader8_GetObject(l, &d, iid, out);
 }
 
-static cache_entry *cache_find(rm_loader *l, const WCHAR *path, const GUID *g)
-{
-    for (int k = 0; k < l->nce; k++) {
-        if (path && path[0] && !lstrcmpiW(l->ce[k].path, path)) return &l->ce[k];
-        if (g && l->ce[k].hasguid && IsEqualGUID(&l->ce[k].guid, g)) return &l->ce[k];
-    }
-    return NULL;
-}
-
-static void cache_add(rm_loader *l, const WCHAR *path, const GUID *g, IUnknown *obj)
-{
-    if (!l->cache) return;
-    l->ce = realloc(l->ce, (l->nce + 1) * sizeof(*l->ce));
-    cache_entry *e = &l->ce[l->nce++];
-    memset(e, 0, sizeof(*e));
-    if (path) lstrcpynW(e->path, path, MAX_PATH);
-    if (g) { e->guid = *g; e->hasguid = TRUE; }
-    e->obj = obj;
-    IUnknown_AddRef(obj);
-}
-
-/* a band's DLS reference (or the default GM set) while loading a segment */
+/* a band's DLS reference (or the default GM set) while loading */
 static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *file)
 {
-    rm_loader *l = ctx;
-    if ((!g && !file) || (g && !memcmp(g, &RM_GUID_DefaultGMCollection, sizeof(GUID)) && !file))
-        return dm_collection_from_file(dm_gm_dls_path(), 1);
-    if (file) {
-        char path[MAX_PATH * 2];
-        if (file[0] && file[1] == ':') lstrcpynA(path, file, sizeof(path));
-        else {
-            char dir[MAX_PATH] = "";
-            if (l) w2a(dir, l->dir, MAX_PATH);
-            snprintf(path, sizeof(path), "%s%s%s", dir, dir[0] && dir[strlen(dir) - 1] != '\\' ? "\\" : "", file);
-        }
-        dm_collection *c = dm_collection_from_file(path, 0);
-        if (c) return c;
+    IDirectMusicLoader8 *l = ctx;
+    BOOL gm = !g || !memcmp(g, &RM_GUID_DefaultGMCollection, sizeof(GUID));
+    if (!l) {                           /* (a stream of the application's own: no loader to ask) */
+        if (file) { dm_collection *c = dm_collection_from_file(file, 0); if (c) return c; }
+        return gm ? dm_collection_from_file(dm_gm_dls_path(), 1) : NULL;
     }
-    if (g && !memcmp(g, &RM_GUID_DefaultGMCollection, sizeof(GUID))) return dm_collection_from_file(dm_gm_dls_path(), 1);
-    return NULL;
+    IDirectMusicCollection *o = NULL;
+    HRESULT hr = ldr_get(l, &CLSID_DirectMusicCollection, &IID_IDirectMusicCollection,
+                         !g && !file ? (const dm_guid *)&RM_GUID_DefaultGMCollection : g, file, NULL, (void **)&o);
+    if (FAILED(hr) || !o) {
+        LOG_INFO("music: collection %s not found (%08lx)", file ? file : "(by guid)", (unsigned long)hr);
+        return NULL;
+    }
+    rm_collection *c = col_of((IUnknown *)o);
+    dm_collection *r = c ? c->c : NULL;    /* (collections stay in the process-wide cache) */
+    IDirectMusicCollection_Release(o);
+    return r;
 }
 
 #include "dmcomsty.c"
@@ -3236,25 +3347,10 @@ static void prm_out(int prm, int hr, void *p)
 }
 
 /* a wave track item's reference (773248af: the loader's GetObject of a DirectSoundWave by guid, file or name) */
-static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out);
 static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
-    rm_loader *l = ctx;
-    if (!l) return NULL;
-    DMUS_OBJECTDESC d;
-    memset(&d, 0, sizeof(d));
-    d.dwSize = sizeof(d);
-    d.dwValidData = DMUS_OBJ_CLASS;
-    d.guidClass = RM_CLSID_DirectSoundWave;
-    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
-    if (file) {
-        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
-        d.dwValidData |= DMUS_OBJ_FILENAME;
-        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
-    }
-    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
     IDirectMusicObject *o = NULL;
-    if (FAILED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &IID_IDirectMusicObject, (void **)&o)) || !o) {
+    if (FAILED(ldr_get(ctx, &RM_CLSID_DirectSoundWave, &IID_IDirectMusicObject, g, file, name, (void **)&o)) || !o) {
         LOG_INFO("music: wave track: wave %s not found", file ? file : name ? name : "(by guid)");
         return NULL;
     }
@@ -3269,22 +3365,8 @@ static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, co
  * reference */
 static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
-    rm_loader *l = ctx;
-    if (!l) return NULL;
-    DMUS_OBJECTDESC d;
-    memset(&d, 0, sizeof(d));
-    d.dwSize = sizeof(d);
-    d.dwValidData = DMUS_OBJ_CLASS;
-    d.guidClass = CLSID_DirectMusicSegment;
-    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
-    if (file) {
-        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
-        d.dwValidData |= DMUS_OBJ_FILENAME;
-        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
-    }
-    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
     IDirectMusicSegment8 *o = NULL;
-    if (FAILED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &IID_IDirectMusicSegment8, (void **)&o)) || !o) {
+    if (FAILED(ldr_get(ctx, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, g, file, name, (void **)&o)) || !o) {
         LOG_INFO("music: segment trigger track: segment %s not found", file ? file : name ? name : "(by guid)");
         return NULL;
     }
@@ -3298,22 +3380,8 @@ static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, 
 /* a style track's reference (774123a0: the loader's GetObject of a style); the engine style with a reference */
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
-    rm_loader *l = ctx;
-    if (!l) return NULL;
-    DMUS_OBJECTDESC d;
-    memset(&d, 0, sizeof(d));
-    d.dwSize = sizeof(d);
-    d.dwValidData = DMUS_OBJ_CLASS;
-    d.guidClass = RM_CLSID_DirectMusicStyle;
-    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
-    if (file) {
-        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
-        d.dwValidData |= DMUS_OBJ_FILENAME;
-        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
-    }
-    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
     IDirectMusicStyle8 *o = NULL;
-    if (FAILED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &RM_IID_IDirectMusicStyle8, (void **)&o)) || !o) {
+    if (FAILED(ldr_get(ctx, &RM_CLSID_DirectMusicStyle, &RM_IID_IDirectMusicStyle8, g, file, name, (void **)&o)) || !o) {
         LOG_INFO("music: style track: style %s not found", file ? file : name ? name : "(by guid)");
         return NULL;
     }
@@ -3323,247 +3391,6 @@ static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char
     IDirectMusicStyle8_Release(o);
     return r;
 }
-
-static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, REFIID riid, LPVOID *out)
-{
-    rm_loader *l = ldr(i);
-    char b1[64];
-    if (!d || !out) return E_POINTER;
-    *out = NULL;
-    WCHAR path[MAX_PATH] = L"";
-    if (d->dwValidData & (DMUS_OBJ_FILENAME | DMUS_OBJ_FULLPATH)) full_path(l, d, path);
-    const GUID *g = (d->dwValidData & DMUS_OBJ_OBJECT) ? &d->guidObject : NULL;
-    BOOL isseg = (d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &CLSID_DirectMusicSegment);
-    BOOL iscol = (d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &CLSID_DirectMusicCollection);
-    char a[MAX_PATH];
-    w2a(a, path, MAX_PATH);
-    LOG_CALL("music: Loader::GetObject(%s, %s)", guidstr(&d->guidClass, b1), a);
-    cache_entry *e = cache_find(l, path, g);
-    if (e) return IUnknown_QueryInterface(e->obj, riid, out);
-    if (iscol) {
-        dm_collection *c = NULL;
-        if (g && IsEqualGUID(g, &RM_GUID_DefaultGMCollection) && !path[0]) c = dm_collection_from_file(dm_gm_dls_path(), 1);
-        else if (path[0]) c = dm_collection_from_file(a, 0);
-        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
-            c = dls_load(d->pbMemData, (size_t)d->llMemLength, 0);
-        }
-        if (!c) return DMUS_E_LOADER_FAILEDOPEN;
-        rm_collection *o = new_collection(c);
-        if (!o) return E_OUTOFMEMORY;
-        if (g) o->desc.guidObject = *g;
-        cache_add(l, path, g, (IUnknown *)&o->IDirectMusicCollection_iface);
-        HRESULT hr = col_qi(&o->IDirectMusicCollection_iface, riid, out);
-        col_release(&o->IDirectMusicCollection_iface);
-        return hr;
-    }
-    if ((d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectSoundWave)) {
-        BYTE *data = NULL;
-        DWORD size = 0;
-        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
-        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
-            size = (DWORD)d->llMemLength;
-            data = malloc(size ? size : 1);
-            if (data) memcpy(data, d->pbMemData, size);
-        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
-            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
-        } else return DMUS_E_LOADER_NOFILENAME;
-        if (!data) return E_OUTOFMEMORY;
-        dm_wave *w = dm_wave_load(data, size);
-        free(data);
-        if (!w) return DMUS_E_UNSUPPORTED_STREAM;
-        rm_wave *o = new_wave(w);
-        if (!o) { dm_wave_release(w); return E_OUTOFMEMORY; }
-        if (path[0]) { lstrcpynW(o->desc.wszFileName, path, DMUS_MAX_FILENAME); o->desc.dwValidData |= DMUS_OBJ_FILENAME | DMUS_OBJ_FULLPATH; }
-        if (g) { o->desc.guidObject = *g; o->desc.dwValidData |= DMUS_OBJ_OBJECT; }
-        cache_add(l, path, g ? g : (w->hasguid ? (const GUID *)&w->guid : NULL), (IUnknown *)&o->IDirectMusicObject_iface);
-        HRESULT hr = wvo_qi(&o->IDirectMusicObject_iface, riid, out);
-        wvo_release(&o->IDirectMusicObject_iface);
-        return hr;
-    }
-    if ((d->dwValidData & DMUS_OBJ_CLASS) && (IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectMusicStyle) ||
-                                              IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectMusicBand))) {
-        int isstyle = IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectMusicStyle);
-        BYTE *data = NULL;
-        DWORD size = 0;
-        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
-        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
-            size = (DWORD)d->llMemLength;
-            data = malloc(size ? size : 1);
-            if (data) memcpy(data, d->pbMemData, size);
-        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
-            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
-        } else return DMUS_E_LOADER_NOFILENAME;
-        if (!data) return E_OUTOFMEMORY;
-        IUnknown *o = NULL;
-        HRESULT hr = S_OK;
-        if (isstyle) {
-            dms_style *x = style_from_data(data, size, l, &hr);
-            rm_style *s = x ? new_style(x) : NULL;
-            if (x && !s) dms_style_release(x);
-            if (s) { o = (IUnknown *)&s->IDirectMusicStyle8_iface; style_load_cmaps(s, data, size, l); }
-        } else {
-            dm_band *x = size >= 12 && !memcmp(data, "RIFF", 4) && !memcmp(data + 8, "DMBD", 4) ?
-                         dm_band_load(data + 12, size - 12, loader_getcoll, l) : NULL;
-            rm_band *b = x ? new_band(x) : NULL;
-            dm_band_release(x);
-            if (b) o = (IUnknown *)&b->IDirectMusicBand_iface;
-        }
-        free(data);
-        LOG_CALL("music: loaded %s -> %p", isstyle ? "style" : "band", (void *)o);
-        if (!o) return FAILED(hr) ? hr : DMUS_E_UNSUPPORTED_STREAM;
-        if (path[0] && isstyle) { lstrcpynW(style_of(o)->desc.wszFileName, path, DMUS_MAX_FILENAME); style_of(o)->desc.dwValidData |= DMUS_OBJ_FILENAME | DMUS_OBJ_FULLPATH; }
-        const GUID *cg = g;
-        if (!cg && isstyle && style_of(o)->s->hasguid) cg = (const GUID *)&style_of(o)->s->guid;
-        cache_add(l, path, cg, o);
-        hr = IUnknown_QueryInterface(o, riid, out);
-        IUnknown_Release(o);
-        return hr;
-    }
-    if ((d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &RM_CLSID_DirectMusicChordMap)) {
-        BYTE *data = NULL;
-        DWORD size = 0;
-        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
-        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
-            size = (DWORD)d->llMemLength;
-            data = malloc(size ? size : 1);
-            if (data) memcpy(data, d->pbMemData, size);
-        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
-            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
-        } else return DMUS_E_LOADER_NOFILENAME;
-        if (!data) return E_OUTOFMEMORY;
-        IUnknown *o = NULL;
-        HRESULT hr = chordmap_from_data(data, size, &o);
-        free(data);
-        LOG_CALL("music: loaded chord map -> %08lx", (unsigned long)hr);
-        if (FAILED(hr)) return hr;
-        dmc_chordmap *m = chordmap_engine_of(o);
-        cache_add(l, path, g ? g : (const GUID *)&m->guid, o);
-        hr = IUnknown_QueryInterface(o, riid, out);
-        IUnknown_Release(o);
-        return hr;
-    }
-    if ((d->dwValidData & DMUS_OBJ_CLASS) && IsEqualCLSID(&d->guidClass, &CLSID_DirectMusicAudioPathConfig)) {
-        BYTE *data = NULL;
-        DWORD size = 0;
-        if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
-        else if (d->dwValidData & DMUS_OBJ_MEMORY) {
-            size = (DWORD)d->llMemLength;
-            data = malloc(size ? size : 1);
-            if (data) memcpy(data, d->pbMemData, size);
-        } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
-            if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
-        } else return DMUS_E_LOADER_NOFILENAME;
-        if (!data) return E_OUTOFMEMORY;
-        IUnknown *o = NULL;
-        HRESULT hr = rm_apcfg_load(data, size, &o);
-        free(data);
-        LOG_CALL("music: loaded audiopath configuration -> %08lx", (unsigned long)hr);
-        if (FAILED(hr)) return hr;
-        cache_add(l, path, g, o);
-        hr = IUnknown_QueryInterface(o, riid, out);
-        IUnknown_Release(o);
-        return hr;
-    }
-    if (!isseg) {
-        LOG_INFO("music: Loader::GetObject: class %s not supported", guidstr(&d->guidClass, b1));
-        return DMUS_E_LOADER_NOCLASSID;
-    }
-    BYTE *data = NULL;
-    DWORD size = 0;
-    if (path[0]) { if (!read_whole_file(path, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN; }
-    else if (d->dwValidData & DMUS_OBJ_MEMORY) {
-        size = (DWORD)d->llMemLength;
-        data = malloc(size ? size : 1);
-        if (data) memcpy(data, d->pbMemData, size);
-    } else if ((d->dwValidData & DMUS_OBJ_STREAM) && d->pStream) {
-        if (!read_stream(d->pStream, &data, &size)) return DMUS_E_LOADER_FAILEDOPEN;
-    } else return DMUS_E_LOADER_NOFILENAME;
-    if (!data) return E_OUTOFMEMORY;
-    dm_segment *sgt = segment_from_data(data, size, l);
-    HRESULT ghr = S_OK;
-    IDirectMusicGraph *gr = sgt ? segment_graph_from_data(data, size, &ghr) : NULL;
-    free(data);
-    if (!sgt) return DMUS_E_UNSUPPORTED_STREAM;
-    if (gr && FAILED(ghr)) { IDirectMusicGraph_Release(gr); dm_segment_release(sgt); return ghr; }
-    rm_segment *s = new_segment(sgt);
-    if (!s) { if (gr) IDirectMusicGraph_Release(gr); dm_segment_release(sgt); return E_OUTOFMEMORY; }
-    s->graph = gr;
-    s->loader = l;
-    if (path[0]) { lstrcpynW(s->desc.wszFileName, path, DMUS_MAX_FILENAME); s->desc.dwValidData |= DMUS_OBJ_FILENAME | DMUS_OBJ_FULLPATH; }
-    if (g) { s->desc.guidObject = *g; s->desc.dwValidData |= DMUS_OBJ_OBJECT; }
-    cache_add(l, path, g, (IUnknown *)&s->IDirectMusicSegment8_iface);
-    HRESULT hr = seg_qi(&s->IDirectMusicSegment8_iface, riid, out);
-    seg_release(&s->IDirectMusicSegment8_iface);
-    if (hr == S_OK && sgt->partial) hr = DMUS_S_PARTIALLOAD;
-    LOG_CALL("music: loaded segment %s (%d tracks) -> %08lx", sgt->name, sgt->ntracks, (unsigned long)hr);
-    return hr;
-}
-static HRESULT WINAPI ld_setobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d) { return S_OK; }
-static HRESULT WINAPI ld_setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *path, BOOL clear)
-{
-    rm_loader *l = ldr(i);
-    if (!path) return E_POINTER;
-    WCHAR full[MAX_PATH];
-    if (!GetFullPathNameW(path, MAX_PATH, full, NULL)) lstrcpynW(full, path, MAX_PATH);
-    if (clear) ld_clear(l);
-    BOOL same = !lstrcmpiW(full, l->dir);
-    lstrcpynW(l->dir, full, MAX_PATH);
-    char a[MAX_PATH];
-    w2a(a, full, MAX_PATH);
-    LOG_CALL("music: Loader::SetSearchDirectory(%s)", a);
-    return same ? S_FALSE : S_OK;
-}
-static HRESULT WINAPI ld_scandir(IDirectMusicLoader8 *i, REFGUID c, WCHAR *ext, WCHAR *name) { return S_FALSE; }
-static HRESULT WINAPI ld_cacheobj(IDirectMusicLoader8 *i, IDirectMusicObject *o) { return S_OK; }
-static HRESULT WINAPI ld_releaseobj(IDirectMusicLoader8 *i, IDirectMusicObject *o)
-{
-    rm_loader *l = ldr(i);
-    for (int k = 0; k < l->nce; k++) {
-        IUnknown *u = NULL;
-        if (l->ce[k].obj && SUCCEEDED(IUnknown_QueryInterface(l->ce[k].obj, &IID_IDirectMusicObject, (void **)&u))) {
-            IUnknown_Release(u);
-            if (u == (IUnknown *)o) {
-                IUnknown_Release(l->ce[k].obj);
-                l->ce[k] = l->ce[--l->nce];
-                return S_OK;
-            }
-        }
-    }
-    return S_FALSE;
-}
-static HRESULT WINAPI ld_clearcache(IDirectMusicLoader8 *i, REFGUID c) { ld_clear(ldr(i)); return S_OK; }
-static HRESULT WINAPI ld_enablecache(IDirectMusicLoader8 *i, REFGUID c, BOOL on)
-{
-    rm_loader *l = ldr(i);
-    BOOL was = l->cache;
-    l->cache = on;
-    if (!on) ld_clear(l);
-    return was == on ? S_FALSE : S_OK;
-}
-static HRESULT WINAPI ld_enum(IDirectMusicLoader8 *i, REFGUID c, DWORD n, LPDMUS_OBJECTDESC d) { return S_FALSE; }
-static void WINAPI ld_gc(IDirectMusicLoader8 *i) {}
-static HRESULT WINAPI ld_releasebyunk(IDirectMusicLoader8 *i, IUnknown *o)
-{
-    IDirectMusicObject *obj;
-    if (!o || FAILED(IUnknown_QueryInterface(o, &IID_IDirectMusicObject, (void **)&obj))) return E_POINTER;
-    HRESULT hr = ld_releaseobj(i, obj);
-    IDirectMusicObject_Release(obj);
-    return hr;
-}
-static HRESULT WINAPI ld_loadfile(IDirectMusicLoader8 *i, REFGUID cls, REFIID iid, WCHAR *file, void **out)
-{
-    DMUS_OBJECTDESC d;
-    memset(&d, 0, sizeof(d));
-    d.dwSize = sizeof(d);
-    d.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_FILENAME;
-    d.guidClass = *cls;
-    if (!file) return E_POINTER;
-    lstrcpynW(d.wszFileName, file, DMUS_MAX_FILENAME);
-    if (file[0] && (file[1] == L':' || file[0] == L'\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
-    return ld_getobject(i, &d, iid, out);
-}
-static IDirectMusicLoader8Vtbl ld_vtbl = { ld_qi, ld_addref, ld_release, ld_getobject, ld_setobject, ld_setdir, ld_scandir,
-    ld_cacheobj, ld_releaseobj, ld_clearcache, ld_enablecache, ld_enum, ld_gc, ld_releasebyunk, ld_loadfile };
 
 /* ------------------------------------------------------------------ class creation */
 /* test hooks: REDM_TIME fixes time() for the rand() seeds (as tests do to Microsoft's DLLs); REDM_RANDLOG
@@ -3596,15 +3423,13 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         wvo_release(&o->IDirectMusicObject_iface);
         return hr;
     }
-    if (IsEqualCLSID(clsid, &CLSID_DirectMusicLoader)) {
-        rm_loader *l = calloc(1, sizeof(*l));
-        if (!l) return E_OUTOFMEMORY;
-        l->IDirectMusicLoader8_iface.lpVtbl = &ld_vtbl;
-        l->ref = 1;
-        g_styleloader = l;
-        l->cache = TRUE;
-        HRESULT hr = ld_qi(&l->IDirectMusicLoader8_iface, riid, out);
-        ld_release(&l->IDirectMusicLoader8_iface);
+    if (IsEqualCLSID(clsid, &CLSID_DirectMusicLoader)) return rm_loader_create(riid, out);
+    if (IsEqualCLSID(clsid, &CLSID_DirectMusicContainer)) return rm_container_create(riid, out);
+    if (IsEqualCLSID(clsid, &CLSID_DirectMusicCollection)) {
+        rm_collection *c = new_collection(NULL);
+        if (!c) return E_OUTOFMEMORY;
+        HRESULT hr = col_qi(&c->IDirectMusicCollection_iface, riid, out);
+        col_release(&c->IDirectMusicCollection_iface);
         return hr;
     }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicPerformance)) {
@@ -3662,6 +3487,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
 BOOL rm_handles(REFCLSID clsid)
 {
     return IsEqualCLSID(clsid, &CLSID_DirectMusicLoader) || IsEqualCLSID(clsid, &CLSID_DirectMusicPerformance) ||
+           IsEqualCLSID(clsid, &CLSID_DirectMusicContainer) || IsEqualCLSID(clsid, &CLSID_DirectMusicCollection) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) || IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicStyle) ||

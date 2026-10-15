@@ -11,6 +11,7 @@
  * A 'DSBC' form (dsound 6efdb7de): 'guid', 'dsbd' (DSOUND_IO_DSBUFFERDESC), 'bsid' (bus functions), 'ds3d'
  * (DSOUND_IO_3D), LIST 'fxls' of RIFF 'DSFX' ('fxhr' DSOUND_IO_DXDMO_HEADER, 'data': the effect's IPersistStream data,
  * or a send's level).  An effect only counts after 'dsbd'; its object is made at load. */
+#include "dmldr.h"
 #include "../real.h"
 #include "dmapcfg.h"
 #include "dmgraph.h"
@@ -336,18 +337,7 @@ static void read_desc(span s, DMUS_OBJECTDESC *d)
         }
     }
 }
-static BOOL read_stream_all(IStream *st, BYTE **data, DWORD *size)
-{
-    STATSTG ss;
-    LARGE_INTEGER zero = { { 0, 0 } };
-    ULARGE_INTEGER pos;
-    if (FAILED(IStream_Seek(st, zero, STREAM_SEEK_CUR, &pos)) || FAILED(IStream_Stat(st, &ss, STATFLAG_NONAME))) return FALSE;
-    DWORD n = (DWORD)(ss.cbSize.QuadPart - pos.QuadPart), got = 0;
-    BYTE *b = malloc(n ? n : 1);
-    if (!b || FAILED(IStream_Read(st, b, n, &got))) { free(b); return FALSE; }
-    *data = b; *size = got;
-    return TRUE;
-}
+static BOOL read_stream_all(IStream *st, BYTE **data, DWORD *size) { return rm_read_form(st, data, size); }
 static HRESULT WINAPI ob_ParseDescriptor(IDirectMusicObject *i, LPSTREAM st, LPDMUS_OBJECTDESC d)
 {
     if (!st || !d) return E_POINTER;
