@@ -9,6 +9,9 @@
 #define TF_NOTIFY_OFF 0x20
 #define TF_PLAY_OFF 0x40
 #define TF_CLOCK 0x400
+/* the lyrics and segment trigger tracks' state */
+typedef struct { uint32_t gen; void *cur; dm_audiopath *ap; } evstate;
+static int perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out);
 
 #include "dmstytrack.c"
 
@@ -685,9 +688,11 @@ static int wavetrack_setparam(dm_wavetrack *T, int prm, void *data)
 
 /* tempo 7731c483: enable / disable (sticky: the first call decides even over the segment's flags); a tempo at the
  * time given, replacing one at the same time, while enabled.  Time signature 7731d1e0: enable / disable only. */
+static int segtrig_setparam(dm_track *t, int prm, mtime_t mt, void *data);
 static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
 {
     switch (t->kind) {
+    case TRK_SEGTRIG: return segtrig_setparam(t, prm, mt, data);
     case TRK_TEMPO: {
         dm_tempotrack *T = t->data;
         if (prm == PRM_DISABLETEMPO) {
@@ -811,6 +816,13 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
     case TRK_PATTERN: patterntrack_initplay(pf, ss, e, flags); break;
     case TRK_SIGNPOST: dm_perf_srand(pf); break;     /* 7728aac2: a composer for recomposing (its constructor seeds the
                                                      * rand() of the thread playing) */
+    case TRK_LYRICS: case TRK_SEGTRIG: {     /* 773105a3 / 773233cf (the state's audiopath, 7731ebd7) */
+        evstate *S = calloc(1, sizeof(*S));
+        if (!S) break;
+        if (e->t->kind == TRK_SEGTRIG) S->ap = ss->audiopath;
+        e->state = S;
+        break;
+    }
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));
@@ -822,6 +834,76 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         break;
     }
     }
+}
+
+
+/* ------------------------------------------------------------------ lyrics and segment trigger tracks */
+/* their state (77310660 / 77310208): the track's generation it last looked at, the next event, and the segment
+ * trigger track's the state's audiopath */
+
+/* 77310660 with 77321522: each lyric with a logical time in [start, end) as a DMUS_LYRIC_PMSG at its physical time
+ * (through the state's graph); from the first one at or after start when the track changed or on a seek, loop or
+ * flush; DMUS_S_END after the last */
+static int lyrics_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    dm_lyricstrack *T = e->t->data;
+    evstate *S = e->state;
+    if (!S) return DM_OK;
+    if (flags & TF_PLAY_OFF) return DM_OK;
+    dm_lyric *x = S->cur;
+    if (S->gen != T->gen || (flags & (TF_SEEK | TF_LOOP | TF_FLUSH))) {
+        for (x = T->items; x && x->logical < start; x = x->next) {}
+        S->gen = T->gen;
+    }
+    for (; x; x = x->next) {
+        if (x->logical < start) continue;
+        if (end <= x->logical) break;
+        uint32_t bytes = (x->len + 1) * 2;
+        dm_pmsg *m = pm_alloc(pf, 0x40 + x->len * 2);
+        if (!m) continue;
+        m->sx_data = malloc(bytes);
+        if (m->sx_data) { memcpy(m->sx_data, x->text, bytes); m->sx_len = bytes; }
+        m->mt = x->physical + off; m->flags = x->timing | PF_MUSICTIME;
+        m->vpch = e->vid; m->type = PT_LYRIC; m->group = 0xffffffff;
+        stamp_send(pf, ss, m);
+    }
+    S->cur = x;
+    return x ? DM_OK : DMUS_S_END;
+}
+
+/* 77310208 with 77323295: each event with a logical time in [start, end) plays its segment at its physical time,
+ * with its flags, on the state's audiopath (a failure ignored) */
+static int segtrig_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    dm_segtrigtrack *T = e->t->data;
+    evstate *S = e->state;
+    if (!S) return DM_OK;
+    if (flags & TF_PLAY_OFF) return DM_OK;
+    dm_segtrig *x = S->cur;
+    if (S->gen != T->gen || (flags & (TF_SEEK | TF_LOOP | TF_FLUSH))) {
+        for (x = T->items; x && x->logical < start; x = x->next) {}
+        S->gen = T->gen;
+    }
+    for (; x; x = x->next) {
+        if (x->logical < start) continue;
+        if (end <= x->logical) break;
+        if (x->seg) perf_play(pf, x->seg, x->playflags, (int64_t)(x->physical + off), S->ap, NULL);
+    }
+    S->cur = x;
+    return x ? DM_OK : DMUS_S_END;
+}
+
+/* 77323380: a parameter set on the track goes to every event's segment (all its tracks, at the time in it), ten
+ * deep at most (a segment that triggers itself); always S_OK */
+static int segtrig_setparam(dm_track *t, int prm, mtime_t mt, void *data)
+{
+    dm_segtrigtrack *T = t->data;
+    if (T->depth >= 10) return DM_OK;
+    T->depth++;
+    for (dm_segtrig *x = T->items; x; x = x->next)
+        if (x->seg) dm_segment_setparam(x->seg, prm, 0xffffffff, DM_SEG_ALLTRACKS, mt - x->physical, data);
+    T->depth--;
+    return DM_OK;
 }
 
 static void track_endplay(dm_perf *pf, sstrack *e)
@@ -843,6 +925,8 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_BAND: return band_play(pf, ss, e, start, end, off, flags);
     case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
     case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
+    case TRK_LYRICS: return lyrics_play(pf, ss, e, start, end, off, flags);
+    case TRK_SEGTRIG: return segtrig_play(pf, ss, e, start, end, off, flags);
     case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN:
     case TRK_CHORDMAP: case TRK_SIGNPOST: return sty_play(pf, ss, e, start, end, off, flags);
     }

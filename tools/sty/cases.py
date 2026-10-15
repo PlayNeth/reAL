@@ -537,7 +537,33 @@ def case_regen(out):
                             chord(3 * BAR + 1536 + 220, 3, 2, 'G', 7)])
     return {'regen.sty': st.build(), 'regen.sgt': seg.build()}
 
-CASES = {'compose2': case_compose2, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_tracks(out):
+    """dmime's lyrics and segment trigger tracks (tests/trktest.c)"""
+    def notes(name, guid, bars, pch, step, note, lyr=None, trig=None, trigflags=0):
+        seg = Segment(guid, name, bars * BAR)
+        seg.tempo([(0, 120.0)])
+        seg.timesig([(0, 4, 4, 4)])
+        seg.seq([(t, 200, pch, 0x90, note + (t // step) % 5, 100) for t in range(0, bars * BAR, step)])
+        if lyr is not None: seg.lyrics(lyr)
+        if trig is not None: seg.segtrigger(trig, flags=trigflags)
+        return seg.build()
+    lyr = [(0, 0, 3000, 3000, 'three thousand'), (0, 0, 0, 0, 'zero'), (0, 0x10, 768, 900, 'late'),
+           (1, 4, 768, 700, 'early'), (0, 8, 768, 768, 'same'), (0, 0, 6200, 6100, 'six one'), (0, 0, 9216, 9300, 'last'),
+           (0, 0, 12500, 12500, 'past the end')]
+    files = {'lyr.sgt': notes('lyr', '8f6d1a10-1200-4000-8000-000000000001', 4, 0, 768, 60, lyr=lyr),
+             'lyrbad.sgt': notes('lyrbad', '8f6d1a10-1200-4000-8000-000000000002', 1, 0, 768, 60,
+                                 lyr=[(0, 1, 0, 0, 'reference time')]),
+             'trgA.sgt': notes('trgA', '8f6d1a10-1200-4000-8000-000000000003', 1, 1, 384, 70),
+             'trgB.sgt': notes('trgB', '8f6d1a10-1200-4000-8000-000000000004', 2, 2, 512, 50)}
+    files.update(case_comstyle(out))
+    trig = [(768, 800, 0x80 | 0x1000, 0, 'trgA.sgt'), (3072, 3072, 0x80, 0, 'trgB.sgt'), (3000, 3100, 0x80, 0, 'trgA.sgt'),
+            (5000, 5000, 0x80, 1, ('comstyle.sty', 'motif b')), (6144, 6200, 0x80 | 0x2000, 0, 'trgA.sgt')]
+    files['trig.sgt'] = notes('trig', '8f6d1a10-1200-4000-8000-000000000005', 4, 0, 1536, 40, trig=trig, trigflags=0)
+    files['trigbad.sgt'] = notes('trigbad', '8f6d1a10-1200-4000-8000-000000000006', 1, 0, 1536, 40,
+                                 trig=[(0, 0, 0x80, 1, ('comstyle.sty', 'no such motif'))])
+    return files
+
+CASES = {'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

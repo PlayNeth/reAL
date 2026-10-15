@@ -449,6 +449,7 @@ static int track_isparam(const dm_track *t, int prm)
         return DMUS_E_TYPE_UNSUPPORTED;
     case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 77307918 */
     case TRK_MARKER: return prm == PRM_VALIDSTART || prm == PRM_PLAYMARKER ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;    /* 77321af8 */
+    case TRK_SEGTRIG: return DM_OK;                         /* 77321b4b: every type (its SetParam passes them on) */
     }
     return DMUS_E_TYPE_UNSUPPORTED;
 }

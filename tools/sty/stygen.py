@@ -45,6 +45,9 @@ DMUS_PLAYMODE_PEDALPOINTCHORD = 1 | 8
 DMUS_PLAYMODE_PEDALPOINTALWAYS = DMUS_PLAYMODE_PEDALPOINT | DMUS_PLAYMODE_CHORD_INTERVALS
 
 CLSID = {
+    'segment': 'd2ac2882-b39b-11d1-8704-00600893b1bd',
+    'lyricstrack': '995c1cf5-54ff-11d3-8bda-00600893b1b6',
+    'segtriggertrack': 'bae4d665-4ea1-11d3-8bda-00600893b1b6',
     'style': 'd2ac288a-b39b-11d1-8704-00600893b1bd',
     'styletrack': 'd2ac288d-b39b-11d1-8704-00600893b1bd',
     'chordtrack': 'd2ac288b-b39b-11d1-8704-00600893b1bd',
@@ -318,6 +321,26 @@ class Segment:
         body = struct.pack('<I', 12) + b''.join(struct.pack('<iIH2x', *it) for it in items)
         self.track(CLSID['signposttrack'], 'sgnp', None, chunk('sgnp', body), group=group,
                    extras=(config, 0) if config is not None else None)
+
+    def lyrics(self, items, group=1):
+        """a lyrics track: items (flags, timing flags, logical, physical, text)"""
+        ev = [LIST('lyre', chunk('lyrh', struct.pack('<IIii', f, tf, lt, pt)), chunk('lyrn', wstr(txt)))
+              for f, tf, lt, pt, txt in items]
+        self.track(CLSID['lyricstrack'], None, 'lyrt', LIST('lyrt', LIST('lyrl', *ev)), group=group)
+
+    def segtrigger(self, items, flags=0, group=1):
+        """a segment trigger track: items (logical, physical, play flags, item flags, segment file) or, with item
+        flag 1, (..., (style file, motif name))"""
+        ev = []
+        for lt, pt, pf, fl, ref in items:
+            body = [chunk('sgih', struct.pack('<iiII', lt, pt, pf, fl))]
+            if fl & 1:
+                body += [reference(CLSID['style'], file=ref[0]), chunk('snam', wstr(ref[1]))]
+            else:
+                body.append(reference(CLSID['segment'], file=ref))
+            ev.append(LIST('lseg', *body))
+        self.track(CLSID['segtriggertrack'], None, 'segt', LIST('segt', chunk('sgth', struct.pack('<I', flags)), LIST('lsgl', *ev)),
+                   group=group)
 
     def markers(self, starts=(), plays=(), group=1):
         """a marker track ('MARK'): valid start times ('vals') and play markers ('play')"""

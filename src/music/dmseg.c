@@ -47,6 +47,8 @@ static const dm_guid CLSID_MuteTrack    = { 0xd2ac2898, 0xb39b, 0x11d1, { 0x87, 
 static const dm_guid CLSID_ChordMapTrack = { 0xd2ac2896, 0xb39b, 0x11d1, { 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_MarkerTrack = { 0x55a8fd00, 0x4288, 0x11d3, { 0x9b, 0xd1, 0x8a, 0x0d, 0x61, 0xc8, 0x88, 0x35 } };
 static const dm_guid CLSID_SignPostTrack = { 0xf17e8672, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
+static const dm_guid CLSID_LyricsTrack  = { 0x995c1cf5, 0x54ff, 0x11d3, { 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
+static const dm_guid CLSID_SegTriggerTrack = { 0xbae4d665, 0x4ea1, 0x11d3, { 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
 static const dm_guid CLSID_WaveTrack    = { 0xeed36461, 0x9ea5, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
 
 static void get_guid(dm_guid *g, const uint8_t *p)
@@ -541,6 +543,252 @@ void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint
     for (int k = 0; k < s->nntypes; k++) dm_track_add_notification(t, &s->ntypes[k].g);
 }
 
+
+/* ------------------------------------------------------------------ lyrics and segment trigger tracks */
+/* 77310932 / 773104d6: the original's merge sort of an event list by logical time (the split reverses both halves,
+ * the merge takes the second list's event first on equal times) */
+#define EVSORT(name, T)                                                                                       \
+static T *name##_merge(T *a, T *b)                                                                           \
+{                                                                                                            \
+    T *head = NULL, **tail = &head;                                                                          \
+    while (a && b) {                                                                                         \
+        if (a->logical < b->logical) { *tail = a; a = a->next; } else { *tail = b; b = b->next; }            \
+        tail = &(*tail)->next; *tail = NULL;                                                                 \
+    }                                                                                                        \
+    *tail = a ? a : b;                                                                                       \
+    return head;                                                                                             \
+}                                                                                                            \
+static T *name(T *l)                                                                                         \
+{                                                                                                            \
+    if (!l || !l->next) return l;                                                                            \
+    T *a = NULL, *b = NULL;                                                                                  \
+    while (l) {                                                                                              \
+        T *n = l->next; l->next = a; a = l;                                                                  \
+        if (!n) break;                                                                                       \
+        l = n->next; n->next = b; b = n;                                                                     \
+    }                                                                                                        \
+    b = name(b); a = name(a);                                                                                \
+    return name##_merge(a, b);                                                                               \
+}
+EVSORT(lyric_sort, dm_lyric)
+EVSORT(segtrig_sort, dm_segtrig)
+
+static void lyric_free(dm_lyric *e) { if (e) { free(e->text); free(e); } }
+void dm_lyricstrack_free(dm_lyricstrack *T)
+{
+    if (!T) return;
+    for (dm_lyric *e = T->items, *n; e; e = n) { n = e->next; lyric_free(e); }
+    free(T);
+}
+#define E_LYRICS ((int32_t)0x88781221)
+/* 77321606: a 'lyre' list: 'lyrh' (DMUS_IO_LYRICSTRACK_EVENTHEADER: its timing flags may not ask for reference
+ * time or a tool's queue) and 'lyrn' (the text); both must be there */
+static int32_t lyric_load(dm_lyricstrack *T, rd r)
+{
+    dm_lyric *e = calloc(1, sizeof(*e));
+    if (!e) return DM_E_OUTOFMEMORY;
+    int hdr = 0;
+    uint32_t id; rd c;
+    while (next_chunk(&r, &id, &c, NULL)) {
+        if (id == FCC('l','y','r','h')) {
+            if (c.e - c.p < 16) { lyric_free(e); return E_LYRICS; }
+            if (u32(c.p + 4) & 0x63) { lyric_free(e); return E_LYRICS; }
+            e->flags = u32(c.p); e->timing = u32(c.p + 4); e->logical = (int32_t)u32(c.p + 8); e->physical = (int32_t)u32(c.p + 12);
+            hdr = 1;
+        } else if (id == FCC('l','y','r','n')) {
+            size_t n = (size_t)(c.e - c.p);
+            if (n & 1) { lyric_free(e); return E_LYRICS; }
+            uint16_t *t = malloc(n + 2);
+            if (!t) { lyric_free(e); return DM_E_OUTOFMEMORY; }
+            uint32_t k = 0;
+            for (; k < n / 2; k++) { t[k] = u16(c.p + 2 * k); if (!t[k]) break; }
+            t[k] = 0;
+            free(e->text); e->text = t; e->len = k;
+        }
+    }
+    if (!hdr || !e->text) { lyric_free(e); return E_LYRICS; }
+    e->next = T->items; T->items = e;
+    return DM_OK;
+}
+/* 7732175a: the 'lyrt' list's 'lyrl' list of 'lyre' lists */
+dm_lyricstrack *dm_lyricstrack_load(const uint8_t *p, size_t n, int32_t *hr)
+{
+    dm_lyricstrack *T = calloc(1, sizeof(*T));
+    *hr = DM_E_OUTOFMEMORY;
+    if (!T) return NULL;
+    T->gen = 1;
+    rd r = { p, p + n }, c;
+    uint32_t id, type;
+    *hr = E_LYRICS;
+    while (next_chunk(&r, &id, &c, &type)) {
+        if (id != FCC('L','I','S','T') || type != FCC('l','y','r','l')) continue;
+        *hr = DM_OK;
+        rd x;
+        while (*hr >= 0 && next_chunk(&c, &id, &x, &type))
+            if (id == FCC('L','I','S','T') && type == FCC('l','y','r','e')) *hr = lyric_load(T, x);
+        break;
+    }
+    if (*hr < 0) { dm_lyricstrack_free(T); return NULL; }
+    T->items = lyric_sort(T->items);
+    return T;
+}
+/* 77310c64: the events at logical times in [start, end), moved to 0 */
+static dm_lyricstrack *lyricstrack_clone(const dm_lyricstrack *T, mtime_t start, mtime_t end)
+{
+    dm_lyricstrack *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    C->gen = 1;
+    dm_lyric **tail = &C->items;
+    for (const dm_lyric *e = T->items; e && e->logical < end; e = e->next) {
+        if (e->logical < start) continue;
+        dm_lyric *x = malloc(sizeof(*x));
+        if (!x) break;
+        *x = *e; x->next = NULL;
+        x->logical -= start; x->physical -= start;
+        x->text = malloc((e->len + 1) * 2);
+        if (x->text) memcpy(x->text, e->text, (e->len + 1) * 2); else x->len = 0;
+        *tail = x; tail = &x->next;
+    }
+    return C;
+}
+
+static void segtrig_item_free(dm_segtrig *e) { if (e) { if (e->seg) dm_segment_release(e->seg); free(e); } }
+void dm_segtrigtrack_free(dm_segtrigtrack *T)
+{
+    if (!T) return;
+    for (dm_segtrig *e = T->items, *n; e; e = n) { n = e->next; segtrig_item_free(e); }
+    free(T);
+}
+#define E_SEGTRIG ((int32_t)0x88781220)
+static int wname_ieq(const uint16_t *a, const uint16_t *b)
+{
+    for (;; a++, b++) {
+        uint16_t x = *a, y = *b;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return 0;
+        if (!x) return 1;
+    }
+}
+/* a reference's guid, file and name */
+static void ref_read(rd r, dm_guid *g, int *hasg, char *file, size_t nf, char *name, size_t nn)
+{
+    uint32_t id; rd c;
+    *hasg = 0; file[0] = name[0] = 0;
+    while (next_chunk(&r, &id, &c, NULL)) {
+        if (id == FCC('g','u','i','d') && c.e - c.p >= 16) { get_guid(g, c.p); *hasg = 1; }
+        else if (id == FCC('f','i','l','e')) wcs_to_utf8(file, nf, c);
+        else if (id == FCC('n','a','m','e')) wcs_to_utf8(name, nn, c);
+    }
+}
+/* 77323454: an 'lseg' list: 'sgih' (DMUS_IO_SEGMENT_ITEM_HEADER), then the segment's reference, or (flag 1,
+ * DMUS_SEGMENTTRACKF_MOTIF) the style's reference and the motif's name ('snam'); an event whose reference is missing
+ * is left out, one whose segment does not load fails the track */
+static int32_t segtrig_load_item(dm_segtrigtrack *T, rd r, const dm_loadcb *cb)
+{
+    uint32_t id, type; rd c;
+    int got = 0;
+    dm_segtrig *e = calloc(1, sizeof(*e));
+    if (!e) return DM_E_OUTOFMEMORY;
+    while (next_chunk(&r, &id, &c, &type)) {
+        if (id == FCC('s','g','i','h')) {
+            if (c.e - c.p < 16) { free(e); return E_SEGTRIG; }
+            e->logical = (int32_t)u32(c.p); e->physical = (int32_t)u32(c.p + 4);
+            e->playflags = u32(c.p + 8); e->flags = u32(c.p + 12);
+            got = 1;
+            break;
+        }
+    }
+    if (!got) { free(e); return E_SEGTRIG; }
+    dm_guid g; int hasg;
+    char file[260], name[128];
+    if (e->flags & 1) {
+        struct dms_style *st = NULL;
+        uint16_t *mname = NULL;
+        int32_t hr = DM_OK;
+        while (hr >= 0 && next_chunk(&r, &id, &c, &type)) {
+            if (id == FCC('L','I','S','T') && type == FCC('D','M','R','F')) {
+                ref_read(c, &g, &hasg, file, sizeof(file), name, sizeof(name));
+                struct dms_style *x = cb && cb->getstyle ? cb->getstyle(cb->ctx, hasg ? &g : NULL, file[0] ? file : NULL, name[0] ? name : NULL) : NULL;
+                if (!x) hr = E_SEGTRIG;
+                if (st) dms_style_release(st);
+                st = x;
+            } else if (id == FCC('s','n','a','m')) {
+                size_t n = (size_t)(c.e - c.p);
+                if (n & 1) { hr = E_SEGTRIG; break; }
+                free(mname);
+                if (!(mname = malloc(n + 2))) { hr = DM_E_OUTOFMEMORY; break; }
+                size_t k = 0;
+                for (; k < n / 2; k++) { mname[k] = u16(c.p + 2 * k); if (!mname[k]) break; }
+                mname[k] = 0;
+            }
+        }
+        if (hr >= 0 && st && mname) {
+            hr = DMUS_E_NOT_FOUND;
+            for (int k = 0; k < st->nmotifs; k++) {
+                uint16_t mn[65];
+                memcpy(mn, st->motifs[k]->name, sizeof(st->motifs[k]->name)); mn[64] = 0;
+                if (!wname_ieq(mname, mn)) continue;
+                e->seg = dms_motif_segment(st, st->motifs[k]);
+                hr = e->seg ? DM_OK : DM_E_OUTOFMEMORY;
+                break;
+            }
+        }
+        free(mname);
+        if (st) dms_style_release(st);
+        if (hr < 0 || !e->seg) { free(e); return hr < 0 ? hr : DM_OK; }
+    } else {
+        while (next_chunk(&r, &id, &c, &type)) {
+            if (id != FCC('L','I','S','T') || type != FCC('D','M','R','F')) continue;
+            ref_read(c, &g, &hasg, file, sizeof(file), name, sizeof(name));
+            e->seg = cb && cb->getseg ? cb->getseg(cb->ctx, hasg ? &g : NULL, file[0] ? file : NULL, name[0] ? name : NULL) : NULL;
+            if (!e->seg) { free(e); return E_SEGTRIG; }
+            break;
+        }
+        if (!e->seg) { free(e); return DM_OK; }
+    }
+    e->next = T->items; T->items = e;
+    return DM_OK;
+}
+/* 77323691: the 'segt' list: 'sgth' (the track's flags) and the 'lsgl' list of 'lseg' lists */
+dm_segtrigtrack *dm_segtrigtrack_load(const uint8_t *p, size_t n, const dm_loadcb *cb, int32_t *hr)
+{
+    dm_segtrigtrack *T = calloc(1, sizeof(*T));
+    *hr = DM_E_OUTOFMEMORY;
+    if (!T) return NULL;
+    T->gen = 1;
+    *hr = DM_OK;
+    rd r = { p, p + n }, c, x;
+    uint32_t id, type;
+    while (*hr >= 0 && next_chunk(&r, &id, &c, &type)) {
+        if (id == FCC('s','g','t','h')) { if (c.e - c.p >= 4) T->hflags = u32(c.p); else *hr = E_SEGTRIG; }
+        else if (id == FCC('L','I','S','T') && type == FCC('l','s','g','l'))
+            while (*hr >= 0 && next_chunk(&c, &id, &x, &type))
+                if (id == FCC('L','I','S','T') && type == FCC('l','s','e','g')) *hr = segtrig_load_item(T, x, cb);
+    }
+    if (*hr < 0) { dm_segtrigtrack_free(T); return NULL; }
+    T->items = segtrig_sort(T->items);
+    return T;
+}
+/* 77310b0b: the events at logical times in [start, end), moved to 0 (the track's flags not copied) */
+static dm_segtrigtrack *segtrigtrack_clone(const dm_segtrigtrack *T, mtime_t start, mtime_t end)
+{
+    dm_segtrigtrack *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    C->gen = 1;
+    dm_segtrig **tail = &C->items;
+    for (const dm_segtrig *e = T->items; e && e->logical < end; e = e->next) {
+        if (e->logical < start) continue;
+        dm_segtrig *x = malloc(sizeof(*x));
+        if (!x) break;
+        *x = *e; x->next = NULL;
+        x->logical -= start; x->physical -= start;
+        if (x->seg) x->seg->refs++;
+        *tail = x; tail = &x->next;
+    }
+    return C;
+}
+
 typedef struct { int kind; dm_guid clsid; uint32_t position, group, config, priority; void *data; } ldtrack;
 static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
 {
@@ -603,6 +851,16 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
                 int32_t hr;
                 t.data = dm_markertrack_load(c.p, (size_t)(c.e - c.p), &hr);
                 t.kind = t.data ? TRK_MARKER : TRK_OTHER;
+            } else if (guid_eq(&t.clsid, &CLSID_LyricsTrack) && id == FCC('L','I','S','T') && type == FCC('l','y','r','t')) {
+                int32_t hr;
+                t.data = dm_lyricstrack_load(c.p, (size_t)(c.e - c.p), &hr);
+                if (!t.data) { s->partial = 1; return; }    /* (a track whose Load fails is left out) */
+                t.kind = TRK_LYRICS;
+            } else if (guid_eq(&t.clsid, &CLSID_SegTriggerTrack) && id == FCC('L','I','S','T') && type == FCC('s','e','g','t')) {
+                int32_t hr;
+                t.data = dm_segtrigtrack_load(c.p, (size_t)(c.e - c.p), cb, &hr);
+                if (!t.data) { s->partial = 1; return; }
+                t.kind = TRK_SEGTRIG;
             } else if (guid_eq(&t.clsid, &CLSID_MuteTrack) && id == FCC('m','u','t','e')) {
                 int32_t hr;
                 t.data = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr);
@@ -766,6 +1024,8 @@ static void free_track(dm_track *t)
     case TRK_CHORDMAP: dmc_cmtrack_free(t->data); break;
     case TRK_SIGNPOST: dmc_sptrack_free(t->data); break;
     case TRK_MARKER: dm_markertrack_free(t->data); break;
+    case TRK_LYRICS: dm_lyricstrack_free(t->data); break;
+    case TRK_SEGTRIG: dm_segtrigtrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
@@ -1078,7 +1338,8 @@ static void *clone_band(const dm_bandtrack *t, mtime_t start, mtime_t end)
 dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
 {
     *hr = DM_OK;
-    if (start < 0 || end < start) { *hr = DM_E_INVALIDARG; return NULL; }
+    /* (the lyrics and segment trigger tracks' Clone takes any range) */
+    if ((start < 0 || end < start) && t->kind != TRK_LYRICS && t->kind != TRK_SEGTRIG) { *hr = DM_E_INVALIDARG; return NULL; }
     void *d = NULL;
     switch (t->kind) {
     case TRK_TEMPO: d = clone_tempo(t->data, start, end); break;
@@ -1095,6 +1356,8 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_CHORDMAP: d = dmc_cmtrack_clone(t->data, start, end); break;      /* 7728c49d */
     case TRK_SIGNPOST: d = dmc_sptrack_clone(t->data, start, end); break;      /* 7728b155 */
     case TRK_MARKER: d = markertrack_clone(t->data, start, end); break;      /* 77321e28 */
+    case TRK_LYRICS: d = lyricstrack_clone(t->data, start, end); break;
+    case TRK_SEGTRIG: d = segtrigtrack_clone(t->data, start, end); break;
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }

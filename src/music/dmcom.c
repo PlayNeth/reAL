@@ -666,6 +666,7 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
 static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, const char *name);
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name);
 static struct dmc_chordmap *loader_getcmap(void *ctx, const dm_guid *g, const char *file, const char *name);
+static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, const char *name);
 static dm_segment *segment_from_data(const BYTE *b, DWORD n, rm_loader *l)
 {
     if (dm_is_midi(b, n)) return dm_segment_from_midi(b, n, loader_getcoll, l);
@@ -676,7 +677,7 @@ static dm_segment *segment_from_data(const BYTE *b, DWORD n, rm_loader *l)
         dm_wave_release(w);
         return g;
     }
-    dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap };
+    dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg };
     return dm_segment_load_cb(b, n, &cb);
 }
 static rm_segment *sgp(IPersistStream *i) { return impl_from(i, rm_segment, IPersistStream_iface); }
@@ -731,7 +732,7 @@ static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
     g->wrapper = s;
     if (gr) { if (s->graph) IDirectMusicGraph_Release(s->graph); s->graph = gr; }
     s->desc.dwValidData |= DMUS_OBJ_LOADED;
-    return S_OK;
+    return g->partial ? DMUS_S_PARTIALLOAD : S_OK;
 }
 static HRESULT WINAPI sgp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }
 static HRESULT WINAPI sgp_getsize(IPersistStream *i, ULARGE_INTEGER *s) { return rm_notimpl(__func__); }
@@ -1242,7 +1243,11 @@ static HRESULT WINAPI st_getsegment(IDirectMusicSegmentState8 *i, IDirectMusicSe
 {
     if (!s) return E_POINTER;
     *s = NULL;
-    if (!sst(i)->seg) return DMUS_E_NOT_FOUND;
+    rm_state *st = sst(i);
+    if (st->perf->host) dm_host_lock(st->perf->host);
+    int gone = !dm_segstate_segment(st->ss);        /* (released when the state left the performance) */
+    if (st->perf->host) dm_host_unlock(st->perf->host);
+    if (!st->seg || gone) return DMUS_E_NOT_FOUND;
     *s = (IDirectMusicSegment *)&sst(i)->seg->IDirectMusicSegment8_iface;
     IDirectMusicSegment_AddRef(*s);
     return S_OK;
@@ -1976,6 +1981,7 @@ static ULONG type_size(DWORD t)
     case DMUS_PMSGT_TRANSPOSE: return sizeof(DMUS_TRANSPOSE_PMSG);
     case DMUS_PMSGT_CHANNEL_PRIORITY: return sizeof(DMUS_CHANNEL_PRIORITY_PMSG);
     case DMUS_PMSGT_WAVE: return sizeof(DMUS_WAVE_PMSG);
+    case DMUS_PMSGT_LYRIC: return sizeof(DMUS_LYRIC_PMSG);
     default: return sizeof(DMUS_PMSG);
     }
 }
@@ -2006,6 +2012,11 @@ static void pm_to_com(rm_perf *p, const dm_pmsg *e, DMUS_PMSG *m)
         x->bBeat = e->n_beat; x->bGrid = e->n_grid; x->bVelocity = e->n_vel; x->bFlags = e->n_flags; x->bTimeRange = e->n_timerange;
         x->bDurRange = e->n_durrange; x->bVelRange = e->n_velrange; x->bPlayModeFlags = e->n_playmode; x->bSubChordLevel = e->n_subchord;
         x->bMidiValue = e->n_midival; x->cTranspose = e->n_transpose;
+        break;
+    }
+    case DMUS_PMSGT_LYRIC: {           /* the text a lyrics track made (one the application made stays in its view) */
+        DMUS_LYRIC_PMSG *x = (DMUS_LYRIC_PMSG *)m;
+        if (e->sx_data && FIELD_OFFSET(DMUS_LYRIC_PMSG, wszString) + e->sx_len <= cap) memcpy(x->wszString, e->sx_data, e->sx_len);
         break;
     }
     case DMUS_PMSGT_SYSEX: {
@@ -2140,6 +2151,7 @@ static DMUS_PMSG *pm_view(rm_perf *p, dm_pmsg *e)
     if (!m) {
         ULONG n = type_size(e->type);
         if (e->type == DMUS_PMSGT_SYSEX && FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) + e->sx_len > n) n = FIELD_OFFSET(DMUS_SYSEX_PMSG, abData) + e->sx_len;
+        if (e->type == DMUS_PMSGT_LYRIC && FIELD_OFFSET(DMUS_LYRIC_PMSG, wszString) + e->sx_len > n) n = FIELD_OFFSET(DMUS_LYRIC_PMSG, wszString) + e->sx_len;
         if (e->size > n) n = e->size;
         if (!(m = pmsg_new(n))) return NULL;
         ((rm_pmsghdr *)m - 1)->e = e;
@@ -3201,6 +3213,36 @@ static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, co
     return r;
 }
 
+/* a segment trigger track's reference (77323220: the loader's GetObject of a segment); the engine segment with a
+ * reference */
+static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, const char *name)
+{
+    rm_loader *l = ctx;
+    if (!l) return NULL;
+    DMUS_OBJECTDESC d;
+    memset(&d, 0, sizeof(d));
+    d.dwSize = sizeof(d);
+    d.dwValidData = DMUS_OBJ_CLASS;
+    d.guidClass = CLSID_DirectMusicSegment;
+    if (g) { memcpy(&d.guidObject, g, sizeof(GUID)); d.dwValidData |= DMUS_OBJ_OBJECT; }
+    if (file) {
+        MultiByteToWideChar(CP_ACP, 0, file, -1, d.wszFileName, DMUS_MAX_FILENAME);
+        d.dwValidData |= DMUS_OBJ_FILENAME;
+        if (file[0] && (file[1] == ':' || file[0] == '\\')) d.dwValidData |= DMUS_OBJ_FULLPATH;
+    }
+    if (name) { MultiByteToWideChar(CP_ACP, 0, name, -1, d.wszName, DMUS_MAX_NAME); d.dwValidData |= DMUS_OBJ_NAME; }
+    IDirectMusicSegment8 *o = NULL;
+    if (FAILED(ld_getobject(&l->IDirectMusicLoader8_iface, &d, &IID_IDirectMusicSegment8, (void **)&o)) || !o) {
+        LOG_INFO("music: segment trigger track: segment %s not found", file ? file : name ? name : "(by guid)");
+        return NULL;
+    }
+    rm_segment *r = o->lpVtbl == &seg_vtbl ? sgm(o) : NULL;
+    dm_segment *x = r ? r->seg : NULL;
+    if (x) x->refs++;
+    IDirectMusicSegment8_Release(o);
+    return x;
+}
+
 /* a style track's reference (774123a0: the loader's GetObject of a style); the engine style with a reference */
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
@@ -3400,6 +3442,7 @@ static HRESULT WINAPI ld_getobject(IDirectMusicLoader8 *i, LPDMUS_OBJECTDESC d, 
     cache_add(l, path, g, (IUnknown *)&s->IDirectMusicSegment8_iface);
     HRESULT hr = seg_qi(&s->IDirectMusicSegment8_iface, riid, out);
     seg_release(&s->IDirectMusicSegment8_iface);
+    if (hr == S_OK && sgt->partial) hr = DMUS_S_PARTIALLOAD;
     LOG_CALL("music: loaded segment %s (%d tracks) -> %08lx", sgt->name, sgt->ntracks, (unsigned long)hr);
     return hr;
 }

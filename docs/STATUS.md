@@ -88,6 +88,15 @@ Doppler, and WASAPI output.
 - Track objects: GetTrack, InsertTrack, RemoveTrack, and track and segment Clone.
 - SegmentState::GetObjectInPath.
 
+**DirectMusic: lyrics and segment trigger tracks** (`src/music/dmseg.c`, `dmtrack.c`, from dmime)
+- The lyrics track ('lyrt'): DMUS_LYRIC_PMSGs at each lyric's physical time, chosen by logical time, through the
+  state's graph; Clone; a header asking for reference time or a tool's queue fails the load.
+- The segment trigger track ('segt'): each event plays its segment (or a style's motif, by name) with its flags on
+  the state's audiopath; SetParam passes parameters to every event's segment (ten deep at most); IsParamSupported
+  answers S_OK for every type; Clone. A reference that does not load fails the track.
+- A track whose Load fails is left out of the segment, which loads with DMUS_S_PARTIALLOAD.
+- `tests/comcmp.sh trktest.exe lyrics` and `trigger` (`cases.py tracks`) match.
+
 **DirectMusic: tool graphs and application tools**
 - The graph object (CLSID_DirectMusicGraph, `src/music/dmgraph.c`, from dmime's CGraph): InsertTool, GetTool,
   RemoveTool (a removed tool stays referenced until the graph goes), StampPMsg, the descriptor, IPersistStream::Load

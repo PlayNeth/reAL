@@ -71,7 +71,7 @@ typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } dm_guid;
 
 /* pmsg types and flags */
 enum { PT_MIDI = 0, PT_NOTE, PT_SYSEX, PT_NOTIFICATION, PT_TEMPO, PT_CURVE, PT_TIMESIG, PT_PATCH, PT_TRANSPOSE,
-       PT_CHANNEL_PRIORITY, PT_STOP, PT_DIRTY, PT_WAVE };
+       PT_CHANNEL_PRIORITY, PT_STOP, PT_DIRTY, PT_WAVE, PT_LYRIC };
 #define PF_REFTIME        0x01
 #define PF_MUSICTIME      0x02
 #define PF_TOOL_IMMEDIATE 0x04
@@ -294,6 +294,7 @@ typedef struct dm_wavetrack {
 } dm_wavetrack;
 
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE, TRK_MARKER,
+       TRK_LYRICS, TRK_SEGTRIG, TRK_PARAMCTL,
        TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF, TRK_PATTERN,   /* TRK_CHORD on are dmstyle's (dmsty.h) */
        TRK_CHORDMAP, TRK_SIGNPOST };      /* dmcompos's (dmcomp.h) */
 /* the marker track (dmime CMarkerTrack 77321d13): valid start points ('vals') and play markers ('play'), sorted */
@@ -302,6 +303,16 @@ typedef struct { dm_marker *starts, *plays; } dm_markertrack;
 /* the 'MARK' list's chunks (the data after the list type) */
 dm_markertrack *dm_markertrack_load(const uint8_t *p, size_t n, int32_t *hr);
 void dm_markertrack_free(dm_markertrack *T);
+/* the lyrics track (dmime 77310adb): 'lyre' events, sorted by logical time; the text as written (UTF-16) */
+typedef struct dm_lyric { struct dm_lyric *next; uint32_t flags, timing; mtime_t logical, physical; uint16_t *text; uint32_t len; } dm_lyric;
+typedef struct { dm_lyric *items; uint32_t gen; } dm_lyricstrack;
+/* the segment trigger track (dmime 77310aa3): 'lseg' events (a segment, or a style's motif, played with the flags) */
+struct dm_segment;
+typedef struct dm_segtrig { struct dm_segtrig *next; mtime_t logical, physical; uint32_t playflags, flags; struct dm_segment *seg; } dm_segtrig;
+typedef struct { dm_segtrig *items; uint32_t gen, hflags; int depth; } dm_segtrigtrack;
+dm_lyricstrack *dm_lyricstrack_load(const uint8_t *p, size_t n, int32_t *hr);   /* the 'lyrt' list's data */
+void dm_lyricstrack_free(dm_lyricstrack *T);
+void dm_segtrigtrack_free(dm_segtrigtrack *T);
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */
@@ -333,6 +344,7 @@ typedef struct dm_segment {
     char name[64];
     dm_ntype *ntypes; int nntypes;
     void *wrapper;          /* the COM object (weak) */
+    int partial;            /* a track failed to load and was left out (DMUS_S_PARTIALLOAD) */
 } dm_segment;
 
 /* notification types (dmusici.h) */
@@ -368,7 +380,11 @@ uint32_t *dm_app_rand_state(void);
 struct dms_style;
 typedef struct dms_style *(*dm_getstyle_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
 typedef struct dmc_chordmap *(*dm_getcmap_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
-typedef struct { dm_getcoll_fn getcoll; dm_getwave_fn getwave; dm_getstyle_fn getstyle; void *ctx; dm_getcmap_fn getcmap; } dm_loadcb;
+/* a segment trigger track's segment reference (a segment, with a reference) */
+typedef struct dm_segment *(*dm_getseg_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
+typedef struct { dm_getcoll_fn getcoll; dm_getwave_fn getwave; dm_getstyle_fn getstyle; void *ctx; dm_getcmap_fn getcmap;
+                 dm_getseg_fn getseg; } dm_loadcb;
+dm_segtrigtrack *dm_segtrigtrack_load(const uint8_t *p, size_t n, const dm_loadcb *cb, int32_t *hr);   /* 'segt' data */
 dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *cb);
 dm_segment *dm_segment_from_wave(dm_wave *w);
 /* a band's 'DMBD' form (the data after the form type), as dmband loads it */
