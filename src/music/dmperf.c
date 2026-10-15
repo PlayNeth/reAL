@@ -670,7 +670,10 @@ static int perf_getparam_ex(dm_perf *pf, dm_segstate *ctx, uint32_t cflags, int 
     } else if (prm == PRM_TIMESIG) {
         /* 77304559: the time signature list's entry; default 4/4 */
         timesig *o = data;
-        o->t = -mt; o->bpm = 4; o->beat = 4; o->grids = 4;
+        dm_pmsg *e = pf->tsq.head;
+        while (e && e->next && e->next->mt <= mt) e = e->next;
+        if (e) { o->t = e->mt - mt; o->bpm = e->ts_bpm; o->beat = e->ts_beat; o->grids = e->ts_grids; }
+        else { o->t = -mt; o->bpm = 4; o->beat = 4; o->grids = 4; }
         hr = DM_OK;
     }
     return hr;

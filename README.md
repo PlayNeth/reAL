@@ -61,7 +61,7 @@ diffed line by line, and offline captures are compared event by event.
 | Lyrics and segment trigger tracks | ✅ |
 | Parameter control track, effect parameter envelopes (IMediaParams) | ✅ |
 | The loader as dmloader has it (object cache, garbage collection, ScanDirectory, EnumObject) and containers (.con) | ✅ |
-| Standalone track objects (CoCreateInstance, Load, direct InitPlay/Play) | ⏳ |
+| Standalone track objects (CoCreateInstance, Load, direct InitPlay/Play) | ✅ |
 | Scripts (dmscript, AudioVBScript) | ⏳ (last) |
 
 As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REDM_NOFIXES` in the environment

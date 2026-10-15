@@ -150,6 +150,31 @@ Doppler, and WASAPI output.
   descriptors and flags of every item, lookups by GUID, name, alias and file, NOLOADS, embedded containers,
   ReleaseObject of a container from the cache, ScanDirectory, SetObject, a disabled cache, EnumObject of all types.
 
+**DirectMusic: track objects on their own** (`src/music/dmseg.c`, `dmtrack.c`, `dmcom.c`)
+- CoCreateInstance of every track class reDM has (sequence, tempo, time signature, SysEx, band, wave, chord,
+  command, style, motif, pattern, mute, chord map, signpost, marker, lyrics, segment trigger, parameter control)
+  gives the track with no items, as each class's constructor leaves it (the style and motif tracks seed the
+  application thread's rand(), as dmstyle's constructors do).
+- IPersistStream::Load reads the track's own chunk ('seqt', LIST 'lyrt', RIFF 'DMPT', ...) and resolves its
+  references through the stream's loader (IDirectMusicGetLoader). Without one, the segment trigger track fails
+  before reading (E_NOINTERFACE), the style and chord map tracks after reading (E_NOINTERFACE), the band track with
+  0x88781150, and the wave track at its first item's reference, as their DLLs do.
+- InitPlay / Play / PlayEx / EndPlay on a state and performance of the application's choosing: the engine keeps the
+  track's state as a segment state would, with every group bit and on the application thread's rand(). The chord
+  map, signpost, mute and marker tracks hand out no state; a style or pattern track without a style fails with
+  E_POINTER, a motif track without a motif with E_FAIL; the wave track fails with DMUS_E_NOT_INIT when an item's
+  wave is not downloaded to its port (and, as dmime's, keeps the track: its state is never ended).
+- A segment made with CoCreateInstance has a length of 1 and no tracks, and plays (it used to refuse).
+- Found on the way: the performance's time signature when no track gives one is the newest one in its time
+  signature list (dmime 77304559), not 4/4 from time 0, so a segment without a time signature track aligns
+  secondary segments to the beat of the one before it.
+- `tests/comcmp.sh trktest.exe standalone lyr.sgt basic.sgt bells1.sgt pctl.sgt c1.sgt params.sgt aprim.sgt
+  wavemute.sgt` matches: every class made empty (interfaces, class ID, supported parameters, GetParam, Clone,
+  direct play), and every track of those files loaded with and without a loader, played in a new segment and
+  directly. Two differences are left: a pattern track playing alone in a segment (no chord track) and a motif
+  triggered by a segment trigger track the application plays directly call rand() for some notes in a different
+  order than dmstyle does, so a note or two lands a few ticks off.
+
 **DirectMusic: tool graphs and application tools**
 - The graph object (CLSID_DirectMusicGraph, `src/music/dmgraph.c`, from dmime's CGraph): InsertTool, GetTool,
   RemoveTool (a removed tool stays referenced until the graph goes), StampPMsg, the descriptor, IPersistStream::Load

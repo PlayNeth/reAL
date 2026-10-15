@@ -1003,6 +1003,127 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
     }
 }
 
+/* ------------------------------------------------------------------ tracks on their own (CoCreateInstance of a track
+ * class, then IPersistStream::Load of its chunk) */
+static const struct { const dm_guid *g; int kind; } s_kinds[] = {
+    { &CLSID_SeqTrack, TRK_SEQ }, { &CLSID_TempoTrack, TRK_TEMPO }, { &CLSID_TimeSigTrack, TRK_TIMESIG },
+    { &CLSID_BandTrack, TRK_BAND }, { &CLSID_SysExTrack, TRK_SYSEX }, { &CLSID_WaveTrack, TRK_WAVE },
+    { &CLSID_ChordTrack, TRK_CHORD }, { &CLSID_CommandTrack, TRK_COMMAND }, { &CLSID_StyleTrack, TRK_STYLE },
+    { &CLSID_MotifTrack, TRK_MOTIF }, { &CLSID_PatternTrack, TRK_PATTERN }, { &CLSID_ChordMapTrack, TRK_CHORDMAP },
+    { &CLSID_SignPostTrack, TRK_SIGNPOST }, { &CLSID_MarkerTrack, TRK_MARKER }, { &CLSID_LyricsTrack, TRK_LYRICS },
+    { &CLSID_SegTriggerTrack, TRK_SEGTRIG }, { &CLSID_ParamControlTrack, TRK_PARAMCTL }, { &CLSID_MuteTrack, TRK_MUTE },
+};
+int dm_track_class_kind(const dm_guid *clsid)
+{
+    for (size_t k = 0; k < sizeof(s_kinds) / sizeof(*s_kinds); k++) if (guid_eq(clsid, s_kinds[k].g)) return s_kinds[k].kind;
+    return -1;
+}
+/* a track as its class's constructor leaves it: no items */
+dm_track *dm_track_create(const dm_guid *clsid)
+{
+    int kind = dm_track_class_kind(clsid);
+    if (kind < 0) return NULL;
+    static const uint8_t none[4];
+    rd e = { none, none };
+    int32_t hr;
+    void *d = NULL;
+    switch (kind) {
+    case TRK_SEQ: d = load_seq(e); break;
+    case TRK_TEMPO: d = load_tempo(e); break;
+    case TRK_TIMESIG: { dm_tstrack *ts = calloc(1, sizeof(*ts)); if (ts) ts->active = 1; d = ts; break; }
+    case TRK_BAND: d = load_band(e, NULL, NULL); break;
+    case TRK_SYSEX: d = load_sysex(e); break;
+    case TRK_WAVE: d = load_wavetrack(e, NULL, NULL); break;
+    case TRK_CHORD: d = calloc(1, sizeof(dms_chordtrack)); break;
+    case TRK_COMMAND: d = calloc(1, sizeof(dms_cmdtrack)); break;
+    case TRK_MUTE: d = calloc(1, sizeof(dms_mutetrack)); break;
+    case TRK_STYLE: case TRK_MOTIF: dm_style_srand(); d = dms_styletrack_load(none, 0, NULL, NULL, &hr); break;
+    case TRK_PATTERN: {                 /* (no pattern: no style either) */
+        dms_styletrack *y = calloc(1, sizeof(*y));
+        if (y) { y->kind = TRK_PATTERN; y->au_byguid = y->au_all = 1; }
+        d = y;
+        break;
+    }
+    case TRK_CHORDMAP: d = dmc_cmtrack_load(none, 0, NULL, NULL, &hr); break;
+    case TRK_SIGNPOST: d = dmc_sptrack_load(none, 0, &hr); break;
+    case TRK_MARKER: d = dm_markertrack_load(none, 0, &hr); break;
+    case TRK_LYRICS: { dm_lyricstrack *y = calloc(1, sizeof(*y)); if (y) y->gen = 1; d = y; break; }
+    case TRK_SEGTRIG: d = dm_segtrigtrack_load(none, 0, NULL, &hr); break;
+    case TRK_PARAMCTL: d = dm_paramtrack_load(none, 0, &hr); break;
+    }
+    if (!d) return NULL;
+    dm_track *t = dm_track_new(kind, clsid, d);
+    if (!t) { dm_track tmp = { .kind = kind, .data = d }; free_track(&tmp); }
+    return t;
+}
+/* whether a track can start playing: a style or pattern track without a style cannot (E_POINTER), nor a motif track
+ * without its motif (E_FAIL) */
+int dm_track_can_play(const dm_track *t)
+{
+    const dms_styletrack *y = t->data;
+    if (t->kind == TRK_STYLE || t->kind == TRK_PATTERN)
+        if (!y || !y->styles || (t->kind == TRK_PATTERN && !y->motif)) return DM_E_POINTER;
+    if (t->kind == TRK_MOTIF && (!y || !y->motif)) return DM_E_FAIL;
+    return DM_OK;
+}
+/* Load of the track's own chunk (its header included: 'seqt', LIST 'lyrt', RIFF 'DMPT', ...); what it had before is
+ * let go of once the new data is there */
+int dm_track_load_chunk(dm_track *t, const uint8_t *p, size_t n, const dm_loadcb *cb)
+{
+    if (n < 8) return DMUS_E_CHUNKNOTFOUND_;
+    uint32_t id = u32(p), size = u32(p + 4), type = 0;
+    rd c = { p + 8, p + 8 + (size < n - 8 ? size : n - 8) };
+    if ((id == FCC('R','I','F','F') || id == FCC('L','I','S','T')) && c.e - c.p >= 4) { type = u32(c.p); c.p += 4; }
+    dm_getcoll_fn getcoll = cb ? cb->getcoll : NULL;
+    void *ctx = cb ? cb->ctx : NULL;
+    int32_t hr = DM_OK;
+    void *d = NULL;
+    switch (t->kind) {
+    case TRK_SEQ: if (id == FCC('s','e','q','t')) d = load_seq(c); break;
+    case TRK_TEMPO: if (id == FCC('t','e','t','r')) d = load_tempo(c); break;
+    case TRK_TIMESIG: {
+        dm_tstrack *ts = calloc(1, sizeof(*ts));
+        if (!ts) return DM_E_OUTOFMEMORY;
+        ts->active = 1;
+        if (id == FCC('t','i','m','s')) load_tims(ts, c);
+        else { rd x; uint32_t xid; while (next_chunk(&c, &xid, &x, NULL)) if (xid == FCC('t','i','m','s')) load_tims(ts, x); }
+        d = ts;
+        break;
+    }
+    case TRK_BAND: d = load_band(c, getcoll, ctx); break;
+    case TRK_SYSEX: if (id == FCC('s','y','e','x')) d = load_sysex(c); break;
+    case TRK_WAVE: if (type == FCC('w','a','v','t')) d = load_wavetrack(c, cb ? cb->getwave : NULL, ctx); break;
+    case TRK_CHORD: if (type == FCC('c','o','r','d')) d = dms_chordtrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_COMMAND: if (id == FCC('c','m','n','d')) d = dms_cmdtrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_STYLE:
+        if (type == FCC('s','t','t','r')) { d = dms_styletrack_load(c.p, (size_t)(c.e - c.p), cb ? cb->getstyle : NULL, ctx, &hr); }
+        break;
+    case TRK_PATTERN: if (type == FCC('D','M','P','T')) d = dms_patterntrack_load(c.p, (size_t)(c.e - c.p), getcoll, ctx, &hr); break;
+    case TRK_CHORDMAP: if (type == FCC('p','f','t','r')) d = dmc_cmtrack_load(c.p, (size_t)(c.e - c.p), cb ? cb->getcmap : NULL, ctx, &hr); break;
+    case TRK_SIGNPOST: if (id == FCC('s','g','n','p')) d = dmc_sptrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_MARKER: if (type == FCC('M','A','R','K')) d = dm_markertrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_LYRICS: if (type == FCC('l','y','r','t')) d = dm_lyricstrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_SEGTRIG: if (type == FCC('s','e','g','t')) d = dm_segtrigtrack_load(c.p, (size_t)(c.e - c.p), cb, &hr); break;
+    case TRK_PARAMCTL: if (type == FCC('p','r','m','t')) d = dm_paramtrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_MUTE: if (id == FCC('m','u','t','e')) d = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    default: return DM_E_FAIL;
+    }
+    if (!d) return hr < 0 ? hr : DMUS_E_CHUNKNOTFOUND_;
+    if (t->data) free_track(t);
+    t->data = d;
+    return hr;
+}
+
+/* a segment as CoCreateInstance makes it (dmime's CSegment constructor): no tracks, a length of 1 */
+dm_segment *dm_segment_new(void)
+{
+    dm_segment *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
+    s->refs = 1;
+    s->length = 1;
+    return s;
+}
+
 dm_segment *dm_segment_load(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx)
 {
     return dm_segment_load_ex(data, size, getcoll, NULL, ctx);

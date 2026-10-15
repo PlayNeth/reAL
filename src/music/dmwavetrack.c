@@ -327,12 +327,14 @@ static void ws_voice_end(dm_perf *pf, wstate *S, dm_wvoice *v)
         if ((*p)->voice == v) { wrec *r = *p; *p = r->next; rec_free(pf, r); return; }
 }
 
-/* 77327312 */
-static void wt_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e)
+/* 77327312: DMUS_E_NOT_INIT when an item's wave is not downloaded to the port its PChannel plays on (the state is
+ * made all the same) */
+static int wt_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e)
 {
     dm_wavetrack *T = e->t->data;
     wstate *S = calloc(1, sizeof(*S));
-    if (!S) return;
+    int hr = DM_OK;
+    if (!S) return DM_E_OUTOFMEMORY;
     S->ap = ss->audiopath;
     if (S->ap) dm_audiopath_addref(S->ap);
     ws_reset(T, S);
@@ -359,7 +361,8 @@ static void wt_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e)
             uint32_t pi, group, chan;
             if (wt_pchinfo(pf, S->ap, pch, &pi, &group, &chan) >= 0 && pi < (uint32_t)pf->nports) {
                 wdl *d = wdl_find(pf, it, pi);
-                if (d && it->index != -1 && (!it->streaming || !it->nopreroll)) {
+                if (!d) hr = DMUS_E_NOT_INIT_;
+                else if (it->index != -1 && (!it->streaming || !it->nopreroll)) {
                     dm_wvoice *v = NULL;
                     ws_alloc_voice(pf, T, S, d->dl, pi, it, it->startoff, chan, group, &v);
                 }
@@ -367,6 +370,7 @@ static void wt_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e)
             S->cursor[i] = it->next;
         }
     }
+    return hr;
 }
 
 /* 77326fda */

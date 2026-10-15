@@ -145,6 +145,12 @@ int dm_segstate_set_trackconfig(dm_segstate *ss, const dm_guid *clsid, uint32_t 
 int dm_segment_add_pchannels(dm_segment *s, const uint32_t *pch, uint32_t n);
 /* a track object's own IsParamSupported / GetParam / SetParam / Add/RemoveNotificationType */
 int dm_track_isparam(const dm_track *t, int prm);
+/* a track played by the application itself (IDirectMusicTrack::InitPlay / Play / EndPlay); d may be NULL (a track
+ * kind without a state) */
+void *dm_track_direct_init(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t segflags, uint32_t id, int *hr);
+int dm_track_direct_play(dm_perf *pf, dm_segstate *ss, void *d, dm_track *t, int64_t start, int64_t end, int64_t off,
+                         uint32_t flags, int clock);
+void dm_track_direct_end(dm_perf *pf, void *d);
 int dm_track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data);
 int dm_track_setparam(dm_track *t, int prm, mtime_t mt, void *data);
 int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);

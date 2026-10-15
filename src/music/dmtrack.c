@@ -1090,3 +1090,47 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     }
     return DM_OK;
 }
+
+/* ------------------------------------------------------------------ a track played by the application itself
+ * (IDirectMusicTrack::InitPlay / Play / PlayEx / EndPlay on a state of its choosing): the track's state as a segment
+ * state keeps it, for a track the state's segment does not have (no group: every bit) */
+void *dm_track_direct_init(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t segflags, uint32_t id, int *hr)
+{
+    *hr = DM_OK;
+    sstrack *e = calloc(1, sizeof(*e));
+    if (!e) return NULL;
+    e->t = t; dm_track_addref(t);
+    e->vid = id; e->group = 0xffffffff; e->cfg = 0x38;
+    pf->apprand = 1;                    /* (all on the application's thread: its rand()) */
+    if (t->kind == TRK_WAVE) *hr = wt_initplay(pf, ss, e);
+    else track_initplay(pf, ss, e, segflags);
+    pf->apprand = 0;
+    return e;
+}
+int dm_track_direct_play(dm_perf *pf, dm_segstate *ss, void *d, dm_track *t, int64_t start, int64_t end, int64_t off,
+                         uint32_t flags, int clock)
+{
+    sstrack tmp = { .t = t, .vid = 0, .group = 0xffffffff, .cfg = 0x38 };
+    sstrack *e = d ? d : &tmp;
+    dm_segstate *was = pf->ssplaying;
+    pf->ssplaying = ss;
+    pf->inplay = 1;
+    pf->apprand = 1;
+    int r;
+    if (clock && e->t->kind == TRK_WAVE) r = wt_play(pf, ss, e, start, end, off, flags | TF_CLOCK, 1);
+    else r = track_play(pf, ss, e, (mtime_t)start, (mtime_t)end, (mtime_t)off, flags);
+    pf->inplay = 0;
+    pf->apprand = 0;
+    pf->ssplaying = was;
+    return r;
+}
+void dm_track_direct_end(dm_perf *pf, void *d)
+{
+    sstrack *e = d;
+    if (!e) return;
+    if (pf) pf->apprand = 1;
+    track_endplay(pf, e);
+    if (pf) pf->apprand = 0;
+    dm_track_release(e->t);
+    free(e);
+}

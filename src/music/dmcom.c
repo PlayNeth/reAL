@@ -1120,9 +1120,62 @@ static ULONG WINAPI trk_release(IDirectMusicTrack8 *i)
     return n;
 }
 static HRESULT WINAPI trk_init(IDirectMusicTrack8 *i, IDirectMusicSegment *s) { return S_OK; }
-static HRESULT WINAPI trk_initplay(IDirectMusicTrack8 *i, IDirectMusicSegmentState *ss, IDirectMusicPerformance *p, void **d, DWORD id, DWORD f) { return rm_notimpl(__func__); }
-static HRESULT WINAPI trk_endplay(IDirectMusicTrack8 *i, void *d) { return rm_notimpl(__func__); }
-static HRESULT WINAPI trk_play(IDirectMusicTrack8 *i, void *d, MUSIC_TIME a, MUSIC_TIME b, MUSIC_TIME o, DWORD f, IDirectMusicPerformance *p, IDirectMusicSegmentState *ss, DWORD id) { return rm_notimpl(__func__); }
+/* a track played by the application (InitPlay, Play, EndPlay on a state and performance of its choosing): the engine
+ * keeps the track's state as a segment state would; the chord map, signpost, mute and marker tracks have none
+ * (their InitPlay gives NULL), a style or pattern track without a style fails with E_POINTER, a motif track without
+ * a motif with E_FAIL */
+static rm_state *unsafe_state(IUnknown *u);
+static rm_perf *perf_from_unknown(IUnknown *u);
+static BYTE s_nostate;                      /* (what a failed motif InitPlay leaves: never played or ended) */
+static HRESULT WINAPI trk_initplay(IDirectMusicTrack8 *i, IDirectMusicSegmentState *ss, IDirectMusicPerformance *p, void **d, DWORD id, DWORD f)
+{
+    dm_track *t = trk(i)->t;
+    if (!d || IsBadWritePtr(d, sizeof(*d))) return E_POINTER;
+    *d = NULL;
+    int ok = dm_track_can_play(t);
+    if (ok == DM_E_FAIL) *d = &s_nostate;
+    if (ok < 0) return ok;
+    rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
+    rm_perf *pf = p ? perf_from_unknown((IUnknown *)p) : NULL;
+    if (!st || !st->ss || !pf || !pf->host) return rm_notimpl("Track::InitPlay (a state or performance not made by reDM)");
+    dm_host_lock(pf->host);
+    int ihr;
+    void *x = dm_track_direct_init(dm_host_perf(pf->host), st->ss, t, f, id, &ihr);
+    if (x && (t->kind == TRK_CHORDMAP || t->kind == TRK_SIGNPOST || t->kind == TRK_MUTE || t->kind == TRK_MARKER)) {
+        dm_track_direct_end(dm_host_perf(pf->host), x);
+        x = NULL;
+    } else if (!x) { dm_host_unlock(pf->host); return E_OUTOFMEMORY; }
+    dm_host_unlock(pf->host);
+    *d = x;
+    /* (dmime's wave track hands out its state even so; nothing ever ends it, and it keeps the track) */
+    if (ihr < 0) trk_addref(i);
+    return ihr;
+}
+static HRESULT WINAPI trk_endplay(IDirectMusicTrack8 *i, void *d)
+{
+    if (!d || d == &s_nostate) return S_OK;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    dm_track_direct_end(h ? dm_host_perf(h) : NULL, d);
+    if (h) dm_host_unlock(h);
+    return S_OK;
+}
+static HRESULT trk_play_any(IDirectMusicTrack8 *i, void *d, int64_t a, int64_t b, int64_t o, DWORD f, IDirectMusicPerformance *p,
+                            IDirectMusicSegmentState *ss, int clock)
+{
+    if (d == &s_nostate) return E_POINTER;
+    rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
+    rm_perf *pf = p ? perf_from_unknown((IUnknown *)p) : NULL;
+    if (!st || !st->ss || !pf || !pf->host) return rm_notimpl("Track::Play (a state or performance not made by reDM)");
+    dm_host_lock(pf->host);
+    int hr = dm_track_direct_play(dm_host_perf(pf->host), st->ss, d, trk(i)->t, a, b, o, f, clock);
+    dm_host_unlock(pf->host);
+    return hr;
+}
+static HRESULT WINAPI trk_play(IDirectMusicTrack8 *i, void *d, MUSIC_TIME a, MUSIC_TIME b, MUSIC_TIME o, DWORD f, IDirectMusicPerformance *p, IDirectMusicSegmentState *ss, DWORD id)
+{
+    return trk_play_any(i, d, a, b, o, f, p, ss, 0);
+}
 static HRESULT WINAPI trk_getparam(IDirectMusicTrack8 *i, REFGUID g, MUSIC_TIME t, MUSIC_TIME *nx, void *p)
 {
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
@@ -1184,7 +1237,13 @@ static HRESULT WINAPI trk_clone(IDirectMusicTrack8 *i, MUSIC_TIME a, MUSIC_TIME 
     dm_track_release(c);
     return *o ? S_OK : E_OUTOFMEMORY;
 }
-static HRESULT WINAPI trk_playex(IDirectMusicTrack8 *i, void *d, REFERENCE_TIME a, REFERENCE_TIME b, REFERENCE_TIME o, DWORD f, IDirectMusicPerformance *p, IDirectMusicSegmentState *ss, DWORD id) { return rm_notimpl(__func__); }
+/* PlayEx: clock time (DMUS_TRACKF_CLOCK) for the wave track; music time otherwise */
+static HRESULT WINAPI trk_playex(IDirectMusicTrack8 *i, void *d, REFERENCE_TIME a, REFERENCE_TIME b, REFERENCE_TIME o, DWORD f, IDirectMusicPerformance *p, IDirectMusicSegmentState *ss, DWORD id)
+{
+    int clock = (f & DMUS_TRACKF_CLOCK) != 0;
+    if (clock && trk(i)->t->kind != TRK_WAVE) { a /= 10000; b /= 10000; o /= 10000; }
+    return trk_play_any(i, d, a, b, o, f & ~DMUS_TRACKF_CLOCK, p, ss, clock && trk(i)->t->kind == TRK_WAVE);
+}
 /* GetParamEx / SetParamEx (7731bded / 77324130): DMUS_TRACK_PARAMF_CLOCK times are reference time, used in 1/10000 */
 static HRESULT WINAPI trk_getparamex(IDirectMusicTrack8 *i, REFGUID g, REFERENCE_TIME t, REFERENCE_TIME *nx, void *p, void *sd, DWORD f)
 {
@@ -1235,7 +1294,74 @@ static ULONG WINAPI trp_addref(IPersistStream *i) { return trk_addref(&trp(i)->I
 static ULONG WINAPI trp_release(IPersistStream *i) { return trk_release(&trp(i)->IDirectMusicTrack8_iface); }
 static HRESULT WINAPI trp_getclass(IPersistStream *i, CLSID *c) { if (!c) return E_POINTER; memcpy(c, &trp(i)->t->clsid, sizeof(*c)); return S_OK; }
 static HRESULT WINAPI trp_isdirty(IPersistStream *i) { return S_FALSE; }
-static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s) { return rm_notimpl(__func__); }
+/* the track's chunk (its header and size, then that much) */
+static BOOL read_chunk(IStream *s, BYTE **data, DWORD *size)
+{
+    BYTE h[8];
+    ULONG got = 0;
+    *data = NULL; *size = 0;
+    if (FAILED(IStream_Read(s, h, 8, &got)) || got != 8) return FALSE;
+    DWORD n = *(DWORD *)(h + 4);
+    BYTE *b = malloc(8 + (size_t)n + 1);
+    if (!b) return FALSE;
+    memcpy(b, h, 8);
+    if (n && (FAILED(IStream_Read(s, b + 8, n, &got)) || got != n)) { free(b); return FALSE; }
+    *data = b; *size = 8 + n;
+    return TRUE;
+}
+/* the end of a wave track chunk's first item, and the next one's header: where dmime's Load stops when it has no loader
+ * to give the item's reference to */
+static DWORD wavetrack_noloader_stop(const BYTE *b, DWORD n)
+{
+    for (DWORD off = 12; off + 12 <= n; ) {
+        DWORD sz = *(const DWORD *)(b + off + 4);
+        if (!memcmp(b + off, "LIST", 4) && !memcmp(b + off + 8, "wavp", 4)) {
+            for (DWORD q = off + 12; q + 12 <= off + 8 + sz; ) {
+                DWORD qs = *(const DWORD *)(b + q + 4);
+                if (!memcmp(b + q, "LIST", 4) && !memcmp(b + q + 8, "wavi", 4)) {
+                    DWORD r = q + 12;
+                    if (r + 8 <= n) { DWORD rs = *(const DWORD *)(b + r + 4); r += 8 + rs + (rs & 1) + 8; }
+                    return r < n ? r : n;
+                }
+                q += 8 + qs + (qs & 1);
+            }
+        }
+        off += 8 + sz + (sz & 1);
+    }
+    return n;
+}
+/* Load of a track made on its own: its chunk; references through the stream's loader (the segment trigger track
+ * asks for it before it reads, the style, chord map and band tracks fail after reading without one, the wave track
+ * at its first item's reference) */
+static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s)
+{
+    dm_track *t = trp(i)->t;
+    if (!s || IsBadReadPtr(s, 4)) return E_POINTER;
+    IDirectMusicLoader8 *l = rm_stream_loader(s);
+    if (t->kind == TRK_SEGTRIG && !l) return E_NOINTERFACE;
+    LARGE_INTEGER z = { { 0, 0 } };
+    ULARGE_INTEGER at;
+    if (FAILED(IStream_Seek(s, z, STREAM_SEEK_CUR, &at))) at.QuadPart = 0;
+    BYTE *b; DWORD n;
+    if (!read_chunk(s, &b, &n)) return DMUS_E_CHUNKNOTFOUND;
+    HRESULT hr = S_OK;
+    if (!l && (t->kind == TRK_STYLE || t->kind == TRK_CHORDMAP)) hr = E_NOINTERFACE;
+    else if (!l && t->kind == TRK_BAND) hr = (HRESULT)0x88781150;
+    else if (!l && t->kind == TRK_WAVE) {
+        LARGE_INTEGER p; p.QuadPart = (LONGLONG)(at.QuadPart + wavetrack_noloader_stop(b, n));
+        IStream_Seek(s, p, STREAM_SEEK_SET, NULL);
+        hr = E_NOINTERFACE;
+    }
+    if (SUCCEEDED(hr)) {
+        dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg };
+        dm_host *h = any_host();
+        if (h) dm_host_lock(h);
+        hr = dm_track_load_chunk(t, b, n, &cb);
+        if (h) dm_host_unlock(h);
+    }
+    free(b);
+    return hr;
+}
 /* the signpost track's (7728af59: its 'sgnp' chunk); the others are not written */
 static HRESULT WINAPI trp_save(IPersistStream *i, IStream *s, BOOL c)
 {
@@ -3444,13 +3570,25 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         return hr;
     }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicSegment)) {
-        rm_segment *s = new_segment(NULL);
-        if (!s) return E_OUTOFMEMORY;
+        dm_segment *g = dm_segment_new();
+        rm_segment *s = g ? new_segment(g) : NULL;
+        if (!s) { dm_segment_release(g); return E_OUTOFMEMORY; }
+        s->desc.dwValidData = 0;            /* (not loaded) */
         HRESULT hr = seg_qi(&s->IDirectMusicSegment8_iface, riid, out);
         seg_release(&s->IDirectMusicSegment8_iface);
         return hr;
     }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicGraph)) return rm_graph_create(riid, out);
+    if (dm_track_class_kind((const dm_guid *)clsid) >= 0) {     /* a track class: the track with no items */
+        dm_track *t = dm_track_create((const dm_guid *)clsid);
+        if (!t) return E_OUTOFMEMORY;
+        IDirectMusicTrack8 *o = track_object(t);
+        dm_track_release(t);
+        if (!o) return E_OUTOFMEMORY;
+        HRESULT hr = trk_qi(o, riid, out);
+        trk_release(o);
+        return hr;
+    }
     if (IsEqualCLSID(clsid, &RM_CLSID_DirectMusicStyle)) {
         rm_style *s = new_style(NULL);
         if (!s) return E_OUTOFMEMORY;
@@ -3488,6 +3626,7 @@ BOOL rm_handles(REFCLSID clsid)
 {
     return IsEqualCLSID(clsid, &CLSID_DirectMusicLoader) || IsEqualCLSID(clsid, &CLSID_DirectMusicPerformance) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicContainer) || IsEqualCLSID(clsid, &CLSID_DirectMusicCollection) ||
+           dm_track_class_kind((const dm_guid *)clsid) >= 0 ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) || IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicStyle) ||

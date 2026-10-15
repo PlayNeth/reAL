@@ -1,6 +1,7 @@
 /* trktest - dmime's lyrics, segment trigger and parameter control tracks, printed for comparison with Microsoft's
  * DirectMusic: the tracks' parameters and Clone, and the messages a tool in the performance's graph sees while
- * segments with them play.  trktest [lyrics|trigger] (tools/sty/cases.py tracks writes the segments) */
+ * segments with them play.  trktest [lyrics|trigger] (tools/sty/cases.py tracks writes the segments); trktest standalone
+ * [files.sgt]: track objects made with CoCreateInstance, loaded from their chunks, played in a segment and directly */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -111,6 +112,8 @@ static int cmplog(const void *a, const void *b)
     if (x->extra != y->extra) return x->extra < y->extra ? -1 : 1;
     return lstrcmpW(x->text, y->text);
 }
+static int g_nosegnotes;      /* (the host segment's own, when tracks play directly) */
+static int g_nogroup;         /* (a sequence track played directly: its group is whatever was on dmime's stack) */
 static void dump_log(MUSIC_TIME len)
 {
     EnterCriticalSection(&logcs);
@@ -121,7 +124,9 @@ static void dump_log(MUSIC_TIME len)
         if (e->type == DMUS_PMSGT_DIRTY || e->type == DMUS_PMSGT_TIMESIG || e->type == DMUS_PMSGT_TEMPO) continue;
         if (e->mt >= len - 768) continue;         /* (what comes near the stop depends on when it comes) */
         if (e->type == DMUS_PMSGT_NOTIFICATION && e->extra == (GUID_NOTIFICATION_SEGMENT.Data1 ^ DMUS_NOTIFICATION_SEGALMOSTEND)) continue;
-        printf("  %6ld type %lu pch %lu flags %lx group %lx %lx '%ls'\n", e->mt, e->type, e->pch, e->flags, e->group, e->extra, e->text);
+        if (g_nosegnotes && e->type == DMUS_PMSGT_NOTIFICATION && (e->extra & ~0xffu) == (GUID_NOTIFICATION_SEGMENT.Data1 & ~0xffu)) continue;
+        if (g_nogroup) printf("  %6ld type %lu pch %lu flags %lx group ? %lx '%ls'\n", e->mt, e->type, e->pch, e->flags, e->extra, e->text);
+        else printf("  %6ld type %lu pch %lu flags %lx group %lx %lx '%ls'\n", e->mt, e->type, e->pch, e->flags, e->group, e->extra, e->text);
     }
     nlog = 0;
     LeaveCriticalSection(&logcs);
@@ -319,6 +324,260 @@ static void play_on(IDirectMusicSegment8 *sg, IDirectMusicAudioPath *ap, MUSIC_T
     IDirectMusicSegmentState_Release(ss);
     if (!getenv("TRK_KEEPSTATES")) { for (int k = 0; k < nstates; k++) IDirectMusicSegmentState_Release(states[k]); nstates = 0; }
     if (getenv("TRK_TIMING")) fprintf(stderr, "released\n");
+}
+
+
+/* ------------------------------------------------------------------ standalone tracks */
+#define TG(n, a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) { #n, { a, b, c, { d0, d1, d2, d3, d4, d5, d6, d7 } } }
+static const struct { const char *name; GUID g; } g_tracks[] = {
+    TG(tempo, 0xd2ac2885, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(seq, 0xd2ac2886, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(sysex, 0xd2ac2887, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(timesig, 0xd2ac2888, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(chord, 0xd2ac288b, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(command, 0xd2ac288c, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(style, 0xd2ac288d, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(motif, 0xd2ac288e, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(band, 0xd2ac2894, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(chordmap, 0xd2ac2896, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(pattern, 0xd2ac2897, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(mute, 0xd2ac2898, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(marker, 0x55a8fd00, 0x4288, 0x11d3, 0x9b, 0xd1, 0x8a, 0x0d, 0x61, 0xc8, 0x88, 0x35),
+    TG(signpost, 0xf17e8672, 0xc3b4, 0x11d1, 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd),
+    TG(lyrics, 0x995c1cf5, 0x54ff, 0x11d3, 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6),
+    TG(segtrigger, 0xbae4d665, 0x4ea1, 0x11d3, 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6),
+    TG(paramctl, 0x4be0537b, 0x5c19, 0x11d3, 0x8b, 0xdc, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6),
+    TG(wave, 0xeed36461, 0x9ea5, 0x11d3, 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74),
+};
+static const char *track_name(REFGUID g)
+{
+    for (size_t k = 0; k < sizeof(g_tracks) / sizeof(*g_tracks); k++) if (IsEqualGUID(g, &g_tracks[k].g)) return g_tracks[k].name;
+    return "?";
+}
+
+/* a stream on memory that hands out the loader (IDirectMusicGetLoader), as the loader's own streams do */
+typedef struct { IStream IStream_iface; IDirectMusicGetLoader gl; LONG ref; IStream *in; } gstream;
+#define GS(i) CONTAINING_RECORD(i, gstream, IStream_iface)
+#define GL(i) CONTAINING_RECORD(i, gstream, gl)
+static HRESULT WINAPI gs_qi(IStream *i, REFIID r, void **o)
+{
+    if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &IID_IStream) || IsEqualIID(r, &IID_ISequentialStream)) *o = i;
+    else if (IsEqualIID(r, &IID_IDirectMusicGetLoader)) *o = &GS(i)->gl;
+    else { *o = NULL; return E_NOINTERFACE; }
+    InterlockedIncrement(&GS(i)->ref);
+    return S_OK;
+}
+static ULONG WINAPI gs_addref(IStream *i) { return InterlockedIncrement(&GS(i)->ref); }
+static ULONG WINAPI gs_release(IStream *i)
+{
+    LONG r = InterlockedDecrement(&GS(i)->ref);
+    if (!r) { IStream_Release(GS(i)->in); free(GS(i)); }
+    return r;
+}
+static HRESULT WINAPI gs_read(IStream *i, void *p, ULONG n, ULONG *g) { return IStream_Read(GS(i)->in, p, n, g); }
+static HRESULT WINAPI gs_write(IStream *i, const void *p, ULONG n, ULONG *g) { return IStream_Write(GS(i)->in, p, n, g); }
+static HRESULT WINAPI gs_seek(IStream *i, LARGE_INTEGER d, DWORD o, ULARGE_INTEGER *n) { return IStream_Seek(GS(i)->in, d, o, n); }
+static HRESULT WINAPI gs_setsize(IStream *i, ULARGE_INTEGER n) { return E_NOTIMPL; }
+static HRESULT WINAPI gs_copyto(IStream *i, IStream *t, ULARGE_INTEGER n, ULARGE_INTEGER *a, ULARGE_INTEGER *b) { return E_NOTIMPL; }
+static HRESULT WINAPI gs_commit(IStream *i, DWORD f) { return E_NOTIMPL; }
+static HRESULT WINAPI gs_revert(IStream *i) { return E_NOTIMPL; }
+static HRESULT WINAPI gs_lock(IStream *i, ULARGE_INTEGER a, ULARGE_INTEGER b, DWORD c) { return E_NOTIMPL; }
+static HRESULT WINAPI gs_stat(IStream *i, STATSTG *s, DWORD f) { return IStream_Stat(GS(i)->in, s, f); }
+static IStream *gstream_new(const BYTE *p, DWORD n, BOOL withloader);
+static HRESULT WINAPI gs_clone(IStream *i, IStream **o)
+{
+    IStream *c = NULL;
+    HRESULT hr = IStream_Clone(GS(i)->in, &c);
+    if (FAILED(hr)) return hr;
+    gstream *g = calloc(1, sizeof(*g));
+    *g = *GS(i);
+    g->ref = 1; g->in = c;
+    *o = &g->IStream_iface;
+    return S_OK;
+}
+static IStreamVtbl gs_vtbl = { gs_qi, gs_addref, gs_release, gs_read, gs_write, gs_seek, gs_setsize, gs_copyto, gs_commit,
+                               gs_revert, gs_lock, gs_lock, gs_stat, gs_clone };
+static HRESULT WINAPI gl_qi(IDirectMusicGetLoader *i, REFIID r, void **o) { return gs_qi(&GL(i)->IStream_iface, r, o); }
+static ULONG WINAPI gl_addref(IDirectMusicGetLoader *i) { return gs_addref(&GL(i)->IStream_iface); }
+static ULONG WINAPI gl_release(IDirectMusicGetLoader *i) { return gs_release(&GL(i)->IStream_iface); }
+static HRESULT WINAPI gl_get(IDirectMusicGetLoader *i, IDirectMusicLoader **o)
+{
+    return IDirectMusicLoader8_QueryInterface(loader, &IID_IDirectMusicLoader, (void **)o);
+}
+static IDirectMusicGetLoaderVtbl gl_vtbl = { gl_qi, gl_addref, gl_release, gl_get };
+static IStream *gstream_new(const BYTE *p, DWORD n, BOOL withloader)
+{
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, n ? n : 1);
+    memcpy(GlobalLock(h), p, n);
+    GlobalUnlock(h);
+    IStream *in = NULL;
+    CreateStreamOnHGlobal(h, TRUE, &in);
+    if (!withloader) return in;
+    gstream *g = calloc(1, sizeof(*g));
+    g->IStream_iface.lpVtbl = &gs_vtbl; g->gl.lpVtbl = &gl_vtbl; g->ref = 1; g->in = in;
+    return &g->IStream_iface;
+}
+
+/* what a track says of itself: interfaces, class, the parameters it supports, a few GetParams, Clone */
+static void track_show(IDirectMusicTrack *t, const char *what)
+{
+    static const struct { const char *n; const GUID *g; } ps[] = {
+        { "tempo", &GUID_TempoParam }, { "timesig", &GUID_TimeSignature }, { "disabletempo", &GUID_DisableTempo },
+        { "enabletempo", &GUID_EnableTempo }, { "disablets", &GUID_DisableTimeSig }, { "enablets", &GUID_EnableTimeSig },
+        { "chord", &GUID_ChordParam }, { "rhythm", &GUID_RhythmParam }, { "command", &GUID_CommandParam },
+        { "style", &GUID_IDirectMusicStyle }, { "chordmap", &GUID_IDirectMusicChordMap }, { "band", &GUID_BandParam },
+        { "iband", &GUID_IDirectMusicBand }, { "mute", &GUID_MuteParam }, { "download", &GUID_Download },
+        { "connectdls", &GUID_ConnectToDLSCollection }, { "validstart", &GUID_Valid_Start_Time },
+        { "playmarker", &GUID_Play_Marker }, { "variations", &GUID_Variations }, { "seqvar", &GUID_SeedVariations },
+        { "stdnotes", &GUID_StandardMIDIFile }, { "clearall", &GUID_Clear_All_Bands }, { "autodl", &GUID_Enable_Auto_Download },
+        { "mastertempo", &GUID_PerfMasterTempo },
+    };
+    IUnknown *u = NULL;
+    printf("%s\n", what);
+    printf("  qi track8 %08lx", IDirectMusicTrack_QueryInterface(t, &IID_IDirectMusicTrack8, (void **)&u)); if (u) { IUnknown_Release(u); u = NULL; }
+    printf(" persist %08lx", IDirectMusicTrack_QueryInterface(t, &IID_IPersistStream, (void **)&u));
+    if (u) { CLSID c; HRESULT h = IPersistStream_GetClassID((IPersistStream *)u, &c); printf(" classid %08lx %s", h, SUCCEEDED(h) ? track_name(&c) : "-"); IUnknown_Release(u); u = NULL; }
+    printf(" object %08lx\n", IDirectMusicTrack_QueryInterface(t, &IID_IDirectMusicObject, (void **)&u)); if (u) { IUnknown_Release(u); u = NULL; }
+    printf("  params");
+    for (size_t k = 0; k < sizeof(ps) / sizeof(*ps); k++) {
+        HRESULT h = IDirectMusicTrack_IsParamSupported(t, ps[k].g);
+        if (h == S_OK) printf(" %s", ps[k].n);
+        else if (h != DMUS_E_TYPE_UNSUPPORTED) printf(" %s:%08lx", ps[k].n, h);
+    }
+    printf("\n");
+    BYTE buf[512];
+    MUSIC_TIME nx = -1;
+    memset(buf, 0, sizeof(buf));
+    HRESULT h = IDirectMusicTrack_GetParam(t, &GUID_TempoParam, 0, &nx, buf);
+    printf("  tempo %08lx", h);
+    if (h == S_OK) printf(" %ld %.3f next %ld", *(MUSIC_TIME *)buf, *(double *)(buf + 8), nx);
+    nx = -1; memset(buf, 0, sizeof(buf));
+    h = IDirectMusicTrack_GetParam(t, &GUID_TimeSignature, 0, &nx, buf);
+    printf(" timesig %08lx", h);
+    if (h == S_OK) { DMUS_TIMESIGNATURE *ts = (DMUS_TIMESIGNATURE *)buf; printf(" %ld %u/%u %u next %ld", ts->mtTime, ts->bBeatsPerMeasure, ts->bBeat, ts->wGridsPerBeat, nx); }
+    nx = -1; memset(buf, 0, sizeof(buf));
+    h = IDirectMusicTrack_GetParam(t, &GUID_Valid_Start_Time, 0, &nx, buf);
+    printf(" validstart %08lx", h);
+    if (h == S_OK) printf(" %ld next %ld", ((DMUS_VALID_START_PARAM *)buf)->mtTime, nx);
+    printf("\n");
+    IDirectMusicTrack *c = NULL;
+    h = IDirectMusicTrack_Clone(t, 0, 3072, &c);
+    printf("  clone %08lx", h);
+    if (c) {
+        IUnknown *x = NULL;
+        printf(" persist %08lx", IDirectMusicTrack_QueryInterface(c, &IID_IPersistStream, (void **)&x));
+        if (x) { CLSID cl; if (SUCCEEDED(IPersistStream_GetClassID((IPersistStream *)x, &cl))) printf(" %s", track_name(&cl)); IUnknown_Release(x); }
+        IDirectMusicTrack_Release(c);
+    }
+    printf("\n");
+}
+
+/* a track played directly (InitPlay, Play over [0, len) with the state's start as the offset, EndPlay) on the
+ * state of a silent segment */
+static void track_direct(IDirectMusicTrack *t, MUSIC_TIME len)
+{
+    IDirectMusicSegment8 *host = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&host);
+    if (!host) return;
+    IDirectMusicSegment8_SetLength(host, 100 * 3072);
+    REFERENCE_TIME now = 0;
+    IDirectMusicPerformance8_GetTime(perf, &now, NULL);
+    IDirectMusicSegmentState *ss = NULL;
+    HRESULT hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)host, NULL, NULL, DMUS_SEGF_REFTIME, now + 5000000, &ss, NULL, NULL);
+    if (!ss) { printf("  host play %08lx\n", hr); IDirectMusicSegment8_Release(host); return; }
+    IDirectMusicSegmentState_GetStartTime(ss, &s0);
+    Sleep(100);
+    EnterCriticalSection(&logcs); nlog = 0; LeaveCriticalSection(&logcs);
+    void *data = NULL;
+    hr = IDirectMusicTrack_InitPlay(t, ss, (IDirectMusicPerformance *)perf, &data, 1, 0);
+    printf("  initplay %08lx data %d\n", hr, data != NULL);
+    if (SUCCEEDED(hr)) {
+        HRESULT p1 = IDirectMusicTrack_Play(t, data, 0, len / 2, s0, DMUS_TRACKF_START | DMUS_TRACKF_SEEK, (IDirectMusicPerformance *)perf, ss, 1);
+        HRESULT p2 = IDirectMusicTrack_Play(t, data, len / 2, len, s0, 0, (IDirectMusicPerformance *)perf, ss, 1);
+        printf("  play %08lx %08lx\n", p1, p2);
+        MUSIC_TIME mt = 0;
+        DWORD deadline = GetTickCount() + 30000;
+        do { Sleep(20); IDirectMusicPerformance8_GetTime(perf, NULL, &mt); } while (mt < s0 + len && (LONG)(deadline - GetTickCount()) > 0);
+        printf("  endplay %08lx\n", IDirectMusicTrack_EndPlay(t, data));
+    }
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    Sleep(300);
+    CLSID cls = { 0 };
+    IPersistStream *ps = NULL;
+    if (SUCCEEDED(IDirectMusicTrack_QueryInterface(t, &IID_IPersistStream, (void **)&ps))) { IPersistStream_GetClassID(ps, &cls); IPersistStream_Release(ps); }
+    g_nogroup = !strcmp(track_name(&cls), "seq");
+    g_nosegnotes = 1;
+    dump_log(len + 768);
+    g_nosegnotes = g_nogroup = 0;
+    for (int k = 0; k < nstates; k++) IDirectMusicSegmentState_Release(states[k]);
+    nstates = 0;
+    IDirectMusicSegmentState_Release(ss);
+    IDirectMusicSegment8_Release(host);
+}
+
+/* each track of a segment file loaded on its own from its chunk (with or without the loader), and played in a new
+ * segment and directly */
+static void tracks_of_file(const WCHAR *file, MUSIC_TIME len)
+{
+    HANDLE f = CreateFileW(file, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) { printf("no %ls\n", file); return; }
+    DWORD n = GetFileSize(f, NULL), got = 0;
+    BYTE *b = malloc(n);
+    ReadFile(f, b, n, &got, NULL);
+    CloseHandle(f);
+    printf("file %ls\n", file);
+    /* RIFF DMSG > LIST trkl > RIFF DMTK > trkh, [trkx], the track's chunk */
+    for (DWORD off = 12; off + 8 <= n; ) {
+        DWORD sz = *(DWORD *)(b + off + 4);
+        if (!memcmp(b + off, "LIST", 4) && !memcmp(b + off + 8, "trkl", 4)) {
+            for (DWORD q = off + 12; q + 8 <= off + 8 + sz; ) {
+                DWORD qs = *(DWORD *)(b + q + 4);
+                if (!memcmp(b + q, "RIFF", 4) && !memcmp(b + q + 8, "DMTK", 4)) {
+                    GUID cls = { 0 };
+                    DWORD group = 1;
+                    for (DWORD r = q + 12; r + 8 <= q + 8 + qs; ) {
+                        DWORD rs = *(DWORD *)(b + r + 4);
+                        if (!memcmp(b + r, "trkh", 4)) { memcpy(&cls, b + r + 8, 16); group = *(DWORD *)(b + r + 8 + 20); }
+                        else if (memcmp(b + r, "trkx", 4)) {
+                            for (int wl = 0; wl < 2; wl++) {
+                                IDirectMusicTrack *t = NULL;
+                                HRESULT hr = CoCreateInstance(&cls, NULL, CLSCTX_INPROC, &IID_IDirectMusicTrack, (void **)&t);
+                                char what[96];
+                                snprintf(what, sizeof(what), "  %s track %.4s%s", track_name(&cls), b + r, wl ? " (loader)" : "");
+                                if (!t) { printf("%s create %08lx\n", what, hr); break; }
+                                IPersistStream *ps = NULL;
+                                IDirectMusicTrack_QueryInterface(t, &IID_IPersistStream, (void **)&ps);
+                                IStream *st = gstream_new(b + r, 8 + rs, wl);
+                                hr = ps ? IPersistStream_Load(ps, st) : E_NOINTERFACE;
+                                ULARGE_INTEGER pos = { { 0, 0 } };
+                                LARGE_INTEGER z = { { 0, 0 } };
+                                IStream_Seek(st, z, STREAM_SEEK_CUR, &pos);
+                                printf("%s load %08lx at %lu of %lu\n", what, hr, (unsigned long)pos.QuadPart, (unsigned long)(8 + rs));
+                                IStream_Release(st);
+                                if (ps) IPersistStream_Release(ps);
+                                if (wl || getenv("TRK_BOTH")) {
+                                    track_show(t, "   loaded");
+                                    IDirectMusicSegment8 *sg = NULL;
+                                    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&sg);
+                                    IDirectMusicSegment8_SetLength(sg, len);
+                                    printf("   insert %08lx\n", IDirectMusicSegment8_InsertTrack(sg, t, group));
+                                    play(sg, len);
+                                    IDirectMusicSegment8_Release(sg);
+                                    track_direct(t, len);
+                                }
+                                ULONG left = IDirectMusicTrack_Release(t);     /* (a failed wave InitPlay keeps it: how many times is dmime's) */
+                                if (left) printf("   release: kept\n"); else printf("   release 0\n");
+                            }
+                        }
+                        r += 8 + rs + (rs & 1);
+                    }
+                }
+                q += 8 + qs + (qs & 1);
+            }
+        }
+        off += 8 + sz + (sz & 1);
+    }
+    free(b);
 }
 
 int main(int argc, char **argv)
@@ -546,6 +805,37 @@ int main(int argc, char **argv)
         IDirectMusicPerformance8_Release(perf);
         dump_probe();
         return 0;
+    } else if (!strcmp(mode, "standalone")) {
+        /* a new segment */
+        IDirectMusicSegment8 *ns = NULL;
+        CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&ns);
+        if (ns) {
+            MUSIC_TIME l = -1, sp = -1, la = -1, lb = -1; DWORD rp = 99, rs = 99;
+            IDirectMusicSegment8_GetLength(ns, &l); IDirectMusicSegment8_GetRepeats(ns, &rp); IDirectMusicSegment8_GetDefaultResolution(ns, &rs);
+            IDirectMusicSegment8_GetStartPoint(ns, &sp); IDirectMusicSegment8_GetLoopPoints(ns, &la, &lb);
+            printf("new segment length %ld repeats %lu res %lx start %ld loop %ld %ld\n", l, rp, rs, sp, la, lb);
+            IDirectMusicTrack *t = NULL;
+            printf("  gettrack %08lx\n", IDirectMusicSegment8_GetTrack(ns, &(GUID){ 0 }, 0xffffffff, 0, &t));
+            BYTE buf[64]; MUSIC_TIME nx = 0;
+            printf("  getparam tempo %08lx\n", IDirectMusicSegment8_GetParam(ns, &GUID_TempoParam, 0xffffffff, 0, 0, &nx, buf));
+            IDirectMusicSegment8_Release(ns);
+        }
+        /* every track class made empty */
+        for (size_t k = 0; k < sizeof(g_tracks) / sizeof(*g_tracks) && !getenv("TRK_NOEMPTY"); k++) {
+            IDirectMusicTrack *t = NULL;
+            hr = CoCreateInstance(&g_tracks[k].g, NULL, CLSCTX_INPROC, &IID_IDirectMusicTrack, (void **)&t);
+            char what[64];
+            snprintf(what, sizeof(what), "empty %s %08lx", g_tracks[k].name, hr);
+            if (!t) { printf("%s\n", what); continue; }
+            track_show(t, what);
+            if (!getenv("TRK_NODIRECT")) track_direct(t, 3072);
+            printf("  release %lu\n", IDirectMusicTrack_Release(t));
+        }
+        for (int k = 2; k < argc; k++) {
+            WCHAR w[MAX_PATH];
+            MultiByteToWideChar(CP_ACP, 0, argv[k], -1, w, MAX_PATH);
+            tracks_of_file(w, 2 * 3072);
+        }
     }
     IDirectMusicPerformance8_CloseDown(perf);
     IDirectMusicPerformance8_Release(perf);

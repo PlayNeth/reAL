@@ -25,6 +25,8 @@ typedef struct { uint32_t d1; uint16_t d2, d3; uint8_t d4[8]; } dm_guid;
 #define DMUS_S_END          0x08781202
 #endif
 #define DM_E_FAIL           ((int32_t)0x80004005)
+#define DMUS_E_CHUNKNOTFOUND_ ((int32_t)0x88781117)
+#define DMUS_E_NOT_INIT_    ((int32_t)0x88781162)
 #define DM_E_POINTER        ((int32_t)0x80004003)
 #define DM_E_NOTIMPL        ((int32_t)0x80004001)
 #define DM_E_INVALIDARG     ((int32_t)0x80070057)
@@ -398,6 +400,7 @@ typedef struct dm_segment *(*dm_getseg_fn)(void *ctx, const dm_guid *guid, const
 typedef struct { dm_getcoll_fn getcoll; dm_getwave_fn getwave; dm_getstyle_fn getstyle; void *ctx; dm_getcmap_fn getcmap;
                  dm_getseg_fn getseg; } dm_loadcb;
 dm_segtrigtrack *dm_segtrigtrack_load(const uint8_t *p, size_t n, const dm_loadcb *cb, int32_t *hr);   /* 'segt' data */
+dm_segment *dm_segment_new(void);
 dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *cb);
 dm_segment *dm_segment_from_wave(dm_wave *w);
 /* a band's 'DMBD' form (the data after the form type), as dmband loads it */
@@ -418,6 +421,12 @@ int dm_is_midi(const void *data, size_t size);
 dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data);
 void dm_track_addref(dm_track *t);
 void dm_track_release(dm_track *t);
+/* a track of a track class on its own (CoCreateInstance): its kind (-1: not one reDM has), the empty track, its
+ * IPersistStream::Load from its chunk (the chunk header included) */
+int dm_track_class_kind(const dm_guid *clsid);
+dm_track *dm_track_create(const dm_guid *clsid);
+int dm_track_can_play(const dm_track *t);
+int dm_track_load_chunk(dm_track *t, const uint8_t *p, size_t n, const dm_loadcb *cb);
 /* Clone: a track's data in [start, end) moved to 0 (77..: per kind); a segment's tracks cloned (77313a27).
  * dm_set_clone_fix: keep what the original's clones lose (wave item ranges, a band carried over without a later band) */
 dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr);
