@@ -979,6 +979,90 @@ static int cmd_wavesrev(int argc, char **argv)
         if (FAILED(hr)) die("SetAllParameters", hr);
     }
     if (FAILED(hr = IMediaObject_AllocateStreamingResources(mo))) die("AllocateStreamingResources", hr);
+    /* DMO_INFO: IMediaParamInfo.  DMO_ENV="<index>:<start>,<end>,<v0>,<v1>,<curve>,<flags>/...;...": AddEnvelope calls;
+     * DMO_SETPARAM="<index>,<value>;...", DMO_FLUSH="<index>,<start>,<end>;...", then GetParam for each */
+    static const GUID iid_mp = { 0x6d6cbb61, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6e } };
+    static const GUID iid_mpi = { 0x6d6cbb60, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6d } };
+    void **mp = NULL, **mpi = NULL;
+    IMediaObject_QueryInterface(mo, &iid_mp, (void **)&mp);
+    IMediaObject_QueryInterface(mo, &iid_mpi, (void **)&mpi);
+    DWORD npar = 0;
+    if (getenv("DMO_VT")) {
+        for (int k = 0; k < 9 && mpi; k++) fprintf(stderr, "mpi[%d] %p\n", k, (*(void ***)mpi)[k]);
+        for (int k = 0; k < 8 && mp; k++) fprintf(stderr, "mp[%d] %p\n", k, (*(void ***)mp)[k]);
+    }
+    if (mpi) ((HRESULT (WINAPI *)(void *, DWORD *))(*(void ***)mpi)[3])(mpi, &npar);
+    if (getenv("DMO_INFO") && mpi) {
+        fprintf(stderr, "count %lu\n", npar);
+        for (DWORD k = 0; k < npar; k++) {
+            struct { DWORD type, caps; float mn, mx, nt; WCHAR unit[32], label[32]; } pi;
+            WCHAR *tx = NULL;
+            hr = ((HRESULT (WINAPI *)(void *, DWORD, void *))(*(void ***)mpi)[4])(mpi, k, &pi);
+            ((HRESULT (WINAPI *)(void *, DWORD, WCHAR **))(*(void ***)mpi)[5])(mpi, k, &tx);
+            fprintf(stderr, "info %lu: type %lu caps %lx %.9g %.9g %.9g text", k, pi.type, pi.caps, pi.mn, pi.mx, pi.nt);
+            WCHAR *c = tx;
+            for (int j = 0; c && j < 3; j++) {     /* label, unit, the enumeration's names (to the double NUL) */
+                fprintf(stderr, " ");
+                if (j < 2) { for (; *c; c++) fputc(*c, stderr); c++; fprintf(stderr, "|"); }
+                else while (*c) { for (; *c; c++) fputc(*c, stderr); c++; fprintf(stderr, "|"); }
+            }
+            fprintf(stderr, "\n");
+            CoTaskMemFree(tx);
+        }
+        DWORD nf = 0; GUID g; DWORD td = 1;
+        ((HRESULT (WINAPI *)(void *, DWORD *))(*(void ***)mpi)[6])(mpi, &nf);
+        ((HRESULT (WINAPI *)(void *, DWORD, GUID *))(*(void ***)mpi)[7])(mpi, 0, &g);
+        fprintf(stderr, "formats %lu %08lx", nf, g.Data1);
+        ((HRESULT (WINAPI *)(void *, GUID *, DWORD *))(*(void ***)mpi)[8])(mpi, &g, &td);
+        fprintf(stderr, " current %08lx %lu\n", g.Data1, td);
+        GUID mus = { 0x0574c49d, 0x5b04, 0x4b15, { 0xa5, 0x42, 0xae, 0x28, 0x20, 0x30, 0x11, 0x7b } };
+        hr = ((HRESULT (WINAPI *)(void *, GUID, DWORD))(*(void ***)mp)[7])(mp, mus, 768);
+        fprintf(stderr, "SetTimeFormat(music) %08lx", hr);
+        hr = ((HRESULT (WINAPI *)(void *, GUID, DWORD))(*(void ***)mp)[7])(mp, g, 0);
+        fprintf(stderr, " (reference) %08lx\n", hr);
+        float x = 0;
+        fprintf(stderr, "bad index %08lx %08lx %08lx\n", ((HRESULT (WINAPI *)(void *, DWORD, float *))(*(void ***)mp)[3])(mp, npar, &x),
+                ((HRESULT (WINAPI *)(void *, DWORD, DWORD, void *))(*(void ***)mp)[5])(mp, npar, 1, &x),
+                ((HRESULT (WINAPI *)(void *, DWORD, LONGLONG, LONGLONG))(*(void ***)mp)[6])(mp, 0, 5, 5));
+    }
+    if (getenv("DMO_ENV") && mp) {
+        char *spec = strdup(getenv("DMO_ENV")), *sv = NULL;
+        for (char *gp = strtok_r(spec, ";", &sv); gp; gp = strtok_r(NULL, ";", &sv)) {
+            struct { LONGLONG a0, a1; float v0, v1; DWORD c, fl; } sg[8];
+            int idx = atoi(gp), m = 0; char *sv2 = NULL;
+            gp = strchr(gp, ':') + 1;
+            for (char *q = strtok_r(gp, "/", &sv2); q && m < 8; q = strtok_r(NULL, "/", &sv2), m++) {
+                long long a0, a1; float v0, v1; unsigned c, fl;
+                sscanf(q, "%lld,%lld,%f,%f,%u,%u", &a0, &a1, &v0, &v1, &c, &fl);
+                sg[m].a0 = a0; sg[m].a1 = a1; sg[m].v0 = v0; sg[m].v1 = v1; sg[m].c = c; sg[m].fl = fl;
+            }
+            hr = ((HRESULT (WINAPI *)(void *, DWORD, DWORD, void *))(*(void ***)mp)[5])(mp, idx, m, sg);
+            fprintf(stderr, "AddEnvelope %d %d %08lx\n", idx, m, hr);
+        }
+    }
+    if (getenv("DMO_SETPARAM") && mp) {
+        char *spec = strdup(getenv("DMO_SETPARAM")), *sv = NULL;
+        for (char *gp = strtok_r(spec, ";", &sv); gp; gp = strtok_r(NULL, ";", &sv))
+            fprintf(stderr, "SetParam %08lx\n", ((HRESULT (WINAPI *)(void *, DWORD, float))(*(void ***)mp)[4])(mp, atoi(gp), (float)atof(strchr(gp, ',') + 1)));
+    }
+    if (getenv("DMO_FLUSH") && mp) {
+        char *spec = strdup(getenv("DMO_FLUSH")), *sv = NULL;
+        for (char *gp = strtok_r(spec, ";", &sv); gp; gp = strtok_r(NULL, ";", &sv)) {
+            int idx; long long a0, a1;
+            sscanf(gp, "%d,%lld,%lld", &idx, &a0, &a1);
+            fprintf(stderr, "FlushEnvelope %08lx\n", ((HRESULT (WINAPI *)(void *, DWORD, LONGLONG, LONGLONG))(*(void ***)mp)[6])(mp, idx, a0, a1));
+        }
+    }
+    if ((getenv("DMO_ENV") || getenv("DMO_SETPARAM") || getenv("DMO_FLUSH")) && mp) {
+        fprintf(stderr, "getparam");
+        for (DWORD k = 0; k < npar; k++) {
+            float x = 0;
+            ((HRESULT (WINAPI *)(void *, DWORD, float *))(*(void ***)mp)[3])(mp, k, &x);
+            fprintf(stderr, " %.9g", x);
+        }
+        fprintf(stderr, "\n");
+    }
+    long long t0 = getenv("DMO_T0") ? atoll(getenv("DMO_T0")) : 0;
     void *ip;
     if (FAILED(hr = IMediaObject_QueryInterface(mo, &IID_MOInPlace, &ip))) die("QI InPlace", hr);
     FILE *f = fopen(argv[3], "rb");
@@ -1127,6 +1211,90 @@ static int cmd_dmo(int argc, char **argv)
         FILE *d = fopen(getenv("DMO_DUMP"), "wb");
         if (d) { fwrite(mo, 1, getenv("DMO_DUMP_SIZE") ? strtoul(getenv("DMO_DUMP_SIZE"), NULL, 0) : 0x4c8, d); fclose(d); }
     }
+    /* DMO_INFO: IMediaParamInfo.  DMO_ENV="<index>:<start>,<end>,<v0>,<v1>,<curve>,<flags>/...;...": AddEnvelope calls;
+     * DMO_SETPARAM="<index>,<value>;...", DMO_FLUSH="<index>,<start>,<end>;...", then GetParam for each */
+    static const GUID iid_mp = { 0x6d6cbb61, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6e } };
+    static const GUID iid_mpi = { 0x6d6cbb60, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6d } };
+    void **mp = NULL, **mpi = NULL;
+    IMediaObject_QueryInterface(mo, &iid_mp, (void **)&mp);
+    IMediaObject_QueryInterface(mo, &iid_mpi, (void **)&mpi);
+    DWORD npar = 0;
+    if (getenv("DMO_VT")) {
+        for (int k = 0; k < 9 && mpi; k++) fprintf(stderr, "mpi[%d] %p\n", k, (*(void ***)mpi)[k]);
+        for (int k = 0; k < 8 && mp; k++) fprintf(stderr, "mp[%d] %p\n", k, (*(void ***)mp)[k]);
+    }
+    if (mpi) ((HRESULT (WINAPI *)(void *, DWORD *))(*(void ***)mpi)[3])(mpi, &npar);
+    if (getenv("DMO_INFO") && mpi) {
+        fprintf(stderr, "count %lu\n", npar);
+        for (DWORD k = 0; k < npar; k++) {
+            struct { DWORD type, caps; float mn, mx, nt; WCHAR unit[32], label[32]; } pi;
+            WCHAR *tx = NULL;
+            hr = ((HRESULT (WINAPI *)(void *, DWORD, void *))(*(void ***)mpi)[4])(mpi, k, &pi);
+            ((HRESULT (WINAPI *)(void *, DWORD, WCHAR **))(*(void ***)mpi)[5])(mpi, k, &tx);
+            fprintf(stderr, "info %lu: type %lu caps %lx %.9g %.9g %.9g text", k, pi.type, pi.caps, pi.mn, pi.mx, pi.nt);
+            WCHAR *c = tx;
+            for (int j = 0; c && j < 3; j++) {     /* label, unit, the enumeration's names (to the double NUL) */
+                fprintf(stderr, " ");
+                if (j < 2) { for (; *c; c++) fputc(*c, stderr); c++; fprintf(stderr, "|"); }
+                else while (*c) { for (; *c; c++) fputc(*c, stderr); c++; fprintf(stderr, "|"); }
+            }
+            fprintf(stderr, "\n");
+            CoTaskMemFree(tx);
+        }
+        DWORD nf = 0; GUID g; DWORD td = 1;
+        ((HRESULT (WINAPI *)(void *, DWORD *))(*(void ***)mpi)[6])(mpi, &nf);
+        ((HRESULT (WINAPI *)(void *, DWORD, GUID *))(*(void ***)mpi)[7])(mpi, 0, &g);
+        fprintf(stderr, "formats %lu %08lx", nf, g.Data1);
+        ((HRESULT (WINAPI *)(void *, GUID *, DWORD *))(*(void ***)mpi)[8])(mpi, &g, &td);
+        fprintf(stderr, " current %08lx %lu\n", g.Data1, td);
+        GUID mus = { 0x0574c49d, 0x5b04, 0x4b15, { 0xa5, 0x42, 0xae, 0x28, 0x20, 0x30, 0x11, 0x7b } };
+        hr = ((HRESULT (WINAPI *)(void *, GUID, DWORD))(*(void ***)mp)[7])(mp, mus, 768);
+        fprintf(stderr, "SetTimeFormat(music) %08lx", hr);
+        hr = ((HRESULT (WINAPI *)(void *, GUID, DWORD))(*(void ***)mp)[7])(mp, g, 0);
+        fprintf(stderr, " (reference) %08lx\n", hr);
+        float x = 0;
+        fprintf(stderr, "bad index %08lx %08lx %08lx\n", ((HRESULT (WINAPI *)(void *, DWORD, float *))(*(void ***)mp)[3])(mp, npar, &x),
+                ((HRESULT (WINAPI *)(void *, DWORD, DWORD, void *))(*(void ***)mp)[5])(mp, npar, 1, &x),
+                ((HRESULT (WINAPI *)(void *, DWORD, LONGLONG, LONGLONG))(*(void ***)mp)[6])(mp, 0, 5, 5));
+    }
+    if (getenv("DMO_ENV") && mp) {
+        char *spec = strdup(getenv("DMO_ENV")), *sv = NULL;
+        for (char *gp = strtok_r(spec, ";", &sv); gp; gp = strtok_r(NULL, ";", &sv)) {
+            struct { LONGLONG a0, a1; float v0, v1; DWORD c, fl; } sg[8];
+            int idx = atoi(gp), m = 0; char *sv2 = NULL;
+            gp = strchr(gp, ':') + 1;
+            for (char *q = strtok_r(gp, "/", &sv2); q && m < 8; q = strtok_r(NULL, "/", &sv2), m++) {
+                long long a0, a1; float v0, v1; unsigned c, fl;
+                sscanf(q, "%lld,%lld,%f,%f,%u,%u", &a0, &a1, &v0, &v1, &c, &fl);
+                sg[m].a0 = a0; sg[m].a1 = a1; sg[m].v0 = v0; sg[m].v1 = v1; sg[m].c = c; sg[m].fl = fl;
+            }
+            hr = ((HRESULT (WINAPI *)(void *, DWORD, DWORD, void *))(*(void ***)mp)[5])(mp, idx, m, sg);
+            fprintf(stderr, "AddEnvelope %d %d %08lx\n", idx, m, hr);
+        }
+    }
+    if (getenv("DMO_SETPARAM") && mp) {
+        char *spec = strdup(getenv("DMO_SETPARAM")), *sv = NULL;
+        for (char *gp = strtok_r(spec, ";", &sv); gp; gp = strtok_r(NULL, ";", &sv))
+            fprintf(stderr, "SetParam %08lx\n", ((HRESULT (WINAPI *)(void *, DWORD, float))(*(void ***)mp)[4])(mp, atoi(gp), (float)atof(strchr(gp, ',') + 1)));
+    }
+    if (getenv("DMO_FLUSH") && mp) {
+        char *spec = strdup(getenv("DMO_FLUSH")), *sv = NULL;
+        for (char *gp = strtok_r(spec, ";", &sv); gp; gp = strtok_r(NULL, ";", &sv)) {
+            int idx; long long a0, a1;
+            sscanf(gp, "%d,%lld,%lld", &idx, &a0, &a1);
+            fprintf(stderr, "FlushEnvelope %08lx\n", ((HRESULT (WINAPI *)(void *, DWORD, LONGLONG, LONGLONG))(*(void ***)mp)[6])(mp, idx, a0, a1));
+        }
+    }
+    if ((getenv("DMO_ENV") || getenv("DMO_SETPARAM") || getenv("DMO_FLUSH")) && mp) {
+        fprintf(stderr, "getparam");
+        for (DWORD k = 0; k < npar; k++) {
+            float x = 0;
+            ((HRESULT (WINAPI *)(void *, DWORD, float *))(*(void ***)mp)[3])(mp, k, &x);
+            fprintf(stderr, " %.9g", x);
+        }
+        fprintf(stderr, "\n");
+    }
+    long long t0 = getenv("DMO_T0") ? atoll(getenv("DMO_T0")) : 0;
     void *ip;
     if (FAILED(hr = IMediaObject_QueryInterface(mo, &IID_MOInPlace, &ip))) die("QI InPlace", hr);
     FILE *f = fopen(argv[4], "rb");
@@ -1137,8 +1305,14 @@ static int cmd_dmo(int argc, char **argv)
     DWORD csz = chunk * wf.nBlockAlign;
     for (long o = 0; o < n; o += csz) {
         DWORD sz = (DWORD)(n - o < (long)csz ? n - o : csz);
-        hr = ((HRESULT (WINAPI *)(void *, ULONG, BYTE *, REFERENCE_TIME, DWORD))(*(void ***)ip)[3])(ip, sz, b + o, 0, 0);
+        REFERENCE_TIME t = getenv("DMO_T0") ? t0 + (long long)(o / wf.nBlockAlign) * 10000000 / rate : 0;
+        hr = ((HRESULT (WINAPI *)(void *, ULONG, BYTE *, REFERENCE_TIME, DWORD))(*(void ***)ip)[3])(ip, sz, b + o, t, 0);
         if (FAILED(hr)) die("Process", hr);
+    }
+    if (getenv("DMO_ENV")) {
+        memset(v, 0, sizeof(v));
+        ((HRESULT (WINAPI *)(void *, void *))(*(void ***)fx)[4])(fx, v);
+        fprintf(stderr, "after"); print_params(s_fx[e].types, v);
     }
     f = fopen(argv[5], "wb");
     fwrite(b, 1, n, f); fclose(f);

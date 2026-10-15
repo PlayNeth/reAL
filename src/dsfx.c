@@ -5,15 +5,20 @@
  * parameter envelopes up to date and calls the effect's FBRProcess on whole frames; Discontinuity resets the effect's
  * running state.  Parameters live in an IMediaParams store as floats (CParams 0x10018590): SetAllParameters converts
  * the DSFX structure's fields and calls SetParam for each, which checks the range and works out what the effect needs.
- * Parameter envelopes (IMediaParams::AddEnvelope) are not implemented. */
+ * The store keeps, for each parameter, a list of envelope segments, newest first (IMediaParams::AddEnvelope);
+ * SetParam makes the newest one a jump to its value, and GetParam reads the newest one's end value.  Process works in
+ * quanta of 3 ms, each with its time stamp, and brings the parameters with envelopes up to it (UpdateActiveParams
+ * 10018ac0) before the effect runs. */
 #include "dsfx.h"
 #include "music/wavesrev.h"
 #include "i3dl2.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <uchar.h>
 
 typedef struct { float min, max, def; } prange;
+typedef struct dsfx_node { struct dsfx_node *next; dsfx_envseg s; } dsfx_node;
 /* a delay line: written backwards, positions in 1/4096 samples */
 typedef struct { float *buf; int32_t pos, len; } dline;
 
@@ -21,8 +26,11 @@ struct dsfx {
     int kind;
     unsigned tag, ch, rate, bits, is8;  /* +0x154.. the format; +0x130 rate, +0x134 channels, +0x138 8-bit */
     int hasfmt;
-    float p[8];                         /* +0x180.. IMediaParams' current values */
+    float p[8];                         /* GetParam's values: the newest segment's end value (or the neutral value) */
     uint32_t fixes;
+    dsfx_node *env[8];                  /* CParams +0x48: the segments, newest first */
+    uint32_t active;                    /* +0x4c: the parameters with envelopes to follow */
+    uint32_t qframes, qtime;            /* +0x174 +0x178: the processing quantum (3 ms, at least 16 frames) and its time */
     union {
         struct { uint32_t shape, hz, period, phase; } gargle;   /* +0x1ec +0x1f0 +0x1f4 +0x1f8 */
         struct {
@@ -76,7 +84,7 @@ struct dsfx {
             float env, gain;            /* +0x214 +0x218 */
             dline l, r;                 /* +0x21c +0x228 */
         } comp;
-        struct { wavesrev *w; } waves;  /* +0x200 the reverb's state, made by Init */
+        struct { wavesrev *w; float cur[4]; } waves;   /* +0x200 the reverb's state, made by Init; +0x1ec.. the values */
         i3dl2 *i3;                      /* XP's I3DL2 reverb (i3dl2.c) */
     } u;
 };
@@ -93,6 +101,65 @@ static const prange s_ranges[DSFX_NKINDS][7] = {
     [DSFX_DISTORTION] = { { -60, 0, -18 }, { 0, 100, 15 }, { 100, 8000, 8000 }, { 100, 8000, 2400 }, { 100, 8000, 2400 } },
     [DSFX_COMPRESSOR] = { { -60, 60, 0 }, { 0.01f, 500, 10 }, { 50, 3000, 200 }, { -60, 0, -20 }, { 1, 100, 3 }, { 0, 4, 4 } },
     [DSFX_WAVES] = { { -96, 0, 0 }, { -96, 0, 0 }, { 0.001f, 3000, 1000 }, { 0.001f, 0.999f, 0.001f } },
+};
+/* the parameters' descriptions (dsdmo 0x1001b000 ...: MP_PARAMINFO and the enumerations), in index order */
+typedef struct { uint32_t type; float min, max, neutral; const char16_t *unit, *label, *enums; } pdesc;
+static const pdesc s_pdesc[DSFX_NKINDS][7] = {
+    [DSFX_CHORUS] = {
+        { 1, 0.0f, 100.0f, 50.0f, u"%", u"WetDryMix", u"" },
+        { 1, 0.0f, 100.0f, 10.0f, u"", u"Depth", u"" },
+        { 1, 0.0f, 10.0f, 1.100000023841858f, u"Hz", u"Frequency", u"" },
+        { 3, 0.0f, 1.0f, 1.0f, u"", u"WaveShape", u"Triangle,Sine" },
+        { 0, 0.0f, 4.0f, 3.0f, u"", u"Phase", u"" },
+        { 1, -99.0f, 99.0f, 25.0f, u"", u"Feedback", u"" },
+        { 1, 0.0f, 20.0f, 16.0f, u"", u"Delay", u"" },
+    },
+    [DSFX_COMPRESSOR] = {
+        { 1, -60.0f, 60.0f, 0.0f, u"", u"Gain", u"" },
+        { 1, 0.009999999776482582f, 500.0f, 10.0f, u"", u"Attack", u"" },
+        { 1, 50.0f, 3000.0f, 200.0f, u"", u"Release", u"" },
+        { 1, -60.0f, 0.0f, -20.0f, u"", u"Threshold", u"" },
+        { 1, 1.0f, 100.0f, 3.0f, u"", u"Ratio", u"" },
+        { 1, 0.0f, 4.0f, 4.0f, u"", u"Predelay", u"" },
+    },
+    [DSFX_DISTORTION] = {
+        { 1, -60.0f, 0.0f, -18.0f, u"", u"Gain", u"" },
+        { 1, 0.0f, 100.0f, 15.0f, u"", u"Edge", u"" },
+        { 1, 100.0f, 8000.0f, 8000.0f, u"", u"PreLowpassCutoff", u"" },
+        { 1, 100.0f, 8000.0f, 2400.0f, u"", u"PostEQCenterFrequency", u"" },
+        { 1, 100.0f, 8000.0f, 2400.0f, u"", u"PostEQBandwidth", u"" },
+    },
+    [DSFX_PARAMEQ] = {
+        { 1, 80.0f, 16000.0f, 8000.0f, u"", u"Center", u"" },
+        { 1, 1.0f, 36.0f, 12.0f, u"", u"Bandwidth", u"" },
+        { 1, -15.0f, 15.0f, 0.0f, u"", u"Gain", u"" },
+    },
+    [DSFX_ECHO] = {
+        { 1, 0.0f, 100.0f, 50.0f, u"", u"WetDryMix", u"" },
+        { 1, 0.0f, 100.0f, 50.0f, u"", u"Feedback", u"" },
+        { 1, 1.0f, 2000.0f, 500.0f, u"", u"LeftDelay", u"" },
+        { 1, 1.0f, 2000.0f, 500.0f, u"", u"RightDelay", u"" },
+        { 2, 0.0f, 1.0f, 0.0f, u"", u"PanDelay", u"" },
+    },
+    [DSFX_FLANGER] = {
+        { 1, 0.0f, 100.0f, 50.0f, u"%", u"WetDryMix", u"" },
+        { 3, 0.0f, 1.0f, 1.0f, u"", u"WaveShape", u"Triangle,Sine" },
+        { 1, 0.0f, 10.0f, 0.25f, u"Hz", u"Frequency", u"" },
+        { 1, 0.0f, 100.0f, 100.0f, u"", u"Depth", u"" },
+        { 0, 0.0f, 4.0f, 2.0f, u"", u"Phase", u"" },
+        { 1, -99.0f, 99.0f, -50.0f, u"", u"Feedback", u"" },
+        { 1, 0.0f, 4.0f, 2.0f, u"", u"Delay", u"" },
+    },
+    [DSFX_GARGLE] = {
+        { 0, 1.0f, 1000.0f, 20.0f, u"Hz", u"Rate", u"" },
+        { 3, 0.0f, 1.0f, 0.0f, u"", u"WaveShape", u"Triangle,Square" },
+    },
+    [DSFX_WAVES] = {
+        { 1, -96.0f, 0.0f, 0.0f, u"dB", u"InGain", u"" },
+        { 1, -96.0f, 0.0f, 0.0f, u"dB", u"ReverbMix", u"" },
+        { 1, 0.0010000000474974513f, 3000.0f, 1000.0f, u"ms", u"ReverbTime", u"" },
+        { 1, 0.0010000000474974513f, 0.9990000128746033f, 0.0010000000474974513f, u"", u"HighFreqRTRatio", u"" },
+    },
 };
 static const int s_nparams[DSFX_NKINDS] = { [DSFX_GARGLE] = 2, [DSFX_ECHO] = 5, [DSFX_PARAMEQ] = 3, [DSFX_CHORUS] = 7,
                                             [DSFX_FLANGER] = 7, [DSFX_DISTORTION] = 5,
@@ -866,16 +933,21 @@ static void comp_process(dsfx *f, void *data, uint32_t n)
 
 /* ------------------------------------------------------------------ Waves reverb (10016770 ...): the network is in
  * music/wavesrev.c; 16-bit and float only */
+static void record(dsfx *f, int i, float v);
+/* Init and Discontinuity: GetAllParameters, then SetAllParameters with them (so the newest segments become jumps) */
+static void waves_params_again(dsfx *f)
+{
+    for (int i = 0; i < 4; i++) { f->u.waves.cur[i] = f->p[i]; record(f, i, f->p[i]); }
+    float *q = f->u.waves.cur;
+    wavesrev_set(f->u.waves.w, q[0], q[1], q[2], q[3]);
+}
 /* 10016c90 SetParam: the coefficients made again once Init has run */
 static int waves_param(dsfx *f, int i, float v)
 {
     if (v < s_ranges[DSFX_WAVES][i].min || v > s_ranges[DSFX_WAVES][i].max) return DSFX_E_INVALIDARG;
-    if (f->u.waves.w) {
-        float q[4];
-        memcpy(q, f->p, sizeof(q));
-        q[i] = v;
-        wavesrev_set(f->u.waves.w, q[0], q[1], q[2], q[3]);
-    }
+    float *q = f->u.waves.cur;
+    q[i] = v;
+    if (f->u.waves.w) wavesrev_set(f->u.waves.w, q[0], q[1], q[2], q[3]);
     return DSFX_OK;
 }
 /* 100168f0 Init / 10016ad0 Discontinuity: the memory cleared, the delays laid out for the rate, the parameters set */
@@ -887,14 +959,14 @@ static int waves_init(dsfx *f)
         wavesrev_free(f->u.waves.w);
         if (!(f->u.waves.w = wavesrev_new(f->rate))) return DSFX_E_OUTOFMEMORY;
     }
-    wavesrev_set(f->u.waves.w, f->p[0], f->p[1], f->p[2], f->p[3]);
+    waves_params_again(f);
     return DSFX_OK;
 }
 static void waves_discont(dsfx *f)
 {
     if (!f->u.waves.w) return;
     wavesrev_reset(f->u.waves.w);
-    wavesrev_set(f->u.waves.w, f->p[0], f->p[1], f->p[2], f->p[3]);
+    waves_params_again(f);
 }
 static void waves_process(dsfx *f, void *data, uint32_t n)
 {
@@ -940,6 +1012,7 @@ void dsfx_free(dsfx *f)
     if (f->kind == DSFX_COMPRESSOR) { free(f->u.comp.l.buf); free(f->u.comp.r.buf); }
     if (f->kind == DSFX_WAVES) wavesrev_free(f->u.waves.w);
     if (f->kind == DSFX_I3DL2) i3dl2_free(f->u.i3);
+    for (int i = 0; i < 8; i++) while (f->env[i]) { dsfx_node *n = f->env[i]; f->env[i] = n->next; free(n); }
     if (f->kind == DSFX_FLANGER) { free(f->u.flanger.l.buf); free(f->u.flanger.r.buf); free(f->u.flanger.dl.buf); free(f->u.flanger.dr.buf); }
     free(f);
 }
@@ -959,6 +1032,7 @@ void dsfx_i3dl2_frame(dsfx *f, uint32_t fn, void *out) { if (f->kind == DSFX_I3D
 void dsfx_i3dl2_object(dsfx *f, void *out) { if (f->kind == DSFX_I3DL2) i3dl2_object(f->u.i3, out); }
 int dsfx_i3dl2_get_quality(dsfx *f, int32_t *q) { return f->kind == DSFX_I3DL2 ? i3dl2_get_quality(f->u.i3, q) : DSFX_E_INVALIDARG; }
 
+static int set_format_init(dsfx *f);
 int dsfx_set_format(dsfx *f, unsigned tag, unsigned ch, unsigned rate, unsigned bits)
 {
     if (tag == 1) { if (bits != 8 && bits != 16) return DSFX_E_TYPE_NOT_ACCEPTED; }
@@ -971,6 +1045,17 @@ int dsfx_set_format(dsfx *f, unsigned tag, unsigned ch, unsigned rate, unsigned 
         return hr;
     }
     f->tag = tag; f->ch = ch; f->rate = rate; f->bits = bits; f->is8 = bits == 8; f->hasfmt = 1;
+    f->qframes = rate * 3 / 1000;       /* 100070d0 */
+    if (f->qframes < 16) f->qframes = 16;
+    f->qtime = (uint32_t)((uint64_t)f->qframes * 10000000 / rate);
+    int hr = set_format_init(f);
+    /* Init sets the parameters again through SetParam, Gargle's excepted (Waves' does it itself) */
+    if (hr >= 0 && f->kind != DSFX_GARGLE && f->kind != DSFX_WAVES)
+        for (int i = 0; i < s_nparams[f->kind]; i++) record(f, i, f->p[i]);
+    return hr;
+}
+static int set_format_init(dsfx *f)
+{
     switch (f->kind) {
     case DSFX_GARGLE: gargle_init(f); break;
     case DSFX_ECHO: return echo_init(f);
@@ -988,22 +1073,40 @@ int dsfx_set_format(dsfx *f, unsigned tag, unsigned ch, unsigned rate, unsigned 
     return DSFX_OK;
 }
 
+/* the effect's SetParam: what the effect needs worked out (*v: the value as kept, for the ones that adjust it) */
+static int apply(dsfx *f, int i, float *v)
+{
+    switch (f->kind) {
+    case DSFX_GARGLE: return gargle_param(f, i, *v);
+    case DSFX_ECHO: return echo_param(f, i, *v);
+    case DSFX_PARAMEQ: return eq_param(f, i, v);
+    case DSFX_CHORUS: return chorus_param(f, i, *v);
+    case DSFX_FLANGER: return flanger_param(f, i, *v);
+    case DSFX_DISTORTION: return dist_param(f, i, v);
+    case DSFX_COMPRESSOR: return comp_param(f, i, *v);
+    case DSFX_WAVES: return waves_param(f, i, *v);
+    }
+    return DSFX_E_INVALIDARG;
+}
+/* 10018e30: SetParam's value kept - the newest segment made a jump to it (a segment over all time when there is none) */
+static void record(dsfx *f, int i, float v)
+{
+    dsfx_node *n = f->env[i];
+    if (!n) {
+        if (!(n = calloc(1, sizeof(*n)))) return;
+        n->s.start = INT64_MIN; n->s.end = INT64_MAX;
+        f->env[i] = n;
+    }
+    n->s.v0 = n->s.v1 = v;
+    n->s.curve = DSFX_CURVE_JUMP;
+    f->p[i] = v;
+}
 int dsfx_set_param(dsfx *f, int i, float v)
 {
     if (i < 0 || i >= s_nparams[f->kind]) return DSFX_E_INVALIDARG;
     if (f->kind == DSFX_I3DL2) return i3dl2_set_param(f->u.i3, i, v);
-    int hr = DSFX_E_INVALIDARG;
-    switch (f->kind) {
-    case DSFX_GARGLE: hr = gargle_param(f, i, v); break;
-    case DSFX_ECHO: hr = echo_param(f, i, v); break;
-    case DSFX_PARAMEQ: hr = eq_param(f, i, &v); break;
-    case DSFX_CHORUS: hr = chorus_param(f, i, v); break;
-    case DSFX_FLANGER: hr = flanger_param(f, i, v); break;
-    case DSFX_DISTORTION: hr = dist_param(f, i, &v); break;
-    case DSFX_COMPRESSOR: hr = comp_param(f, i, v); break;
-    case DSFX_WAVES: hr = waves_param(f, i, v); break;
-    }
-    if (hr >= 0) f->p[i] = v;
+    int hr = apply(f, i, &v);
+    if (hr >= 0) record(f, i, v);
     return hr;
 }
 float dsfx_get_param(const dsfx *f, int i)
@@ -1012,6 +1115,69 @@ float dsfx_get_param(const dsfx *f, int i)
     return i >= 0 && i < s_nparams[f->kind] ? f->p[i] : 0.0f;
 }
 
+/* 10018ef0 AddEnvelope: the segments pushed in order (the last one newest), their values clamped to the range */
+int dsfx_add_envelope(dsfx *f, int i, uint32_t n, const dsfx_envseg *segs)
+{
+    if (!segs) return DSFX_E_POINTER;
+    if (f->kind == DSFX_I3DL2 || i < 0 || i >= s_nparams[f->kind]) return DSFX_E_INVALIDARG;
+    const prange *r = &s_ranges[f->kind][i];
+    for (uint32_t k = 0; k < n; k++) {
+        dsfx_node *e = malloc(sizeof(*e));
+        if (!e) return DSFX_E_OUTOFMEMORY;
+        e->s = segs[k];
+        e->s.v1 = r->min <= e->s.v1 && e->s.v1 <= r->max ? e->s.v1 : r->min <= e->s.v1 ? r->max : r->min;
+        e->s.v0 = r->min <= e->s.v0 && e->s.v0 <= r->max ? e->s.v0 : r->min <= e->s.v0 ? r->max : r->min;
+        e->next = f->env[i];
+        f->env[i] = e;
+        f->active |= 1u << i;
+        f->p[i] = e->s.v1;
+    }
+    return DSFX_OK;
+}
+/* 10019030 FlushEnvelope: the segments wholly inside [start, end] dropped */
+int dsfx_flush_envelope(dsfx *f, int i, int64_t start, int64_t end)
+{
+    if (f->kind == DSFX_I3DL2 || i < 0 || i >= s_nparams[f->kind] || start >= end) return DSFX_E_INVALIDARG;
+    dsfx_node **pp = &f->env[i];
+    while (*pp) {
+        dsfx_node *e = *pp;
+        if (e->s.start >= start && e->s.end <= end) { *pp = e->next; free(e); }
+        else pp = &e->next;
+    }
+    f->p[i] = f->env[i] ? f->env[i]->s.v1 : s_ranges[f->kind][i].def;
+    return DSFX_OK;
+}
+/* 10018ac0 UpdateActiveParams: each parameter with an envelope set to its value at t (the effect's SetParam, nothing
+ * kept); a parameter whose newest segment is over is followed no more */
+static void update_params(dsfx *f, int64_t t)
+{
+    for (int i = 0; i < s_nparams[f->kind] && f->active; i++) {
+        if (!(f->active & (1u << i))) continue;
+        float def = s_ranges[f->kind][i].def, v = def;
+        dsfx_node *head = f->env[i], *e;
+        if (!head) { apply(f, i, &v); f->active &= ~(1u << i); continue; }
+        for (e = head; e && e->s.start > t; e = e->next) ;
+        if (!e) v = def;
+        else if (e->s.end < t) {
+            v = e->s.v1;
+            if (e == head) f->active &= ~(1u << i);
+        } else if (e->s.curve & DSFX_CURVE_JUMP) v = e->s.v1;
+        else {
+            float x = (float)(double)(t - e->s.start) / (float)(double)(e->s.end - e->s.start);
+            switch (e->s.curve) {
+            case DSFX_CURVE_SQUARE: x = x * x; break;
+            case DSFX_CURVE_INVSQUARE: x = (float)sqrt((double)x); break;
+            case DSFX_CURVE_SINE: x = (float)(sin((double)x * 3.1415926535 - 1.57079632675) + 1.0) * 0.5f; break;
+            }
+            float v0 = e->s.v0;
+            if (e->s.flags & DSFX_ENVF_NEUTRAL) v0 = def;
+            if (e->s.flags & DSFX_ENVF_CURRENT)
+                for (dsfx_node *o = e->next; o; o = o->next) if (o->s.end <= t) { v0 = o->s.v1; break; }
+            v = (e->s.v1 - v0) * x + v0;
+        }
+        apply(f, i, &v);
+    }
+}
 int dsfx_params_size(int kind)
 {
     static const int sz[DSFX_NKINDS] = { 8, 28, 28, 20, 20, 24, 12, 16, 48 };
@@ -1099,9 +1265,8 @@ void dsfx_discontinuity(dsfx *f)
     }
 }
 
-void dsfx_process(dsfx *f, void *data, uint32_t frames)
+static void process(dsfx *f, void *data, uint32_t frames)
 {
-    if (!f->hasfmt || !frames) return;
     switch (f->kind) {
     case DSFX_GARGLE: gargle_process(f, data, frames); break;
     case DSFX_ECHO: echo_process(f, data, frames); break;
@@ -1111,6 +1276,31 @@ void dsfx_process(dsfx *f, void *data, uint32_t frames)
     case DSFX_DISTORTION: dist_process(f, data, frames); break;
     case DSFX_COMPRESSOR: comp_process(f, data, frames); break;
     case DSFX_WAVES: waves_process(f, data, frames); break;
-    case DSFX_I3DL2: i3dl2_process(f->u.i3, data, frames); break;
     }
 }
+/* 10006d70: whole quanta while more than one is left, then the rest; each with its time */
+int dsfx_param_info(int kind, int i, dsfx_pinfo *o)
+{
+    if (kind < 0 || kind >= DSFX_NKINDS || kind == DSFX_I3DL2 || i < 0 || i >= s_nparams[kind]) return DSFX_E_INVALIDARG;
+    const pdesc *d = &s_pdesc[kind][i];
+    o->type = d->type; o->caps = 0x1f; o->min = d->min; o->max = d->max; o->neutral = d->neutral;
+    o->unit = (const uint16_t *)d->unit; o->label = (const uint16_t *)d->label; o->enums = (const uint16_t *)d->enums;
+    return DSFX_OK;
+}
+void dsfx_process_at(dsfx *f, void *data, uint32_t frames, int64_t t)
+{
+    if (!f->hasfmt || !frames) return;
+    if (f->kind == DSFX_I3DL2) { i3dl2_process(f->u.i3, data, frames); return; }
+    unsigned fb = f->ch * f->bits / 8;
+    uint8_t *d = data;
+    uint32_t done = 0, q = f->qframes;
+    if (frames > q)
+        do {
+            if (f->active) update_params(f, t);
+            process(f, d, q);
+            t += f->qtime; d += q * fb; done += q;
+        } while (done < frames - q);
+    if (f->active) update_params(f, t);
+    process(f, d, frames - done);
+}
+void dsfx_process(dsfx *f, void *data, uint32_t frames) { dsfx_process_at(f, data, frames, 0); }

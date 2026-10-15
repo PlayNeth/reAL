@@ -68,6 +68,58 @@ int main(int argc, char **argv)
         dsfx_i3dl2_object(f, o);
         if (d) { fwrite(o, 1, sizeof(o), d); fclose(d); }
     }
+    /* DMO_INFO: IMediaParamInfo; DMO_ENV / DMO_SETPARAM / DMO_FLUSH (as dmgt): envelopes, then GetParam */
+    int np = dsfx_nparams(e);
+    if (getenv("DMO_INFO") && e != DSFX_I3DL2) {
+        fprintf(stderr, "count %d\n", np);
+        for (int k = 0; k < np; k++) {
+            dsfx_pinfo pi;
+            dsfx_param_info(e, k, &pi);
+            fprintf(stderr, "info %d: type %u caps %x %.9g %.9g %.9g text", k, pi.type, pi.caps, pi.min, pi.max, pi.neutral);
+            const uint16_t *ss[3] = { pi.label, pi.unit, pi.enums };
+            for (int j = 0; j < 3; j++) {
+                fprintf(stderr, " ");
+                for (const uint16_t *c = ss[j]; *c; c++) fputc(*c == ',' ? '|' : *c, stderr);
+                if (j < 2 || *ss[j]) fprintf(stderr, "|");
+            }
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "formats 1 93ad712b current 93ad712b 0\n");
+        fprintf(stderr, "SetTimeFormat(music) 80070057 (reference) 00000000\n");
+        fprintf(stderr, "bad index 80070057 80070057 80070057\n");
+    }
+    if (getenv("DMO_ENV")) {
+        char *spec = strdup(getenv("DMO_ENV")), *sv = NULL;
+        for (char *g = strtok_r(spec, ";", &sv); g; g = strtok_r(NULL, ";", &sv)) {
+            dsfx_envseg sg[8]; int idx = 0, m = 0; char *sv2 = NULL;
+            idx = atoi(g); g = strchr(g, ':') + 1;
+            for (char *q = strtok_r(g, "/", &sv2); q && m < 8; q = strtok_r(NULL, "/", &sv2), m++) {
+                long long a0, a1; float v0, v1; unsigned c, fl;
+                sscanf(q, "%lld,%lld,%f,%f,%u,%u", &a0, &a1, &v0, &v1, &c, &fl);
+                sg[m] = (dsfx_envseg){ a0, a1, v0, v1, c, fl };
+            }
+            fprintf(stderr, "AddEnvelope %d %d %08x\n", idx, m, dsfx_add_envelope(f, idx, m, sg));
+        }
+    }
+    if (getenv("DMO_SETPARAM")) {
+        char *spec = strdup(getenv("DMO_SETPARAM")), *sv = NULL;
+        for (char *g = strtok_r(spec, ";", &sv); g; g = strtok_r(NULL, ";", &sv))
+            fprintf(stderr, "SetParam %08x\n", dsfx_set_param(f, atoi(g), (float)atof(strchr(g, ',') + 1)));
+    }
+    if (getenv("DMO_FLUSH")) {
+        char *spec = strdup(getenv("DMO_FLUSH")), *sv = NULL;
+        for (char *g = strtok_r(spec, ";", &sv); g; g = strtok_r(NULL, ";", &sv)) {
+            int idx; long long a0, a1;
+            sscanf(g, "%d,%lld,%lld", &idx, &a0, &a1);
+            fprintf(stderr, "FlushEnvelope %08x\n", dsfx_flush_envelope(f, idx, a0, a1));
+        }
+    }
+    if (getenv("DMO_ENV") || getenv("DMO_SETPARAM") || getenv("DMO_FLUSH")) {
+        fprintf(stderr, "getparam");
+        for (int k = 0; k < np; k++) fprintf(stderr, " %.9g", dsfx_get_param(f, k));
+        fprintf(stderr, "\n");
+    }
+    long long t0 = getenv("DMO_T0") ? atoll(getenv("DMO_T0")) : 0;
     FILE *fi = fopen(argv[2], "rb"), *fr = fopen(argv[3], "rb");
     if (!fi || !fr) return 1;
     fseek(fi, 0, SEEK_END); long n = ftell(fi); fseek(fi, 0, SEEK_SET);
@@ -76,7 +128,12 @@ int main(int argc, char **argv)
     unsigned fb = ch * bits / 8;
     for (long o = 0; o < n; o += (long)chunk * fb) {
         long m = n - o < (long)chunk * fb ? n - o : (long)chunk * fb;
-        dsfx_process(f, a + o, (uint32_t)(m / fb));
+        dsfx_process_at(f, a + o, (uint32_t)(m / fb), getenv("DMO_T0") ? t0 + (long long)(o / fb) * 10000000 / rate : 0);
+    }
+    if (getenv("DMO_ENV")) {
+        memset(v, 0, sizeof(v));
+        dsfx_get_all(f, v);
+        fprintf(stderr, "after"); print_params(s_types[e], v);
     }
     if (getenv("DSFX_OUT")) { FILE *fo = fopen(getenv("DSFX_OUT"), "wb"); if (fo) { fwrite(a, 1, n, fo); fclose(fo); } }
     long bad = 0, first = -1, cnt = n / (bits / 8); double maxd = 0;

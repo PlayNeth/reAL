@@ -26,6 +26,20 @@ int dsfx_set_format(dsfx *f, unsigned tag, unsigned channels, unsigned rate, uns
 int dsfx_nparams(int kind);
 int dsfx_set_param(dsfx *f, int index, float v);
 float dsfx_get_param(const dsfx *f, int index);
+/* IMediaParams' envelopes: MP_ENVELOPE_SEGMENT (reference times), the curves (MP_CURVE_*) and flags (MPF_ENVLP_*) */
+typedef struct { int64_t start, end; float v0, v1; uint32_t curve, flags; } dsfx_envseg;
+#define DSFX_CURVE_JUMP 1
+#define DSFX_CURVE_LINEAR 2
+#define DSFX_CURVE_SQUARE 4
+#define DSFX_CURVE_INVSQUARE 8
+#define DSFX_CURVE_SINE 0x10
+#define DSFX_ENVF_CURRENT 1                 /* MPF_ENVLP_BEGIN_CURRENTVAL: from where the last segment ended */
+#define DSFX_ENVF_NEUTRAL 2                 /* MPF_ENVLP_BEGIN_NEUTRALVAL */
+int dsfx_add_envelope(dsfx *f, int index, uint32_t n, const dsfx_envseg *segs);
+int dsfx_flush_envelope(dsfx *f, int index, int64_t start, int64_t end);
+/* IMediaParamInfo: MP_PARAMINFO (type, caps, min, max, neutral, unit, label) and the enumeration's names */
+typedef struct { uint32_t type, caps; float min, max, neutral; const uint16_t *unit, *label, *enums; } dsfx_pinfo;
+int dsfx_param_info(int kind, int index, dsfx_pinfo *out);
 /* SetAllParameters / GetAllParameters with the effect's DSFX structure (DSFXGargle, DSFXChorus, ...) */
 int dsfx_set_all(dsfx *f, const void *params);
 int dsfx_get_all(const dsfx *f, void *params);
@@ -45,5 +59,7 @@ int dsfx_i3dl2_get_quality(dsfx *f, int32_t *quality);
 void dsfx_i3dl2_object(dsfx *f, void *out);
 void dsfx_i3dl2_frame(dsfx *f, uint32_t fn, void *out);  /* debugging: a function's frame (i3dl2_frame) */       /* debugging: XP's object, 0x4c8 bytes */
 void dsfx_process(dsfx *f, void *data, uint32_t frames);
+/* Process with its time stamp (reference time): in quanta of 3 ms, the envelopes followed to each one's time */
+void dsfx_process_at(dsfx *f, void *data, uint32_t frames, int64_t t);
 
 #endif
