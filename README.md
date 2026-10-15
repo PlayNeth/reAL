@@ -54,10 +54,14 @@ diffed line by line, and offline captures are compared event by event.
 | Audiopaths: the standard ones and audiopath configurations (buffers, effects, sends, PChannel maps) | ✅ |
 | Port objects (the synth port, its sink and master clock) | ✅ |
 | MIDI through winmm (midiOut, midiStream, MCI) for games that play General MIDI | ✅ |
-| Styles: style and motif tracks, the pattern chooser, variations, chord mapping, mute and pattern tracks | ✅ |
+| Styles: style and motif tracks, the pattern chooser, variations, chord mapping, mute and pattern tracks, IDirectMusicPatternTrack, chord regeneration | ✅ |
 | Chord maps and the composer: chord map, chord map and signpost tracks, ComposeSegmentFromTemplate, ComposeSegmentFromShape, ComposeTemplateFromShape, ChangeChordMap, Segment::Compose | ✅ |
 | Composer: ComposeTransition / AutoTransition, Segment::Compose with from/to segments, recomposing while a segment plays | ✅ |
-| Scripts (dmscript, AudioVBScript) | ⏳ |
+| Start times: align, valid starts, markers, segment end | ✅ |
+| Lyrics and segment trigger tracks | ✅ |
+| Parameter control track | 🔧 in progress |
+| Containers (.con), standalone track objects (CoCreateInstance, Load, direct InitPlay/Play) | ⏳ |
+| Scripts (dmscript, AudioVBScript) | ⏳ (last) |
 
 As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REDM_NOFIXES` in the environment
 turns the fixes off for comparison runs. `docs/STATUS.md` has the details and the testing setup.
