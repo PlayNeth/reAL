@@ -563,7 +563,30 @@ def case_tracks(out):
                                  trig=[(0, 0, 0x80, 1, ('comstyle.sty', 'no such motif'))])
     return files
 
-CASES = {'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_paramctl(out):
+    """dmime's parameter control track (tests/trktest.c param): envelopes to two fxprobe effects in an audiopath's
+    buffer, one object in reference time, one in music time (which the probe refuses), one not found; 125 bpm, so a
+    tick is 6250 reference time units"""
+    probe, buf = '5e1d2c3b-7a4f-4c61-9d2e-0f8a1b6c4d55', '11111111-2222-3333-4444-555566667701'
+    files = {'pctl.aud': audiopath_config([(buf, 2, [(probe, None), (probe, None)])])}
+    seg = Segment('8f6d1a10-1300-4000-8000-000000000001', 'pctl', 4 * BAR)
+    seg.tempo([(0, 125.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.seq([(t, 200, 0, 0x90, 60, 100) for t in range(0, 4 * BAR, 768)])
+    p0 = [(0, 1000, 0.25, 0.75, 2, 0), (1500, 4000, 0, 100, 4, 0), (5000, 5000, 3, 3, 1, 0), (6000, 9000, 10, 20, 0x10, 1),
+          (9500, 12000, 1, 2, 8, 2)]
+    p1 = [(100, 200, 5, 6, 1, 0), (3000, 3100, 7, 8, 2, 0)]
+    objs = [('ref', 0, 0x6100, 0, probe, 0, [(0, 0, p0), (0, 3, p1), (0, 7, None)]),
+            ('music', 0, 0x6100, 0, probe, 1, [(0, 2, [(0, 600, 1, 2, 2, 0)])]),
+            ('ref', 0, 0x6100, 0, probe, 5, [(0, 1, [(0, 600, 1, 2, 2, 0)])])]
+    seg.paramcontrol(objs)
+    files['pctl.sgt'] = seg.build()
+    bad = Segment('8f6d1a10-1300-4000-8000-000000000002', 'pctlbad', BAR)
+    bad.paramcontrol([('1111aaaa-5b04-4b15-a542-ae282030117b', 0, 0x6100, 0, probe, 0, [(0, 0, [(0, 600, 1, 2, 2, 0)])])])
+    files['pctlbad.sgt'] = bad.build()
+    return files
+
+CASES = {'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

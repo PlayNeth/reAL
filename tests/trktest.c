@@ -188,6 +188,84 @@ static void track_params(IDirectMusicSegment8 *sg, REFGUID clsid, const char *wh
     IDirectMusicTrack_Release(t);
 }
 
+/* the probe's log (FXPROBE_LOG), its times relative to rt0 (in ticks at 125 bpm where they divide), without
+ * Process lines */
+static long g_logpos[8];
+static REFERENCE_TIME g_rt0[8];
+static int g_nplays;
+static long probe_size(void)
+{
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    const char *path = getenv("FXPROBE_LOG");
+    return path && GetFileAttributesExA(path, GetFileExInfoStandard, &a) ? (long)a.nFileSizeLow : 0;
+}
+static void dump_probe(void)
+{
+    const char *path = getenv("FXPROBE_LOG");
+    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!f) { printf("no probe log\n"); return; }
+    char line[512];
+    int k = -1;
+    REFERENCE_TIME rt0 = 0;
+    while (fgets(line, sizeof(line), f)) {
+        long pos = ftell(f) - (long)strlen(line);
+        while (k + 1 < g_nplays && pos >= g_logpos[k + 1]) { k++; rt0 = g_rt0[k]; printf("-- play %d\n", k); }
+        if (!strncmp(line, "Process", 7)) continue;
+        if (!strncmp(line, "released after", 14)) { printf("released\n"); continue; }   /* (Process calls: timing) */
+        char out[600], *o = out, *p = line;
+        int inb = 0;
+        while (*p) {
+            if (*p == ']') inb = 0;
+            if (*p == '[' || (inb && *p == ' ' && p[-1] == ',')) {
+                inb = 1;
+                *o++ = *p++;
+                char *e;
+                long long v = _strtoi64(p, &e, 10);
+                if (e != p) {
+                    if (v == (long long)0x8000000000000000ULL) o += sprintf(o, "min");
+                    else if (v == 0x7fffffffffffffffLL) o += sprintf(o, "max");
+                    else if ((v - rt0) % 6250 == 0) o += sprintf(o, "t%lld", (v - rt0) / 6250);
+                    else o += sprintf(o, "t%lld+%lld", (v - rt0) / 6250, (v - rt0) % 6250);
+                    p = e;
+                }
+                continue;
+            }
+            *o++ = *p++;
+        }
+        *o = 0;
+        fputs(out, stdout);
+    }
+    fclose(f);
+}
+
+/* plays a segment on an audiopath from a start point, until the music time is `len` past its start; rt0 gets the
+ * reference time of the segment's time 0 */
+static void play_on(IDirectMusicSegment8 *sg, IDirectMusicAudioPath *ap, MUSIC_TIME len, REFERENCE_TIME *rt0)
+{
+    REFERENCE_TIME now = 0;
+    IDirectMusicPerformance8_GetTime(perf, &now, NULL);
+    IDirectMusicSegmentState *ss = NULL;
+    g_logpos[g_nplays] = probe_size();
+    HRESULT hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)sg, NULL, NULL, DMUS_SEGF_REFTIME, now + 10000000, &ss, NULL, (IUnknown *)ap);
+    printf("play %08lx\n", hr);
+    if (!ss) return;
+    MUSIC_TIME st = 0, sp = 0;
+    IDirectMusicSegmentState_GetStartTime(ss, &st);
+    IDirectMusicSegmentState_GetStartPoint(ss, &sp);
+    IDirectMusicPerformance8_MusicToReferenceTime(perf, st - sp, rt0);
+    g_rt0[g_nplays++] = *rt0;
+    MUSIC_TIME mt = 0;
+    DWORD deadline = GetTickCount() + 60000;
+    do { Sleep(20); IDirectMusicPerformance8_GetTime(perf, NULL, &mt); } while (mt < st + len && (LONG)(deadline - GetTickCount()) > 0);
+    if (getenv("TRK_TIMING")) fprintf(stderr, "waited %lu ms\n", (unsigned long)(GetTickCount() - (deadline - 60000)));
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    if (getenv("TRK_TIMING")) fprintf(stderr, "stopped\n");
+    Sleep(300);
+    IDirectMusicSegmentState_Release(ss);
+    if (!getenv("TRK_KEEPSTATES")) { for (int k = 0; k < nstates; k++) IDirectMusicSegmentState_Release(states[k]); nstates = 0; }
+    if (getenv("TRK_TIMING")) fprintf(stderr, "released\n");
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -258,6 +336,53 @@ int main(int argc, char **argv)
         }
         IDirectMusicSegment8 *bad = load(L"trigbad.sgt");
         if (bad) IDirectMusicSegment8_Release(bad);
+    } else if (!strcmp(mode, "param")) {
+        if (getenv("FXPROBE_LOG")) DeleteFileA(getenv("FXPROBE_LOG"));
+        IDirectMusicSegment8 *sg = load(L"pctl.sgt");
+        IUnknown *cfg = NULL;
+        DMUS_OBJECTDESC d = { sizeof(d) };
+        d.dwValidData = DMUS_OBJ_CLASS | DMUS_OBJ_FILENAME;
+        d.guidClass = CLSID_DirectMusicAudioPathConfig;
+        lstrcpyW(d.wszFileName, L"pctl.aud");
+        hr = IDirectMusicLoader8_GetObject(loader, &d, &IID_IUnknown, (void **)&cfg);
+        printf("config %08lx\n", hr);
+        IDirectMusicAudioPath *ap = NULL;
+        if (cfg) printf("audiopath %08lx\n", IDirectMusicPerformance8_CreateAudioPath(perf, cfg, TRUE, &ap));
+        REFERENCE_TIME rt[4] = { 0 };
+        if (sg && ap && !getenv("TRK_NOPLAY")) {
+            track_params(sg, &CLSID_DirectMusicParamControlTrack, "param");
+            play_on(sg, ap, 4 * 3072 + 768, &rt[0]);
+            IDirectMusicSegment8_SetStartPoint(sg, 2500);           /* in the middle of a curve: what is left of it */
+            play_on(sg, ap, 3 * 3072, &rt[1]);
+            IDirectMusicSegment8_SetStartPoint(sg, 0);
+            IDirectMusicSegment8_SetRepeats(sg, 1);
+            IDirectMusicSegment8_SetLoopPoints(sg, 1200, 7000);     /* a loop back into the second curve */
+            play_on(sg, ap, 4 * 3072, &rt[2]);
+            IDirectMusicSegment8_SetRepeats(sg, 0);
+            IDirectMusicSegment8_SetLoopPoints(sg, 0, 0);   /* (dmime spins forever on a clone shorter than its loop) */
+            IDirectMusicSegment *c = NULL;
+            hr = IDirectMusicSegment8_Clone(sg, 1600, 7000, &c);
+            printf("clone %08lx\n", hr);
+            if (c && !getenv("TRK_NOCLONEPLAY")) play_on((IDirectMusicSegment8 *)c, ap, 3 * 3072, &rt[3]);
+            if (getenv("TRK_TIMING")) fprintf(stderr, "clone played\n");
+            if (c) IDirectMusicSegment_Release(c);
+        }
+        if (getenv("TRK_TIMING")) fprintf(stderr, "plays done\n");
+        IDirectMusicSegment8 *bad = load(L"pctlbad.sgt");
+        if (getenv("TRK_TIMING")) fprintf(stderr, "bad loaded\n");
+        if (bad) {
+            IDirectMusicTrack *t = NULL;
+            printf("  bad param track %08lx\n", IDirectMusicSegment8_GetTrack(bad, &CLSID_DirectMusicParamControlTrack, 0xffffffff, 0, &t));
+            if (t) IDirectMusicTrack_Release(t);
+            IDirectMusicSegment8_Release(bad);
+        }
+        if (sg) IDirectMusicSegment8_Release(sg);
+        if (ap) IDirectMusicAudioPath_Release(ap);
+        if (cfg) IUnknown_Release(cfg);
+        IDirectMusicPerformance8_CloseDown(perf);
+        IDirectMusicPerformance8_Release(perf);
+        dump_probe();
+        return 0;
     }
     IDirectMusicPerformance8_CloseDown(perf);
     IDirectMusicPerformance8_Release(perf);

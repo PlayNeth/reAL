@@ -12,6 +12,11 @@
 /* the lyrics and segment trigger tracks' state */
 typedef struct { uint32_t gen; void *cur; dm_audiopath *ap; } evstate;
 static int perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out);
+/* the parameter control track's state (below) */
+typedef struct pcsent { struct pcsent *next; int64_t t; } pcsent;
+typedef struct { int cur, sent; int64_t last; pcsent *times; } pcpstate;
+typedef struct { void **mp; int nmp; pcpstate *ps; int nps; uint32_t gen; int flushed; } pcstate;
+static int pc_init(dm_perf *pf, dm_segstate *ss, const dm_paramtrack *T, pcstate *S);
 
 #include "dmstytrack.c"
 
@@ -823,6 +828,15 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         e->state = S;
         break;
     }
+    case TRK_PARAMCTL: {                    /* 77322dc4 */
+        const dm_paramtrack *T = e->t->data;
+        pcstate *S = calloc(1, sizeof(*S));
+        if (!S) break;
+        if (pc_init(pf, ss, T, S) < 0) { free(S); break; }
+        S->gen = T->gen;
+        e->state = S;
+        break;
+    }
     case TRK_BAND: {
         dm_bandtrack *T = e->t->data;
         bandstate *S = calloc(1, sizeof(*S));
@@ -906,8 +920,151 @@ static int segtrig_setparam(dm_track *t, int prm, mtime_t mt, void *data)
     return DM_OK;
 }
 
+
+/* ------------------------------------------------------------------ the parameter control track (dmime 77310eae)
+ * Its state: each object's IMediaParams (from the state's path, InitPlay 77322b08), and for each parameter the next
+ * curve, whether it sent one, the start of the last one sent and the starts of all of them. */
+static const dm_guid PC_TIME_MUSIC = { 0x0574c49d, 0x5b04, 0x4b15, { 0xa5, 0x42, 0xae, 0x28, 0x20, 0x30, 0x11, 0x7b } };
+static const dm_guid PC_TIME_REFERENCE = { 0x93ad712b, 0xdaa0, 0x4ffe, { 0xbc, 0x81, 0xb0, 0xce, 0x50, 0x0f, 0xcd, 0xd9 } };
+
+static void pc_free_params(pcstate *S)
+{
+    for (int i = 0; S->ps && i < S->nps; i++)
+        for (pcsent *x = S->ps[i].times, *nx; x; x = nx) { nx = x->next; free(x); }
+    free(S->ps);
+    S->ps = NULL;
+}
+/* 77322b08: the objects found again (a time format the object refuses counts as not found) */
+static int pc_init(dm_perf *pf, dm_segstate *ss, const dm_paramtrack *T, pcstate *S)
+{
+    if (S->mp) {
+        /* (the original lets the references it held go unreleased) */
+        for (int i = 0; i < S->nmp; i++) if (S->mp[i] && pf->tops.mp_release) pf->tops.mp_release(pf->tctx, S->mp[i]);
+        free(S->mp);
+        S->mp = NULL;
+    }
+    pc_free_params(S);
+    S->mp = calloc(T->nobj ? T->nobj : 1, sizeof(void *));
+    S->ps = calloc(T->nparam ? T->nparam : 1, sizeof(pcpstate));
+    S->nmp = S->nps = 0;
+    if (!S->mp || !S->ps) { free(S->mp); free(S->ps); S->mp = NULL; S->ps = NULL; return DM_E_OUTOFMEMORY; }
+    S->nmp = T->nobj; S->nps = T->nparam;
+    int k = 0;
+    for (const dm_pcobj *o = T->objs; o; o = o->next, k++)
+        if (pf->tops.mp_get)
+            S->mp[k] = pf->tops.mp_get(pf->tctx, ss, o->pch, o->stage, o->buffer, &o->obj, o->index, &o->fmt,
+                                       !memcmp(&o->fmt, &PC_TIME_MUSIC, sizeof(dm_guid)) ? 768 : 0);
+    return DM_OK;
+}
+/* 7732214e: a curve's time for the object (playing in music time: music time, or reference time for the reference
+ * time format) */
+static int64_t pc_time(dm_perf *pf, int32_t t, mtime_t off, int isref)
+{
+    int64_t x = (int64_t)t + (int64_t)off;
+    return isref ? M2R(pf, (mtime_t)(int32_t)x) : x;
+}
+/* 7732242d: a curve as an envelope segment (AddEnvelope), its start kept */
+static int pc_add(dm_perf *pf, void *mp, const dm_pcparam *q, pcpstate *P, const dm_pccurve *c, mtime_t off, int isref)
+{
+    int64_t a = pc_time(pf, c->start, off, isref), b = pc_time(pf, c->end, off, isref);
+    int hr = pf->tops.mp_add ? pf->tops.mp_add(pf->tctx, mp, q->index, a, b, c->v0, c->v1, c->curve, c->flags) : DM_E_FAIL;
+    if (hr < 0) return hr;
+    P->last = a;
+    pcsent *x = malloc(sizeof(*x));
+    if (x) { x->t = a; x->next = P->times; P->times = x; }
+    P->sent = 1;
+    return hr;
+}
+/* 773224fa: on a seek, the curve before the new position: what is left of it from where it is now (linear, whatever
+ * its shape), or, once over, a jump to its end value (not on a loop) */
+static int pc_catchup(dm_perf *pf, void *mp, const dm_pcparam *q, pcpstate *P, const dm_pccurve *prev, mtime_t start,
+                      mtime_t off, int isref, uint32_t flags)
+{
+    dm_pccurve c = *prev;
+    c.start = (int32_t)start;
+    if ((int32_t)start < c.end) {
+        if (c.curve != 1) {
+            long double x = (long double)(int32_t)((int32_t)start - prev->start) / (long double)(int32_t)(prev->end - prev->start);
+            if (c.curve == 4) x = x * x;
+            else if (c.curve == 8) x = sqrtl(x);
+            else if (c.curve == 0x10) x = (sinl(x * (long double)3.1415926535 - (long double)1.57079632675) + 1.0L) * 0.5L;
+            c.v0 = (float)(((long double)prev->v1 - (long double)prev->v0) * x + (long double)prev->v0);
+            c.curve = 2;
+        }
+    } else {
+        if (flags & TF_LOOP) return DM_OK;
+        c.end = (int32_t)start;
+        c.curve = 1;
+    }
+    return pc_add(pf, mp, q, P, &c, off, isref);
+}
+/* 77322fa6 (playing in music time): each parameter's curves starting in [start, end) sent to the object; on a seek,
+ * a loop, the start or a flush (or once the track changed) from the first curve at or after start, with what is left
+ * of the one before; DMUS_S_END once no curves are left */
+static int paramctl_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    dm_paramtrack *T = e->t->data;
+    pcstate *S = e->state;
+    if (!S) return DM_OK;
+    if (flags & TF_PLAY_OFF) return DM_OK;
+    if (S->gen != T->gen) {
+        int hr = pc_init(pf, ss, T, S);
+        if (hr < 0) return hr;
+    }
+    int more = 0, k = 0, pi = 0;
+    for (const dm_pcobj *o = T->objs; o && k < T->nobj; o = o->next, k++) {
+        void *mp = S->mp[k];
+        int isref = !memcmp(&o->fmt, &PC_TIME_REFERENCE, sizeof(dm_guid));
+        if (!isref && memcmp(&o->fmt, &PC_TIME_MUSIC, sizeof(dm_guid))) continue;
+        for (const dm_pcparam *q = o->params; q && pi < T->nparam; q = q->next, pi++) {
+            pcpstate *P = &S->ps[pi];
+            if (S->gen != T->gen || (flags & (TF_SEEK | TF_LOOP | TF_START | TF_FLUSH))) {
+                P->cur = 0;
+                while (P->cur < q->n && q->c[P->cur].start < start) P->cur++;
+                if (mp && P->cur > 0) pc_catchup(pf, mp, q, P, &q->c[P->cur - 1], start, off, isref, flags);
+            }
+            for (; P->cur < q->n; P->cur++) {
+                const dm_pccurve *c = &q->c[P->cur];
+                if (c->start >= start) {
+                    if (c->start >= end) break;
+                    if (mp) pc_add(pf, mp, q, P, c, off, isref);
+                }
+            }
+            if (P->cur < q->n) more = 1;
+        }
+    }
+    S->gen = T->gen;
+    return more ? DM_OK : DMUS_S_END;
+}
+/* 77322eaf EndPlay: for each parameter that was sent curves, the envelope segments over before the last one's start
+ * flushed (the original counts the parameters from 0 again for each object, so an object past the first is looked
+ * at with the first one's states); the objects let go */
+static void paramctl_endplay(dm_perf *pf, sstrack *e)
+{
+    dm_paramtrack *T = e->t->data;
+    pcstate *S = e->state;
+    if (!S) return;
+    int k = 0;
+    if (!S->flushed && S->mp)
+        for (const dm_pcobj *o = T->objs; o && k < T->nobj && k < S->nmp; o = o->next, k++) {
+            void *mp = S->mp[k];
+            if (!mp) continue;
+            int j = 0;
+            for (const dm_pcparam *q = o->params; q && j < T->nparam && j < S->nps; q = q->next, j++)
+                if (S->ps[j].sent && pf->tops.mp_flush) pf->tops.mp_flush(pf->tctx, mp, q->index, INT64_MIN, S->ps[j].last);
+            if (pf->tops.mp_release) pf->tops.mp_release(pf->tctx, mp);
+            S->mp[k] = NULL;
+        }
+    for (int i = 0; S->mp && i < S->nmp; i++) if (S->mp[i] && pf->tops.mp_release) pf->tops.mp_release(pf->tctx, S->mp[i]);
+    free(S->mp);
+    pc_free_params(S);
+    free(S);
+    e->state = NULL;
+}
+
 static void track_endplay(dm_perf *pf, sstrack *e)
 {
+    if (e->t->kind == TRK_PARAMCTL) { paramctl_endplay(pf, e); return; }
     if (e->t->kind == TRK_WAVE) { wt_endplay(pf, e); return; }
     if (e->t->kind == TRK_STYLE || e->t->kind == TRK_MOTIF || e->t->kind == TRK_PATTERN) { stytrack_endplay(e); return; }
     if (e->t->kind == TRK_SEQ && e->state) { free(((seqstate *)e->state)->ev); free(((seqstate *)e->state)->cv); }
@@ -927,6 +1084,7 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
     case TRK_LYRICS: return lyrics_play(pf, ss, e, start, end, off, flags);
     case TRK_SEGTRIG: return segtrig_play(pf, ss, e, start, end, off, flags);
+    case TRK_PARAMCTL: return paramctl_play(pf, ss, e, start, end, off, flags);
     case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN:
     case TRK_CHORDMAP: case TRK_SIGNPOST: return sty_play(pf, ss, e, start, end, off, flags);
     }

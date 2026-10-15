@@ -37,6 +37,7 @@ typedef struct { int64_t start, end; float v0, v1; uint32_t curve, flags; } dsfx
 #define DSFX_ENVF_NEUTRAL 2                 /* MPF_ENVLP_BEGIN_NEUTRALVAL */
 int dsfx_add_envelope(dsfx *f, int index, uint32_t n, const dsfx_envseg *segs);
 int dsfx_flush_envelope(dsfx *f, int index, int64_t start, int64_t end);
+int dsfx_copy_envelopes(dsfx *dst, const dsfx *src);  /* Clone's copy of the store */
 /* IMediaParamInfo: MP_PARAMINFO (type, caps, min, max, neutral, unit, label) and the enumeration's names */
 typedef struct { uint32_t type, caps; float min, max, neutral; const uint16_t *unit, *label, *enums; } dsfx_pinfo;
 int dsfx_param_info(int kind, int index, dsfx_pinfo *out);

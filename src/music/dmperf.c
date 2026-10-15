@@ -94,6 +94,7 @@ struct dm_perf {
     pchblock *blocks;                           /* +0x34 */
     dm_segstate *lists[NLISTS];                 /* +0x3c + 8k */
     int inside_c7c8;                            /* +0x10c */
+    int closed;                                 /* CloseDown: messages coming back from application tools are freed */
     int inplay;                                 /* +0x110 */
     dm_queue early, nearq, ontime, tmap, thist, notif, tsq;  /* +0x114 .. +0x144 */
     double lasttempo; mtime_t lasttempo_mt;     /* +0x150 +0x158 */
@@ -1811,8 +1812,17 @@ void dm_perf_run_app_tools(dm_perf *pf)
         if (!pf->apphead) pf->apptail = NULL;
         p->next = NULL;
         int hr = pf->tops.process ? pf->tops.process(pf->tctx, p) : DMUS_S_FREE;
-        if (hr != DM_OK && (hr != DMUS_S_REQUEUE || send_pmsg(pf, p) < 0)) pm_free(pf, p);
+        if (hr != DM_OK && (hr != DMUS_S_REQUEUE || pf->closed || send_pmsg(pf, p) < 0)) pm_free(pf, p);
     }
+}
+/* CloseDown: every message freed (the states, graphs and audiopaths they name let go) */
+void dm_perf_drop_all_messages(dm_perf *pf)
+{
+    dm_queue *qs[] = { &pf->early, &pf->nearq, &pf->ontime, &pf->notif };
+    for (int k = 0; k < 4; k++) for (dm_pmsg *p; (p = q_pop(qs[k])); ) pm_free(pf, p);
+    while (pf->apphead) { dm_pmsg *p = pf->apphead; pf->apphead = p->next; pm_free(pf, p); }
+    pf->apptail = NULL;
+    pf->closed = 1;
 }
 
 uint32_t dm_perf_realtime(dm_perf *pf)

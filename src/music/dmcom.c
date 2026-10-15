@@ -1802,6 +1802,8 @@ static void pf_closedown(rm_perf *p)
         dm_perf *pf = dm_host_perf(p->host);
         dm_perf_stop(pf, NULL, NULL, 0, 0);
         dm_perf_drop_app_messages(pf);
+        dm_perf_end_states(pf);
+        dm_perf_drop_all_messages(pf);
         dm_perf_set_graph(pf, NULL);
         dm_host_unlock(p->host);
     }
@@ -2318,8 +2320,58 @@ static void *tops_state_graph(void *ctx, dm_segstate *ss)
     return c;
 }
 static void tops_graph_release(void *ctx, void *g) { IDirectMusicGraph_Release((IDirectMusicGraph *)g); }
+/* the parameter control track's objects: IMediaParams (by its vtable: GetParam, SetParam, AddEnvelope,
+ * FlushEnvelope, SetTimeFormat) */
+static const GUID RM_IID_IMediaParams = { 0x6d6cbb61, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6e } };
+typedef struct { LONGLONG start, end; float v0, v1; DWORD curve, flags; } rm_envseg;
+typedef struct rm_mpvtbl {
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *GetParam)(void *, DWORD, float *);
+    HRESULT (WINAPI *SetParam)(void *, DWORD, float);
+    HRESULT (WINAPI *AddEnvelope)(void *, DWORD, DWORD, rm_envseg *);
+    HRESULT (WINAPI *FlushEnvelope)(void *, DWORD, LONGLONG, LONGLONG);
+    HRESULT (WINAPI *SetTimeFormat)(void *, GUID, DWORD);
+} rm_mpvtbl;
+#define MPV(mp) (*(const rm_mpvtbl **)(mp))
+/* 77322b08: the state's GetObjectInPath for IMediaParams, then SetTimeFormat */
+static void *tops_mp_get(void *ctx, dm_segstate *ss, uint32_t pch, uint32_t stage, uint32_t buffer, const dm_guid *obj,
+                         uint32_t index, const dm_guid *fmt, uint32_t fmtdata)
+{
+    rm_perf *p = ctx;
+    IUnknown *u = state_object(p, ss);
+    if (!u) return NULL;
+    void *mp = NULL;
+    HRESULT hr = IDirectMusicSegmentState8_GetObjectInPath((IDirectMusicSegmentState8 *)u, pch, stage, buffer,
+                                                           (REFGUID)obj, index, &RM_IID_IMediaParams, &mp);
+    IUnknown_Release(u);
+    if (FAILED(hr) || !mp) return NULL;
+    GUID g;
+    memcpy(&g, fmt, sizeof(g));
+    if (FAILED(MPV(mp)->SetTimeFormat(mp, g, fmtdata))) { MPV(mp)->Release(mp); return NULL; }
+    return mp;
+}
+static int tops_mp_add(void *ctx, void *mp, uint32_t param, int64_t start, int64_t end, float v0, float v1,
+                       uint32_t curve, uint32_t flags)
+{
+    rm_envseg e = { start, end, v0, v1, curve, flags };
+    return MPV(mp)->AddEnvelope(mp, param, 1, &e);
+}
+static int tops_mp_flush(void *ctx, void *mp, uint32_t param, int64_t start, int64_t end)
+{
+    return MPV(mp)->FlushEnvelope(mp, param, start, end);
+}
+/* 77316457: a state that leaves the performance lets its audiopath go (its object stays) */
+static void tops_state_end(void *ctx, dm_segstate *ss)
+{
+    rm_state *s = *dm_segstate_wrapper(ss);
+    if (s && s->path) { IDirectMusicAudioPath *a = s->path; s->path = NULL; IDirectMusicAudioPath_Release(a); }
+}
+static void tops_mp_release(void *ctx, void *mp) { MPV(mp)->Release(mp); }
 static const dm_toolops s_toolops = { tops_stamp, tops_unstamp, tops_process, tops_flush, tops_clone_ext, tops_free_ext,
-                                      tops_state_graph, tops_graph_release };
+                                      tops_state_graph, tops_graph_release, tops_mp_get, tops_mp_add, tops_mp_flush,
+                                      tops_mp_release, tops_state_end };
 
 /* the StampPMsg of the performance's, a state's and an audiopath's graph interfaces on any message */
 static HRESULT owner_stamp(rm_perf *p, DMUS_PMSG *m, int owner, void *obj)
@@ -2764,9 +2816,11 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     dm_host_unlock(p->host);
     LOG_CALL("music: PlaySegment(%s, flags %lx, %lld) -> %08x", g->seg->name, (unsigned long)flags, (long long)start, hr);
     if (hr < 0) return hr;
+    rm_state *n = calloc(1, sizeof(*n));   /* (made before the lock, put in under it: a tool may make one meanwhile) */
     dm_host_lock(p->host);
     rm_state *s = *dm_segstate_wrapper(ss);
     if (s) {        /* made on demand already (a tool or notification met the state first): it is the application's now */
+        free(n);
         InterlockedIncrement(&s->ref);
         if (s->lazy) { s->lazy = FALSE; s->xref++; }    /* it holds the play's reference now, and still its own */
         else dm_segstate_release(ss);
@@ -2779,9 +2833,8 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
         else IDirectMusicSegmentState8_Release(&s->IDirectMusicSegmentState8_iface);
         return S_OK;
     }
-    dm_host_unlock(p->host);
-    s = calloc(1, sizeof(*s));
-    if (!s) { dm_host_lock(p->host); dm_segstate_release(ss); dm_host_unlock(p->host); return E_OUTOFMEMORY; }
+    s = n;
+    if (!s) { dm_segstate_release(ss); dm_host_unlock(p->host); return E_OUTOFMEMORY; }
     s->IDirectMusicSegmentState8_iface.lpVtbl = &st_vtbl;
     s->IDirectMusicGraph_iface.lpVtbl = &stg_vtbl;
     s->ref = 1;
@@ -2790,7 +2843,6 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     s->perf = p; IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
     rm_path *pa = a ? a : p->defpath;
     if (pa) { s->path = &pa->IDirectMusicAudioPath_iface; IDirectMusicAudioPath_AddRef(s->path); }
-    dm_host_lock(p->host);
     *dm_segstate_wrapper(ss) = s;
     dm_host_unlock(p->host);
     if (out) *out = (IDirectMusicSegmentState *)&s->IDirectMusicSegmentState8_iface;

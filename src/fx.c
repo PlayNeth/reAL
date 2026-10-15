@@ -22,6 +22,9 @@ static const GUID RL_IID_IMediaObject = { 0xd8ad0f58, 0x5494, 0x4102, { 0x97, 0x
 static const GUID RL_IID_IMediaObjectInPlace = { 0x651b9ad0, 0x0fc7, 0x4aa9, { 0x95, 0x38, 0xd8, 0x99, 0x31, 0x01, 0x07, 0x41 } };
 static const GUID RL_IID_IPersistStream = { 0x00000109, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 static const GUID RL_IID_IPersist = { 0x0000010c, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+static const GUID RL_IID_IMediaParams = { 0x6d6cbb61, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6e } };
+static const GUID RL_IID_IMediaParamInfo = { 0x6d6cbb60, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6d } };
+static const GUID RL_GUID_TIME_REFERENCE = { 0x93ad712b, 0xdaa0, 0x4ffe, { 0xbc, 0x81, 0xb0, 0xce, 0x50, 0x0f, 0xcd, 0xd9 } };
 static const GUID RL_GUID_All_Objects = { 0xaa114de5, 0xc262, 0x4169, { 0xa1, 0xc8, 0x23, 0xd6, 0x98, 0xcc, 0x73, 0xb5 } };
 static const GUID RL_MEDIATYPE_Audio = { 0x73647561, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71 } };
 static const GUID RL_FORMAT_WaveFormatEx = { 0x05589f81, 0xc356, 0x11ce, { 0xbf, 0x01, 0x00, 0xaa, 0x00, 0x55, 0x59, 0x5a } };
@@ -66,6 +69,8 @@ typedef struct rl_fx {
     IMediaObject IMediaObject_iface;
     IMediaObjectInPlace IMediaObjectInPlace_iface;
     IPersistStream IPersistStream_iface;
+    const struct mpvtbl *mp_vtbl;           /* IMediaParams */
+    const struct mpivtbl *mpi_vtbl;         /* IMediaParamInfo */
     LONG ref;
     CRITICAL_SECTION cs;
     int kind, std;
@@ -87,6 +92,8 @@ static HRESULT fx_qi(rl_fx *This, REFIID riid, void **out)
     else if (IsEqualIID(riid, &RL_IID_IMediaObject)) *out = &This->IMediaObject_iface;
     else if (IsEqualIID(riid, &RL_IID_IMediaObjectInPlace)) *out = &This->IMediaObjectInPlace_iface;
     else if (IsEqualIID(riid, &RL_IID_IPersistStream) || IsEqualIID(riid, &RL_IID_IPersist)) *out = &This->IPersistStream_iface;
+    else if (IsEqualIID(riid, &RL_IID_IMediaParams) && This->kind != DSFX_I3DL2) *out = &This->mp_vtbl;
+    else if (IsEqualIID(riid, &RL_IID_IMediaParamInfo) && This->kind != DSFX_I3DL2) *out = &This->mpi_vtbl;
     else return E_NOINTERFACE;
     InterlockedIncrement(&This->ref);
     return S_OK;
@@ -335,6 +342,149 @@ static IMediaObjectVtbl mo_vtbl = {
     mo_ProcessOutput, mo_Lock,
 };
 
+/* IMediaParams / IMediaParamInfo (dsdmo's CParams: 0x100013d8 and the info interface beside it); envelopes in
+ * reference time, the only time format */
+typedef struct mpvtbl {
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *GetParam)(void *, DWORD, float *);
+    HRESULT (WINAPI *SetParam)(void *, DWORD, float);
+    HRESULT (WINAPI *AddEnvelope)(void *, DWORD, DWORD, const dsfx_envseg *);
+    HRESULT (WINAPI *FlushEnvelope)(void *, DWORD, LONGLONG, LONGLONG);
+    HRESULT (WINAPI *SetTimeFormat)(void *, GUID, DWORD);
+} mpvtbl;
+typedef struct mpivtbl {
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *GetParamCount)(void *, DWORD *);
+    HRESULT (WINAPI *GetParamInfo)(void *, DWORD, void *);
+    HRESULT (WINAPI *GetParamText)(void *, DWORD, WCHAR **);
+    HRESULT (WINAPI *GetNumTimeFormats)(void *, DWORD *);
+    HRESULT (WINAPI *GetSupportedTimeFormat)(void *, DWORD, GUID *);
+    HRESULT (WINAPI *GetCurrentTimeFormat)(void *, GUID *, DWORD *);
+} mpivtbl;
+static rl_fx *from_mp(void *i) { return impl_from(i, rl_fx, mp_vtbl); }
+static rl_fx *from_mpi(void *i) { return impl_from(i, rl_fx, mpi_vtbl); }
+
+static HRESULT WINAPI mp_QueryInterface(void *i, REFIID riid, void **out) { return fx_qi(from_mp(i), riid, out); }
+static ULONG WINAPI mp_AddRef(void *i) { return fx_addref(from_mp(i)); }
+static ULONG WINAPI mp_Release(void *i) { return fx_release(from_mp(i)); }
+/* 10018da0 */
+static HRESULT WINAPI mp_GetParam(void *i, DWORD idx, float *v)
+{
+    rl_fx *This = from_mp(i);
+    if (!v) return E_POINTER;
+    if (idx >= (DWORD)dsfx_nparams(This->kind)) return E_INVALIDARG;
+    EnterCriticalSection(&This->cs);
+    *v = dsfx_get_param(This->fx, idx);
+    LeaveCriticalSection(&This->cs);
+    return S_OK;
+}
+/* the effect's SetParam (10009450 ...): checked, worked out, kept */
+static HRESULT WINAPI mp_SetParam(void *i, DWORD idx, float v)
+{
+    rl_fx *This = from_mp(i);
+    unsigned int cw = rl_fpu_enter();
+    EnterCriticalSection(&This->cs);
+    HRESULT hr = idx < (DWORD)dsfx_nparams(This->kind) ? dsfx_set_param(This->fx, idx, v) : E_INVALIDARG;
+    LeaveCriticalSection(&This->cs);
+    rl_fpu_leave(cw);
+    LOG_CALL("FX[%d]::SetParam(%lu, %g) -> %08lx", This->kind, (unsigned long)idx, v, (unsigned long)hr);
+    return hr;
+}
+/* 10018ef0 */
+static HRESULT WINAPI mp_AddEnvelope(void *i, DWORD idx, DWORD n, const dsfx_envseg *segs)
+{
+    rl_fx *This = from_mp(i);
+    if (!segs) return E_POINTER;
+    EnterCriticalSection(&This->cs);
+    HRESULT hr = dsfx_add_envelope(This->fx, idx < 32 ? (int)idx : -1, n, segs);
+    LeaveCriticalSection(&This->cs);
+    LOG_CALL("FX[%d]::AddEnvelope(%lu, %lu) -> %08lx", This->kind, (unsigned long)idx, (unsigned long)n, (unsigned long)hr);
+    return hr;
+}
+/* 10019030 */
+static HRESULT WINAPI mp_FlushEnvelope(void *i, DWORD idx, LONGLONG start, LONGLONG end)
+{
+    rl_fx *This = from_mp(i);
+    EnterCriticalSection(&This->cs);
+    HRESULT hr = dsfx_flush_envelope(This->fx, idx < 32 ? (int)idx : -1, start, end);
+    LeaveCriticalSection(&This->cs);
+    return hr;
+}
+/* 10019110: reference time only */
+static HRESULT WINAPI mp_SetTimeFormat(void *i, GUID fmt, DWORD data)
+{
+    return IsEqualGUID(&fmt, &RL_GUID_TIME_REFERENCE) ? S_OK : E_INVALIDARG;
+}
+static const mpvtbl mp_vtbl = { mp_QueryInterface, mp_AddRef, mp_Release, mp_GetParam, mp_SetParam, mp_AddEnvelope,
+                                mp_FlushEnvelope, mp_SetTimeFormat };
+
+static HRESULT WINAPI mpi_QueryInterface(void *i, REFIID riid, void **out) { return fx_qi(from_mpi(i), riid, out); }
+static ULONG WINAPI mpi_AddRef(void *i) { return fx_addref(from_mpi(i)); }
+static ULONG WINAPI mpi_Release(void *i) { return fx_release(from_mpi(i)); }
+static HRESULT WINAPI mpi_GetParamCount(void *i, DWORD *n)
+{
+    if (!n) return E_POINTER;
+    *n = dsfx_nparams(from_mpi(i)->kind);
+    return S_OK;
+}
+static size_t wlen(const uint16_t *s) { size_t n = 0; while (s[n]) n++; return n; }
+/* 10018750: MP_PARAMINFO */
+static HRESULT WINAPI mpi_GetParamInfo(void *i, DWORD idx, void *out)
+{
+    struct { DWORD type, caps; float mn, mx, nt; WCHAR unit[32], label[32]; } *o = out;
+    dsfx_pinfo pi;
+    if (!out) return E_POINTER;
+    if (idx >= 32 || dsfx_param_info(from_mpi(i)->kind, idx, &pi) < 0) return E_INVALIDARG;
+    memset(o, 0, sizeof(*o));
+    o->type = pi.type; o->caps = pi.caps; o->mn = pi.min; o->mx = pi.max; o->nt = pi.neutral;
+    memcpy(o->unit, pi.unit, (wlen(pi.unit) + 1) * 2);
+    memcpy(o->label, pi.label, (wlen(pi.label) + 1) * 2);
+    return S_OK;
+}
+/* 100187a0: label, unit and the enumeration's names, each ended by a NUL, then another */
+static HRESULT WINAPI mpi_GetParamText(void *i, DWORD idx, WCHAR **out)
+{
+    dsfx_pinfo pi;
+    if (!out) return E_POINTER;
+    if (idx >= 32 || dsfx_param_info(from_mpi(i)->kind, idx, &pi) < 0) return E_INVALIDARG;
+    size_t a = wlen(pi.label), b = wlen(pi.unit), c = wlen(pi.enums), n = a + b + c + 3;
+    WCHAR *t = CoTaskMemAlloc((n + 1) * sizeof(WCHAR));
+    if (!t) return E_OUTOFMEMORY;
+    memcpy(t, pi.label, a * 2); t[a] = 0;
+    memcpy(t + a + 1, pi.unit, b * 2); t[a + 1 + b] = 0;
+    for (size_t k = 0; k < c; k++) t[a + b + 2 + k] = pi.enums[k] == ',' ? 0 : pi.enums[k];
+    t[n - 1] = 0; t[n] = 0;
+    *out = t;
+    return S_OK;
+}
+static HRESULT WINAPI mpi_GetNumTimeFormats(void *i, DWORD *n)
+{
+    if (!n) return E_POINTER;
+    *n = 1;
+    return S_OK;
+}
+static HRESULT WINAPI mpi_GetSupportedTimeFormat(void *i, DWORD idx, GUID *g)
+{
+    if (!g) return E_POINTER;
+    if (idx >= 1) return E_INVALIDARG;
+    *g = RL_GUID_TIME_REFERENCE;
+    return S_OK;
+}
+static HRESULT WINAPI mpi_GetCurrentTimeFormat(void *i, GUID *g, DWORD *data)
+{
+    if (!g || !data) return E_POINTER;
+    *g = RL_GUID_TIME_REFERENCE;
+    *data = 0;
+    return S_OK;
+}
+static const mpivtbl mpi_vtbl = { mpi_QueryInterface, mpi_AddRef, mpi_Release, mpi_GetParamCount, mpi_GetParamInfo,
+                                  mpi_GetParamText, mpi_GetNumTimeFormats, mpi_GetSupportedTimeFormat,
+                                  mpi_GetCurrentTimeFormat };
+
 /* IMediaObjectInPlace */
 static HRESULT WINAPI ip_QueryInterface(IMediaObjectInPlace *i, REFIID riid, void **out) { return fx_qi(from_ip(i), riid, out); }
 static ULONG WINAPI ip_AddRef(IMediaObjectInPlace *i) { return fx_addref(from_ip(i)); }
@@ -347,7 +497,7 @@ static HRESULT WINAPI ip_Process(IMediaObjectInPlace *i, ULONG size, BYTE *data,
     if (!This->has_in || !This->has_out) { LeaveCriticalSection(&This->cs); return DMO_E_TYPE_NOT_SET; }
     if (flags & DMO_INPLACE_ZERO) memset(data, This->wf.wBitsPerSample == 8 ? 0x80 : 0, size);
     unsigned int cw = rl_fpu_enter();
-    dsfx_process(This->fx, data, size / This->wf.nBlockAlign);
+    dsfx_process_at(This->fx, data, size / This->wf.nBlockAlign, t);
     rl_fpu_leave(cw);
     LeaveCriticalSection(&This->cs);
     return S_OK;
@@ -366,6 +516,7 @@ static HRESULT WINAPI ip_Clone(IMediaObjectInPlace *i, IMediaObjectInPlace **out
     unsigned int cw = rl_fpu_enter();
     EnterCriticalSection(&This->cs);
     dsfx_get_all(This->fx, p);
+    if (This->kind != DSFX_I3DL2) dsfx_copy_envelopes(n->fx, This->fx);
     dsfx_set_all(n->fx, p);
     if (This->kind == DSFX_I3DL2) {
         int32_t q = 0;
@@ -441,6 +592,8 @@ static rl_fx *fx_new(int std)
     This->IMediaObject_iface.lpVtbl = &mo_vtbl;
     This->IMediaObjectInPlace_iface.lpVtbl = &ip_vtbl;
     This->IPersistStream_iface.lpVtbl = &ps_vtbl;
+    This->mp_vtbl = &mp_vtbl;
+    This->mpi_vtbl = &mpi_vtbl;
     This->ref = 1;
     This->std = std;
     This->kind = s_std[std].kind;
@@ -674,13 +827,14 @@ void rl_fxchain_discontinuity(rl_fxchain *c)
     for (DWORD i = 0; c && i < c->n; i++) if (c->e[i].mo) IMediaObject_Discontinuity(c->e[i].mo, 0);
 }
 
-void rl_fxchain_process(rl_fxchain *c, BYTE *data, DWORD bytes)
+void rl_fxchain_process_at(rl_fxchain *c, BYTE *data, DWORD bytes, LONGLONG t)
 {
     for (DWORD i = 0; c && i < c->n; i++) {
         if (c->e[i].send) { if (c->ops) c->ops->mix(c->ctx, c->e[i].send->target, data, bytes, c->e[i].send->gain, c->nch); }
-        else IMediaObjectInPlace_Process(c->e[i].ip, bytes, data, 0, 0);
+        else IMediaObjectInPlace_Process(c->e[i].ip, bytes, data, t, 0);
     }
 }
+void rl_fxchain_process(rl_fxchain *c, BYTE *data, DWORD bytes) { rl_fxchain_process_at(c, data, bytes, 0); }
 
 /* DirectSound's buffer configuration effects (DSBC 'DSFX' forms, 6efdb574): the object made at load (as CoCreateInstance
  * with IID_IMediaObject: ours for the standard classes) */

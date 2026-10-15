@@ -22,6 +22,8 @@ HRESULT rl_fxchain_get_object(rl_fxchain *c, REFGUID cls, DWORD index, REFIID ii
 /* the mixer's side: a fresh start (Play, SetCurrentPosition), and frames processed in place */
 void    rl_fxchain_discontinuity(rl_fxchain *c);
 void    rl_fxchain_process(rl_fxchain *c, BYTE *data, DWORD bytes);
+/* a DirectMusic sink's buffer (6efd7afc): with the reference time of its first frame, for parameter envelopes */
+void    rl_fxchain_process_at(rl_fxchain *c, BYTE *data, DWORD bytes, LONGLONG t);
 
 /* DirectMusic's buffers made from a buffer configuration (DSBC): the effects made at load (IMediaObject; ours for
  * the standard classes), and the chain of a buffer made from it, which clones them.  Sends (GUID_DSFX_SEND) go to

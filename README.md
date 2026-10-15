@@ -59,7 +59,7 @@ diffed line by line, and offline captures are compared event by event.
 | Composer: ComposeTransition / AutoTransition, Segment::Compose with from/to segments, recomposing while a segment plays | ✅ |
 | Start times: align, valid starts, markers, segment end | ✅ |
 | Lyrics and segment trigger tracks | ✅ |
-| Parameter control track | 🔧 in progress |
+| Parameter control track, effect parameter envelopes (IMediaParams) | ✅ |
 | Containers (.con), standalone track objects (CoCreateInstance, Load, direct InitPlay/Play) | ⏳ |
 | Scripts (dmscript, AudioVBScript) | ⏳ (last) |
 

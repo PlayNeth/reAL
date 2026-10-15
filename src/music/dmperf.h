@@ -46,6 +46,8 @@ typedef struct {
 
 dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx);
 void dm_perf_free(dm_perf *pf);
+void dm_perf_end_states(dm_perf *pf);
+void dm_perf_drop_all_messages(dm_perf *pf);   /* CloseDown: every queued message freed */       /* CloseDown: every segment state shut down (tracks, segment, audiopath let go) */
 /* IDirectMusicPerformance::AddPort / AssignPChannelBlock / AssignPChannel */
 int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx);
 int dm_perf_assign_block(dm_perf *pf, uint32_t block, int port, uint32_t group);
@@ -230,6 +232,16 @@ typedef struct {
     /* the graph a new segment state starts with (a clone of its segment's; one reference) and a graph reference let go */
     void *(*state_graph)(void *ctx, dm_segstate *ss);
     void (*graph_release)(void *ctx, void *graph);
+    /* the parameter control track: an object's IMediaParams in the state's path (GetObjectInPath, then SetTimeFormat
+     * with the format and its data; NULL if either fails), its envelopes, and the reference let go */
+    void *(*mp_get)(void *ctx, dm_segstate *ss, uint32_t pch, uint32_t stage, uint32_t buffer, const dm_guid *obj,
+                    uint32_t index, const dm_guid *fmt, uint32_t fmtdata);
+    int (*mp_add)(void *ctx, void *mp, uint32_t param, int64_t start, int64_t end, float v0, float v1, uint32_t curve,
+                  uint32_t flags);
+    int (*mp_flush)(void *ctx, void *mp, uint32_t param, int64_t start, int64_t end);
+    void (*mp_release)(void *ctx, void *mp);
+    /* a state leaves the performance (its segment and audiopath let go) */
+    void (*state_end)(void *ctx, dm_segstate *ss);
 } dm_toolops;
 void dm_perf_set_toolops(dm_perf *pf, const dm_toolops *ops, void *ctx);
 /* the graphs: the setters take over one reference (released through graph_release), the getters lend theirs */

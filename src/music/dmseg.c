@@ -49,6 +49,9 @@ static const dm_guid CLSID_MarkerTrack = { 0x55a8fd00, 0x4288, 0x11d3, { 0x9b, 0
 static const dm_guid CLSID_SignPostTrack = { 0xf17e8672, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_LyricsTrack  = { 0x995c1cf5, 0x54ff, 0x11d3, { 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
 static const dm_guid CLSID_SegTriggerTrack = { 0xbae4d665, 0x4ea1, 0x11d3, { 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
+static const dm_guid CLSID_ParamControlTrack = { 0x4be0537b, 0x5c19, 0x11d3, { 0x8b, 0xdc, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
+static const dm_guid GUID_TIME_MUSIC = { 0x0574c49d, 0x5b04, 0x4b15, { 0xa5, 0x42, 0xae, 0x28, 0x20, 0x30, 0x11, 0x7b } };
+static const dm_guid GUID_TIME_REFERENCE = { 0x93ad712b, 0xdaa0, 0x4ffe, { 0xbc, 0x81, 0xb0, 0xce, 0x50, 0x0f, 0xcd, 0xd9 } };
 static const dm_guid CLSID_WaveTrack    = { 0xeed36461, 0x9ea5, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
 
 static void get_guid(dm_guid *g, const uint8_t *p)
@@ -789,6 +792,127 @@ static dm_segtrigtrack *segtrigtrack_clone(const dm_segtrigtrack *T, mtime_t sta
     return C;
 }
 
+
+/* ------------------------------------------------------------------ the parameter control track */
+static void pcobj_free(dm_pcobj *o)
+{
+    if (!o) return;
+    for (dm_pcparam *q = o->params, *n; q; q = n) { n = q->next; free(q->c); free(q); }
+    free(o);
+}
+void dm_paramtrack_free(dm_paramtrack *T)
+{
+    if (!T) return;
+    for (dm_pcobj *o = T->objs, *n; o; o = n) { n = o->next; pcobj_free(o); }
+    free(T);
+}
+#define E_PARAMCTL ((int32_t)0x88781222)
+/* the next chunk of the kind and id, the ones before it skipped (7732397a) */
+static int find_chunk(rd *r, int list, uint32_t want, rd *c)
+{
+    uint32_t id, type;
+    while (next_chunk(r, &id, c, &type)) {
+        if (list ? (id == FCC('L','I','S','T') && type == want) : id == want) return 1;
+    }
+    return 0;
+}
+/* 77322602: a 'prpl' list: 'prph' (DMUS_IO_PARAMCONTROLTRACK_PARAMHEADER) and 'prcc' (the curves, after the size of
+ * one); without 'prcc' the parameter is left out */
+static int32_t pcparam_load(dm_paramtrack *T, dm_pcobj *o, rd r)
+{
+    rd c;
+    if (!find_chunk(&r, 0, FCC('p','r','p','h'), &c)) return E_PARAMCTL;
+    uint8_t h[8] = { 0 };
+    memcpy(h, c.p, (size_t)(c.e - c.p) < 8 ? (size_t)(c.e - c.p) : 8);
+    if (!find_chunk(&r, 0, FCC('p','r','c','c'), &c)) return DM_OK;
+    size_t n = (size_t)(c.e - c.p);
+    if (n < 4) return DM_E_FAIL;
+    uint32_t isz = u32(c.p);
+    n -= 4;
+    if (!isz || n % isz) return DM_E_FAIL;
+    dm_pcparam *q = calloc(1, sizeof(*q));
+    if (!q) return DM_E_OUTOFMEMORY;
+    q->flags = u32(h); q->index = u32(h + 4);
+    q->n = (int)(n / isz);
+    q->c = calloc(q->n ? q->n : 1, sizeof(dm_pccurve));
+    if (!q->c) { free(q); return DM_E_OUTOFMEMORY; }
+    for (int k = 0; k < q->n; k++) {
+        uint8_t b[24] = { 0 };
+        memcpy(b, c.p + 4 + k * isz, isz < 24 ? isz : 24);
+        dm_pccurve *x = &q->c[k];
+        x->start = (int32_t)u32(b); x->end = (int32_t)u32(b + 4);
+        memcpy(&x->v0, b + 8, 4); memcpy(&x->v1, b + 12, 4);
+        x->curve = u32(b + 16); x->flags = u32(b + 20);
+    }
+    q->next = o->params; o->params = q;
+    T->nparam++;
+    return DM_OK;
+}
+/* 773229d3: a 'prol' list: 'proh' (its time format music or reference time), then 'prpl' lists */
+static int32_t pcobj_load(dm_paramtrack *T, rd r)
+{
+    rd c;
+    if (!find_chunk(&r, 0, FCC('p','r','o','h'), &c)) return E_PARAMCTL;
+    uint8_t h[0x34] = { 0 };
+    memcpy(h, c.p, (size_t)(c.e - c.p) < sizeof(h) ? (size_t)(c.e - c.p) : sizeof(h));
+    dm_pcobj *o = calloc(1, sizeof(*o));
+    if (!o) return DM_E_OUTOFMEMORY;
+    o->flags = u32(h); get_guid(&o->fmt, h + 4);
+    o->pch = u32(h + 0x14); o->stage = u32(h + 0x18); o->buffer = u32(h + 0x1c);
+    get_guid(&o->obj, h + 0x20); o->index = u32(h + 0x30);
+    if (!guid_eq(&o->fmt, &GUID_TIME_MUSIC) && !guid_eq(&o->fmt, &GUID_TIME_REFERENCE)) { pcobj_free(o); return E_PARAMCTL; }
+    while (find_chunk(&r, 1, FCC('p','r','p','l'), &c)) {
+        int32_t hr = pcparam_load(T, o, c);
+        if (hr < 0) { pcobj_free(o); return hr; }
+    }
+    o->next = T->objs; T->objs = o;
+    T->nobj++;
+    return DM_OK;
+}
+/* 77322c8f: the 'prmt' list's 'prol' lists */
+dm_paramtrack *dm_paramtrack_load(const uint8_t *p, size_t n, int32_t *hr)
+{
+    dm_paramtrack *T = calloc(1, sizeof(*T));
+    *hr = DM_E_OUTOFMEMORY;
+    if (!T) return NULL;
+    T->gen = 1;
+    *hr = DM_OK;
+    rd r = { p, p + n }, c;
+    while (*hr >= 0 && find_chunk(&r, 1, FCC('p','r','o','l'), &c)) *hr = pcobj_load(T, c);
+    if (*hr < 0) { dm_paramtrack_free(T); return NULL; }
+    return T;
+}
+/* 773227bf: the curves from the first not over before start to the last starting before end, moved to 0; the
+ * lists in the same order */
+static dm_paramtrack *paramtrack_clone(const dm_paramtrack *T, mtime_t start, mtime_t end)
+{
+    dm_paramtrack *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    C->gen = 2;
+    dm_pcobj **ot = &C->objs;
+    for (const dm_pcobj *o = T->objs; o; o = o->next) {
+        dm_pcobj *x = malloc(sizeof(*x));
+        if (!x) break;
+        *x = *o; x->next = NULL; x->params = NULL;
+        dm_pcparam **qt = &x->params;
+        for (const dm_pcparam *q = o->params; q; q = q->next) {
+            int a = 0, b;
+            while (a < q->n && q->c[a].end < start) a++;
+            for (b = a; b < q->n && q->c[b].start < end; b++) {}
+            dm_pcparam *y = calloc(1, sizeof(*y));
+            if (!y) break;
+            y->flags = q->flags; y->index = q->index; y->n = b - a;
+            y->c = malloc((y->n ? y->n : 1) * sizeof(dm_pccurve));
+            if (!y->c) { free(y); break; }
+            for (int k = 0; k < y->n; k++) { y->c[k] = q->c[a + k]; y->c[k].start -= start; y->c[k].end -= start; }
+            *qt = y; qt = &y->next;
+        }
+        *ot = x; ot = &x->next;
+    }
+    C->nobj = T->nobj; C->nparam = T->nparam;
+    return C;
+}
+
 typedef struct { int kind; dm_guid clsid; uint32_t position, group, config, priority; void *data; } ldtrack;
 static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
 {
@@ -861,6 +985,11 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
                 t.data = dm_segtrigtrack_load(c.p, (size_t)(c.e - c.p), cb, &hr);
                 if (!t.data) { s->partial = 1; return; }
                 t.kind = TRK_SEGTRIG;
+            } else if (guid_eq(&t.clsid, &CLSID_ParamControlTrack) && id == FCC('L','I','S','T') && type == FCC('p','r','m','t')) {
+                int32_t hr;
+                t.data = dm_paramtrack_load(c.p, (size_t)(c.e - c.p), &hr);
+                if (!t.data) { s->partial = 1; return; }
+                t.kind = TRK_PARAMCTL;
             } else if (guid_eq(&t.clsid, &CLSID_MuteTrack) && id == FCC('m','u','t','e')) {
                 int32_t hr;
                 t.data = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr);
@@ -1026,6 +1155,7 @@ static void free_track(dm_track *t)
     case TRK_MARKER: dm_markertrack_free(t->data); break;
     case TRK_LYRICS: dm_lyricstrack_free(t->data); break;
     case TRK_SEGTRIG: dm_segtrigtrack_free(t->data); break;
+    case TRK_PARAMCTL: dm_paramtrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
@@ -1339,7 +1469,8 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
 {
     *hr = DM_OK;
     /* (the lyrics and segment trigger tracks' Clone takes any range) */
-    if ((start < 0 || end < start) && t->kind != TRK_LYRICS && t->kind != TRK_SEGTRIG) { *hr = DM_E_INVALIDARG; return NULL; }
+    if ((start < 0 || end < start) && t->kind != TRK_LYRICS && t->kind != TRK_SEGTRIG &&
+        t->kind != TRK_PARAMCTL) { *hr = DM_E_INVALIDARG; return NULL; }
     void *d = NULL;
     switch (t->kind) {
     case TRK_TEMPO: d = clone_tempo(t->data, start, end); break;
@@ -1358,6 +1489,7 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_MARKER: d = markertrack_clone(t->data, start, end); break;      /* 77321e28 */
     case TRK_LYRICS: d = lyricstrack_clone(t->data, start, end); break;
     case TRK_SEGTRIG: d = segtrigtrack_clone(t->data, start, end); break;
+    case TRK_PARAMCTL: d = paramtrack_clone(t->data, start, end); break;
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }

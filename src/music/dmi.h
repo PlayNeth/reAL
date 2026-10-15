@@ -313,6 +313,19 @@ typedef struct { dm_segtrig *items; uint32_t gen, hflags; int depth; } dm_segtri
 dm_lyricstrack *dm_lyricstrack_load(const uint8_t *p, size_t n, int32_t *hr);   /* the 'lyrt' list's data */
 void dm_lyricstrack_free(dm_lyricstrack *T);
 void dm_segtrigtrack_free(dm_segtrigtrack *T);
+/* the parameter control track (dmime 77310eae): objects in the path ('proh', DMUS_IO_PARAMCONTROLTRACK_OBJECTHEADER)
+ * with parameters ('prph') and their curves ('prcc', DMUS_IO_PARAMCONTROLTRACK_CURVEINFO); both lists newest first
+ * (the reverse of the file), as the original keeps them */
+typedef struct { int32_t start, end; float v0, v1; uint32_t curve, flags; } dm_pccurve;
+typedef struct dm_pcparam { struct dm_pcparam *next; uint32_t flags, index; dm_pccurve *c; int n; } dm_pcparam;
+typedef struct dm_pcobj {
+    struct dm_pcobj *next;
+    uint32_t flags; dm_guid fmt; uint32_t pch, stage, buffer; dm_guid obj; uint32_t index;
+    dm_pcparam *params;
+} dm_pcobj;
+typedef struct { dm_pcobj *objs; int nobj, nparam; uint32_t gen; } dm_paramtrack;
+dm_paramtrack *dm_paramtrack_load(const uint8_t *p, size_t n, int32_t *hr);    /* the 'prmt' list's data */
+void dm_paramtrack_free(dm_paramtrack *T);
 typedef struct { mtime_t mt; uint32_t len; uint8_t *data; } dm_sysexitem;
 typedef struct { dm_sysexitem *items; int n; uint32_t validate; } dm_sysextrack;
 /* a track object (IDirectMusicTrack): shared by the segments it was inserted in and the states playing it */

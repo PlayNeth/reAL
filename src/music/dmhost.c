@@ -340,7 +340,7 @@ static void sink_pass(dm_host *h)
                         else out[i] = a[i];
                     }
                 }
-                if (x->fx) rl_fxchain_process(x->fx, (BYTE *)out, n * 2 * x->nch);
+                if (x->fx) rl_fxchain_process_at(x->fx, (BYTE *)out, n * 2 * x->nch, h->rt0 + h->written * 10000000 / h->rate);
                 write_buffer(x->b, at, out, n, x->nch);
                 b2 = NULL;
                 break;

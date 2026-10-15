@@ -97,6 +97,34 @@ Doppler, and WASAPI output.
 - A track whose Load fails is left out of the segment, which loads with DMUS_S_PARTIALLOAD.
 - `tests/comcmp.sh trktest.exe lyrics` and `trigger` (`cases.py tracks`) match.
 
+**DirectMusic: parameter control track** (`src/music/dmseg.c`, `dmtrack.c`, from dmime 77310eae)
+- Load ('prmt': 'prol' objects with 'proh', 'prpl' parameters with 'prph' and 'prcc' curves; a time format other
+  than music or reference time fails it, a parameter without curves is left out); both lists kept newest first,
+  as dmime keeps them. Clone keeps the curves from the first one not over before the start.
+- InitPlay asks the state's path for each object's IMediaParams (GetObjectInPath) and sets its time format;
+  an object that refuses it (dsdmo's effects take reference time only) gets nothing.
+- Play sends each curve starting in the range as one AddEnvelope segment (music time converted to reference
+  time for that format). On a seek, loop, start or flush it starts again from the first curve at or after the
+  position; what is left of the curve before is sent linear from its current value, whatever its shape, or as a
+  jump to its end once over (not on a loop). DMUS_S_END once no curves are left.
+- EndPlay flushes, for each parameter that was sent curves, what ended before the last one's start; dmime counts
+  the parameters from 0 again for each object, so only the first object's states are looked at (kept).
+  GetParam/SetParam/IsParamSupported: unsupported.
+- `FXPROBE_LOG=probe.txt tests/comcmp.sh trktest.exe param` (`cases.py paramctl`) matches: the envelopes dmime
+  gives the probe effect (tests/fxprobe.c now has IMediaParams) for plays from the start, from a start point in a
+  curve, with a loop, and of a clone. dmime spins forever on a clone shorter than its loop points; the test
+  avoids that.
+- reAL's standard effects (`src/dsfx.c`, `src/fx.c`) have IMediaParams and IMediaParamInfo as dsdmo's CParams:
+  AddEnvelope, FlushEnvelope, SetParam (which turns the newest segment into a jump), GetParam (the newest
+  segment's end value), reference time only; Process works in 3 ms quanta and follows the envelopes to each
+  quantum's time stamp; Clone copies the envelopes. The sink gives its buffers' effects the reference time of
+  each piece it mixes. `tools/dsfx/cmp.sh` with `DMO_ENV`, `DMO_SETPARAM`, `DMO_FLUSH`, `DMO_T0` and `DMO_INFO`
+  compares envelopes, curves and parameter descriptions with dsdmo.dll: all match.
+- Found on the way: CloseDown now shuts down every segment state and frees every queued message, and a state
+  lets its audiopath go when it leaves the performance, as dmime does (an application keeping a state no longer
+  keeps the audiopath's buffers and effects); a race in PlaySegment could leave a second state object holding
+  the audiopath.
+
 **DirectMusic: tool graphs and application tools**
 - The graph object (CLSID_DirectMusicGraph, `src/music/dmgraph.c`, from dmime's CGraph): InsertTool, GetTool,
   RemoveTool (a removed tool stays referenced until the graph goes), StampPMsg, the descriptor, IPersistStream::Load

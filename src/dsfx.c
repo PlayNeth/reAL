@@ -1134,6 +1134,22 @@ int dsfx_add_envelope(dsfx *f, int i, uint32_t n, const dsfx_envseg *segs)
     }
     return DSFX_OK;
 }
+/* 10018990 (IMediaObjectInPlace::Clone): the segments copied, in order; nothing followed yet */
+int dsfx_copy_envelopes(dsfx *dst, const dsfx *src)
+{
+    if (dst->kind != src->kind || dst->kind == DSFX_I3DL2) return DSFX_E_INVALIDARG;
+    for (int i = 0; i < s_nparams[dst->kind]; i++) {
+        while (dst->env[i]) { dsfx_node *n = dst->env[i]; dst->env[i] = n->next; free(n); }
+        dsfx_node **pp = &dst->env[i];
+        for (const dsfx_node *n = src->env[i]; n; n = n->next) {
+            if (!(*pp = malloc(sizeof(**pp)))) return DSFX_E_OUTOFMEMORY;
+            (*pp)->s = n->s; (*pp)->next = NULL;
+            pp = &(*pp)->next;
+        }
+        dst->p[i] = src->p[i];
+    }
+    return DSFX_OK;
+}
 /* 10019030 FlushEnvelope: the segments wholly inside [start, end] dropped */
 int dsfx_flush_envelope(dsfx *f, int i, int64_t start, int64_t end)
 {

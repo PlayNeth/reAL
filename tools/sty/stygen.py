@@ -48,6 +48,7 @@ CLSID = {
     'segment': 'd2ac2882-b39b-11d1-8704-00600893b1bd',
     'lyricstrack': '995c1cf5-54ff-11d3-8bda-00600893b1b6',
     'segtriggertrack': 'bae4d665-4ea1-11d3-8bda-00600893b1b6',
+    'paramcontroltrack': '4be0537b-5c19-11d3-8bdc-00600893b1b6',
     'style': 'd2ac288a-b39b-11d1-8704-00600893b1bd',
     'styletrack': 'd2ac288d-b39b-11d1-8704-00600893b1bd',
     'chordtrack': 'd2ac288b-b39b-11d1-8704-00600893b1bd',
@@ -342,6 +343,23 @@ class Segment:
         self.track(CLSID['segtriggertrack'], None, 'segt', LIST('segt', chunk('sgth', struct.pack('<I', flags)), LIST('lsgl', *ev)),
                    group=group)
 
+    def paramcontrol(self, objs, group=1):
+        """a parameter control track: objs (time format 'music' or 'ref' (or a GUID), pchannel, stage, buffer, object
+        GUID, index, params); params (flags, index, curves); curves (start, end, start value, end value, curve type,
+        flags).  A curve list of None leaves 'prcc' out."""
+        fmts = {'music': '0574c49d-5b04-4b15-a542-ae282030117b', 'ref': '93ad712b-daa0-4ffe-bc81-b0ce500fcdd9'}
+        ol = []
+        for fmt, pch, stage, buf, obj, idx, params in objs:
+            items = [chunk('proh', struct.pack('<I', 0) + guid_bytes(fmts.get(fmt, fmt)) + struct.pack('<III', pch, stage, buf)
+                           + guid_bytes(obj) + struct.pack('<I', idx))]
+            for fl, pidx, curves in params:
+                body = [chunk('prph', struct.pack('<II', fl, pidx))]
+                if curves is not None:
+                    body.append(chunk('prcc', struct.pack('<I', 24) + b''.join(struct.pack('<iiffII', *c) for c in curves)))
+                items.append(LIST('prpl', *body))
+            ol.append(LIST('prol', *items))
+        self.track(CLSID['paramcontroltrack'], None, 'prmt', LIST('prmt', *ol), group=group)
+
     def markers(self, starts=(), plays=(), group=1):
         """a marker track ('MARK'): valid start times ('vals') and play markers ('play')"""
         items = []
@@ -354,3 +372,24 @@ class Segment:
             struct.pack('<qII', 0, self.flags, 0)
         return RIFF('DMSG', chunk('segh', segh), chunk('guid', guid_bytes(self.guid)),
                     chunk('vers', struct.pack('<II', 0x10000, 0)), unfo(self.name), LIST('trkl', *self.tracks))
+
+
+def audiopath_config(buffers, pch_count=16):
+    """an audiopath configuration ('DMAP'): one synth port for PChannels 0.. pch_count, into the buffers given as
+    (buffer GUID, channels, effects); effects (class GUID, data bytes or None)"""
+    pcfh = guid_bytes('26bb9432-45fe-48d3-a375-2472c5e3e786') + struct.pack('<III', 0, pch_count, 1)
+    pprh = struct.pack('<9I', 36, 0x2 | 0x80, 0, (pch_count + 15) // 16, 0, 0, 0, 0, 0x1)
+    pchh = struct.pack('<IIII', 0, pch_count, len(buffers), 0) + b''.join(guid_bytes(b[0]) for b in buffers)
+    port = LIST('pcfl', chunk('pcfh', pcfh), chunk('pprh', pprh), LIST('pchl', chunk('pchh', pchh)))
+    items = [LIST('pcsl', port)]
+    for g, nch, fx in buffers:
+        dsbc = [chunk('guid', guid_bytes(g)), chunk('dsbd', struct.pack('<IH2xiiI', 0x80 | 0x200, nch, 0, 0, 0)),
+                chunk('bsid', struct.pack('<%dI' % nch, *range(nch)))]
+        if fx:
+            fl = []
+            for cls, data in fx:
+                hdr = struct.pack('<I', 0) + guid_bytes(cls) + b'\0' * 32 + struct.pack('<I', 0)
+                fl.append(RIFF('DSFX', chunk('fxhr', hdr), *([chunk('data', data)] if data else [])))
+            dsbc.append(LIST('fxls', *fl))
+        items.append(LIST('dbfl', chunk('ddah', guid_bytes(g) + struct.pack('<I', 0)), RIFF('DSBC', *dsbc)))
+    return RIFF('DMAP', *items)

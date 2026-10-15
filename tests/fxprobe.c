@@ -3,6 +3,8 @@
  * types it is given, every call, and the samples it processes:
  *   FXPROBE_LOG   text log of the calls (appended)
  *   FXPROBE_DATA  the sample data, as processed (appended)
+ * It also has IMediaParams, which logs what it is given (a parameter control track's envelopes): SetTimeFormat
+ * takes reference time only, unless FXPROBE_ANYTIME is set.
  * Its class is {5e1d2c3b-7a4f-4c61-9d2e-0f8a1b6c4d55}. */
 #define COBJMACROS
 #include <windows.h>
@@ -16,6 +18,7 @@
 static const GUID CLSID_FxProbe = { 0x5e1d2c3b, 0x7a4f, 0x4c61, { 0x9d, 0x2e, 0x0f, 0x8a, 0x1b, 0x6c, 0x4d, 0x55 } };
 static const GUID IID_IMediaObject_ = { 0xd8ad0f58, 0x5494, 0x4102, { 0x97, 0xc5, 0xec, 0x79, 0x8e, 0x59, 0xbc, 0xf4 } };
 static const GUID IID_IMediaObjectInPlace_ = { 0x651b9ad0, 0x0fc7, 0x4aa9, { 0x95, 0x38, 0xd8, 0x99, 0x31, 0x01, 0x07, 0x41 } };
+static const GUID IID_IMediaParams_ = { 0x6d6cbb61, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6e } };
 static LONG g_locks, g_objs;
 
 static void plog(const char *fmt, ...)
@@ -37,6 +40,7 @@ static void pdata(const BYTE *d, DWORD n)
 typedef struct {
     IMediaObject IMediaObject_iface;
     IMediaObjectInPlace IMediaObjectInPlace_iface;
+    const struct mpvtbl *mp_vtbl;
     LONG ref;
     DMO_MEDIA_TYPE in, out;
     WAVEFORMATEX wf;
@@ -52,6 +56,7 @@ static HRESULT WINAPI mo_qi(IMediaObject *i, REFIID r, void **o)
     probe *p = mo(i);
     if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &IID_IMediaObject_)) *o = &p->IMediaObject_iface;
     else if (IsEqualIID(r, &IID_IMediaObjectInPlace_)) *o = &p->IMediaObjectInPlace_iface;
+    else if (IsEqualIID(r, &IID_IMediaParams_)) *o = &p->mp_vtbl;
     else {
         plog("QueryInterface {%08lx-%04x-%04x-...}: no", r->Data1, r->Data2, r->Data3);
         *o = NULL; return E_NOINTERFACE;
@@ -137,6 +142,39 @@ static HRESULT WINAPI ip_clone(IMediaObjectInPlace *i, IMediaObjectInPlace **o)
 static HRESULT WINAPI ip_latency(IMediaObjectInPlace *i, REFERENCE_TIME *t) { plog("GetLatency"); *t = 0; return S_OK; }
 static IMediaObjectInPlaceVtbl ip_vtbl = { ip_qi, ip_addref, ip_release, ip_process, ip_clone, ip_latency };
 
+/* ------------------------------------------------------------------ IMediaParams */
+typedef struct { LONGLONG start, end; float v0, v1; DWORD curve, flags; } envseg;
+typedef struct mpvtbl {
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *GetParam)(void *, DWORD, float *);
+    HRESULT (WINAPI *SetParam)(void *, DWORD, float);
+    HRESULT (WINAPI *AddEnvelope)(void *, DWORD, DWORD, const envseg *);
+    HRESULT (WINAPI *FlushEnvelope)(void *, DWORD, LONGLONG, LONGLONG);
+    HRESULT (WINAPI *SetTimeFormat)(void *, GUID, DWORD);
+} mpvtbl;
+static probe *mpp(void *i) { return CONTAINING_RECORD(i, probe, mp_vtbl); }
+static HRESULT WINAPI mp_qi(void *i, REFIID r, void **o) { return mo_qi(&mpp(i)->IMediaObject_iface, r, o); }
+static ULONG WINAPI mp_addref(void *i) { return mo_addref(&mpp(i)->IMediaObject_iface); }
+static ULONG WINAPI mp_release(void *i) { return mo_release(&mpp(i)->IMediaObject_iface); }
+static HRESULT WINAPI mp_get(void *i, DWORD n, float *v) { plog("GetParam %lu", n); if (v) *v = 0; return S_OK; }
+static HRESULT WINAPI mp_set(void *i, DWORD n, float v) { plog("SetParam %lu %g", n, v); return S_OK; }
+static HRESULT WINAPI mp_addenv(void *i, DWORD n, DWORD c, const envseg *s)
+{
+    plog("AddEnvelope param %lu, %lu segments", n, c);
+    for (DWORD k = 0; s && k < c; k++)
+        plog("  [%lld, %lld] %.9g to %.9g curve %lu flags %lx", s[k].start, s[k].end, s[k].v0, s[k].v1, s[k].curve, s[k].flags);
+    return S_OK;
+}
+static HRESULT WINAPI mp_flushenv(void *i, DWORD n, LONGLONG a, LONGLONG b) { plog("FlushEnvelope param %lu [%lld, %lld]", n, a, b); return S_OK; }
+static HRESULT WINAPI mp_settf(void *i, GUID g, DWORD d)
+{
+    plog("SetTimeFormat {%08lx-...} %lu", g.Data1, d);
+    return g.Data1 == 0x93ad712b || getenv("FXPROBE_ANYTIME") ? S_OK : E_INVALIDARG;
+}
+static const mpvtbl mp_vtbl = { mp_qi, mp_addref, mp_release, mp_get, mp_set, mp_addenv, mp_flushenv, mp_settf };
+
 /* ------------------------------------------------------------------ class factory */
 static HRESULT WINAPI cf_qi(IClassFactory *i, REFIID r, void **o)
 {
@@ -153,6 +191,7 @@ static HRESULT WINAPI cf_create(IClassFactory *i, IUnknown *outer, REFIID r, voi
     if (!p) return E_OUTOFMEMORY;
     p->IMediaObject_iface.lpVtbl = &mo_vtbl;
     p->IMediaObjectInPlace_iface.lpVtbl = &ip_vtbl;
+    p->mp_vtbl = &mp_vtbl;
     p->ref = 1;
     InterlockedIncrement(&g_objs);
     plog("created");

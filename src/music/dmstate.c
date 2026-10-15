@@ -52,12 +52,19 @@ static void ss_unref(dm_segstate *ss) { if (--ss->refs <= 0) ss_destroy(ss); }
 static void ss_shutdown(dm_segstate *ss)
 {
     for (int i = 0; i < ss->ntr; i++) { track_endplay(ss->perf, &ss->tr[i]); dm_track_release(ss->tr[i].t); }
+    if (ss->perf->tops.state_end) ss->perf->tops.state_end(ss->perf->tctx, ss);
     free(ss->tr); ss->tr = NULL; ss->ntr = 0;
     dm_segment_release(ss->seg); ss->seg = NULL;
     if (ss->audiopath) { dm_audiopath_release(ss->audiopath); ss->audiopath = NULL; }
     ss_unref(ss);
 }
 
+/* CloseDown: every state leaves the performance now */
+void dm_perf_end_states(dm_perf *pf)
+{
+    for (int k = 0; k < NLISTS; k++)
+        while (pf->lists[k]) { dm_segstate *s = pf->lists[k]; pf->lists[k] = s->lnext; s->lnext = NULL; ss_shutdown(s); }
+}
 void dm_segstate_release(dm_segstate *ss) { if (ss && !ss->released) { ss->released = 1; ss_unref(ss); } }
 void dm_segstate_addref(dm_segstate *ss) { ss->refs++; }
 void dm_segstate_unref(dm_segstate *ss) { ss_unref(ss); }
