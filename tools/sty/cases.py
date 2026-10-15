@@ -516,7 +516,28 @@ def case_pattrack(out, seed=13):
     seg.chords(0x00ab5ab5, ch)
     return {'pattrk.sgt': seg.build(), 'pat.sty': mix_style('pat', 13).build()}
 
-CASES = {'compose2': case_compose2, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_regen(out):
+    """notes held across chord changes: regenerated (DMUS_NOTEF_REGENERATE), kept while they fit the new scale or
+    chord (NOINVALIDATE_INSCALE / _INCHORD), or left alone, each on its own PChannel.  At 60 bpm, each chord well
+    after the notes it falls in start (they sound already) or shortly after one waiting to start, whatever the
+    output's latency"""
+    st = Style('8f6d1a10-0000-4000-8000-0000000000e1', 'regen', tempo=60.0)
+    pat = st.pattern('main', measures=1, groove=(1, 100))
+    for k, fl in enumerate((0x10, 0x04, 0x08, 0, 0x10 | 0x04)):
+        p = st.part('8f6d1a10-0001-4000-8000-0000000000%02x' % (0xe1 + k), measures=1, playmode=DMUS_PLAYMODE_NORMALCHORD)
+        p.note(grid=0, var=0xffffffff, dur=2900, music=music_value(4, k % 4, 0), noteflags=fl)
+        p.note(grid=8, var=0xffffffff, dur=1400, music=music_value(5, (k + 1) % 4, 0), noteflags=fl)
+        pat.partref(p, pchannel=k)
+    seg = Segment('8f6d1a10-1000-4000-8000-0000000000e1', 'regen', 4 * BAR)
+    seg.tempo([(0, 60.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.style([(0, 'regen.sty', st.guid, st.name)])
+    seg.chords(0x00ab5ab5, [chord(0, 0, 0, 'C', 0), chord(1536 + 200, 0, 2, 'Dm', 2, MINOR),
+                            chord(BAR + 1536 + 250, 1, 2, 'Am', 9, MINOR), chord(2 * BAR + 1536 + 200, 2, 2, 'E', 4, scale=0x00ad5ad5),
+                            chord(3 * BAR + 1536 + 220, 3, 2, 'G', 7)])
+    return {'regen.sty': st.build(), 'regen.sgt': seg.build()}
+
+CASES = {'compose2': case_compose2, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

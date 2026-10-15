@@ -35,6 +35,8 @@ const dm_subchord *dmt_subchord(const dm_chord_key *c, uint8_t level);
 int32_t dmt_music_to_midi(uint16_t mv, const dm_chord_key *c, uint8_t playmode, uint8_t level, uint8_t *midi);
 int32_t dmt_midi_to_music(uint8_t midi, const dm_chord_key *c, uint8_t playmode, uint8_t level, uint16_t *mv);
 /* 7730822e: a music value against one subchord (0x1000 when it falls between chord tones) */
+uint32_t dmt_note_scale(uint8_t root, uint32_t scale);
+int dmt_in_pattern(uint8_t midi, uint8_t root, uint32_t pattern);
 int dmt_music_value(uint32_t mv, uint8_t playmode, const dm_subchord *s, uint8_t key);
 
 #endif

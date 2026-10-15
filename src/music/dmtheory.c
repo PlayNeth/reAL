@@ -340,6 +340,15 @@ static int32_t octave_fix(int32_t v, uint8_t *out, int32_t hr)
     return hr;
 }
 
+/* 77307a89(77307b52): the scale a note is tested against for DMUS_NOTEF_NOINVALIDATE_INSCALE */
+uint32_t dmt_note_scale(uint8_t root, uint32_t scale) { return fix_scale(scale_down(root, scale)); }
+/* 77307a21: whether a MIDI note is in a 12-note pattern from root */
+int dmt_in_pattern(uint8_t midi, uint8_t root, uint32_t pattern)
+{
+    int32_t k = ((int32_t)midi - root % 12 + 12) % 12;
+    return ((1u << k) & ((pattern >> 12) | pattern) & 0xfff) != 0;
+}
+
 /* 773085af */
 int32_t dmt_music_to_midi(uint16_t mv, const dm_chord_key *c, uint8_t pm, uint8_t level, uint8_t *midi)
 {

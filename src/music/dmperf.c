@@ -6,6 +6,7 @@
 #include "dmperf.h"
 #include <time.h>
 #include "dmdls.h"
+#include "dmtheory.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -1472,6 +1473,86 @@ static int curve_out(dm_perf *pf, dm_pmsg *p, rtime_t rt)
     }
 }
 
+static void tool_flush(dm_perf *pf, dm_pmsg *p, rtime_t rt);
+/* 773086d1: a queued note against the chord at rt (the note-off pending since then): S_OK when it no longer fits
+ * (DMUS_NOTEF_NOINVALIDATE_INSCALE / _INCHORD), or when it is to be regenerated (DMUS_NOTEF_REGENERATE) and its
+ * value makes another MIDI note now: that note is played at once for the rest of the length (*out, its note-off
+ * pending); S_FALSE else */
+static int note_regen(dm_perf *pf, dm_pmsg *n, uint32_t group, rtime_t rt, dm_pmsg **out)
+{
+    mtime_t now = R2M(pf, rt);
+    dm_chord_key ck;
+    *out = NULL;
+    if (n->n_flags & (NOTEF_NOINVALIDATE_INSCALE | NOTEF_NOINVALIDATE_INCHORD)) {
+        if (perf_getparam(pf, PRM_CHORD, group, DM_SEG_ANYTRACK, now, NULL, &ck) < 0 || !ck.nsub) return 1;
+        uint32_t pat = (n->n_flags & NOTEF_NOINVALIDATE_INCHORD) ? ck.sub[0].chord : dmt_note_scale(ck.sub[0].chordroot, ck.sub[0].scale);
+        return dmt_in_pattern(n->n_midival, ck.sub[0].chordroot, pat) ? 1 : 0;
+    }
+    if (!(n->n_flags & NOTEF_REGENERATE)) return 1;
+    if (perf_getparam(pf, PRM_CHORD, group, DM_SEG_ANYTRACK, now, NULL, &ck) < 0) return 1;
+    uint8_t midi = 0;
+    if (dmt_music_to_midi(n->n_musicval, &ck, n->n_playmode, n->n_subchord, &midi) < 0 || midi == n->n_midival) return 1;
+    mtime_t dur = (n->n_flags & NOTEF_NOTEON) ? n->n_dur + n->mt - now : n->mt - now;
+    if (dur < 1) dur = 0;
+    dm_pmsg *m = pm_clone(pf, n);
+    if (!m) return DM_E_OUTOFMEMORY;
+    m->mt = now; m->rt = M2R(pf, now);
+    m->n_dur = dur; m->n_midival = midi;
+    m->n_flags = NOTEF_NOTEON | NOTEF_REGENERATE;
+    note_out(pf, m, rt + 1);
+    *out = m;
+    return DM_OK;
+}
+
+/* 77309cec: a queue's notes on the track (any, vid 0) against a new chord at rt: a note not yet started whose
+ * place is before the chord is cut at it (and played on in the new chord when regenerated); a sounding note that
+ * ends after it is ended there through its tool (and played on); the new notes join the queue, sounding */
+static void chord_queue(dm_perf *pf, dm_queue *q, uint32_t vid, uint32_t group, rtime_t rt)
+{
+    dm_pmsg *added = NULL, **atail = &added, *x, *nx;
+    for (x = q->head; x; x = x->next) x->hflags &= ~HF_MARK;
+    for (x = q->head; x; x = nx) {
+        nx = x->next;
+        if ((vid && x->vpch != vid) || x->type != PT_NOTE) continue;
+        rtime_t t = (x->n_flags & NOTEF_NOTEON) ? M2R(pf, x->mt - x->n_offset) : x->rt;
+        dm_pmsg *m = NULL;
+        int hr = 1;
+        if (t < rt) {
+            if (!(x->n_flags & NOTEF_NOTEON)) continue;
+            hr = note_regen(pf, x, group, rt, &m);
+            if (hr == 0) {
+                rtime_t e = M2R(pf, x->n_dur - 2 + x->mt);
+                if (rt <= e) { mtime_t d = R2M(pf, rt) - x->mt; x->n_dur = d < 1 ? 1 : d; }
+            }
+        } else {
+            rtime_t r2 = x->rtlast < rt ? rt : x->rtlast + 10000;
+            if (x->tool && !(x->n_flags & NOTEF_NOTEON)) {
+                hr = note_regen(pf, x, group, r2, &m);
+                if (hr == 0) { x->hflags |= HF_MARK; x->flags |= PF_TOOL_FLUSH; tool_flush(pf, x, r2); }
+            }
+        }
+        if (hr >= 0 && m) { m->next = NULL; *atail = m; atail = &m->next; }
+    }
+    for (x = q->head; x; x = nx) {
+        nx = x->next;
+        if (!(x->hflags & HF_MARK)) continue;
+        x->hflags &= ~HF_MARK;
+        if (q_remove(q, x)) pm_free(pf, x);
+    }
+    while (added) { x = added; added = x->next; x->next = NULL; q_insert(q, x); }
+}
+
+/* 77309f00: a chord changed (GUID_NOTIFICATION_PRIVATE_CHORD from a chord track): the queued notes of the track
+ * against it (the latest queue first) */
+static void chord_changed(dm_perf *pf, dm_pmsg *n)
+{
+    if (!n->user) return;
+    rtime_t rt = n->mt ? M2R(pf, n->mt) : 0;
+    chord_queue(pf, &pf->ontime, n->vpch, n->group, rt);
+    chord_queue(pf, &pf->nearq, n->vpch, n->group, rt);
+    chord_queue(pf, &pf->early, n->vpch, n->group, rt);
+}
+
 /* 7730e5b7: the performance's tool ProcessPMsg */
 static int process_pmsg(dm_perf *pf, dm_pmsg *p)
 {
@@ -1513,8 +1594,7 @@ static int process_pmsg(dm_perf *pf, dm_pmsg *p)
         return DMUS_S_REQUEUE;
     }
     if (p->type == PT_NOTIFICATION && guid_same(&p->nf_guid, &GUID_NOTIFICATION_PRIVATE_CHORD_)) {
-        /* 77309f00: a chord changed: queued notes of the state's track regenerated (not yet: the style tracks
-         * convert their notes when they make them) */
+        chord_changed(pf, p);
         return DMUS_S_FREE;
     }
     if (p->type == PT_NOTIFICATION) {

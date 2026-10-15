@@ -126,8 +126,10 @@ Doppler, and WASAPI output.
   cloned; the pattern track never does. It plays the same as Microsoft's when time() is fixed (`DMGT_TIME`).
 - `tools/sty/cases.py` writes the cases. `tools/sty/cap.sh <case>` compares dmgt with test_perf; every case matches
   event for event. `tests/comcmp.sh styletest.exe` gives 927 lines and `stylecom.exe` gives 186, all identical.
-- Open: chord regeneration (DMUS_SEGF... regenerate flags). dmstyle's 09f25101 writes a part's variations to the
-  address its PChannel makes (reDM doesn't).
+- Chord changes reach notes already queued (77309f00): DMUS_NOTEF_REGENERATE notes are played on in the new chord
+  when it makes another note, NOINVALIDATE_INSCALE / _INCHORD notes are cut when they no longer fit; a note waiting
+  to start is shortened to the chord, a sounding one ended through its tool (`cap.sh regen 20000` matches).
+- Open: dmstyle's 09f25101 writes a part's variations to the address its PChannel makes (reDM doesn't).
 
 **DirectMusic: chord maps and the composer** (`src/music/dmcompose.c`, `dmcomcmp.c`, `dmtheory.c`, from dmcompos)
 - Chord map files ('DMPR'): the chord palette, the chord graph (entries and their connections) and the
