@@ -12,7 +12,7 @@ See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
 ## Status
 
 reAL has two halves in one DLL:
-- **The DirectSound side** is the ALchemy reimplementation. It is done except for CMSS / surround and EAX 5.
+- **The DirectSound side** is the ALchemy reimplementation. It is done except for CMSS / surround.
 - **reDM** is its own DirectMusic, switched on with `music=true` (see "reDM" below). It is a faithful port of
   Windows XP's DirectMusic.
 
@@ -38,7 +38,7 @@ reAL has two halves in one DLL:
 | Doppler (DS3D factor, EAX 3 per-buffer factor) | ✅ ALchemy's formula, bit-identical in the emulator |
 | DirectSound effects (SetFX): Gargle, Echo, ParamEq, Chorus, Flanger, Distortion, Compressor, Waves reverb, I3DL2 reverb | ✅ bit-exact ports of Microsoft's dsdmo (Windows 11's; I3DL2 from XP SP3); SetFX's validation and placement match Windows 7's dsound |
 | CMSS-3D upmix, speaker configs > 2.0 | ⏳ left for last |
-| EAX 5.0 | ⏳ left for last; reported unsupported until then (games fall back to EAX 4) |
+| EAX 5.0 | ✖ not planned: games used it through OpenAL, not DirectSound (use OpenAL Soft); reported unsupported, so games fall back to EAX 4 |
 | Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
 
 ### reDM (DirectMusic)
@@ -134,7 +134,7 @@ MIDI output for games that play General MIDI through winmm. `reAL.ini.example` h
 6. ~~DirectSound effects (SetFX)~~ (src/fx.c, src/dsfx.c, src/i3dl2.c)
 7. reDM, reAL's own DirectMusic (src/music/): playback, synth, audiopaths, tools, styles and the composer done;
    scripts under way (loading, variables, routines and AudioVBScript done)
-8. Last: CMSS-3D upmix and speaker configs > 2.0, then EAX 5
+8. Last: CMSS-3D upmix and speaker configs > 2.0 (EAX 5 dropped: it was an OpenAL feature in practice)
 
 ## Repo layout
 

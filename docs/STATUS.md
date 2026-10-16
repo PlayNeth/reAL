@@ -285,7 +285,8 @@ Doppler, and WASAPI output.
    next the IDispatch layer of segments, segment states and audiopaths (stage 3, with the rest of the interpreter's
    surface), then the script track and VBScript/JScript through Active Scripting (stage 4)
 2. Surround / CMSS
-3. EAX 5
+(EAX 5 dropped: games used it through OpenAL, which OpenAL Soft covers; the EAX 5 property set stays
+reported unsupported so games fall back to EAX 4.)
 
 Smaller items still open:
 - The sink object does not answer IDirectSoundSynthSink (Microsoft's private interface between dmusic and dsound).
