@@ -29,6 +29,7 @@ static IDirectMusicLoader8 *loader;
 
 /* ------------------------------------------------------------------ a tool printing the messages it gets */
 static IDirectMusicTool toolobj;
+static int g_quiet;                 /* (only the script methods' messages) */
 static CRITICAL_SECTION logcs;
 static char logbuf[16384];
 static HRESULT WINAPI t_qi(IDirectMusicTool *i, REFIID r, void **o)
@@ -60,7 +61,7 @@ static HRESULT WINAPI t_process(IDirectMusicTool *i, IDirectMusicPerformance *p,
         DMUS_TRANSPOSE_PMSG *t = (DMUS_TRANSPOSE_PMSG *)m;
         snprintf(b, sizeof(b), "  msg transpose size %lu flags %lx pch %lx grp %lx by %d merge %x\n", m->dwSize,
                  m->dwFlags & ~DMUS_PMSGF_MUSICTIME, m->dwPChannel, m->dwGroupID, t->nTranspose, t->wMergeIndex);
-    } else if (m->dwType != DMUS_PMSGT_DIRTY && m->dwType != DMUS_PMSGT_NOTIFICATION) {
+    } else if (m->dwType != DMUS_PMSGT_DIRTY && m->dwType != DMUS_PMSGT_NOTIFICATION && !g_quiet) {
         snprintf(b, sizeof(b), "  msg type %lu pch %lx\n", m->dwType, m->dwPChannel);
     }
     EnterCriticalSection(&logcs);
@@ -268,6 +269,8 @@ static const char *const s_syntax[] = {
     "Sub A\nCall B(1)\nEnd Sub\nSub B\nEnd Sub\n",
     "Sub A\nCall B 1\nEnd Sub\n",
     "Sub A\nSetMasterVolume -100,\nEnd Sub\n",
+    "Sub A\nx = Rand(A)\nEnd Sub\n",
+    "Sub A\nx = Rand(A) + 1\nEnd Sub\n",
     "Sub A\nIf s = \"a\" Then\nEnd If\nEnd Sub\n",
     "Sub A\nelseif\nEnd Sub\n",
     "Sub A\nthen = 1\nEnd Sub\n",
@@ -689,6 +692,56 @@ static void files(void)
     }
 }
 
+
+/* ------------------------------------------------------------------ automation: segments, states, audiopaths */
+static void playing(IDirectMusicScript *s)
+{
+    IDirectMusicSegment8 *t = NULL, *sh = NULL;
+    IDirectMusicScript_GetVariableObject(s, L"Tune", &IID_IDirectMusicSegment8, (void **)&t, NULL);
+    IDirectMusicScript_GetVariableObject(s, L"Short", &IID_IDirectMusicSegment8, (void **)&sh, NULL);
+    printf("    playing: tune %08lx short %08lx\n",
+           t ? IDirectMusicPerformance8_IsPlaying(perf, (IDirectMusicSegment *)t, NULL) : 0xdead,
+           sh ? IDirectMusicPerformance8_IsPlaying(perf, (IDirectMusicSegment *)sh, NULL) : 0xdead);
+    if (t) IDirectMusicSegment8_Release(t);
+    if (sh) IDirectMusicSegment8_Release(sh);
+}
+static void autotest(void)
+{
+    HRESULT hr;
+    g_quiet = 1;
+    IDirectMusicScript *s = NULL;
+    hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicScript, &IID_IDirectMusicScript, L"auto.spt", (void **)&s);
+    printf("load %08lx\n", hr);
+    if (!s) return;
+    DMUS_SCRIPT_ERRORINFO e;
+    einit(&e);
+    hr = IDirectMusicScript_Init(s, (IDirectMusicPerformance *)perf, &e);
+    printf("init %08lx\n", hr);
+    perr(&e);
+    /* ("!": the segments' playing state, checked only after immediate plays and stops: reAL's clock runs fast
+     * in the test setup, so anything waiting for a boundary would compare timing) */
+    static const char *const steps[] = {
+        "Loads", "PlayAgain", "-", "!", "IsIt", "PlaySecondary", "-", "IsIt", "StopStateNow", "-", "!", "IsIt",
+        "PlayControl", "PlayAligned", "PlayQueued", "StopSegNow", "-", "!", "IsIt",
+        "PlayAgain", "-", "DoFill", "-", "DoEnd", "-", "StopSegNow", "-", "!",
+        "PlayIt", "PlayFrom", "-", "IsIt", "PlayNoCutoff", "-", "!", "PlayTransition", "-", "IsIt", "StopState",
+        "StopSeg", "StopSegNow", "-", "!", "PlayBad", "PlayBadPath", "PlayBadFlags",
+        "MakePath", "PathPlay", "-", "!", "IsIt", "StopSegNow", "-", "!", "Download", "Recomp", "NothingState",
+        "BadMethod", "CfgVolume", NULL };
+    for (int k = 0; steps[k]; k++) {
+        if (!strcmp(steps[k], "-")) { Sleep(400); continue; }
+        if (!strcmp(steps[k], "!")) { playing(s); continue; }
+        call(s, steps[k]);
+        getvar(s, "R");
+        getvar(s, "V");
+    }
+    getvar(s, "SS");
+    getvar(s, "P");
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    Sleep(200);
+    IDirectMusicScript_Release(s);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { printf("scrtest <dir> lang|files\n"); return 1; }
@@ -715,6 +768,7 @@ int main(int argc, char **argv)
     IDirectMusicLoader8_SetSearchDirectory(loader, &GUID_DirectMusicAllTypes, dir, FALSE);
     if (!strcmp(argv[2], "lang")) lang();
     else if (!strcmp(argv[2], "files")) files();
+    else if (!strcmp(argv[2], "auto")) autotest();
     IDirectMusicLoader8_Release(loader);
     IDirectMusicPerformance8_CloseDown(perf);
     IDirectMusicPerformance8_Release(perf);

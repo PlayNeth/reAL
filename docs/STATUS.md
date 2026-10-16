@@ -187,6 +187,28 @@ Doppler, and WASAPI output.
   then crashes running the routine; reDM reports the error. GetVariableObject of a variable holding Nothing
   crashes in dmscript as in reDM. Script source by reference (a DMRF list) is not supported.
 
+**DirectMusic: scripts, stage 3** (`src/music/dmscript.c`: dmscript's CAutDirectMusic* classes)
+- IDispatch on the segment (Load, Play, Stop, DownloadSoundData, UnloadSoundData, Recompose), the segment state
+  (IsPlaying, Stop), the audiopath (SetVolume, GetVolume) and the audiopath configuration (Load, Create), each an
+  aggregated object made on the first QueryInterface, with dmscript's method tables (argument types, optional
+  arguments and their interfaces) and its translation of the script flags into segment flags (AtMeasure ->
+  DMUS_SEGF_MEASURE, AlignToBar -> ALIGN|VALID_START_BEAT|MEASURE, NoCutoff -> NOINVALIDATE, AtImmediate clears
+  DEFAULT ...), composition commands and composition flags (PlayFill/Intro/Break/End/EndAndIntro go through the
+  composer's AutoTransition, as does Stop PlayEnd). Play on an audiopath of another performance remembers it so
+  Stop stops it there; a segment state's Stop goes to the performance it plays on. The methods act on the running
+  script's performance and composer.
+- Found on the way: PlaySegmentEx with DMUS_SEGF_AUTOTRANSITION and a template composes the transition (the
+  template's Compose from the segment playing then) and plays it, then the segment from its end, as dmime 7730d51c
+  does (the transition template was ignored). A segment state the application meets without having played it (a
+  composed transition's, through GetSegmentState) now has a segment object for GetSegment.
+- dmscript's parser keeps going after an error inside a call's arguments within an expression (its error code is
+  overwritten when the call is pushed) and reports the last error it met, or none; reDM does the same now, and runs
+  such a script's call as nothing instead of crashing.
+- `tests/comcmp.sh scrtest.exe <dir> auto` (`cases.py scriptauto`: a script with two segments and an audiopath
+  configuration in its container) matches: every method, the flag combinations, auto-transitions, an audiopath's
+  volume curves, the errors. Its playing checks are made only after immediate plays and stops, as reAL's clock
+  runs fast with the null ALSA device.
+
 **DirectMusic: track objects on their own** (`src/music/dmseg.c`, `dmtrack.c`, `dmcom.c`)
 - CoCreateInstance of every track class reDM has (sequence, tempo, time signature, SysEx, band, wave, chord,
   command, style, motif, pattern, mute, chord map, signpost, marker, lyrics, segment trigger, parameter control)
@@ -281,9 +303,9 @@ Doppler, and WASAPI output.
 
 ## Remaining, in the agreed order
 
-1. Scripts: stages 1 and 2 done (loading, variables, routines, all of AudioVBScript, the performance's methods);
-   next the IDispatch layer of segments, segment states and audiopaths (stage 3, with the rest of the interpreter's
-   surface), then the script track and VBScript/JScript through Active Scripting (stage 4)
+1. Scripts: stages 1 to 3 done (loading, variables, routines, all of AudioVBScript, the automation of the
+   performance, segments, segment states, audiopaths and configurations); next the script track and
+   VBScript/JScript through Active Scripting (stage 4)
 2. Surround / CMSS
 (EAX 5 dropped: games used it through OpenAL, which OpenAL Soft covers; the EAX 5 property set stays
 reported unsupported so games fall back to EAX 4.)

@@ -677,7 +677,121 @@ End Sub
     files['nolang.spt'] = script(None, 'nolang', "Sub X\nEnd Sub\n", lang='NoSuchLanguage')
     return files
 
-CASES = {'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_scriptauto(out):
+    """scripts driving segments, segment states, audiopaths and an audiopath configuration (tests/scrtest.c auto)"""
+    SEG, CFG = CLSID['segment'], 'ee0b9ca0-a81e-11d3-9bd1-0080c7150a74'
+    def seg(name, guid, note, bars=2):
+        g = Segment(guid, name, bars * BAR)
+        g.tempo([(0, 120.0)])
+        g.timesig([(0, 4, 4, 4)])
+        g.seq([(t, 200, 0, 0x90, note, 100) for t in range(0, bars * BAR, 768)])
+        return g.build()
+    src = """' automation
+Dim SS
+Dim SS2
+Dim P
+Dim R
+Dim V
+Sub PlayIt
+    Set SS = Tune.Play
+End Sub
+Sub PlayAgain
+    Set SS2 = Tune.Play(AtImmediate)
+End Sub
+Sub PlaySecondary
+    Set SS2 = Short.Play(IsSecondary + AtBeat)
+End Sub
+Sub PlayControl
+    Short.Play IsControl + AtMeasure
+End Sub
+Sub PlayAligned
+    Set SS2 = Short.Play(IsSecondary + AlignToBar)
+End Sub
+Sub PlayQueued
+    Set SS2 = Short.Play(AtFinish)
+End Sub
+Sub PlayNoCutoff
+    Set SS2 = Tune.Play(NoCutoff + AtImmediate)
+End Sub
+Sub PlayFrom
+    Set SS2 = Short.Play(AtImmediate, Nothing, Nothing, SS)
+End Sub
+Sub PlayTransition
+    Set SS2 = Tune.Play(AtImmediate, Nothing, Short)
+End Sub
+Sub DoFill
+    Set SS2 = Tune.Play(PlayFill)
+End Sub
+Sub DoEnd
+    Tune.Stop PlayEnd
+End Sub
+Sub PlayBad
+    Tune.Play IsSecondary + PlayFill
+End Sub
+Sub PlayBadPath
+    Tune.Play 0, Tune
+End Sub
+Sub PlayBadFlags
+    Tune.Play "x"
+End Sub
+Sub IsIt
+    R = SS.IsPlaying
+    V = SS2.IsPlaying()
+End Sub
+Sub StopState
+    SS.Stop
+End Sub
+Sub StopStateNow
+    SS2.Stop AtImmediate
+End Sub
+Sub StopSeg
+    Tune.Stop
+End Sub
+Sub StopSegNow
+    Tune.Stop AtImmediate
+    Short.Stop AtImmediate
+End Sub
+Sub MakePath
+    Set P = Cfg.Create
+    P.SetVolume -600
+    R = P.GetVolume
+    P.SetVolume -20000, 100
+    V = P.GetVolume
+End Sub
+Sub PathPlay
+    Set SS = Tune.Play(AtImmediate, P)
+End Sub
+Sub Download
+    Tune.DownloadSoundData
+    Tune.DownloadSoundData P
+    Tune.UnloadSoundData P
+    Tune.UnloadSoundData
+End Sub
+Sub Recomp
+    Tune.Recompose
+End Sub
+Sub Loads
+    Tune.Load
+    Cfg.Load
+    Short.Load
+End Sub
+Sub NothingState
+    Set SS = Nothing
+    R = SS.IsPlaying
+End Sub
+Sub BadMethod
+    Tune.Pause
+End Sub
+Sub CfgVolume
+    Cfg.SetVolume 0
+End Sub
+"""
+    items = [(SEG, 0, 'Tune', seg('tune', '8f6d1a10-1600-4000-8000-000000000001', 60, 16)),
+             (SEG, 0, 'Short', seg('short', '8f6d1a10-1600-4000-8000-000000000002', 64, 8)),
+             (CFG, 0, 'Cfg', audiopath_config([('11111111-2222-3333-4444-555566667711', 2, [])], guid='8f6d1a10-1600-4000-8000-000000000003', name='cfg'))]
+    return {'auto.spt': script('8f6d1a10-1600-4000-8000-000000000010', 'auto', src, items, flags=3)}
+
+CASES = {'scriptauto': case_scriptauto, 'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

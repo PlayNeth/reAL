@@ -269,6 +269,7 @@ static void perror_(parser *P, int code)
     P->hr = E_AVS_SYNTAX;
     const char *m = (P->L->tok != T_EOF || P->L->num == 0) ? s_perr[code] : P->L->text;
     if (!P->err) return;
+    avs_error_free(P->err);                         /* (the latest error reported is the one kept) */
     P->err->scode = E_AVS_SYNTAX;                   /* 00409f89 */
     P->err->desc = wfroma(m);
     P->err->source = wdup(L"Microsoft AudioVBScript syntax error", -1);
@@ -470,9 +471,10 @@ static int expression(parser *P, int r, symtab *locals, void *outv, int inparen,
                 target_parse(P, r, locals, &tg);
                 if (P->hr < 0 || p_accept(P)) { free(tg.name); goto fail; }
                 if (P->L->tok == T_LPAREN) {
+                    /* (dmscript pushes the call whatever its arguments did, losing an error in them: the parse
+                     * goes on, and a later error, or none, is what Load reports) */
                     int c = call_parse(P, r, locals, &tg, 1);
                     free(tg.name);
-                    if (P->hr < 0) goto fail;
                     if (set_hr(P, VPUSH(infix, 3, c))) goto fail;
                 } else {
                     int rf = target_ref(P, r, locals, &tg);
@@ -1025,6 +1027,8 @@ static HRESULT call_routine(exec *x, int r, EXCEPINFO *ei)
 static HRESULT call_do(exec *x, int ci, int want, EXCEPINFO *ei, int frame)
 {
     prog *g = x->g;
+    if (ci < 0 || ci >= g->calls.n || g->calls.p[ci].args < 0 || g->calls.p[ci].args >= g->exprs.n)
+        return E_FAIL;                              /* (a call whose arguments failed to parse: dmscript crashes) */
     call c = g->calls.p[ci];
     VARIANT obj, res;
     VariantInit(&obj);

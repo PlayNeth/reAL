@@ -75,11 +75,14 @@ static HRESULT wcopy(WCHAR *d, const WCHAR *s, UINT n)
     return S_TRUNC;
 }
 
-/* ===================================================================== the performance's automation (004063cc) */
-/* the methods (004018b8): id, name, result (0 none, 1 long, 2 object, 3 string), parameters (type, optional) */
-typedef struct { int type, optional; } aparam;
+/* ===================================================================== the objects' automation (dmscript's
+ * CAutDirectMusic* classes, aggregated by the objects: the performance 004063cc, the segment, the segment state,
+ * the audiopath 00404f86 and the audiopath configuration 00405111) */
+/* the methods (004018b8 ...): id, name, result (0 none, 1 long, 2 object), parameters (type 1 long, 2 object,
+ * 3 string; optional; the object's interface) */
+typedef struct { int type, optional; const GUID *iid; } aparam;
 typedef struct { int id; const WCHAR *name; int ret; aparam p[5]; } amethod;
-static const amethod s_perf_methods[] = {
+static const amethod s_perf_methods[] = {                         /* 004018b8 */
     { 1, L"SetMasterTempo", 0, { { 1, 0 } } },
     { 2, L"GetMasterTempo", 1, { { 0 } } },
     { 3, L"SetMasterVolume", 0, { { 1, 0 }, { 1, 1 } } },
@@ -92,23 +95,77 @@ static const amethod s_perf_methods[] = {
     { 10, L"Rand", 1, { { 1, 0 } } },
     { -1 }
 };
-/* the segment's (00401dc0; Play, Stop, DownloadSoundData, UnloadSoundData and Recompose to come) */
-static const amethod s_segment_methods[] = {
+static const amethod s_segment_methods[] = {                      /* 00401dc0 */
     { 1, L"Load", 0, { { 0 } } },
+    { 2, L"Play", 2, { { 1, 1 }, { 2, 1, &IID_IDirectMusicAudioPath }, { 2, 1, &IID_IDirectMusicSegment },
+                       { 2, 1, &IID_IDirectMusicSegmentState } } },
+    { 3, L"Stop", 0, { { 1, 1 } } },
+    { 4, L"DownloadSoundData", 0, { { 2, 1, &IID_IDirectMusicAudioPath } } },
+    { 5, L"UnloadSoundData", 0, { { 2, 1, &IID_IDirectMusicAudioPath } } },
+    { 6, L"Recompose", 0, { { 0 } } },
     { -1 }
 };
-static const amethod *const s_tables[] = { s_perf_methods, s_segment_methods };
+static const amethod s_state_methods[] = {                        /* 00402200 */
+    { 1, L"IsPlaying", 1, { { 0 } } },
+    { 2, L"Stop", 0, { { 1, 1 } } },
+    { -1 }
+};
+static const amethod s_path_methods[] = {                         /* 004012b8 */
+    { 1, L"SetVolume", 0, { { 1, 0 }, { 1, 1 } } },
+    { 2, L"GetVolume", 1, { { 0 } } },
+    { -1 }
+};
+static const amethod s_config_methods[] = {                       /* 00401420 */
+    { 1, L"Load", 0, { { 0 } } },
+    { 2, L"Create", 2, { { 0 } } },
+    { -1 }
+};
+static const amethod *const s_tables[] = { s_perf_methods, s_segment_methods, s_state_methods, s_path_methods, s_config_methods };
 
+/* the script flags (DirectMusic.AtMeasure ...) as segment flags, composition commands and flags (00405907 over
+ * a table of pairs) */
+static const DWORD s_play_flags[] = {                             /* 00401ff0 */
+    0x1, DMUS_SEGF_SECONDARY, 0x2, DMUS_SEGF_SECONDARY | DMUS_SEGF_CONTROL, 0x4, DMUS_SEGF_QUEUE,
+    0x8, DMUS_SEGF_GRID, 0x10, DMUS_SEGF_BEAT, 0x20, DMUS_SEGF_MEASURE, 0x40, DMUS_SEGF_MARKER, 0x80, DMUS_SEGF_DEFAULT,
+    0x100, 0x32000, 0x200, 0x51000, 0x400, 0x8810000, 0x20000, DMUS_SEGF_NOINVALIDATE, 0 };
+static const DWORD s_play_commands[] = {                          /* 00402058 */
+    0x800, DMUS_COMMANDT_FILL, 0x1000, DMUS_COMMANDT_INTRO, 0x2000, DMUS_COMMANDT_BREAK, 0x4000, DMUS_COMMANDT_END,
+    0x8000, DMUS_COMMANDT_ENDANDINTRO, 0 };
+static const DWORD s_play_compose[] = {                           /* 00402088 */
+    0x4, 0x400, 0x8, 0x8, 0x10, 0x10, 0x20, 0x20, 0x40, 0x800, 0x80, 0x4, 0x100, 0x21, 0x200, 0x11, 0x400, 0x401,
+    0x10000, 0x1000, 0 };
+static const DWORD s_stop_flags[] = {                             /* 004020e0 */
+    0x8, DMUS_SEGF_GRID, 0x10, DMUS_SEGF_BEAT, 0x20, DMUS_SEGF_MEASURE, 0x40, DMUS_SEGF_MARKER, 0x80, DMUS_SEGF_DEFAULT, 0 };
+static const DWORD s_stop_compose[] = {                           /* 00402110 */
+    0x8, 0x8, 0x10, 0x10, 0x20, 0x20, 0x40, 0x800, 0x80, 0x4, 0 };
+static const DWORD s_state_stop_flags[] = {                       /* 004022f0 */
+    0x8, DMUS_SEGF_GRID, 0x10, DMUS_SEGF_BEAT, 0x20, DMUS_SEGF_MEASURE, 0x80, DMUS_SEGF_DEFAULT, 0 };
+static DWORD map_flags(DWORD f, const DWORD *t)
+{
+    DWORD r = 0;
+    for (; *t; t += 2) if (f & t[0]) r |= t[1];
+    return r;
+}
+
+typedef struct perfnode { struct perfnode *next; IDirectMusicPerformance8 *perf; } perfnode;
 typedef struct {
     IDispatch IDispatch_iface;
     IUnknown *outer;
     int kind;
-    IDirectMusicPerformance8 *perf;     /* +0x08 (not referenced: the object it is part of) */
-    IDirectMusicGraph *graph;           /* +0x1c */
-    short transpose, volume;            /* +0x20 +0x22 */
+    IUnknown *obj;                      /* +0x08 the object, without a reference (it is part of it) */
+    IDirectMusicGraph *graph;           /* +0x1c (the performance's) */
+    perfnode *played;                   /* +0x1c (a segment's: the other performances it was played on) */
+    LONG volume;                        /* +0x1c (an audiopath's) */
+    short transpose, mvolume;           /* +0x20 +0x22 (the performance's) */
     DWORD seed;                         /* +0x24 */
 } rm_auto;
 static rm_auto *aut(IDispatch *i) { return CONTAINING_RECORD(i, rm_auto, IDispatch_iface); }
+#define A_PERF(a) ((IDirectMusicPerformance8 *)(a)->obj)
+
+/* the script running on this thread: its performance, composer, and the time and flags its script track calls
+ * it with (00404229 / 00404251 / 00404262) */
+typedef struct { IDirectMusicPerformance8 *perf; IDirectMusicComposer *composer; REFERENCE_TIME t; DWORD flags; } script_ctx;
+static int script_context(script_ctx *c);
 
 static HRESULT WINAPI au_qi(IDispatch *i, REFIID r, void **o) { return IUnknown_QueryInterface(aut(i)->outer, r, o); }
 static ULONG WINAPI au_addref(IDispatch *i) { return IUnknown_AddRef(aut(i)->outer); }
@@ -135,14 +192,14 @@ static HRESULT WINAPI au_ids(IDispatch *i, REFIID r, LPOLESTR *names, UINT n, LC
 static HRESULT send_pmsg(rm_auto *a, DMUS_PMSG *m)
 {
     HRESULT hr = IDirectMusicGraph_StampPMsg(a->graph, m);
-    if (SUCCEEDED(hr)) hr = IDirectMusicPerformance8_SendPMsg(a->perf, m);
-    if (FAILED(hr)) IDirectMusicPerformance8_FreePMsg(a->perf, m);
+    if (SUCCEEDED(hr)) hr = IDirectMusicPerformance8_SendPMsg(A_PERF(a), m);
+    if (FAILED(hr)) IDirectMusicPerformance8_FreePMsg(A_PERF(a), m);
     return hr;
 }
 static HRESULT alloc_pmsg(rm_auto *a, ULONG size, DMUS_PMSG **out)
 {
     *out = NULL;
-    HRESULT hr = IDirectMusicPerformance8_AllocPMsg(a->perf, size, out);
+    HRESULT hr = IDirectMusicPerformance8_AllocPMsg(A_PERF(a), size, out);
     if (SUCCEEDED(hr)) { memset(*out, 0, size); (*out)->dwSize = size; }
     return hr;
 }
@@ -161,67 +218,71 @@ static BYTE volume_midi(LONG vol)
 }
 static HRESULT global_param(rm_auto *a, REFGUID g, void *p, DWORD n)   /* 00405ee5 */
 {
-    HRESULT hr = IDirectMusicPerformance8_GetGlobalParam(a->perf, g, p, n);
+    HRESULT hr = IDirectMusicPerformance8_GetGlobalParam(A_PERF(a), g, p, n);
     return SUCCEEDED(hr) || hr == E_INVALIDARG ? S_OK : hr;
 }
-/* the handlers (the methods' order); args are the converted parameters, *res the result */
-static HRESULT perf_method(rm_auto *a, int id, LONG *args, BSTR str, LONG *res)
+
+typedef struct { LONG num; IUnknown *obj; BSTR str; } aval;
+/* the performance's methods (00412090: 00405e1a ...); res NULL when the caller wants no result */
+static HRESULT perf_method(rm_auto *a, int id, aval *v, VARIANT *res)
 {
     HRESULT hr = S_OK;
     DMUS_PMSG *m;
-    if (a->kind == RM_AUTO_SEGMENT) return id == 1 ? S_OK : DISP_E_MEMBERNOTFOUND;     /* Load: loaded already */
+    IDirectMusicPerformance8 *pf = A_PERF(a);
     switch (id) {
     case 1: {                                   /* 00405e1a */
-        float t = (float)args[0] / 100.0f;
+        float t = (float)v[0].num / 100.0f;
         if (t < 0.01f) t = 0.01f; else if (t > 100.0f) t = 100.0f;
-        return IDirectMusicPerformance8_SetGlobalParam(a->perf, &G_MasterTempo, &t, 4);
+        return IDirectMusicPerformance8_SetGlobalParam(pf, &G_MasterTempo, &t, 4);
     }
     case 2: {                                   /* 004060cd */
+        if (!res) return S_OK;
         float t = 1.0f;
         hr = global_param(a, &G_MasterTempo, &t, 4);
-        if (SUCCEEDED(hr)) { LONG v = (LONG)(100.0 * (double)t + 0.5); *res = v ? v : 1; }
+        if (SUCCEEDED(hr)) { LONG x = (LONG)(100.0 * (double)t + 0.5); V_I4(res) = x ? x : 1; }
         return hr;
     }
-    case 3: {                                   /* 00405ce1 */
+    case 3: {                                   /* 00406111 / 00405ce1 */
         if (!a->graph) return E_FAIL;
-        LONG vol = clampl(args[0], -9600, 0);
+        LONG vol = clampl(v[0].num, -9600, 0);
         BYTE midi = volume_midi(vol);
         if (FAILED(hr = alloc_pmsg(a, sizeof(DMUS_CURVE_PMSG), &m))) return hr;
         DMUS_CURVE_PMSG *c = (DMUS_CURVE_PMSG *)m;
         REFERENCE_TIME rt = 0;
-        if (FAILED(hr = IDirectMusicPerformance8_GetLatencyTime(a->perf, &rt))) { IDirectMusicPerformance8_FreePMsg(a->perf, m); return hr; }
+        if (FAILED(hr = IDirectMusicPerformance8_GetLatencyTime(pf, &rt))) { IDirectMusicPerformance8_FreePMsg(pf, m); return hr; }
         c->rtTime = rt;
         c->dwFlags = DMUS_PMSGF_REFTIME | DMUS_PMSGF_LOCKTOREFTIME | DMUS_PMSGF_DX8;
         c->dwPChannel = DMUS_PCHANNEL_BROADCAST_PERFORMANCE;
         c->dwType = DMUS_PMSGT_CURVE;
         c->dwGroupID = 0xffffffff;
-        c->mtDuration = args[1];
+        c->mtDuration = v[1].num;
         c->nEndValue = midi;
         c->bType = DMUS_CURVET_CCCURVE;
-        c->bCurveShape = args[1] == 0 ? DMUS_CURVES_INSTANT : DMUS_CURVES_LINEAR;
+        c->bCurveShape = v[1].num == 0 ? DMUS_CURVES_INSTANT : DMUS_CURVES_LINEAR;
         c->bCCData = 7;
         c->bFlags = DMUS_CURVE_START_FROM_CURRENT;
         c->wMergeIndex = 0xffff;
-        if (SUCCEEDED(hr = send_pmsg(a, m))) a->volume = (short)vol;
+        if (SUCCEEDED(hr = send_pmsg(a, m))) a->mvolume = (short)vol;
         return hr;
     }
-    case 4: *res = a->volume; return S_OK;
+    case 4: if (res) V_I4(res) = a->mvolume; return S_OK;     /* 00405e74 */
     case 5: {                                   /* 00406141 */
-        char g = (char)clampl(args[0], -128, 127);
-        IDirectMusicPerformance8_SetGlobalParam(a->perf, &G_MasterGroove, &g, 1);
+        char g = (char)clampl(v[0].num, -128, 127);
+        IDirectMusicPerformance8_SetGlobalParam(pf, &G_MasterGroove, &g, 1);
         return S_OK;
     }
     case 6: {                                   /* 00406175 */
+        if (!res) return S_OK;
         char g = 0;
         hr = global_param(a, &G_MasterGroove, &g, 1);
-        if (SUCCEEDED(hr)) *res = g;
+        if (SUCCEEDED(hr)) V_I4(res) = g;
         return hr;
     }
     case 7: {                                   /* 004061a9 */
-        short t = (short)clampl(args[0], -0x8000, 0x7fff);
+        short t = (short)clampl(v[0].num, -0x8000, 0x7fff);
         if (FAILED(hr = alloc_pmsg(a, 0x40, &m))) return hr;
         DMUS_TRANSPOSE_PMSG *p = (DMUS_TRANSPOSE_PMSG *)m;
-        if (FAILED(hr = IDirectMusicPerformance8_GetTime(a->perf, &p->rtTime, NULL))) { IDirectMusicPerformance8_FreePMsg(a->perf, m); return hr; }
+        if (FAILED(hr = IDirectMusicPerformance8_GetTime(pf, &p->rtTime, NULL))) { IDirectMusicPerformance8_FreePMsg(pf, m); return hr; }
         p->dwFlags = DMUS_PMSGF_REFTIME | DMUS_PMSGF_LOCKTOREFTIME | DMUS_PMSGF_DX8;
         p->dwType = DMUS_PMSGT_TRANSPOSE;
         p->dwPChannel = DMUS_PCHANNEL_BROADCAST_PERFORMANCE;
@@ -232,11 +293,12 @@ static HRESULT perf_method(rm_auto *a, int id, LONG *args, BSTR str, LONG *res)
         if (SUCCEEDED(hr = send_pmsg(a, m))) a->transpose = t;
         return hr;
     }
-    case 8: *res = a->transpose; return S_OK;
+    case 8: if (res) V_I4(res) = a->transpose; return S_OK;   /* 00405e89 */
     case 9: {                                   /* 0040626c: the text to the application, as a script lyric */
+        BSTR str = v[0].str;
         size_t n = str ? lstrlenW(str) : 0;
         if (FAILED(hr = alloc_pmsg(a, (ULONG)(0x40 + n * 2), &m))) return hr;
-        if (FAILED(hr = IDirectMusicPerformance8_GetTime(a->perf, &m->rtTime, NULL))) { IDirectMusicPerformance8_FreePMsg(a->perf, m); return hr; }
+        if (FAILED(hr = IDirectMusicPerformance8_GetTime(pf, &m->rtTime, NULL))) { IDirectMusicPerformance8_FreePMsg(pf, m); return hr; }
         m->dwFlags = DMUS_PMSGF_REFTIME | DMUS_PMSGF_LOCKTOREFTIME;
         m->dwType = DMUS_PMSGT_SCRIPTLYRIC;
         m->dwPChannel = 0;
@@ -245,37 +307,168 @@ static HRESULT perf_method(rm_auto *a, int id, LONG *args, BSTR str, LONG *res)
         memcpy((BYTE *)m + 0x38, str ? str : L"", (n + 1) * sizeof(WCHAR));
         return send_pmsg(a, m);
     }
-    case 10: {                                  /* 1 + a random number below n (the C library's generator) */
-        LONG n = args[0];
+    case 10: {                                  /* 00405e9e: 1 + a random number below n (msvcrt's generator) */
+        LONG n = v[0].num;
         if (n < 1 || n > 0x7fff) return E_INVALIDARG;
         a->seed = a->seed * 214013 + 2531011;
-        *res = (LONG)((a->seed >> 16) & 0x7fff) % n + 1;
+        if (res) V_I4(res) = (LONG)((a->seed >> 16) & 0x7fff) % n + 1;
         return S_OK;
     }
     }
     return DISP_E_MEMBERNOTFOUND;
 }
 
-/* 00405565: a parameter as the method's type: an absent one (or DISP_E_PARAMNOTFOUND) when optional is 0 */
-static HRESULT convert_arg(BOOL ole, VARIANT *v, const aparam *p, LONG *num, BSTR *str)
+/* 004064b0: the segment stopped on a performance (PlayEnd: an ending composed into the music) */
+static HRESULT segment_stop_on(rm_auto *a, IDirectMusicPerformance8 *pf, DWORD f, const script_ctx *c)
 {
-    if (!v) {
-        if (!p->optional) return DISP_E_PARAMNOTOPTIONAL;
+    if (!(f & 0x4000))
+        return IDirectMusicPerformance8_Stop(pf, (IDirectMusicSegment *)a->obj, NULL, (MUSIC_TIME)c->t,
+                                             c->flags | (map_flags(f, s_stop_flags) ^ DMUS_SEGF_DEFAULT));
+    if (!c->composer) return E_FAIL;
+    return IDirectMusicComposer_AutoTransition(c->composer, (IDirectMusicPerformance *)pf, NULL, DMUS_COMMANDT_END,
+                                               map_flags(f, s_stop_compose) | 0x204000, NULL, NULL, NULL, NULL);
+}
+/* the segment's methods (00412140) */
+static HRESULT segment_method(rm_auto *a, int id, aval *v, VARIANT *res)
+{
+    script_ctx c;
+    IDirectMusicSegment8 *sg = (IDirectMusicSegment8 *)a->obj;
+    HRESULT hr;
+    switch (id) {
+    case 1: return S_OK;                        /* Load: it is */
+    case 2: {                                   /* 004067b2 */
+        DWORD f = (DWORD)v[0].num;
+        IDirectMusicAudioPath *path = (IDirectMusicAudioPath *)v[1].obj;
+        if ((f & 3) && (f & 0xf800)) return E_INVALIDARG;
+        if (!script_context(&c)) return E_FAIL;
+        IDirectMusicPerformance8 *pf = c.perf;
+        if (path) {                             /* the audiopath's performance, remembered to stop it there */
+            IDirectMusicPerformance8 *pp = NULL;
+            if (SUCCEEDED(IDirectMusicAudioPath_GetObjectInPath(path, 0, DMUS_PATH_PERFORMANCE, 0, &CLSID_DirectMusicPerformance,
+                                                                0, &IID_IDirectMusicPerformance8, (void **)&pp)) && pp) {
+                if (pp != pf) {
+                    pf = pp;
+                    perfnode *n;
+                    for (n = a->played; n && n->perf != pp; n = n->next) ;
+                    if (!n && (n = calloc(1, sizeof(*n)))) { n->perf = pp; n->next = a->played; a->played = n; pp = NULL; }
+                }
+                if (pp) IDirectMusicPerformance8_Release(pp);
+            }
+        }
+        IDirectMusicSegmentState *ss = NULL;
+        if (!(f & 0xf800)) {
+            DWORD sf = map_flags(f, s_play_flags) ^ DMUS_SEGF_DEFAULT;
+            if (v[2].obj) sf |= DMUS_SEGF_AUTOTRANSITION;
+            hr = IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)sg, NULL, v[2].obj, c.flags | sf, c.t,
+                                                        res ? &ss : NULL, v[3].obj, (IUnknown *)path);
+        } else {
+            if (!c.composer) return E_FAIL;
+            hr = IDirectMusicComposer_AutoTransition(c.composer, (IDirectMusicPerformance *)pf, (IDirectMusicSegment *)sg,
+                                                     (WORD)map_flags(f, s_play_commands), map_flags(f, s_play_compose) | 0x204000,
+                                                     NULL, NULL, res ? &ss : NULL, NULL);
+        }
+        if (res && ss) { V_VT(res) = VT_UNKNOWN; V_UNKNOWN(res) = (IUnknown *)ss; }
+        return SUCCEEDED(hr) ? S_OK : hr;
+    }
+    case 3: {                                   /* 0040690d: where it was played */
+        if (!script_context(&c)) return E_FAIL;
+        if (!a->played) return segment_stop_on(a, c.perf, (DWORD)v[0].num, &c);
+        HRESULT last = S_OK;
+        BOOL any = FALSE;
+        while (a->played) {
+            perfnode *n = a->played;
+            a->played = n->next;
+            hr = segment_stop_on(a, n->perf, (DWORD)v[0].num, &c);
+            if (SUCCEEDED(hr)) any = TRUE; else last = hr;
+            IDirectMusicPerformance8_Release(n->perf);
+            free(n);
+        }
+        return any && FAILED(last) ? S_FALSE : last;
+    }
+    case 4: case 5: {                           /* 0040657b: on the audiopath, else the script's performance */
+        IUnknown *to = v[0].obj;
+        if (!to) { if (!script_context(&c)) return E_FAIL; to = (IUnknown *)c.perf; }
+        return id == 4 ? IDirectMusicSegment8_Download(sg, to) : IDirectMusicSegment8_Unload(sg, to);
+    }
+    case 6: return rm_segment_recompose(a->obj);                  /* 0040652f */
+    }
+    return DISP_E_MEMBERNOTFOUND;
+}
+static HRESULT state_method(rm_auto *a, int id, aval *v, VARIANT *res)
+{
+    script_ctx c;
+    HRESULT hr;
+    if (id == 1) {                              /* 00406a9a */
+        if (!res) return S_OK;
+        if (!script_context(&c)) return E_FAIL;
+        hr = IDirectMusicPerformance8_IsPlaying(c.perf, NULL, (IDirectMusicSegmentState *)a->obj);
+        V_I4(res) = hr == S_OK ? -1 : 0;
+        return hr;
+    }
+    if (id == 2) {                              /* 00406ace: on the performance the state plays on */
+        DWORD sf = map_flags((DWORD)v[0].num, s_state_stop_flags) ^ DMUS_SEGF_DEFAULT;
+        IDirectMusicSegmentState8 *s8 = NULL;
+        IDirectMusicPerformance8 *pf = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface(a->obj, &IID_IDirectMusicSegmentState8, (void **)&s8))) {
+            if (FAILED(IDirectMusicSegmentState8_GetObjectInPath(s8, 0, DMUS_PATH_PERFORMANCE, 0, &CLSID_DirectMusicPerformance, 0,
+                                                                 &IID_IDirectMusicPerformance8, (void **)&pf))) pf = NULL;
+            IDirectMusicSegmentState8_Release(s8);
+        }
+        BOOL got = script_context(&c);
+        if (!pf) { if (!got) return E_FAIL; pf = c.perf; IDirectMusicPerformance8_AddRef(pf); }
+        if (!got) { c.t = 0; c.flags = 0; }
+        hr = IDirectMusicPerformance8_Stop(pf, NULL, (IDirectMusicSegmentState *)a->obj, (MUSIC_TIME)c.t, c.flags | sf);
+        IDirectMusicPerformance8_Release(pf);
+        return hr;
+    }
+    return DISP_E_MEMBERNOTFOUND;
+}
+static HRESULT path_method(rm_auto *a, int id, aval *v, VARIANT *res)
+{
+    if (id == 1) {                              /* 00404d97 */
+        a->volume = clampl(v[0].num, -9600, 0);
+        return IDirectMusicAudioPath_SetVolume((IDirectMusicAudioPath *)a->obj, a->volume, (DWORD)v[1].num);
+    }
+    if (id == 2) { if (res) V_I4(res) = a->volume; return S_OK; }  /* 00404dc7 */
+    return DISP_E_MEMBERNOTFOUND;
+}
+static HRESULT config_method(rm_auto *a, int id, aval *v, VARIANT *res)
+{
+    if (id == 1) return S_OK;                   /* Load */
+    if (id == 2) {                              /* 00405006: an audiopath on the script's performance */
+        if (!res) return S_OK;
+        script_ctx c;
+        if (!script_context(&c)) return E_FAIL;
+        IDirectMusicAudioPath *p = NULL;
+        HRESULT hr = IDirectMusicPerformance8_CreateAudioPath(c.perf, a->obj, TRUE, &p);
+        if (FAILED(hr)) return hr;
+        V_VT(res) = VT_UNKNOWN; V_UNKNOWN(res) = (IUnknown *)p;
         return S_OK;
     }
+    return DISP_E_MEMBERNOTFOUND;
+}
+
+/* 00405565: a parameter as the method's type: an absent one (or DISP_E_PARAMNOTFOUND) when optional is 0 */
+static HRESULT convert_arg(BOOL ole, VARIANT *v, const aparam *p, aval *out)
+{
+    if (!v) return p->optional ? S_OK : DISP_E_PARAMNOTOPTIONAL;
     VARIANT t;
     VariantInit(&t);
     VARTYPE vt = p->type == 1 ? VT_I4 : p->type == 3 ? VT_BSTR : VT_UNKNOWN;
     HRESULT hr = ole ? VariantChangeType(&t, v, 0, vt) : avs_convert(&t, v, vt);
-    if (FAILED(hr)) {
-        if (hr != DISP_E_OVERFLOW) hr = DISP_E_TYPEMISMATCH;
-        VariantClear(&t);
-        return hr;
+    if (SUCCEEDED(hr)) {
+        if (vt == VT_I4) out->num = V_I4(&t);
+        else if (vt == VT_BSTR) { out->str = V_BSTR(&t); VariantInit(&t); }
+        else if (V_UNKNOWN(&t) && FAILED(IUnknown_QueryInterface(V_UNKNOWN(&t), p->iid ? p->iid : &IID_IUnknown, (void **)&out->obj)))
+            hr = DISP_E_TYPEMISMATCH;
     }
-    if (vt == VT_I4) *num = V_I4(&t);
-    else if (vt == VT_BSTR) { *str = V_BSTR(&t); VariantInit(&t); }
     VariantClear(&t);
-    return S_OK;
+    if (FAILED(hr) && hr != DISP_E_OVERFLOW) hr = DISP_E_TYPEMISMATCH;
+    return hr;
+}
+static void free_args(aval *v)                  /* 00405a04 */
+{
+    for (int k = 0; k < 5; k++) { if (v[k].obj) IUnknown_Release(v[k].obj); SysFreeString(v[k].str); }
 }
 /* 0040601d / 00405a7a / 0040565f */
 static HRESULT method_invoke(rm_auto *a, const amethod *table, DISPID id, REFIID r, WORD f, DISPPARAMS *p,
@@ -294,23 +487,34 @@ static HRESULT method_invoke(rm_auto *a, const amethod *table, DISPID id, REFIID
     UINT total = 0, required = 0;
     while (total < 5 && mt->p[total].type) { if (!mt->p[total].optional) required = total + 1; total++; }
     if (p->cArgs < required || p->cArgs > total) return DISP_E_BADPARAMCOUNT;
-    LONG args[5] = { 0 };
-    BSTR str = NULL;
+    aval v[5];
+    memset(v, 0, sizeof(v));
     for (UINT k = 0; k < total; k++) {
         int idx = (int)p->cArgs - (int)k - 1;
-        VARIANT *v = idx >= 0 ? &p->rgvarg[idx] : NULL;
-        if (v && V_VT(v) == VT_ERROR && V_ERROR(v) == DISP_E_PARAMNOTFOUND) v = NULL;
-        HRESULT hr = convert_arg(ole, v, &mt->p[k], &args[k], &str);
+        VARIANT *x = idx >= 0 ? &p->rgvarg[idx] : NULL;
+        if (x && V_VT(x) == VT_ERROR && V_ERROR(x) == DISP_E_PARAMNOTFOUND) x = NULL;
+        HRESULT hr = convert_arg(ole, x, &mt->p[k], &v[k]);
         if (FAILED(hr)) {
             if (argerr) *argerr = idx;
-            SysFreeString(str);
+            free_args(v);
             return hr;
         }
     }
-    LONG out = 0;
-    HRESULT hr = perf_method(a, id, args, str, &out);
-    SysFreeString(str);
+    VARIANT out;
+    VariantInit(&out);
+    if (mt->ret == 1) { V_VT(&out) = VT_I4; V_I4(&out) = 0; }
+    VARIANT *o = res && mt->ret ? &out : NULL;
+    HRESULT hr;
+    switch (a->kind) {
+    case RM_AUTO_PERFORMANCE: hr = perf_method(a, id, v, o); break;
+    case RM_AUTO_SEGMENT: hr = segment_method(a, id, v, o); break;
+    case RM_AUTO_SEGMENTSTATE: hr = state_method(a, id, v, o); break;
+    case RM_AUTO_AUDIOPATH: hr = path_method(a, id, v, o); break;
+    default: hr = config_method(a, id, v, o); break;
+    }
+    free_args(v);
     if (FAILED(hr)) {
+        VariantClear(&out);
         if (ei) {
             memset(ei, 0, sizeof(*ei));
             ei->bstrSource = SysAllocString(L"Microsoft DirectMusic Runtime Error");
@@ -322,7 +526,7 @@ static HRESULT method_invoke(rm_auto *a, const amethod *table, DISPID id, REFIID
         }
         return DISP_E_EXCEPTION;
     }
-    if (res && mt->ret == 1) { V_VT(res) = VT_I4; V_I4(res) = out; }
+    if (res && mt->ret) *res = out;
     return hr;
 }
 static HRESULT WINAPI au_invoke(IDispatch *i, DISPID id, REFIID r, LCID l, WORD f, DISPPARAMS *p, VARIANT *res,
@@ -340,15 +544,23 @@ IDispatch *rm_auto_new(IUnknown *outer, int kind)
     a->IDispatch_iface.lpVtbl = (IDispatchVtbl *)&au_vtbl;
     a->outer = outer;
     a->kind = kind;
+    a->obj = outer;
     if (kind == RM_AUTO_PERFORMANCE) {
         /* the performance and its graph, without references (the object they are part of) */
-        if (SUCCEEDED(IUnknown_QueryInterface(outer, &G_IidPerf8, (void **)&a->perf))) IUnknown_Release(outer);
+        IUnknown *u;
+        if (SUCCEEDED(IUnknown_QueryInterface(outer, &G_IidPerf8, (void **)&u))) { a->obj = u; IUnknown_Release(outer); }
         if (SUCCEEDED(IUnknown_QueryInterface(outer, &G_IidGraph, (void **)&a->graph))) IUnknown_Release(outer);
         a->seed = GetTickCount();
     }
     return &a->IDispatch_iface;
 }
-void rm_auto_free(IDispatch *d) { if (d) free(aut(d)); }
+void rm_auto_free(IDispatch *d)
+{
+    if (!d) return;
+    rm_auto *a = aut(d);
+    while (a->played) { perfnode *n = a->played; a->played = n->next; IDirectMusicPerformance8_Release(n->perf); free(n); }
+    free(a);
+}
 
 /* ===================================================================== the script */
 typedef struct rm_script rm_script;
@@ -363,6 +575,8 @@ typedef struct {
     HRESULT scode;
     ULONG line, col;
     WCHAR *source, *desc, *text;
+    REFERENCE_TIME tstart;              /* +0x40 the script track's time and flags for what it plays (0 otherwise) */
+    DWORD tflags;                       /* +0x48 */
     WCHAR **names[2];                   /* +0x48 routines, +0x54 variables (EnumRoutine / EnumVariable) */
     UINT nnames[2];
     BOOL built[2];
@@ -434,6 +648,16 @@ static manager *current_set(manager *m)
     return old;
 }
 static manager *current(void) { return s_tls == TLS_OUT_OF_INDEXES ? NULL : TlsGetValue(s_tls); }
+static int script_context(script_ctx *c)
+{
+    manager *m = current();
+    if (!m || !m->s->perf) return 0;
+    c->perf = m->s->perf;
+    c->composer = (IDirectMusicComposer *)m->s->composer;
+    c->t = m->tstart;
+    c->flags = m->tflags;
+    return 1;
+}
 
 /* ---------------------------------------------------------------- the content */
 /* 00406e07: a segment downloaded to (or unloaded from) a performance */
@@ -798,9 +1022,9 @@ static manager *mgr_new(rm_script *s, const WCHAR *src, HRESULT *hr, DMUS_SCRIPT
     *hr = avs_parse(src, &s->named->IDispatch_iface, &m->eng, &e);
     if (FAILED(*hr)) {
         if (e.desc) mgr_store(m, e.scode, e.line, e.col, e.source, e.desc, e.text);
-        avs_error_free(&e);
         *hr = mgr_report(m, *hr, err);
     }
+    avs_error_free(&e);         /* (an error the parse went on after: kept by dmscript, never reported) */
     return m;
 }
 /* 00404814: the script run (its variables set up) and its dispatch */

@@ -377,14 +377,14 @@ class Segment:
                     LIST('trkl', *self.tracks))
 
 
-def audiopath_config(buffers, pch_count=16):
+def audiopath_config(buffers, pch_count=16, guid=None, name=None):
     """an audiopath configuration ('DMAP'): one synth port for PChannels 0.. pch_count, into the buffers given as
     (buffer GUID, channels, effects); effects (class GUID, data bytes or None)"""
     pcfh = guid_bytes('26bb9432-45fe-48d3-a375-2472c5e3e786') + struct.pack('<III', 0, pch_count, 1)
     pprh = struct.pack('<9I', 36, 0x2 | 0x80, 0, (pch_count + 15) // 16, 0, 0, 0, 0, 0x1)
     pchh = struct.pack('<IIII', 0, pch_count, len(buffers), 0) + b''.join(guid_bytes(b[0]) for b in buffers)
     port = LIST('pcfl', chunk('pcfh', pcfh), chunk('pprh', pprh), LIST('pchl', chunk('pchh', pchh)))
-    items = [LIST('pcsl', port)]
+    items = ([chunk('guid', guid_bytes(guid))] if guid else []) + ([unfo(name)] if name else []) + [LIST('pcsl', port)]
     for g, nch, fx in buffers:
         dsbc = [chunk('guid', guid_bytes(g)), chunk('dsbd', struct.pack('<IH2xiiI', 0x80 | 0x200, nch, 0, 0, 0)),
                 chunk('bsid', struct.pack('<%dI' % nch, *range(nch)))]

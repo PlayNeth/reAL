@@ -60,6 +60,7 @@ typedef struct {
     BOOL lazy;                              /* made for a notification: holds an ordinary reference */
     IDirectMusicAudioPath *path;            /* the audiopath it plays on (the default one when none was given) */
     int xref;                               /* further engine references it drops when it goes */
+    IDispatch *autod;                       /* its automation (made on first QueryInterface) */
 } rm_state;
 
 typedef struct {
@@ -75,6 +76,7 @@ typedef struct {
     struct rm_bref *top; DWORD ntop;
     struct rm_pcfg *ports; DWORD nports;
     struct rm_buf **held; DWORD nheld;      /* every buffer reference the path holds */
+    IDispatch *autod;                       /* its automation (made on first QueryInterface) */
 } rm_path;
 
 /* the performance's buffers (dmime's buffer manager, perf +0x90): made from configurations, shared by GUID */
@@ -689,6 +691,17 @@ static HRESULT WINAPI seg_getapconfig(IDirectMusicSegment8 *i, IUnknown **c) { i
 static rm_segment *new_segment(dm_segment *g);
 int dmc_segment_compose(dm_segment *s);
 /* 773150d0: the composing tracks composed (into a clone of the segment when one is asked for) */
+/* Segment.Recompose (dmcompos 77287974 with flags 0, on the application's thread and rand()) */
+HRESULT rm_segment_recompose(IUnknown *u)
+{
+    rm_segment *s = unsafe_segment(u);
+    if (!s || !s->seg) return E_INVALIDARG;
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    int r = dmc_recompose(s->seg, dm_app_rand_state(), 1);
+    if (h) dm_host_unlock(h);
+    return r;
+}
 static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c)
 {
     if ((a && (IsBadReadPtr(a, 4) || IsBadReadPtr(*(void **)a, 4))) || (b && (IsBadReadPtr(b, 4) || IsBadReadPtr(*(void **)b, 4))) ||
@@ -1496,6 +1509,11 @@ static HRESULT WINAPI st_qi(IDirectMusicSegmentState8 *i, REFIID riid, void **ou
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicSegmentState) ||
         IsEqualIID(riid, &IID_IDirectMusicSegmentState8)) { *out = i; InterlockedIncrement(&sst(i)->ref); return S_OK; }
     if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &sst(i)->IDirectMusicGraph_iface; InterlockedIncrement(&sst(i)->ref); return S_OK; }
+    if (IsEqualIID(riid, &IID_IDispatch)) {
+        rm_state *s = sst(i);
+        if (!s->autod && !(s->autod = rm_auto_new((IUnknown *)&s->IDirectMusicSegmentState8_iface, RM_AUTO_SEGMENTSTATE))) { *out = NULL; return E_OUTOFMEMORY; }
+        *out = s->autod; InterlockedIncrement(&s->ref); return S_OK;
+    }
     return rm_noiface(__func__, riid, out);
 }
 static ULONG WINAPI st_addref(IDirectMusicSegmentState8 *i) { return InterlockedIncrement(&sst(i)->ref); }
@@ -1516,6 +1534,7 @@ static ULONG WINAPI st_release(IDirectMusicSegmentState8 *i)
         if (s->seg) IDirectMusicSegment8_Release(&s->seg->IDirectMusicSegment8_iface);
         if (s->path) IDirectMusicAudioPath_Release(s->path);
         IDirectMusicPerformance8_Release(&s->perf->IDirectMusicPerformance8_iface);
+        rm_auto_free(s->autod);
         free(s);
     }
     return r;
@@ -1825,6 +1844,11 @@ static HRESULT WINAPI ap_qi(IDirectMusicAudioPath *i, REFIID riid, void **out)
 {
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicAudioPath)) { *out = i; InterlockedIncrement(&apt(i)->ref); return S_OK; }
     if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &apt(i)->IDirectMusicGraph_iface; InterlockedIncrement(&apt(i)->ref); return S_OK; }
+    if (IsEqualIID(riid, &IID_IDispatch)) {
+        rm_path *a = apt(i);
+        if (!a->autod && !(a->autod = rm_auto_new((IUnknown *)&a->IDirectMusicAudioPath_iface, RM_AUTO_AUDIOPATH))) { *out = NULL; return E_OUTOFMEMORY; }
+        *out = a->autod; InterlockedIncrement(&a->ref); return S_OK;
+    }
     return rm_noiface(__func__, riid, out);
 }
 static ULONG WINAPI ap_addref(IDirectMusicAudioPath *i) { return InterlockedIncrement(&apt(i)->ref); }
@@ -1844,6 +1868,7 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
         }
         path_free_config(a);
         IDirectMusicPerformance8_Release(&a->perf->IDirectMusicPerformance8_iface);
+        rm_auto_free(a->autod);
         free(a);
     }
     return r;
@@ -3163,10 +3188,50 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     return S_OK;
 }
 
+/* 7730d51c: with DMUS_SEGF_AUTOTRANSITION and a template, the template composes a transition from the segment
+ * playing then (the from state's, else the primary one, unless secondary) into this one: the transition plays as
+ * asked, then the segment from the transition's end (its secondary and control flags only) */
 static HRESULT WINAPI pf_playex(IDirectMusicPerformance8 *i, IUnknown *src, WCHAR *name, IUnknown *trans, DWORD flags, __int64 start,
                                 IDirectMusicSegmentState **out, IUnknown *from, IUnknown *path)
 {
-    return pf_play(prf(i), src, flags, start, out, from, path);
+    rm_perf *p = prf(i);
+    rm_segment *tmpl = (flags & DMUS_SEGF_AUTOTRANSITION) && trans ? unsafe_segment(trans) : NULL;
+    rm_segment *to = unsafe_segment(src);
+    if (!tmpl || !to || !p->host) return pf_play(p, src, flags, start, out, from, path);
+    REFERENCE_TIME rt, rr;
+    MUSIC_TIME mt = 0;
+    if (!start) pf_getqueue(i, &rt);
+    else if (!(flags & DMUS_SEGF_REFTIME)) pf_m2r(i, (MUSIC_TIME)start, &rt);
+    else rt = start;
+    pf_resolved(i, rt, &rr, flags);
+    pf_r2m(i, rr, &mt);
+    rm_state *fs = from ? unsafe_state(from) : NULL;
+    IDirectMusicSegment *fromseg = NULL;
+    mtime_t st0 = 0;
+    dm_host_lock(p->host);
+    dm_segstate *st = fs ? fs->ss : !(flags & DMUS_SEGF_SECONDARY) ? dm_perf_primary_at(dm_host_perf(p->host), mt) : NULL;
+    if (st) {
+        dm_segment *g = dm_segstate_segment(st);
+        dm_segstate_start_time(st, &st0);
+        if (g && g->wrapper) { fromseg = (IDirectMusicSegment *)&((rm_segment *)g->wrapper)->IDirectMusicSegment8_iface; IDirectMusicSegment_AddRef(fromseg); }
+    }
+    dm_host_unlock(p->host);
+    IDirectMusicSegment *ts = NULL;
+    IDirectMusicSegment8_Compose(&tmpl->IDirectMusicSegment8_iface, st ? mt - (MUSIC_TIME)st0 : 0, fromseg,
+                                 (IDirectMusicSegment *)&to->IDirectMusicSegment8_iface, &ts);
+    if (fromseg) IDirectMusicSegment_Release(fromseg);
+    if (!ts) return pf_play(p, src, flags, start, out, from, path);
+    IDirectMusicSegmentState *s1 = NULL;
+    HRESULT hr = pf_play(p, (IUnknown *)ts, flags, start, &s1, from, path);
+    IDirectMusicSegment_Release(ts);
+    if (FAILED(hr)) return hr;
+    rm_state *r1 = unsafe_state((IUnknown *)s1);
+    mtime_t end = 0;
+    dm_host_lock(p->host);
+    if (r1 && r1->ss) end = dm_segstate_end(r1->ss);
+    dm_host_unlock(p->host);
+    IDirectMusicSegmentState_Release(s1);
+    return pf_play(p, src, flags & (DMUS_SEGF_SECONDARY | DMUS_SEGF_CONTROL), end, out, NULL, path);
 }
 static HRESULT WINAPI pf_stopex(IDirectMusicPerformance8 *i, IUnknown *obj, __int64 t, DWORD f)
 {

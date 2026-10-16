@@ -2274,3 +2274,6 @@ void dm_perf_debug_tmap(dm_perf *pf)
     for (dm_pmsg *e = pf->tmap.head; e; e = e->next)
         fprintf(stderr, "tmap mt %d rt %lld tempo %.17g master %.9g adjust %lld\n", e->mt, (long long)e->rt, e->tempo, (double)e->master, (long long)pf->adjust);
 }
+
+dm_segstate *dm_perf_primary_at(dm_perf *pf, mtime_t t) { return primary_at(pf, t); }
+mtime_t dm_segstate_end(dm_segstate *ss) { return ss_end(ss, ss->mtstart); }

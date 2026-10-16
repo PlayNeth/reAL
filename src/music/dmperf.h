@@ -109,6 +109,8 @@ int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);
 mtime_t dm_segstate_seek(dm_segstate *ss);
 mtime_t dm_segstate_start_point(dm_segstate *ss);
 dm_segstate *dm_perf_get_segstate(dm_perf *pf, mtime_t t);
+dm_segstate *dm_perf_primary_at(dm_perf *pf, mtime_t t);        /* 77304c92 */
+mtime_t dm_segstate_end(dm_segstate *ss);                       /* 773155db from the state's start */
 int dm_perf_pchannel_info(dm_perf *pf, uint32_t pch, int *port, uint32_t *group, uint32_t *chan);
 int dm_perf_adjust_time(dm_perf *pf, rtime_t rt);
 /* instrument download for a segment's band tracks (IDirectMusicSegment::Download / Unload) */

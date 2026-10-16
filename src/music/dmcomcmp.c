@@ -480,6 +480,7 @@ static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPe
             if (SUCCEEDED(hr) && to) hr = IDirectMusicPerformance8_PlaySegment(pf, to, queuef | 0x100, 0, tostate);
         }
     }
+    LOG_CALL("music: Composer::AutoTransition(cmd %u, flags %lx, trans %p) -> %08lx", cmd, (unsigned long)fl, (void *)*trans, (unsigned long)hr);
     if (style) IDirectMusicStyle_Release(style);
     if (mytrans) IDirectMusicSegment_Release(mytrans);
     if (st) IDirectMusicSegmentState_Release(st);

@@ -15,6 +15,7 @@
 #include "../real.h"
 #include "dmapcfg.h"
 #include "dmgraph.h"
+#include "dmscript.h"
 #include <string.h>
 
 #define FCC(a, b, c, d) ((DWORD)(a) | ((DWORD)(b) << 8) | ((DWORD)(c) << 16) | ((DWORD)(d) << 24))
@@ -269,6 +270,7 @@ typedef struct {
     CRITICAL_SECTION cs;
     DMUS_OBJECTDESC desc;
     apc cfg;
+    IDispatch *autod;                   /* its automation (made on first QueryInterface) */
 } rm_apcfg;
 
 static rm_apcfg *from_obj(IDirectMusicObject *i) { return impl_from(i, rm_apcfg, IDirectMusicObject_iface); }
@@ -279,6 +281,10 @@ static HRESULT ac_qi(rm_apcfg *This, REFIID riid, void **out)
     if (!out) return E_POINTER;
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicObject)) *out = &This->IDirectMusicObject_iface;
     else if (IsEqualIID(riid, &IID_IPersistStream) || IsEqualIID(riid, &IID_IPersist)) *out = &This->IPersistStream_iface;
+    else if (IsEqualIID(riid, &IID_IDispatch)) {
+        if (!This->autod && !(This->autod = rm_auto_new((IUnknown *)&This->IDirectMusicObject_iface, RM_AUTO_CONFIG))) { *out = NULL; return E_OUTOFMEMORY; }
+        *out = This->autod;
+    }
     else { *out = NULL; return E_NOINTERFACE; }
     InterlockedIncrement(&This->ref);
     return S_OK;
@@ -288,6 +294,7 @@ static ULONG ac_release(rm_apcfg *This)
     LONG r = InterlockedDecrement(&This->ref);
     if (!r) {
         apc_clear(&This->cfg);
+        rm_auto_free(This->autod);
         DeleteCriticalSection(&This->cs);
         free(This);
     }
