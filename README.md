@@ -217,3 +217,7 @@ python3 tools/hrtf_build.py measured.npz reAL_hrtf.bin
 ```
 Measured against ALchemy: median rms difference 1.1 % (−39 dB) over 133 directions, ear levels
 within 0.1 dB.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
