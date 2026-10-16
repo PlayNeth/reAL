@@ -5,3 +5,4 @@ __pycache__/
 *.npz
 *.wav
 dstrace-dsound.dll
+*.pdb
