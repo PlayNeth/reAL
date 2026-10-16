@@ -63,7 +63,7 @@ diffed line by line, and offline captures are compared event by event.
 | The loader as dmloader has it (object cache, garbage collection, ScanDirectory, EnumObject) and containers (.con) | ✅ |
 | Standalone track objects (CoCreateInstance, Load, direct InitPlay/Play) | ✅ |
 | Scripts (dmscript, AudioVBScript): loading, routines, variables, the performance's, segments', segment states', audiopaths' script methods | ✅ |
-| Scripts: the script track, VBScript/JScript | ⏳ |
+| Scripts: the script track, VBScript/JScript (Active Scripting) | ✅ |
 
 As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REDM_NOFIXES` in the environment
 turns the fixes off for comparison runs. `docs/STATUS.md` has the details and the testing setup.
@@ -133,7 +133,7 @@ MIDI output for games that play General MIDI through winmm. `reAL.ini.example` h
 5. ~~EAX 4: FX slots, sends, all 12 effects~~ (src/eax4dsp.c)
 6. ~~DirectSound effects (SetFX)~~ (src/fx.c, src/dsfx.c, src/i3dl2.c)
 7. reDM, reAL's own DirectMusic (src/music/): playback, synth, audiopaths, tools, styles and the composer done;
-   scripts under way (all but the script track and VBScript/JScript done)
+   scripts done (AudioVBScript, VBScript/JScript, automation, the script track)
 8. Last: CMSS-3D upmix and speaker configs > 2.0 (EAX 5 dropped: it was an OpenAL feature in practice)
 
 ## Repo layout

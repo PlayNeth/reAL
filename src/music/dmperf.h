@@ -133,6 +133,7 @@ enum { PRM_TEMPO, PRM_PRIVTEMPO, PRM_TIMESIG, PRM_MUTE, PRM_BAND,
        PRM_PLAYMARKER,      /* GUID_Play_Marker (DMUS_PLAY_MARKER_PARAM) */
        PRM_PATSTYLE,        /* dmstyle's private 689821f4: the pattern track's style (a dms_style *, referenced) */
        PRM_PATPART,         /* dmstyle's private 09f25101 (the pattern track's, while playing) */
+       PRM_SCRIPTNOTIFY,    /* dmscript's script track 1cc7e0bf-981c-4b9f-be17-d572fc5fa933: errors as messages */
        PRM_ANY, PRM_OTHER };
 /* PRM_BANDPARAM (DMUS_BAND_PARAM); PRM_IBAND takes the dm_band itself */
 typedef struct { mtime_t physical; dm_band *band; } dm_bandparam;
@@ -253,6 +254,10 @@ typedef struct {
     void (*mp_release)(void *ctx, void *mp);
     /* a state leaves the performance (its segment and audiopath let go) */
     void (*state_end)(void *ctx, dm_segstate *ss);
+    /* the script track: its scripts' Init as a state starts playing it (0040fb32), and an event's message to the
+     * track's tool (0040fbe9: the event's physical time + off) */
+    void (*script_init)(void *ctx, dm_segstate *ss, dm_track *t, uint32_t vid);
+    void (*script_event)(void *ctx, dm_segstate *ss, dm_track *t, const dm_scriptev *e, mtime_t off, uint32_t vid);
 } dm_toolops;
 void dm_perf_set_toolops(dm_perf *pf, const dm_toolops *ops, void *ctx);
 /* the graphs: the setters take over one reference (released through graph_release), the getters lend theirs */

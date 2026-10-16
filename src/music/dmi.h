@@ -298,7 +298,8 @@ typedef struct dm_wavetrack {
 enum { TRK_OTHER = 0, TRK_SEQ, TRK_TEMPO, TRK_TIMESIG, TRK_BAND, TRK_SYSEX, TRK_WAVE, TRK_MARKER,
        TRK_LYRICS, TRK_SEGTRIG, TRK_PARAMCTL,
        TRK_CHORD, TRK_COMMAND, TRK_MUTE, TRK_STYLE, TRK_MOTIF, TRK_PATTERN,   /* TRK_CHORD on are dmstyle's (dmsty.h) */
-       TRK_CHORDMAP, TRK_SIGNPOST };      /* dmcompos's (dmcomp.h) */
+       TRK_CHORDMAP, TRK_SIGNPOST,        /* dmcompos's (dmcomp.h) */
+       TRK_SCRIPT };                      /* dmscript's */
 /* the marker track (dmime CMarkerTrack 77321d13): valid start points ('vals') and play markers ('play'), sorted */
 typedef struct dm_marker { struct dm_marker *next; mtime_t t; } dm_marker;
 typedef struct { dm_marker *starts, *plays; } dm_markertrack;
@@ -315,6 +316,13 @@ typedef struct { dm_segtrig *items; uint32_t gen, hflags; int depth; } dm_segtri
 dm_lyricstrack *dm_lyricstrack_load(const uint8_t *p, size_t n, int32_t *hr);   /* the 'lyrt' list's data */
 void dm_lyricstrack_free(dm_lyricstrack *T);
 void dm_segtrigtrack_free(dm_segtrigtrack *T);
+/* the script track (dmscript CDirectMusicScriptTrack): 'scre' events (a routine of a script, called at the event's
+ * physical time), sorted by logical time; the script is the COM object (IDirectMusicScript, one reference: the COM
+ * layer's dm_unk_ref) */
+typedef struct dm_scriptev { struct dm_scriptev *next; uint32_t flags; mtime_t logical, physical; void *script; uint16_t *routine; } dm_scriptev;
+typedef struct { dm_scriptev *items; uint32_t gen; int errnotify; } dm_scripttrack;
+extern void (*dm_unk_ref)(void *unk, int add);     /* AddRef (add) / Release of a COM object the engine holds */
+void dm_scripttrack_free(dm_scripttrack *T);
 /* the parameter control track (dmime 77310eae): objects in the path ('proh', DMUS_IO_PARAMCONTROLTRACK_OBJECTHEADER)
  * with parameters ('prph') and their curves ('prcc', DMUS_IO_PARAMCONTROLTRACK_CURVEINFO); both lists newest first
  * (the reverse of the file), as the original keeps them */
@@ -398,8 +406,10 @@ typedef struct dmc_chordmap *(*dm_getcmap_fn)(void *ctx, const dm_guid *guid, co
 /* a segment trigger track's segment reference (a segment, with a reference) */
 typedef struct dm_segment *(*dm_getseg_fn)(void *ctx, const dm_guid *guid, const char *file, const char *name);
 typedef struct { dm_getcoll_fn getcoll; dm_getwave_fn getwave; dm_getstyle_fn getstyle; void *ctx; dm_getcmap_fn getcmap;
-                 dm_getseg_fn getseg; } dm_loadcb;
+                 dm_getseg_fn getseg;
+                 void *(*getscript)(void *ctx, const dm_guid *guid, const char *file, const char *name, int32_t *hr); } dm_loadcb;
 dm_segtrigtrack *dm_segtrigtrack_load(const uint8_t *p, size_t n, const dm_loadcb *cb, int32_t *hr);   /* 'segt' data */
+dm_scripttrack *dm_scripttrack_load(const uint8_t *p, size_t n, const dm_loadcb *cb, int32_t *hr);   /* 'scrt' data */
 dm_segment *dm_segment_new(void);
 dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *cb);
 dm_segment *dm_segment_from_wave(dm_wave *w);

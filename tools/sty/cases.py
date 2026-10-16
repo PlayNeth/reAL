@@ -677,6 +677,55 @@ End Sub
     files['nolang.spt'] = script(None, 'nolang', "Sub X\nEnd Sub\n", lang='NoSuchLanguage')
     return files
 
+def case_scripttrack(out):
+    """segments with a script track (tests/scrtest.c track)"""
+    SEG = CLSID['segment']
+    def seg(name, guid, note):
+        g = Segment(guid, name, BAR)
+        g.seq([(t, 200, 0, 0x90, note, 100) for t in range(0, BAR, 768)])
+        return g.build()
+    src = """' the track's
+Dim N
+Sub One
+    N = N + 1
+    Trace "one"
+End Sub
+Sub Two
+    Trace "two"
+End Sub
+Sub Boom
+    N = N \\ 0
+End Sub
+Sub PlayIt
+    Short.Play IsSecondary
+    Trace "played"
+End Sub
+"""
+    files = {'trk.spt': script('8f6d1a10-1700-4000-8000-000000000010', 'trk', src,
+                               [(SEG, 0, 'Short', seg('short', '8f6d1a10-1700-4000-8000-000000000002', 64))], flags=3),
+             'bad.spt': script('8f6d1a10-1700-4000-8000-000000000011', 'bad', "Dim A\nSub One\n  A = (1 + \nEnd Sub\n")}
+    def tseg(guid, name, items, length=3 * BAR):
+        g = Segment(guid, name, length)
+        g.tempo([(0, 120.0)])
+        g.scripttrack(items)
+        return g.build()
+    files['trk.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000001', 'trk', [
+        (0, 0, 0, 'trk.spt', 'One'), (0, 768, 768, 'trk.spt', 'Two'), (1, 1536, 1536, 'trk.spt', 'One'),
+        (2, 2304, 2304, 'trk.spt', 'Boom'), (4, 3072, 3072, 'trk.spt', 'Two'), (0, 3840, 3840, 'trk.spt', 'NoSuch'),
+        (0, 4608, 4608, 'trk.spt', 'PlayIt'), (0, 6144, 5376, 'trk.spt', 'One'), (0, 5400, 5900, 'trk.spt', 'Two')])
+    files['trkbad.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000003', 'trkbad', [(0, 0, 0, 'bad.spt', 'One')], BAR)
+    files['noname.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000004', 'noname', [(0, 0, 0, 'trk.spt', None)], BAR)
+    files['nohdr.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000005', 'nohdr', [(None, 0, 0, 'trk.spt', 'One')], BAR)
+    files['noref.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000006', 'noref', [(0, 0, 0, None, 'One')], BAR)
+    files['missing.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000007', 'missing', [(0, 0, 0, 'nothere.spt', 'One')], BAR)
+    files['vbtrk.spt'] = script('8f6d1a10-1700-4000-8000-000000000012', 'vbtrk',
+                                "Dim n\nn = 5\nTrace \"vb loaded\"\nSub Hello\n  n = n + 1\n  Trace \"vb hello \" & n\nEnd Sub\n",
+                                lang='VBScript')
+    files['trkvbs.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000009', 'trkvbs',
+                               [(0, 0, 0, 'vbtrk.spt', 'Hello'), (0, 768, 768, 'vbtrk.spt', 'Hello')], BAR)
+    files['empty.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000008', 'empty', [], BAR)
+    return files
+
 def case_scriptauto(out):
     """scripts driving segments, segment states, audiopaths and an audiopath configuration (tests/scrtest.c auto)"""
     SEG, CFG = CLSID['segment'], 'ee0b9ca0-a81e-11d3-9bd1-0080c7150a74'
@@ -791,7 +840,7 @@ End Sub
              (CFG, 0, 'Cfg', audiopath_config([('11111111-2222-3333-4444-555566667711', 2, [])], guid='8f6d1a10-1600-4000-8000-000000000003', name='cfg'))]
     return {'auto.spt': script('8f6d1a10-1600-4000-8000-000000000010', 'auto', src, items, flags=3)}
 
-CASES = {'scriptauto': case_scriptauto, 'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+CASES = {'scripttrack': case_scripttrack, 'scriptauto': case_scriptauto, 'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

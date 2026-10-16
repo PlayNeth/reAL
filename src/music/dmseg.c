@@ -49,6 +49,7 @@ static const dm_guid CLSID_MarkerTrack = { 0x55a8fd00, 0x4288, 0x11d3, { 0x9b, 0
 static const dm_guid CLSID_SignPostTrack = { 0xf17e8672, 0xc3b4, 0x11d1, { 0x87, 0x0b, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd } };
 static const dm_guid CLSID_LyricsTrack  = { 0x995c1cf5, 0x54ff, 0x11d3, { 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
 static const dm_guid CLSID_SegTriggerTrack = { 0xbae4d665, 0x4ea1, 0x11d3, { 0x8b, 0xda, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
+static const dm_guid CLSID_ScriptTrack = { 0x4108fa85, 0x3586, 0x11d3, { 0x8b, 0xd7, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
 static const dm_guid CLSID_ParamControlTrack = { 0x4be0537b, 0x5c19, 0x11d3, { 0x8b, 0xdc, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
 static const dm_guid GUID_TIME_MUSIC = { 0x0574c49d, 0x5b04, 0x4b15, { 0xa5, 0x42, 0xae, 0x28, 0x20, 0x30, 0x11, 0x7b } };
 static const dm_guid GUID_TIME_REFERENCE = { 0x93ad712b, 0xdaa0, 0x4ffe, { 0xbc, 0x81, 0xb0, 0xce, 0x50, 0x0f, 0xcd, 0xd9 } };
@@ -793,6 +794,105 @@ static dm_segtrigtrack *segtrigtrack_clone(const dm_segtrigtrack *T, mtime_t sta
 }
 
 
+
+/* ------------------------------------------------------------------ the script track (dmscript) */
+void (*dm_unk_ref)(void *unk, int add);
+EVSORT(scriptev_sort, dm_scriptev)
+static void scriptev_free(dm_scriptev *e)
+{
+    if (!e) return;
+    if (e->script && dm_unk_ref) dm_unk_ref(e->script, 0);
+    free(e->routine); free(e);
+}
+void dm_scripttrack_free(dm_scripttrack *T)
+{
+    if (!T) return;
+    for (dm_scriptev *e = T->items, *n; e; e = n) { n = e->next; scriptev_free(e); }
+    free(T);
+}
+#define E_SCRIPTTRACK ((int32_t)0x88781219)
+/* 00410249: a 'scre' list: 'scrh' (DMUS_IO_SCRIPTTRACK_EVENTHEADER, as much of it as there is), the script's
+ * reference ('DMRF': the loader's GetObject; its failure is the Load's) and 'scrn' (the routine); all three must be
+ * there.  The event goes in front (the list is sorted after) */
+static int32_t scriptev_load(dm_scripttrack *T, rd r, const dm_loadcb *cb)
+{
+    dm_scriptev *e = calloc(1, sizeof(*e));
+    if (!e) return DM_E_OUTOFMEMORY;
+    int hdr = 0;
+    uint32_t id, type; rd c;
+    while (next_chunk(&r, &id, &c, &type)) {
+        if (id == FCC('L','I','S','T') && type == FCC('D','M','R','F')) {
+            dm_guid g; int hasg; char file[260], name[128];
+            ref_read(c, &g, &hasg, file, sizeof(file), name, sizeof(name));
+            int32_t hr = DM_E_FAIL;
+            void *x = cb && cb->getscript ? cb->getscript(cb->ctx, hasg ? &g : NULL, file[0] ? file : NULL, name[0] ? name : NULL, &hr) : NULL;
+            if (!x) { scriptev_free(e); return hr < 0 ? hr : DM_E_FAIL; }
+            if (e->script && dm_unk_ref) dm_unk_ref(e->script, 0);
+            e->script = x;
+        } else if (id == FCC('s','c','r','h')) {
+            uint8_t h[12] = { 0 };
+            memcpy(h, c.p, (size_t)(c.e - c.p) < 12 ? (size_t)(c.e - c.p) : 12);
+            e->flags = u32(h); e->logical = (int32_t)u32(h + 4); e->physical = (int32_t)u32(h + 8);
+            hdr = 1;
+        } else if (id == FCC('s','c','r','n')) {
+            size_t n = (size_t)(c.e - c.p);
+            if (n & 1) { scriptev_free(e); return E_SCRIPTTRACK; }
+            uint16_t *t = malloc(n + 2);
+            if (!t) { scriptev_free(e); return DM_E_OUTOFMEMORY; }
+            size_t k = 0;
+            for (; k < n / 2; k++) { t[k] = u16(c.p + 2 * k); if (!t[k]) break; }
+            t[k] = 0;
+            free(e->routine); e->routine = t;       /* (the original's last one leaks the one before) */
+        }
+    }
+    if (!hdr || !e->script || !e->routine) { scriptev_free(e); return E_SCRIPTTRACK; }
+    e->next = T->items; T->items = e;
+    return DM_OK;
+}
+/* 0041057a: the 'scrt' list's first 'scrl' list of 'scre' lists */
+dm_scripttrack *dm_scripttrack_load(const uint8_t *p, size_t n, const dm_loadcb *cb, int32_t *hr)
+{
+    dm_scripttrack *T = calloc(1, sizeof(*T));
+    *hr = DM_E_OUTOFMEMORY;
+    if (!T) return NULL;
+    T->gen = 1;
+    rd r = { p, p + n }, c;
+    uint32_t id, type;
+    *hr = E_SCRIPTTRACK;
+    while (next_chunk(&r, &id, &c, &type)) {
+        if (id != FCC('L','I','S','T') || type != FCC('s','c','r','l')) continue;
+        *hr = DM_OK;
+        rd x;
+        while (*hr >= 0 && next_chunk(&c, &id, &x, &type))
+            if (id == FCC('L','I','S','T') && type == FCC('s','c','r','e')) *hr = scriptev_load(T, x, cb);
+        break;
+    }
+    if (*hr < 0) { dm_scripttrack_free(T); return NULL; }
+    T->items = scriptev_sort(T->items);
+    return T;
+}
+/* the events at logical times in [start, end), moved to 0 (0040f797's copies) */
+static dm_scripttrack *scripttrack_clone(const dm_scripttrack *T, mtime_t start, mtime_t end)
+{
+    dm_scripttrack *C = calloc(1, sizeof(*C));
+    if (!C) return NULL;
+    C->gen = 1;
+    dm_scriptev **tail = &C->items;
+    for (const dm_scriptev *e = T->items; e && e->logical < end; e = e->next) {
+        if (e->logical < start) continue;
+        dm_scriptev *x = malloc(sizeof(*x));
+        if (!x) break;
+        *x = *e; x->next = NULL;
+        x->logical -= start; x->physical -= start;
+        size_t k = 0; while (e->routine[k]) k++;
+        if (!(x->routine = malloc((k + 1) * 2))) { free(x); break; }
+        memcpy(x->routine, e->routine, (k + 1) * 2);
+        if (x->script && dm_unk_ref) dm_unk_ref(x->script, 1);
+        *tail = x; tail = &x->next;
+    }
+    return C;
+}
+
 /* ------------------------------------------------------------------ the parameter control track */
 static void pcobj_free(dm_pcobj *o)
 {
@@ -990,6 +1090,11 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
                 t.data = dm_paramtrack_load(c.p, (size_t)(c.e - c.p), &hr);
                 if (!t.data) { s->partial = 1; return; }
                 t.kind = TRK_PARAMCTL;
+            } else if (guid_eq(&t.clsid, &CLSID_ScriptTrack) && id == FCC('L','I','S','T') && type == FCC('s','c','r','t')) {
+                int32_t hr;
+                t.data = dm_scripttrack_load(c.p, (size_t)(c.e - c.p), cb, &hr);
+                if (!t.data) { s->partial = 1; return; }
+                t.kind = TRK_SCRIPT;
             } else if (guid_eq(&t.clsid, &CLSID_MuteTrack) && id == FCC('m','u','t','e')) {
                 int32_t hr;
                 t.data = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr);
@@ -1012,6 +1117,7 @@ static const struct { const dm_guid *g; int kind; } s_kinds[] = {
     { &CLSID_MotifTrack, TRK_MOTIF }, { &CLSID_PatternTrack, TRK_PATTERN }, { &CLSID_ChordMapTrack, TRK_CHORDMAP },
     { &CLSID_SignPostTrack, TRK_SIGNPOST }, { &CLSID_MarkerTrack, TRK_MARKER }, { &CLSID_LyricsTrack, TRK_LYRICS },
     { &CLSID_SegTriggerTrack, TRK_SEGTRIG }, { &CLSID_ParamControlTrack, TRK_PARAMCTL }, { &CLSID_MuteTrack, TRK_MUTE },
+    { &CLSID_ScriptTrack, TRK_SCRIPT },
 };
 int dm_track_class_kind(const dm_guid *clsid)
 {
@@ -1050,6 +1156,7 @@ dm_track *dm_track_create(const dm_guid *clsid)
     case TRK_LYRICS: { dm_lyricstrack *y = calloc(1, sizeof(*y)); if (y) y->gen = 1; d = y; break; }
     case TRK_SEGTRIG: d = dm_segtrigtrack_load(none, 0, NULL, &hr); break;
     case TRK_PARAMCTL: d = dm_paramtrack_load(none, 0, &hr); break;
+    case TRK_SCRIPT: { dm_scripttrack *y = calloc(1, sizeof(*y)); if (y) y->gen = 1; d = y; break; }
     }
     if (!d) return NULL;
     dm_track *t = dm_track_new(kind, clsid, d);
@@ -1105,6 +1212,7 @@ int dm_track_load_chunk(dm_track *t, const uint8_t *p, size_t n, const dm_loadcb
     case TRK_LYRICS: if (type == FCC('l','y','r','t')) d = dm_lyricstrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
     case TRK_SEGTRIG: if (type == FCC('s','e','g','t')) d = dm_segtrigtrack_load(c.p, (size_t)(c.e - c.p), cb, &hr); break;
     case TRK_PARAMCTL: if (type == FCC('p','r','m','t')) d = dm_paramtrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
+    case TRK_SCRIPT: if (type == FCC('s','c','r','t')) d = dm_scripttrack_load(c.p, (size_t)(c.e - c.p), cb, &hr); break;
     case TRK_MUTE: if (id == FCC('m','u','t','e')) d = dms_mutetrack_load(c.p, (size_t)(c.e - c.p), &hr); break;
     default: return DM_E_FAIL;
     }
@@ -1277,6 +1385,7 @@ static void free_track(dm_track *t)
     case TRK_LYRICS: dm_lyricstrack_free(t->data); break;
     case TRK_SEGTRIG: dm_segtrigtrack_free(t->data); break;
     case TRK_PARAMCTL: dm_paramtrack_free(t->data); break;
+    case TRK_SCRIPT: dm_scripttrack_free(t->data); break;
     case TRK_BAND: {
         dm_bandtrack *b = t->data;
         for (int i = 0; i < b->nbands; i++) dm_band_release(b->bands[i]);
@@ -1589,9 +1698,9 @@ static void *clone_band(const dm_bandtrack *t, mtime_t start, mtime_t end)
 dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
 {
     *hr = DM_OK;
-    /* (the lyrics and segment trigger tracks' Clone takes any range) */
+    /* (the lyrics, segment trigger, parameter control and script tracks' Clone takes any range) */
     if ((start < 0 || end < start) && t->kind != TRK_LYRICS && t->kind != TRK_SEGTRIG &&
-        t->kind != TRK_PARAMCTL) { *hr = DM_E_INVALIDARG; return NULL; }
+        t->kind != TRK_PARAMCTL && t->kind != TRK_SCRIPT) { *hr = DM_E_INVALIDARG; return NULL; }
     void *d = NULL;
     switch (t->kind) {
     case TRK_TEMPO: d = clone_tempo(t->data, start, end); break;
@@ -1611,6 +1720,7 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     case TRK_LYRICS: d = lyricstrack_clone(t->data, start, end); break;
     case TRK_SEGTRIG: d = segtrigtrack_clone(t->data, start, end); break;
     case TRK_PARAMCTL: d = paramtrack_clone(t->data, start, end); break;
+    case TRK_SCRIPT: d = scripttrack_clone(t->data, start, end); break;
     default: break;                 /* a track kind the engine does not play: a copy without data */
     }
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }

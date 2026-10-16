@@ -451,6 +451,7 @@ static int track_isparam(const dm_track *t, int prm)
     case TRK_SEQ: case TRK_SYSEX: return DM_E_NOTIMPL;     /* 77307918 */
     case TRK_MARKER: return prm == PRM_VALIDSTART || prm == PRM_PLAYMARKER ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;    /* 77321af8 */
     case TRK_SEGTRIG: return DM_OK;                         /* 77321b4b: every type (its SetParam passes them on) */
+    case TRK_SCRIPT: return prm == PRM_SCRIPTNOTIFY ? DM_OK : DMUS_E_TYPE_UNSUPPORTED;     /* 0040f917 */
     }
     return DMUS_E_TYPE_UNSUPPORTED;
 }
@@ -529,7 +530,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
         if (next) *next = k + 1 < T->nbands ? T->bands[k + 1]->logical : 0;    /* (the next band's time, not relative) */
         return DM_OK;
     }
-    if (t->kind >= TRK_CHORD) return sty_getparam(t, prm, mt, next, data);
+    if (t->kind >= TRK_CHORD && t->kind != TRK_SCRIPT) return sty_getparam(t, prm, mt, next, data);
     if (t->kind == TRK_SEQ || t->kind == TRK_SYSEX) return DM_E_NOTIMPL;    /* 7730790b */
     return DMUS_E_GET_UNSUPPORTED;      /* (BandParam would need band objects; the wave track's is private) */
 }
@@ -538,7 +539,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
 static int sty_getparam_state(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data);
 static int track_getparam_ex(const dm_track *t, void *state, int prm, mtime_t mt, mtime_t *next, void *data)
 {
-    if (state && t->kind >= TRK_CHORD) return sty_getparam_state(t, state, prm, mt, next, data);
+    if (state && t->kind >= TRK_CHORD && t->kind != TRK_SCRIPT) return sty_getparam_state(t, state, prm, mt, next, data);
     return track_getparam(t, prm, mt, next, data);
 }
 

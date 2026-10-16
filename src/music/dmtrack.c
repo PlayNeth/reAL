@@ -698,6 +698,10 @@ static int track_setparam(dm_track *t, int prm, mtime_t mt, void *data)
 {
     switch (t->kind) {
     case TRK_SEGTRIG: return segtrig_setparam(t, prm, mt, data);
+    case TRK_SCRIPT:                    /* 0040f937 */
+        if (prm != PRM_SCRIPTNOTIFY) return DMUS_E_SET_UNSUPPORTED;
+        ((dm_scripttrack *)t->data)->errnotify = 1;
+        return DM_OK;
     case TRK_TEMPO: {
         dm_tempotrack *T = t->data;
         if (prm == PRM_DISABLETEMPO) {
@@ -828,6 +832,13 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         e->state = S;
         break;
     }
+    case TRK_SCRIPT: {                      /* 0040fb32 */
+        evstate *S = calloc(1, sizeof(*S));
+        if (!S) break;
+        e->state = S;
+        if (pf->tops.script_init) pf->tops.script_init(pf->tctx, ss, e->t, e->vid);
+        break;
+    }
     case TRK_PARAMCTL: {                    /* 77322dc4 */
         const dm_paramtrack *T = e->t->data;
         pcstate *S = calloc(1, sizeof(*S));
@@ -881,6 +892,29 @@ static int lyrics_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, 
         m->vpch = e->vid; m->type = PT_LYRIC; m->group = 0xffffffff;
         stamp_send(pf, ss, m);
     }
+    S->cur = x;
+    return x ? DM_OK : DMUS_S_END;
+}
+
+/* 0040fe11 with 0040fbe9: each event with a logical time in [start, end) as a message to the track's tool at its
+ * physical time (which calls the routine); none on a flush */
+static int script_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
+{
+    dm_scripttrack *T = e->t->data;
+    evstate *S = e->state;
+    if (!S) return DM_OK;
+    if (flags & TF_PLAY_OFF) return DM_OK;
+    dm_scriptev *x = S->cur;
+    if (S->gen != T->gen || (flags & (TF_SEEK | TF_LOOP | TF_FLUSH))) {
+        for (x = T->items; x && x->logical < start; x = x->next) {}
+        S->gen = T->gen;
+    }
+    if (!(flags & TF_FLUSH))
+        for (; x; x = x->next) {
+            if (x->logical < start) continue;
+            if (end <= x->logical) break;
+            if (pf->tops.script_event) pf->tops.script_event(pf->tctx, ss, e->t, x, off, e->vid);
+        }
     S->cur = x;
     return x ? DM_OK : DMUS_S_END;
 }
@@ -1083,6 +1117,7 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
     case TRK_SYSEX: return sysex_play(pf, ss, e, start, end, off, flags);
     case TRK_WAVE: return wt_play(pf, ss, e, start, end, off, flags, 0);
     case TRK_LYRICS: return lyrics_play(pf, ss, e, start, end, off, flags);
+    case TRK_SCRIPT: return script_play(pf, ss, e, start, end, off, flags);
     case TRK_SEGTRIG: return segtrig_play(pf, ss, e, start, end, off, flags);
     case TRK_PARAMCTL: return paramctl_play(pf, ss, e, start, end, off, flags);
     case TRK_CHORD: case TRK_COMMAND: case TRK_MUTE: case TRK_STYLE: case TRK_MOTIF: case TRK_PATTERN:

@@ -539,6 +539,7 @@ DMG(G_IDirectMusicChordMap_, 0xd2ac28ad, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60,
 DMG(G_PerfMasterGrooveLevel, 0xd2ac28b2, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
 DMG(G_Variations, 0x11f72cce, 0x26e6, 0x4ecd, 0xaf, 0x2e, 0xd6, 0x68, 0xe6, 0x67, 0x07, 0xd8);
 DMG(G_PatternStyle, 0x689821f4, 0xb3bc, 0x44dd, 0x80, 0xd4, 0x0c, 0xf3, 0x2f, 0xe4, 0xd2, 0x1b);    /* dmstyle's private */
+DMG(G_ScriptTrackNotify, 0x1cc7e0bf, 0x981c, 0x4b9f, 0xbe, 0x17, 0xd5, 0x72, 0xfc, 0x5f, 0xa9, 0x33);     /* dmscript's */
 DMG(G_PatternPart, 0x09f25101, 0x505d, 0x4c7c, 0xbe, 0x15, 0x66, 0x2b, 0x33, 0xe7, 0x8a, 0x7c);     /* dmstyle's private */
 DMG(G_PrivateTempo, 0xe8dbd832, 0xbcf0, 0x4c8c, 0xa0, 0x75, 0xa3, 0xf1, 0x5e, 0x67, 0xfd, 0x63);
 static const struct { const GUID *g; int prm; } s_params[] = {
@@ -551,7 +552,7 @@ static const struct { const GUID *g; int prm; } s_params[] = {
     { &G_MuteParam, PRM_MUTE }, { &G_PrivateTempo, PRM_PRIVTEMPO }, { &G_ChordParam, PRM_CHORD }, { &G_RhythmParam, PRM_RHYTHM },
     { &G_CommandParam, PRM_COMMAND }, { &G_CommandParam2, PRM_COMMAND2 }, { &G_CommandParamNext, PRM_COMMANDNEXT },
     { &G_IDirectMusicStyle, PRM_STYLE }, { &G_SeedVariations, PRM_SEEDVAR }, { &G_StyleTimeSig, PRM_STYLETS }, { &G_ValidStartTime, PRM_VALIDSTART }, { &G_PlayMarker, PRM_PLAYMARKER }, { &G_IDirectMusicChordMap_, PRM_CHORDMAP },
-    { &G_Variations, PRM_VARIATIONS }, { &G_PatternStyle, PRM_PATSTYLE }, { &G_PatternPart, PRM_PATPART }, { &GUID_NULL, PRM_ANY },
+    { &G_Variations, PRM_VARIATIONS }, { &G_PatternStyle, PRM_PATSTYLE }, { &G_PatternPart, PRM_PATPART }, { &G_ScriptTrackNotify, PRM_SCRIPTNOTIFY }, { &GUID_NULL, PRM_ANY },
 };
 static int prm_of(REFGUID g)
 {
@@ -783,6 +784,7 @@ static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, co
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name);
 static struct dmc_chordmap *loader_getcmap(void *ctx, const dm_guid *g, const char *file, const char *name);
 static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, const char *name);
+static void *loader_getscript(void *ctx, const dm_guid *g, const char *file, const char *name, int32_t *hr);
 static dm_segment *segment_from_data(const BYTE *b, DWORD n, IDirectMusicLoader8 *l)
 {
     if (dm_is_midi(b, n)) return dm_segment_from_midi(b, n, loader_getcoll, l);
@@ -793,7 +795,7 @@ static dm_segment *segment_from_data(const BYTE *b, DWORD n, IDirectMusicLoader8
         dm_wave_release(w);
         return g;
     }
-    dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg };
+    dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg, loader_getscript };
     return dm_segment_load_cb(b, n, &cb);
 }
 static rm_segment *sgp(IPersistStream *i) { return impl_from(i, rm_segment, IPersistStream_iface); }
@@ -1361,7 +1363,7 @@ static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s)
     dm_track *t = trp(i)->t;
     if (!s || IsBadReadPtr(s, 4)) return E_POINTER;
     IDirectMusicLoader8 *l = rm_stream_loader(s);
-    if (t->kind == TRK_SEGTRIG && !l) return E_NOINTERFACE;
+    if ((t->kind == TRK_SEGTRIG || t->kind == TRK_SCRIPT) && !l) return E_NOINTERFACE;
     LARGE_INTEGER z = { { 0, 0 } };
     ULARGE_INTEGER at;
     if (FAILED(IStream_Seek(s, z, STREAM_SEEK_CUR, &at))) at.QuadPart = 0;
@@ -1376,7 +1378,7 @@ static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s)
         hr = E_NOINTERFACE;
     }
     if (SUCCEEDED(hr)) {
-        dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg };
+        dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg, loader_getscript };
         dm_host *h = any_host();
         if (h) dm_host_lock(h);
         hr = dm_track_load_chunk(t, b, n, &cb);
@@ -2689,9 +2691,82 @@ static void tops_state_end(void *ctx, dm_segstate *ss)
     if (s && s->path) { IDirectMusicAudioPath *a = s->path; s->path = NULL; IDirectMusicAudioPath_Release(a); }
 }
 static void tops_mp_release(void *ctx, void *mp) { MPV(mp)->Release(mp); }
+/* the script track's tool (dmscript's, part of the track: the track's references; 0040f8c2): ProcessPMsg calls an
+ * event's routine, the other methods are not for a graph */
+typedef struct { IDirectMusicTool IDirectMusicTool_iface; LONG ref; dm_track *t; } rm_scripttool;
+static rm_scripttool *sct(IDirectMusicTool *i) { return CONTAINING_RECORD(i, rm_scripttool, IDirectMusicTool_iface); }
+static HRESULT WINAPI sct_qi(IDirectMusicTool *i, REFIID r, void **o)
+{
+    if (!o) return E_POINTER;
+    if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &IID_IDirectMusicTool)) { *o = i; InterlockedIncrement(&sct(i)->ref); return S_OK; }
+    *o = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI sct_addref(IDirectMusicTool *i) { return InterlockedIncrement(&sct(i)->ref); }
+static ULONG WINAPI sct_release(IDirectMusicTool *i)
+{
+    rm_scripttool *x = sct(i);
+    LONG n = InterlockedDecrement(&x->ref);
+    if (!n) {
+        dm_host *h = any_host();
+        if (h) dm_host_lock(h);
+        dm_track_release(x->t);
+        if (h) dm_host_unlock(h);
+        free(x);
+    }
+    return n;
+}
+static HRESULT WINAPI sct_init(IDirectMusicTool *i, IDirectMusicGraph *g) { return E_UNEXPECTED; }
+static HRESULT WINAPI sct_delivery(IDirectMusicTool *i, DWORD *d) { return E_UNEXPECTED; }
+static HRESULT WINAPI sct_typesize(IDirectMusicTool *i, DWORD *n) { return E_UNEXPECTED; }
+static HRESULT WINAPI sct_types(IDirectMusicTool *i, DWORD **t, DWORD n) { return E_UNEXPECTED; }
+static HRESULT WINAPI sct_process(IDirectMusicTool *i, IDirectMusicPerformance *p, DMUS_PMSG *m)
+{
+    if (!m || !m->punkUser) return E_POINTER;
+    return rm_script_track_process(m->punkUser, m->dwVirtualTrackID, ((dm_scripttrack *)sct(i)->t->data)->errnotify);
+}
+static HRESULT WINAPI sct_flush(IDirectMusicTool *i, IDirectMusicPerformance *p, DMUS_PMSG *m, REFERENCE_TIME rt) { return DMUS_S_FREE; }
+static IDirectMusicToolVtbl sct_vtbl = { sct_qi, sct_addref, sct_release, sct_init, sct_delivery, sct_typesize, sct_types,
+                                         sct_process, sct_flush };
+
+/* 0040fb32: each event's script Init (an OLE engine starting runs with the performance let go: its code may call it) */
+static void tops_script_init(void *ctx, dm_segstate *ss, dm_track *t, uint32_t vid)
+{
+    rm_perf *p = ctx;
+    dm_scripttrack *T = t->data;
+    IUnknown *st = state_object(p, ss);
+    for (dm_scriptev *e = T->items; e; e = e->next) {
+        if (!e->script) continue;
+        IUnknown *sc = e->script;
+        IUnknown_AddRef(sc);
+        BOOL let = rm_script_init_blocks(sc);
+        if (let) dm_host_unlock(p->host);
+        rm_script_track_init(sc, (IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, st, vid, T->errnotify);
+        if (let) dm_host_lock(p->host);
+        IUnknown_Release(sc);
+        if (T != t->data) break;        /* (the track loaded again meanwhile) */
+    }
+    if (st) IUnknown_Release(st);
+}
+/* 0040fbe9: an event's message to the track's tool */
+static void tops_script_event(void *ctx, dm_segstate *ss, dm_track *t, const dm_scriptev *e, mtime_t off, uint32_t vid)
+{
+    rm_perf *p = ctx;
+    if (!e->script) return;
+    rm_scripttool *x = calloc(1, sizeof(*x));
+    if (!x) return;
+    x->IDirectMusicTool_iface.lpVtbl = &sct_vtbl;
+    x->ref = 1; x->t = t;
+    dm_track_addref(t);
+    IUnknown *st = state_object(p, ss);
+    rm_script_track_event((IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, st, &x->IDirectMusicTool_iface,
+                          e->script, e->routine, e->flags, (MUSIC_TIME)(e->physical + off), vid);
+    if (st) IUnknown_Release(st);
+    sct_release(&x->IDirectMusicTool_iface);
+}
 static const dm_toolops s_toolops = { tops_stamp, tops_unstamp, tops_process, tops_flush, tops_clone_ext, tops_free_ext,
                                       tops_state_graph, tops_graph_release, tops_mp_get, tops_mp_add, tops_mp_flush,
-                                      tops_mp_release, tops_state_end };
+                                      tops_mp_release, tops_state_end, tops_script_init, tops_script_event };
 
 /* the StampPMsg of the performance's, a state's and an audiopath's graph interfaces on any message */
 static HRESULT owner_stamp(rm_perf *p, DMUS_PMSG *m, int owner, void *obj)
@@ -3609,6 +3684,21 @@ static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, 
     return x;
 }
 
+/* a script track's reference (0040f6fd: the loader's GetObject of a script; its failure is the track's) */
+static void *loader_getscript(void *ctx, const dm_guid *g, const char *file, const char *name, int32_t *hr)
+{
+    IDirectMusicScript *o = NULL;
+    *hr = ldr_get(ctx, &CLSID_DirectMusicScript, &IID_IDirectMusicScript, g, file, name, (void **)&o);
+    if (FAILED(*hr) || !o) {
+        LOG_INFO("music: script track: script %s not found", file ? file : name ? name : "(by guid)");
+        if (o) IDirectMusicScript_Release(o);
+        if (SUCCEEDED(*hr)) *hr = E_FAIL;
+        return NULL;
+    }
+    return o;
+}
+static void unk_ref(void *u, int add) { if (add) IUnknown_AddRef((IUnknown *)u); else IUnknown_Release((IUnknown *)u); }
+
 /* a style track's reference (774123a0: the loader's GetObject of a style); the engine style with a reference */
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
@@ -3648,6 +3738,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
     *out = NULL;
     test_hooks();
     dm_wave_set_decoder(acm_decode);
+    dm_unk_ref = unk_ref;
     if (IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave)) {
         rm_wave *o = new_wave(NULL);
         if (!o) return E_OUTOFMEMORY;

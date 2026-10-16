@@ -47,6 +47,7 @@ DMUS_PLAYMODE_PEDALPOINTALWAYS = DMUS_PLAYMODE_PEDALPOINT | DMUS_PLAYMODE_CHORD_
 CLSID = {
     'segment': 'd2ac2882-b39b-11d1-8704-00600893b1bd',
     'lyricstrack': '995c1cf5-54ff-11d3-8bda-00600893b1b6',
+    'scripttrack': '4108fa85-3586-11d3-8bd7-00600893b1b6',
     'segtriggertrack': 'bae4d665-4ea1-11d3-8bda-00600893b1b6',
     'paramcontroltrack': '4be0537b-5c19-11d3-8bdc-00600893b1b6',
     'style': 'd2ac288a-b39b-11d1-8704-00600893b1bd',
@@ -328,6 +329,18 @@ class Segment:
         ev = [LIST('lyre', chunk('lyrh', struct.pack('<IIii', f, tf, lt, pt)), chunk('lyrn', wstr(txt)))
               for f, tf, lt, pt, txt in items]
         self.track(CLSID['lyricstrack'], None, 'lyrt', LIST('lyrt', LIST('lyrl', *ev)), group=group)
+
+    def scripttrack(self, items, group=1):
+        """a script track: items (flags, logical, physical, script file, routine); None for the file, the routine or
+        the header (flags None) leaves that chunk out"""
+        ev = []
+        for f, lt, pt, sf, rn in items:
+            body = []
+            if f is not None: body.append(chunk('scrh', struct.pack('<Iii', f, lt, pt)))
+            if sf is not None: body.append(reference('810b5013-e88d-11d2-8bc1-00600893b1b6', file=sf))
+            if rn is not None: body.append(chunk('scrn', wstr(rn)))
+            ev.append(LIST('scre', *body))
+        self.track(CLSID['scripttrack'], None, 'scrt', LIST('scrt', LIST('scrl', *ev)), group=group)
 
     def segtrigger(self, items, flags=0, group=1):
         """a segment trigger track: items (logical, physical, play flags, item flags, segment file) or, with item

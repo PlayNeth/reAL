@@ -2,7 +2,10 @@
  *   scrtest <dir> lang     scripts made here from source snippets: syntax errors, routines, variables, runtime
  *                          errors, the "DirectMusic" item's constants and performance methods (the messages they
  *                          send, seen by an application tool)
- *   scrtest <dir> files    the script files of tools/sty/cases.py's 'script' case: content, file names in errors */
+ *   scrtest <dir> files    the script files of tools/sty/cases.py's 'script' case: content, file names in errors
+ *   scrtest <dir> auto     the 'scriptauto' case: scripts driving segments, states and audiopaths
+ *   scrtest <dir> ole      VBScript and JScript
+ *   scrtest <dir> track    the 'scripttrack' case: segments with a script track */
 #define COBJMACROS
 #include <windows.h>
 #include <dmusici.h>
@@ -61,6 +64,11 @@ static HRESULT WINAPI t_process(IDirectMusicTool *i, IDirectMusicPerformance *p,
         DMUS_TRANSPOSE_PMSG *t = (DMUS_TRANSPOSE_PMSG *)m;
         snprintf(b, sizeof(b), "  msg transpose size %lu flags %lx pch %lx grp %lx by %d merge %x\n", m->dwSize,
                  m->dwFlags & ~DMUS_PMSGF_MUSICTIME, m->dwPChannel, m->dwGroupID, t->nTranspose, t->wMergeIndex);
+    } else if (m->dwType == 15000) {   /* a script track's script error */
+        const DMUS_SCRIPT_ERRORINFO *e = (const DMUS_SCRIPT_ERRORINFO *)((BYTE *)m + 0x38);
+        snprintf(b, sizeof(b), "  msg scripterror size %lu flags %lx vt %lu grp %lx tool %d graph %d err %08lx line %lu col %ld file '%ls' comp '%ls' desc '%ls'\n",
+                 m->dwSize, m->dwFlags, m->dwVirtualTrackID, m->dwGroupID, m->pTool != NULL, m->pGraph != NULL,
+                 e->hr, e->ulLineNumber, e->ichCharPosition, e->wszSourceFile, e->wszSourceComponent, e->wszDescription);
     } else if (m->dwType != DMUS_PMSGT_DIRTY && m->dwType != DMUS_PMSGT_NOTIFICATION && !g_quiet) {
         snprintf(b, sizeof(b), "  msg type %lu pch %lx\n", m->dwType, m->dwPChannel);
     }
@@ -742,6 +750,218 @@ static void autotest(void)
     IDirectMusicScript_Release(s);
 }
 
+/* ------------------------------------------------------------------ VBScript and JScript (Active Scripting) */
+static const char s_vbs[] =
+    "Dim n, s, d, o, arr\n"
+    "Sub Basics\n"
+    "  n = 7 \\ 2 + 3 * 4\n  s = \"hello \" & n\n  d = 1.5 * 3\n  arr = Array(1, 2, 3)\n"
+    "End Sub\n"
+    "Sub Perf\n"
+    "  Trace \"from vbscript \" & n\n  SetMasterVolume -500\n  SetMasterTranspose 2\n  n = GetMasterVolume\n"
+    "  d = GetMasterTranspose()\n  SetMasterTranspose 0\n  SetMasterVolume 0\n"
+    "End Sub\n"
+    "Sub Consts\n  n = AtMeasure + IsSecondary\n  s = TypeName(AtBeat)\nEnd Sub\n"
+    "Sub Strs\n  Trace \"x\" & 5\n  SetMasterTempo \"150\"\n  n = GetMasterTempo\n  SetMasterTempo 100\nEnd Sub\n"
+    "Sub DivZero\n  n = 1 / 0\nEnd Sub\n"
+    "Sub BadCall\n  NoSuchThing 1\nEnd Sub\n"
+    "Sub BadArgs\n  Trace\nEnd Sub\n"
+    "Sub RandBad\n  n = Rand(0)\nEnd Sub\n"
+    "Sub WithArg(x)\n  n = x\nEnd Sub\n"
+    "Function Twice(x)\n  Twice = x * 2\nEnd Function\n"
+    "Sub UseObj\n  o.Trace \"via object\"\nEnd Sub\n"
+    "Sub Nested\n  Basics\n  n = Twice(n)\nEnd Sub\n"
+    "Sub ScriptCall\n  o.Basics\n  n = o.n\n  o.n = 99\nEnd Sub\n"
+    "Sub ScriptErr\n  o.DivZero\nEnd Sub\n";
+static const char s_js[] =
+    "var n = 0, s = 'init';\n"
+    "function Basics() { n = 6 * 7; s = 'js ' + n; }\n"
+    "function Perf() { Trace('from jscript ' + n); SetMasterVolume(-300); n = GetMasterVolume(); SetMasterVolume(0); }\n"
+    "function Consts() { n = AtMeasure | IsSecondary; }\n"
+    "function Thrower() { throw new Error('boom'); }\n"
+    "function BadCall() { NoSuchThing(1); }\n";
+static void ole_one(const char *what, const char *src, const WCHAR *lang, const char *const *routines,
+                    const char *const *vars, IDirectMusicScript **keep)
+{
+    printf("== %s\n", what);
+    IDirectMusicScript *s = script_init(src, lang);
+    if (!s) return;
+    enum_names(s);
+    for (int k = 0; routines[k]; k++) call(s, routines[k]);
+    for (int k = 0; vars[k]; k++) getvar(s, vars[k]);
+    if (keep) *keep = s; else IDirectMusicScript_Release(s);
+}
+static void oletest(void)
+{
+    static const char *const vbs_r[] = { "Basics", "Perf", "Consts", "Strs", "DivZero", "BadCall", "BadArgs", "RandBad",
+                                         "WithArg", "Twice", "Nested", "NoSuch", NULL };
+    static const char *const vbs_v[] = { "n", "s", "d", "arr", "o", "nosuch", "Basics", NULL };
+    IDirectMusicScript *vb = NULL, *js = NULL;
+    ole_one("vbscript", s_vbs, L"VBScript", vbs_r, vbs_v, &vb);
+    static const char *const js_r[] = { "Basics", "Perf", "Consts", "Thrower", "BadCall", NULL };
+    static const char *const js_v[] = { "n", "s", NULL };
+    ole_one("jscript", s_js, L"JScript", js_r, js_v, &js);
+    if (vb) {
+        DMUS_SCRIPT_ERRORINFO e;
+        HRESULT hr;
+        printf("== variables\n");
+        einit(&e); hr = IDirectMusicScript_SetVariableNumber(vb, L"n", 42, &e); printf("  setnum n: %08lx\n", hr); perr(&e);
+        getvar(vb, "n");
+        VARIANT v;
+        VariantInit(&v); V_VT(&v) = VT_BSTR; V_BSTR(&v) = SysAllocString(L"12");
+        einit(&e); hr = IDirectMusicScript_SetVariableVariant(vb, L"s", v, FALSE, &e); printf("  setvariant s '12': %08lx\n", hr); perr(&e);
+        VariantClear(&v);
+        getvar(vb, "s");
+        VariantInit(&v); V_VT(&v) = VT_R8; V_R8(&v) = 2.75;
+        einit(&e); hr = IDirectMusicScript_SetVariableVariant(vb, L"d", v, FALSE, &e); printf("  setvariant d r8: %08lx\n", hr); perr(&e);
+        getvar(vb, "d");
+        einit(&e); hr = IDirectMusicScript_SetVariableObject(vb, L"o", (IUnknown *)perf, &e); printf("  setobj o perf: %08lx\n", hr); perr(&e);
+        call(vb, "UseObj");
+        VariantInit(&v); V_VT(&v) = VT_UNKNOWN; V_UNKNOWN(&v) = (IUnknown *)perf;
+        einit(&e); hr = IDirectMusicScript_SetVariableVariant(vb, L"n", v, FALSE, &e); printf("  setvariant n obj let: %08lx\n", hr); perr(&e);
+        VariantInit(&v); V_VT(&v) = VT_I4; V_I4(&v) = 1;
+        einit(&e); hr = IDirectMusicScript_SetVariableVariant(vb, L"n", v, TRUE, &e); printf("  setvariant n 1 set: %08lx\n", hr); perr(&e);
+        einit(&e); hr = IDirectMusicScript_SetVariableNumber(vb, L"Basics", 1, &e); printf("  setnum Basics: %08lx\n", hr); perr(&e);
+        einit(&e); hr = IDirectMusicScript_SetVariableNumber(vb, L"nosuch", 1, &e); printf("  setnum nosuch: %08lx\n", hr); perr(&e);
+        printf("== script to script\n");
+        IDirectMusicScript *vb2 = script_init(s_vbs, L"VBScript");
+        if (vb2) {
+            einit(&e); hr = IDirectMusicScript_SetVariableObject(vb, L"o", (IUnknown *)vb2, &e); printf("  setobj o script: %08lx\n", hr);
+            call(vb, "ScriptCall");
+            getvar(vb, "n");
+            getvar(vb2, "n");
+            call(vb, "ScriptErr");
+            IDirectMusicScript_SetVariableNumber(vb, L"o", 0, NULL);
+            IDirectMusicScript_Release(vb2);
+        }
+        if (js) {
+            einit(&e); hr = IDirectMusicScript_SetVariableObject(vb, L"o", (IUnknown *)js, &e); printf("  setobj o jscript: %08lx\n", hr);
+            call(vb, "ScriptCall");
+            getvar(vb, "n");
+            getvar(js, "n");
+            IDirectMusicScript_SetVariableNumber(vb, L"o", 0, NULL);
+        }
+        IDirectMusicScript_Release(vb);
+    }
+    if (js) IDirectMusicScript_Release(js);
+    static const char *const syn[] = {
+        "Sub A\n  x = \nEnd Sub\n", "Sub A(\nEnd Sub\n", "Dim x\nx = 1 +\n", "Sub A\n  If 1 Then\nEnd Sub\n",
+        "Sub A\nEnd Sub\nSub A\nEnd Sub\n", "Trace \"at load\"\nSub A\nEnd Sub\n", "Dim q\nq = 1 / 0\nSub A\nEnd Sub\n", NULL };
+    for (int k = 0; syn[k]; k++) {
+        char b[16];
+        snprintf(b, sizeof(b), "vbs syntax %d", k);
+        printf("== %s\n", b);
+        IDirectMusicScript *x = script_init(syn[k], L"VBScript");
+        if (x) { call(x, "A"); IDirectMusicScript_Release(x); }
+        flushlog();
+    }
+    printf("== js syntax\n");
+    IDirectMusicScript *x = script_init("function A( { }\n", L"JScript");
+    if (x) IDirectMusicScript_Release(x);
+}
+
+/* ------------------------------------------------------------------ the script track */
+static const GUID G_ScriptTrack = { 0x4108fa85, 0x3586, 0x11d3, { 0x8b, 0xd7, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xb6 } };
+static const GUID G_ScriptNotify = { 0x1cc7e0bf, 0x981c, 0x4b9f, { 0xbe, 0x17, 0xd5, 0x72, 0xfc, 0x5f, 0xa9, 0x33 } };
+static IDirectMusicSegment8 *load_seg(const WCHAR *name, HRESULT *hr)
+{
+    IDirectMusicSegment8 *g = NULL;
+    *hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, (WCHAR *)name, (void **)&g);
+    return g;
+}
+static void play_through(IDirectMusicSegment8 *g)
+{
+    IDirectMusicSegmentState *ss = NULL;
+    HRESULT hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)g, NULL, NULL, 0, 0, &ss, NULL, NULL);
+    printf("  play %08lx\n", hr);
+    /* (until it has played: IsPlaying may answer S_FALSE until it starts) */
+    for (int k = 0, seen = 0; k < 300; k++) {
+        HRESULT p = IDirectMusicPerformance8_IsPlaying(perf, (IDirectMusicSegment *)g, NULL);
+        if (p == S_OK) seen = 1;
+        else if (seen || k > 60) break;
+        Sleep(50);
+    }
+    Sleep(300);
+    flushlog();
+    if (ss) IDirectMusicSegmentState_Release(ss);
+}
+static void tracktest(void)
+{
+    HRESULT hr;
+    g_quiet = 1;
+    IDirectMusicSegment8 *g = load_seg(L"trk.sgt", &hr);
+    printf("== trk.sgt\n  load %08lx\n", hr);
+    if (!g) return;
+    IDirectMusicTrack *t = NULL;
+    hr = IDirectMusicSegment8_GetTrack(g, &G_ScriptTrack, 0xffffffff, 0, &t);
+    printf("  gettrack %08lx\n", hr);
+    if (t) {
+        printf("  isparam notify %08lx tempo %08lx\n", IDirectMusicTrack_IsParamSupported(t, &G_ScriptNotify),
+               IDirectMusicTrack_IsParamSupported(t, &GUID_TempoParam));
+        struct { MUSIC_TIME mt; double tempo; } tp = { 0, 100.0 };
+        MUSIC_TIME nx = 0;
+        printf("  setparam tempo %08lx getparam notify %08lx tempo %08lx\n", IDirectMusicTrack_SetParam(t, &GUID_TempoParam, 0, &tp),
+               IDirectMusicTrack_GetParam(t, &G_ScriptNotify, 0, &nx, NULL), IDirectMusicTrack_GetParam(t, &GUID_TempoParam, 0, &nx, &tp));
+        IDirectMusicTrack8 *t8 = NULL;
+        hr = IDirectMusicTrack_QueryInterface(t, &IID_IDirectMusicTrack8, (void **)&t8);
+        printf("  track8 %08lx\n", hr);
+        if (t8) IDirectMusicTrack8_Release(t8);
+    }
+    printf(" without notification\n");
+    play_through(g);
+    /* (not played with the notification: dmscript crashes sending a routine's runtime error, 0040416a) */
+    hr = IDirectMusicSegment8_SetParam(g, &G_ScriptNotify, 0xffffffff, 0, 0, NULL);
+    printf(" notification: setparam %08lx\n", hr);
+    IDirectMusicScript *s = load_file(L"trk.spt", &hr);
+    printf("  script %08lx\n", hr);
+    if (s) { getvar(s, "N"); IDirectMusicScript_Release(s); }
+    /* a clone: the events in [768, 3500) */
+    IDirectMusicSegment *c = NULL;
+    hr = IDirectMusicSegment8_Clone(g, 768, 3500, &c);
+    printf("== clone %08lx\n", hr);
+    if (c) {
+        IDirectMusicSegment8 *c8 = NULL;
+        IDirectMusicSegment_QueryInterface(c, &IID_IDirectMusicSegment8, (void **)&c8);
+        if (c8) { play_through(c8); IDirectMusicSegment8_Release(c8); }
+        IDirectMusicSegment_Release(c);
+    }
+    if (t) {
+        IDirectMusicTrack *tc = NULL;
+        hr = IDirectMusicTrack_Clone(t, -5, -10, &tc);
+        printf("  track clone (-5, -10) %08lx\n", hr);
+        if (tc) IDirectMusicTrack_Release(tc);
+        IDirectMusicTrack_Release(t);
+    }
+    IDirectMusicSegment8_Release(g);
+
+    printf("== trkbad.sgt\n");
+    g = load_seg(L"trkbad.sgt", &hr);
+    printf("  load %08lx\n", hr);
+    if (g) {
+        play_through(g);
+        hr = IDirectMusicSegment8_SetParam(g, &G_ScriptNotify, 0xffffffff, 0, 0, NULL);
+        printf(" with notification (setparam %08lx)\n", hr);
+        play_through(g);
+        IDirectMusicSegment8_Release(g);
+    }
+    printf("== trkvbs.sgt\n");     /* (a VBScript script: started by the track, its code calling the performance) */
+    g = load_seg(L"trkvbs.sgt", &hr);
+    printf("  load %08lx\n", hr);
+    if (g) { play_through(g); play_through(g); IDirectMusicSegment8_Release(g); }
+    static const WCHAR *const bad[] = { L"noname.sgt", L"nohdr.sgt", L"noref.sgt", L"missing.sgt", L"empty.sgt" };
+    for (size_t k = 0; k < sizeof(bad) / sizeof(*bad); k++) {
+        g = load_seg(bad[k], &hr);
+        printf("== %ls\n  load %08lx\n", bad[k], hr);
+        if (!g) continue;
+        t = NULL;
+        hr = IDirectMusicSegment8_GetTrack(g, &G_ScriptTrack, 0xffffffff, 0, &t);
+        printf("  gettrack %08lx\n", hr);
+        if (t) IDirectMusicTrack_Release(t);
+        IDirectMusicSegment8_Release(g);
+    }
+    IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+    Sleep(200);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) { printf("scrtest <dir> lang|files\n"); return 1; }
@@ -769,6 +989,8 @@ int main(int argc, char **argv)
     if (!strcmp(argv[2], "lang")) lang();
     else if (!strcmp(argv[2], "files")) files();
     else if (!strcmp(argv[2], "auto")) autotest();
+    else if (!strcmp(argv[2], "ole")) oletest();
+    else if (!strcmp(argv[2], "track")) tracktest();
     IDirectMusicLoader8_Release(loader);
     IDirectMusicPerformance8_CloseDown(perf);
     IDirectMusicPerformance8_Release(perf);

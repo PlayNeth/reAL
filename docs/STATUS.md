@@ -186,6 +186,7 @@ Doppler, and WASAPI output.
 - dmscript loses a syntax error inside a call's arguments in an expression (its error code is overwritten) and
   then crashes running the routine; reDM reports the error. GetVariableObject of a variable holding Nothing
   crashes in dmscript as in reDM. Script source by reference (a DMRF list) is not supported.
+  (`files` matched in full once stage 4 brought VBScript.)
 
 **DirectMusic: scripts, stage 3** (`src/music/dmscript.c`: dmscript's CAutDirectMusic* classes)
 - IDispatch on the segment (Load, Play, Stop, DownloadSoundData, UnloadSoundData, Recompose), the segment state
@@ -208,6 +209,27 @@ Doppler, and WASAPI output.
   configuration in its container) matches: every method, the flag combinations, auto-transitions, an audiopath's
   volume curves, the errors. Its playing checks are made only after immediate plays and stops, as reAL's clock
   runs fast with the null ALSA device.
+
+**DirectMusic: scripts, stage 4** (`src/music/dmscript.c`, `dmseg.c`, `dmtrack.c`, `dmcom.c`)
+- VBScript, JScript and any other Active Scripting language a script names: dmscript's host (the site,
+  IObjectSafety, the "DirectMusic" item added with its members global, the script's errors through
+  OnScriptError, the latest kept), run on one thread of its own that has COM initialized, as dmscript does,
+  with each call made from there (BSTRs and IID_NULL for those engines).
+- The script track (CLSID_DirectMusicScriptTrack): 'scrt' / 'scrl' / 'scre' events ('scrh' header, the script
+  by reference through the stream's loader, 'scrn' the routine; any of them missing fails with
+  DMUS_E_INVALID_SCRIPTTRACK, a missing script with the loader's error), sorted by logical time. InitPlay Inits
+  each script on the performance; Play sends each event in [start, end) as a DMUS_PMSGT_USER message to the
+  track's tool (the event's flags giving TOOL_IMMEDIATE / QUEUE / ATTIME, a copy of the event as its user object;
+  none on a flush), and the tool's ProcessPMsg calls the routine with the event's time as what the script plays
+  starts from. SetParam of 1cc7e0bf-981c-4b9f-be17-d572fc5fa933 (the only parameter it knows) makes script errors
+  messages of type 15000 (the DMUS_SCRIPT_ERRORINFO after the header, stamped by the state's graph). Clone takes
+  any range and leaves that setting out. A script whose engine is not started yet is Init'ed with the performance
+  let go, as its code may call it.
+- dmscript crashes sending a routine's runtime error (0040416a takes the performance from the host's reference
+  count); reDM sends it with the script's performance.
+- `tests/comcmp.sh scrtest.exe <dir> ole` (VBScript and JScript, 152 lines) and `track` (`cases.py scripttrack`:
+  AudioVBScript and VBScript scripts on a track, every event flag, a clone, an Init error as a message, the load
+  errors) match; `files` now matches with its VBScript file.
 
 **DirectMusic: track objects on their own** (`src/music/dmseg.c`, `dmtrack.c`, `dmcom.c`)
 - CoCreateInstance of every track class reDM has (sequence, tempo, time signature, SysEx, band, wave, chord,
@@ -303,10 +325,7 @@ Doppler, and WASAPI output.
 
 ## Remaining, in the agreed order
 
-1. Scripts: stages 1 to 3 done (loading, variables, routines, all of AudioVBScript, the automation of the
-   performance, segments, segment states, audiopaths and configurations); next the script track and
-   VBScript/JScript through Active Scripting (stage 4)
-2. Surround / CMSS
+1. Surround / CMSS (scripts done: stages 1 to 4)
 (EAX 5 dropped: games used it through OpenAL, which OpenAL Soft covers; the EAX 5 property set stays
 reported unsupported so games fall back to EAX 4.)
 

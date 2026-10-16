@@ -16,6 +16,9 @@
 #include "dmavs.h"
 #include "dmldr.h"
 #include "dmcom.h"
+#include <activscp.h>
+#include <process.h>
+#include <objsafe.h>
 
 #define S_GC ((HRESULT)0x08781216)                      /* DMUS_S_GARBAGE_COLLECTED */
 #define E_NOTINIT ((HRESULT)0x88781162)                 /* DMUS_E_NOT_INIT */
@@ -568,7 +571,10 @@ typedef struct proxy proxy;
 
 /* the engine host (CActiveScriptManager): the engine, its dispatch once started, and the error it last reported */
 typedef struct {
-    avs_engine *eng;
+    IActiveScriptSite IActiveScriptSite_iface;  /* +0x04 (an OLE engine's site) */
+    avs_engine *eng;                    /* AudioVBScript, reDM's own */
+    IActiveScript *as;                  /* +0x14 an Active Scripting engine (VBScript, JScript): ole */
+    BOOL ole;                           /* +0x10 BSTRs and IID_NULL; run on the scripts' thread (0040eb69) */
     IDispatch *disp;                    /* +0x18 */
     rm_script *s;                       /* +0x0c */
     BOOL err;                           /* +0x1c */
@@ -1000,10 +1006,11 @@ static HRESULT mgr_report(manager *m, HRESULT hr, DMUS_SCRIPT_ERRORINFO *out)
     mgr_clear(m);
     return E_SCRIPTERR;
 }
-static void mgr_free(manager *m)
+static void mgr_free_do(manager *m)
 {
     if (!m) return;
     if (m->disp) IDispatch_Release(m->disp);
+    if (m->as) { IActiveScript_Close(m->as); IActiveScript_Release(m->as); }      /* 00404006 */
     avs_free(m->eng);
     mgr_clear(m);
     for (int k = 0; k < 2; k++) {
@@ -1013,7 +1020,7 @@ static void mgr_free(manager *m)
     free(m);
 }
 /* 00404609: the engine with the script's text parsed against the "DirectMusic" item */
-static manager *mgr_new(rm_script *s, const WCHAR *src, HRESULT *hr, DMUS_SCRIPT_ERRORINFO *err)
+static manager *mgr_new_avs(rm_script *s, const WCHAR *src, HRESULT *hr, DMUS_SCRIPT_ERRORINFO *err)
 {
     manager *m = calloc(1, sizeof(*m));
     if (!m) { *hr = E_OUTOFMEMORY; return NULL; }
@@ -1028,8 +1035,21 @@ static manager *mgr_new(rm_script *s, const WCHAR *src, HRESULT *hr, DMUS_SCRIPT
     return m;
 }
 /* 00404814: the script run (its variables set up) and its dispatch */
-static HRESULT mgr_start(manager *m, DMUS_SCRIPT_ERRORINFO *err)
+static HRESULT mgr_start_do(manager *m, DMUS_SCRIPT_ERRORINFO *err)
 {
+    if (m->as) {                        /* SetScriptState(started): the script's own code runs */
+        manager *old = current_set(m);
+        HRESULT hr = IActiveScript_SetScriptState(m->as, SCRIPTSTATE_STARTED);
+        current_set(old);
+        if (hr == S_OK) hr = IActiveScript_GetScriptDispatch(m->as, NULL, &m->disp);
+        else if (SUCCEEDED(hr)) hr = E_LANGUAGE;
+        if (SUCCEEDED(hr)) return S_OK;
+        IActiveScript_Close(m->as);
+        IActiveScript_Release(m->as);
+        m->as = NULL;
+        if (m->disp) { IDispatch_Release(m->disp); m->disp = NULL; }
+        return mgr_report(m, hr, err);
+    }
     if (!m->eng) return E_NOTINIT;
     HRESULT hr = avs_dispatch(m->eng, &m->disp);
     if (FAILED(hr)) { m->disp = NULL; hr = mgr_report(m, hr, err); }
@@ -1042,7 +1062,7 @@ static HRESULT mgr_id(manager *m, const WCHAR *name, DISPID *id)  /* 00403e27 */
     LPOLESTR n = (LPOLESTR)name;
     return IDispatch_GetIDsOfNames(m->disp, &IID_NULL, &n, 1, 0x409, id);
 }
-static HRESULT mgr_call(manager *m, const WCHAR *name, DMUS_SCRIPT_ERRORINFO *err)   /* 004048ae */
+static HRESULT mgr_call_do(manager *m, const WCHAR *name, DMUS_SCRIPT_ERRORINFO *err)   /* 004048ae */
 {
     DISPID id;
     if (!m->disp) return E_NOTINIT;
@@ -1054,12 +1074,12 @@ static HRESULT mgr_call(manager *m, const WCHAR *name, DMUS_SCRIPT_ERRORINFO *er
     memset(&ei, 0, sizeof(ei));
     DISPPARAMS p = { NULL, NULL, 0, 0 };
     manager *old = current_set(m);
-    hr = IDispatch_Invoke(m->disp, id, &AVS_IID_PRIVATE, 0x409, DISPATCH_METHOD, &p, NULL, &ei, NULL);
+    hr = IDispatch_Invoke(m->disp, id, m->ole ? &IID_NULL : &AVS_IID_PRIVATE, 0x409, DISPATCH_METHOD, &p, NULL, &ei, NULL);
     current_set(old);
     if (hr == DISP_E_EXCEPTION) mgr_store_ei(m, &ei);
     return mgr_report(m, hr, err);
 }
-static HRESULT mgr_set(manager *m, const WCHAR *name, VARIANT *v, BOOL ref, DMUS_SCRIPT_ERRORINFO *err)  /* 0040498a */
+static HRESULT mgr_set_do(manager *m, const WCHAR *name, VARIANT *v, BOOL ref, DMUS_SCRIPT_ERRORINFO *err)  /* 0040498a */
 {
     DISPID id;
     if (!m->disp) return E_NOTINIT;
@@ -1071,7 +1091,7 @@ static HRESULT mgr_set(manager *m, const WCHAR *name, VARIANT *v, BOOL ref, DMUS
     memset(&ei, 0, sizeof(ei));
     DISPID put = DISPID_PROPERTYPUT;
     DISPPARAMS p = { v, &put, 1, 1 };
-    hr = IDispatch_Invoke(m->disp, id, &AVS_IID_PRIVATE, 0x409, ref ? DISPATCH_PROPERTYPUTREF : DISPATCH_PROPERTYPUT,
+    hr = IDispatch_Invoke(m->disp, id, m->ole ? &IID_NULL : &AVS_IID_PRIVATE, 0x409, ref ? DISPATCH_PROPERTYPUTREF : DISPATCH_PROPERTYPUT,
                           &p, NULL, &ei, NULL);
     if (hr == DISP_E_EXCEPTION) {
         mgr_store_ei(m, &ei);
@@ -1080,7 +1100,7 @@ static HRESULT mgr_set(manager *m, const WCHAR *name, VARIANT *v, BOOL ref, DMUS
     }
     return mgr_report(m, hr, err);
 }
-static HRESULT mgr_get(manager *m, const WCHAR *name, VARIANT *v, DMUS_SCRIPT_ERRORINFO *err)   /* 00404a99 */
+static HRESULT mgr_get_do(manager *m, const WCHAR *name, VARIANT *v, DMUS_SCRIPT_ERRORINFO *err)   /* 00404a99 */
 {
     DISPID id;
     if (!m->disp) return E_NOTINIT;
@@ -1091,7 +1111,7 @@ static HRESULT mgr_get(manager *m, const WCHAR *name, VARIANT *v, DMUS_SCRIPT_ER
     EXCEPINFO ei;
     memset(&ei, 0, sizeof(ei));
     DISPPARAMS p = { NULL, NULL, 0, 0 };
-    hr = IDispatch_Invoke(m->disp, id, &AVS_IID_PRIVATE, 0x409, DISPATCH_PROPERTYGET, &p, v, &ei, NULL);
+    hr = IDispatch_Invoke(m->disp, id, m->ole ? &IID_NULL : &AVS_IID_PRIVATE, 0x409, DISPATCH_PROPERTYGET, &p, v, &ei, NULL);
     if (hr == DISP_E_EXCEPTION) mgr_store_ei(m, &ei);
     return mgr_report(m, hr, err);
 }
@@ -1142,7 +1162,7 @@ static HRESULT mgr_names(manager *m, int routines)
     ITypeInfo_Release(ti);
     return hr;
 }
-static HRESULT mgr_enum(manager *m, int routines, DWORD idx, WCHAR *name, UINT *count)    /* 00404b58 */
+static HRESULT mgr_enum_do(manager *m, int routines, DWORD idx, WCHAR *name, UINT *count)    /* 00404b58 */
 {
     HRESULT hr = mgr_names(m, routines);
     if (FAILED(hr)) return hr;
@@ -1151,6 +1171,251 @@ static HRESULT mgr_enum(manager *m, int routines, DWORD idx, WCHAR *name, UINT *
     if (count) *count = n;
     if (idx < n && m->names[routines][idx]) return wcopy(name, m->names[routines][idx], 0x104);
     return S_FALSE;
+}
+
+/* ---------------------------------------------------------------- the scripts' thread (00412918: one for every
+ * script of an Active Scripting engine, COM initialized, running what the scripts are asked one call at a time) */
+typedef struct wjob { struct wjob *next; void (*fn)(void *); void *arg; HANDLE done; } wjob;
+static struct { HANDLE thread, wake; DWORD tid; CRITICAL_SECTION cs; wjob *head; HRESULT co; } s_worker;
+static INIT_ONCE s_worker_once = INIT_ONCE_STATIC_INIT;
+static unsigned __stdcall worker_main(void *arg)            /* 00410bac */
+{
+    s_worker.co = CoInitialize(NULL);
+    for (;;) {
+        WaitForSingleObject(s_worker.wake, INFINITE);
+        EnterCriticalSection(&s_worker.cs);
+        wjob *j = s_worker.head;
+        s_worker.head = NULL;
+        LeaveCriticalSection(&s_worker.cs);
+        while (j) {
+            wjob *n = j->next;
+            j->fn(j->arg);
+            SetEvent(j->done);
+            j = n;
+        }
+    }
+    return 0;
+}
+static BOOL CALLBACK worker_start(INIT_ONCE *o, void *p, void **c)   /* 00410c71 */
+{
+    InitializeCriticalSection(&s_worker.cs);
+    s_worker.wake = CreateEventA(NULL, FALSE, FALSE, NULL);
+    s_worker.co = E_FAIL;
+    unsigned tid = 0;
+    s_worker.thread = (HANDLE)_beginthreadex(NULL, 0, worker_main, NULL, 0, &tid);
+    s_worker.tid = tid;
+    return TRUE;
+}
+/* 00410cbb: fn(arg) on the scripts' thread, waiting for it (at once when already there) */
+static HRESULT worker_run(void (*fn)(void *), void *arg)
+{
+    InitOnceExecuteOnce(&s_worker_once, worker_start, NULL, NULL);
+    if (!s_worker.thread) return E_FAIL;
+    if (GetCurrentThreadId() == s_worker.tid) { fn(arg); return S_OK; }
+    wjob j = { NULL, fn, arg, CreateEventA(NULL, FALSE, FALSE, NULL) };
+    if (!j.done) return E_OUTOFMEMORY;
+    EnterCriticalSection(&s_worker.cs);
+    j.next = s_worker.head;
+    s_worker.head = &j;
+    SetEvent(s_worker.wake);
+    LeaveCriticalSection(&s_worker.cs);
+    WaitForSingleObject(j.done, INFINITE);
+    CloseHandle(j.done);
+    return FAILED(s_worker.co) ? s_worker.co : S_OK;
+}
+
+/* the host's operations, on the scripts' thread for an Active Scripting engine (the proxy 00403858) */
+enum { OP_START, OP_CALL, OP_SET, OP_GET, OP_ENUM, OP_FREE, OP_IDS, OP_INVOKE, OP_NEW };
+typedef struct {
+    int op;
+    manager *m;
+    const WCHAR *name;
+    VARIANT *v;
+    BOOL ref;
+    DMUS_SCRIPT_ERRORINFO *err;
+    int routines;
+    DWORD idx;
+    WCHAR *out;
+    UINT *count;
+    HRESULT hr;
+    /* IDs / Invoke */
+    const IID *riid; LPOLESTR *names; UINT n; DISPID *ids; DISPID id; WORD flags; DISPPARAMS *dp; VARIANT *res;
+    EXCEPINFO *ei; UINT *argerr;
+    /* New */
+    rm_script *s; const WCHAR *src; CLSID cls;
+} mop;
+static HRESULT mgr_ids_do(manager *m, REFIID r, LPOLESTR *names, UINT n, DISPID *ids);
+static HRESULT mgr_invoke_do(manager *m, DISPID id, REFIID r, WORD f, DISPPARAMS *p, VARIANT *res, EXCEPINFO *ei, UINT *argerr);
+static manager *mgr_new_ole(rm_script *s, const WCHAR *src, REFCLSID cls, HRESULT *hr, DMUS_SCRIPT_ERRORINFO *err);
+static void mop_run(void *arg)
+{
+    mop *o = arg;
+    switch (o->op) {
+    case OP_START: o->hr = mgr_start_do(o->m, o->err); break;
+    case OP_CALL: o->hr = mgr_call_do(o->m, o->name, o->err); break;
+    case OP_SET: o->hr = mgr_set_do(o->m, o->name, o->v, o->ref, o->err); break;
+    case OP_GET: o->hr = mgr_get_do(o->m, o->name, o->v, o->err); break;
+    case OP_ENUM: o->hr = mgr_enum_do(o->m, o->routines, o->idx, o->out, o->count); break;
+    case OP_FREE: mgr_free_do(o->m); o->hr = S_OK; break;
+    case OP_IDS: o->hr = mgr_ids_do(o->m, o->riid, o->names, o->n, o->ids); break;
+    case OP_INVOKE: o->hr = mgr_invoke_do(o->m, o->id, o->riid, o->flags, o->dp, o->res, o->ei, o->argerr); break;
+    case OP_NEW: o->m = mgr_new_ole(o->s, o->src, &o->cls, &o->hr, o->err); break;
+    }
+}
+static HRESULT mop_go(mop *o)
+{
+    if (o->op != OP_NEW && !o->m->ole) { mop_run(o); return o->hr; }
+    HRESULT hr = worker_run(mop_run, o);
+    return FAILED(hr) ? hr : o->hr;
+}
+static HRESULT mgr_start(manager *m, DMUS_SCRIPT_ERRORINFO *err) { mop o = { OP_START, m }; o.err = err; return mop_go(&o); }
+static HRESULT mgr_call(manager *m, const WCHAR *name, DMUS_SCRIPT_ERRORINFO *err) { mop o = { OP_CALL, m, name }; o.err = err; return mop_go(&o); }
+static HRESULT mgr_set(manager *m, const WCHAR *name, VARIANT *v, BOOL ref, DMUS_SCRIPT_ERRORINFO *err)
+{ mop o = { OP_SET, m, name, v, ref, err }; return mop_go(&o); }
+static HRESULT mgr_get(manager *m, const WCHAR *name, VARIANT *v, DMUS_SCRIPT_ERRORINFO *err)
+{ mop o = { OP_GET, m, name, v, FALSE, err }; return mop_go(&o); }
+static HRESULT mgr_enum(manager *m, int routines, DWORD idx, WCHAR *name, UINT *count)
+{ mop o = { OP_ENUM, m }; o.routines = routines; o.idx = idx; o.out = name; o.count = count; return mop_go(&o); }
+static void mgr_free(manager *m) { if (!m) return; mop o = { OP_FREE, m }; mop_go(&o); }
+static HRESULT mgr_ids(manager *m, REFIID r, LPOLESTR *names, UINT n, DISPID *ids)
+{ mop o = { OP_IDS, m }; o.riid = r; o.names = names; o.n = n; o.ids = ids; return mop_go(&o); }
+static HRESULT mgr_invoke(manager *m, DISPID id, REFIID r, WORD f, DISPPARAMS *p, VARIANT *res, EXCEPINFO *ei, UINT *argerr)
+{
+    mop o = { OP_INVOKE, m };
+    o.id = id; o.riid = r; o.flags = f; o.dp = p; o.res = res; o.ei = ei; o.argerr = argerr;
+    return mop_go(&o);
+}
+
+/* ---------------------------------------------------------------- the site an Active Scripting engine reports to
+ * (00401204: 00403ce5 ...) */
+static manager *msite(IActiveScriptSite *i) { return CONTAINING_RECORD(i, manager, IActiveScriptSite_iface); }
+static HRESULT WINAPI site_qi(IActiveScriptSite *i, REFIID r, void **o)
+{
+    if (!o) return E_POINTER;
+    if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &IID_IActiveScriptSite)) { *o = i; return S_OK; }
+    *o = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI site_addref(IActiveScriptSite *i) { return 2; }
+static ULONG WINAPI site_release(IActiveScriptSite *i) { return 1; }
+static HRESULT WINAPI site_lcid(IActiveScriptSite *i, LCID *l) { if (!l) return E_POINTER; *l = 0x409; return S_OK; }
+static HRESULT WINAPI site_iteminfo(IActiveScriptSite *i, LPCOLESTR name, DWORD mask, IUnknown **unk, ITypeInfo **ti)  /* 00403d8b */
+{
+    if (unk) *unk = NULL;
+    if (ti) *ti = NULL;
+    if (!name || lstrcmpW(L"DirectMusic", name)) return TYPE_E_ELEMENTNOTFOUND;
+    if (unk) { *unk = (IUnknown *)&msite(i)->s->named->IDispatch_iface; IUnknown_AddRef(*unk); }
+    return S_OK;
+}
+static HRESULT WINAPI site_docversion(IActiveScriptSite *i, BSTR *v) { return E_NOTIMPL; }
+static HRESULT WINAPI site_terminate(IActiveScriptSite *i, const VARIANT *res, const EXCEPINFO *ei)    /* 0040403f */
+{
+    if (ei) { EXCEPINFO c = *ei; mgr_store_ei(msite(i), &c); }
+    return S_OK;
+}
+static HRESULT WINAPI site_statechange(IActiveScriptSite *i, SCRIPTSTATE st) { return S_OK; }
+/* 00404062: the error the engine reports (the last one wins) */
+static HRESULT WINAPI site_error(IActiveScriptSite *i, IActiveScriptError *e)
+{
+    manager *m = msite(i);
+    if (!e) return E_POINTER;
+    BSTR text = NULL;
+    DWORD ctx = 0;
+    ULONG line = 0;
+    LONG col = 0;
+    EXCEPINFO ei;
+    memset(&ei, 0, sizeof(ei));
+    IActiveScriptError_GetSourceLineText(e, &text);
+    IActiveScriptError_GetSourcePosition(e, &ctx, &line, &col);
+    IActiveScriptError_GetExceptionInfo(e, &ei);
+    mgr_clear(m);
+    mgr_store(m, ei.scode, line, (ULONG)col, ei.bstrSource, ei.bstrDescription, text);
+    SysFreeString(ei.bstrSource); SysFreeString(ei.bstrDescription); SysFreeString(ei.bstrHelpFile);
+    SysFreeString(text);
+    return S_OK;
+}
+static HRESULT WINAPI site_enter(IActiveScriptSite *i) { return S_OK; }
+static HRESULT WINAPI site_leave(IActiveScriptSite *i) { return S_OK; }
+static const IActiveScriptSiteVtbl site_vtbl = { site_qi, site_addref, site_release, site_lcid, site_iteminfo,
+    site_docversion, site_terminate, site_statechange, site_error, site_enter, site_leave };
+
+/* 00404609 with an Active Scripting engine (on the scripts' thread): made safe for scripting, given the site and
+ * the "DirectMusic" item, the text parsed */
+static manager *mgr_new_ole(rm_script *s, const WCHAR *src, REFCLSID cls, HRESULT *hr, DMUS_SCRIPT_ERRORINFO *err)
+{
+    manager *m = calloc(1, sizeof(*m));
+    if (!m) { *hr = E_OUTOFMEMORY; return NULL; }
+    m->s = s;
+    m->ole = TRUE;
+    m->IActiveScriptSite_iface.lpVtbl = (IActiveScriptSiteVtbl *)&site_vtbl;
+    IActiveScriptParse *ps = NULL;
+    *hr = CoCreateInstance(cls, NULL, CLSCTX_INPROC_SERVER, &IID_IActiveScript, (void **)&m->as);
+    if (FAILED(*hr)) { m->as = NULL; goto fail; }
+    IObjectSafety *os = NULL;
+    if (SUCCEEDED(IActiveScript_QueryInterface(m->as, &IID_IObjectSafety, (void **)&os))) {
+        DWORD sup = 0, en = 0;
+        *hr = IObjectSafety_GetInterfaceSafetyOptions(os, &IID_IActiveScript, &sup, &en);
+        if (SUCCEEDED(*hr)) *hr = IObjectSafety_SetInterfaceSafetyOptions(os, &IID_IActiveScript, sup, en | 0xf);
+        IObjectSafety_Release(os);
+        if (FAILED(*hr)) goto fail;
+    }
+    if (FAILED(*hr = IActiveScript_SetScriptSite(m->as, &m->IActiveScriptSite_iface))) goto fail;
+    if (FAILED(*hr = IActiveScript_AddNamedItem(m->as, L"DirectMusic", SCRIPTITEM_ISVISIBLE | SCRIPTITEM_GLOBALMEMBERS | SCRIPTITEM_NOCODE))) goto fail;
+    *hr = IActiveScript_QueryInterface(m->as, &IID_IActiveScriptParse, (void **)&ps);
+    if (FAILED(*hr)) { if (*hr == E_NOINTERFACE) *hr = E_LANGUAGE; ps = NULL; goto fail; }
+    if (FAILED(*hr = ps->lpVtbl->InitNew(ps))) goto fail;
+    EXCEPINFO ei;
+    memset(&ei, 0, sizeof(ei));
+    *hr = ps->lpVtbl->ParseScriptText(ps, src, NULL, NULL, NULL, 0, 0, 0, NULL, &ei);
+    if (*hr == DISP_E_EXCEPTION) mgr_store_ei(m, &ei);
+    if (SUCCEEDED(*hr)) { ps->lpVtbl->Release(ps); return m; }
+fail:
+    if (ps) ps->lpVtbl->Release(ps);
+    if (m->as) { IActiveScript_Close(m->as); IActiveScript_Release(m->as); m->as = NULL; }
+    *hr = mgr_report(m, *hr, err);
+    return m;
+}
+static manager *mgr_new(rm_script *s, const WCHAR *src, REFCLSID cls, HRESULT *hr, DMUS_SCRIPT_ERRORINFO *err)
+{
+    if (IsEqualCLSID(cls, &G_ClsidAudioVBScript)) return mgr_new_avs(s, src, hr, err);
+    mop o = { OP_NEW };
+    o.s = s; o.src = src; o.cls = *cls; o.err = err;
+    HRESULT h = worker_run(mop_run, &o);
+    if (FAILED(h)) { *hr = h; mgr_free(o.m); return NULL; }
+    *hr = o.hr;
+    return o.m;
+}
+/* 00403c9d / 00404bbd: another script's names and calls ("Load" is the script's own) */
+static HRESULT mgr_ids_do(manager *m, REFIID r, LPOLESTR *names, UINT n, DISPID *ids)
+{
+    if (!m->disp) return E_NOTINIT;
+    HRESULT hr = load_ids(r, names, n, ids);
+    if (FAILED(hr)) hr = IDispatch_GetIDsOfNames(m->disp, r, names, n, 0x409, ids);
+    return hr;
+}
+static HRESULT mgr_invoke_do(manager *m, DISPID id, REFIID r, WORD f, DISPPARAMS *p, VARIANT *res, EXCEPINFO *ei, UINT *argerr)
+{
+    rm_script *s = m->s;
+    if (!m->disp) return E_NOTINIT;
+    HRESULT hr = load_invoke(id, r, f, p, res, argerr);
+    if (SUCCEEDED(hr)) return hr;
+    manager *old = current_set(m);
+    if ((f & DISPATCH_PROPERTYPUTREF) && p && p->cArgs == 1 && s->loader &&
+        (V_VT(&p->rgvarg[0]) == VT_UNKNOWN || V_VT(&p->rgvarg[0]) == VT_DISPATCH)) {
+        hr = s->loader->lpVtbl->ReportDynamicallyReferencedObject(s->loader, &s->IDirectMusicObject_iface, V_UNKNOWN(&p->rgvarg[0]));
+        if (FAILED(hr)) { current_set(old); return hr; }
+    }
+    hr = IDispatch_Invoke(m->disp, id, r, 0x409, f, p, res, ei, argerr);
+    if (hr == (HRESULT)SCRIPT_E_REPORTED && ei && m->err) {     /* the engine's report, as the exception */
+        memset(ei, 0, sizeof(*ei));
+        ei->scode = m->scode;
+        ei->bstrSource = m->source ? SysAllocString(m->source) : NULL;
+        ei->bstrDescription = m->desc ? SysAllocString(m->desc) : NULL;
+        hr = DISP_E_EXCEPTION;
+    }
+    if (hr == DISP_E_EXCEPTION) avs_stamp(ei, s->file, m->err ? &m->line : NULL);
+    current_set(old);
+    return hr;
 }
 
 /* ---------------------------------------------------------------- the object */
@@ -1293,7 +1558,8 @@ static HRESULT WINAPI sc_getnum(IDirectMusicScript *i, WCHAR *name, LONG *n, DMU
     VARIANT v;
     HRESULT hr = i->lpVtbl->GetVariableVariant(i, name, &v, err);
     if (SUCCEEDED(hr) && hr != S_FALSE && hr != S_GC) {
-        hr = avs_convert(&v, &v, VT_I4);
+        rm_script *sc = scr(i);
+        hr = sc->mgr && sc->mgr->ole ? VariantChangeType(&v, &v, 0, VT_I4) : avs_convert(&v, &v, VT_I4);   /* 0040deec */
         if (SUCCEEDED(hr)) *n = V_I4(&v);
         VariantClear(&v);
     }
@@ -1313,8 +1579,9 @@ static HRESULT WINAPI sc_getobj(IDirectMusicScript *i, WCHAR *name, REFIID r, vo
     VARIANT v;
     HRESULT hr = i->lpVtbl->GetVariableVariant(i, name, &v, err);
     if (SUCCEEDED(hr) && hr != S_GC) {
-        hr = avs_convert(&v, &v, VT_UNKNOWN);
-        if (SUCCEEDED(hr)) hr = IUnknown_QueryInterface(V_UNKNOWN(&v), r, o);
+        rm_script *sc = scr(i);
+        hr = sc->mgr && sc->mgr->ole ? VariantChangeType(&v, &v, 0, VT_UNKNOWN) : avs_convert(&v, &v, VT_UNKNOWN);
+        if (SUCCEEDED(hr)) hr = V_UNKNOWN(&v) ? IUnknown_QueryInterface(V_UNKNOWN(&v), r, o) : E_POINTER;
         VariantClear(&v);
     }
     return hr;
@@ -1595,19 +1862,19 @@ static HRESULT WINAPI sp_load(IPersistStream *i, IStream *st)
         hr = S_OK;
         int eng = language_engine(s->lang);
         if (!eng) hr = E_LANGUAGE;
-        else if (eng == 1) {
+        else {
             CLSID cls;
             HRESULT h = CLSIDFromProgID(s->lang, &cls);
             if (FAILED(h) && (!_wcsicmp(s->lang, L"AudioVBScript") || !_wcsicmp(s->lang, L"AudioVBScript.1"))) { cls = G_ClsidAudioVBScript; h = S_OK; }
             if (FAILED(h)) hr = h;
-            else if (!IsEqualCLSID(&cls, &G_ClsidAudioVBScript)) {
-                LOG_INFO("music: script language %ls: an engine other than AudioVBScript, not supported", s->lang);
-            } else {
-                s->mgr = mgr_new(s, src, &hr, &s->err);
+            else {
+                if (eng == 1 && !IsEqualCLSID(&cls, &G_ClsidAudioVBScript))
+                    LOG_INFO("music: script language %ls: a DirectMusic engine of its own, hosted as an Active Scripting one", s->lang);
+                s->mgr = mgr_new(s, src, &cls, &hr, &s->err);
                 if (FAILED(hr)) { mgr_free(s->mgr); s->mgr = NULL; }
                 if (hr == E_SCRIPTERR) { s->synerr = TRUE; hr = S_OK; }
             }
-        } else LOG_INFO("music: script language %ls (an Active Scripting engine) not supported yet", s->lang);
+        }
         break;
     }
 out:
@@ -1635,10 +1902,8 @@ static HRESULT WINAPI sd_ids(IDispatch *i, REFIID r, LPOLESTR *names, UINT n, LC
 {
     rm_script *s = sdi(i);
     if (s->zombie) { if (ids) for (UINT k = 0; k < n; k++) ids[k] = -1; return S_GC; }
-    if (!s->mgr || !s->perf || !s->mgr->disp) return E_NOTINIT;
-    HRESULT hr = load_ids(r, names, n, ids);
-    if (FAILED(hr)) hr = IDispatch_GetIDsOfNames(s->mgr->disp, r, names, n, l, ids);
-    return hr;
+    if (!s->mgr || !s->perf) return E_NOTINIT;
+    return mgr_ids(s->mgr, r, names, n, ids);
 }
 static HRESULT WINAPI sd_invoke(IDispatch *i, DISPID id, REFIID r, LCID l, WORD f, DISPPARAMS *p, VARIANT *res,
                                 EXCEPINFO *ei, UINT *argerr)
@@ -1646,20 +1911,7 @@ static HRESULT WINAPI sd_invoke(IDispatch *i, DISPID id, REFIID r, LCID l, WORD 
     rm_script *s = sdi(i);
     if (s->zombie) { if (res) VariantInit(res); return S_GC; }
     if (!s->mgr || !s->perf) return E_NOTINIT;
-    manager *m = s->mgr;
-    if (!m->disp) return E_NOTINIT;
-    HRESULT hr = load_invoke(id, r, f, p, res, argerr);
-    if (SUCCEEDED(hr)) return hr;
-    manager *old = current_set(m);
-    if ((f & DISPATCH_PROPERTYPUTREF) && p && p->cArgs == 1 && s->loader &&
-        (V_VT(&p->rgvarg[0]) == VT_UNKNOWN || V_VT(&p->rgvarg[0]) == VT_DISPATCH)) {
-        hr = s->loader->lpVtbl->ReportDynamicallyReferencedObject(s->loader, &s->IDirectMusicObject_iface, V_UNKNOWN(&p->rgvarg[0]));
-        if (FAILED(hr)) { current_set(old); return hr; }
-    }
-    hr = IDispatch_Invoke(m->disp, id, r, l, f, p, res, ei, argerr);
-    if (hr == DISP_E_EXCEPTION) avs_stamp(ei, s->file, m->err ? &m->line : NULL);
-    current_set(old);
-    return hr;
+    return mgr_invoke(s->mgr, id, r, f, p, res, ei, argerr);
 }
 static const IDispatchVtbl sd_vtbl = { sd_qi, sd_addref, sd_release, sd_typecount, sd_typeinfo, sd_ids, sd_invoke };
 
@@ -1678,4 +1930,168 @@ HRESULT rm_script_create(REFIID riid, void **out)
     HRESULT hr = sc_qi(&s->IDirectMusicScript_iface, riid, out);
     sc_release(&s->IDirectMusicScript_iface);
     return hr;
+}
+
+/* ===================================================================== the script track (CDirectMusicScriptTrack)
+ * The track's engine side (dmtrack.c) finds the events; these are its COM pieces: the scripts' Init as a state
+ * starts playing the track (0040fb32), an event's message to the track's tool (0040fbe9: a DMUS_PMSGT_USER message
+ * carrying a copy of the event), the tool's ProcessPMsg calling the routine (0040f8c2 with the script's private
+ * call, 00408a16 / 0040416a) and the script error message (004109b6) the track sends when asked to
+ * (its SetParam of 1cc7e0bf-981c-4b9f-be17-d572fc5fa933). */
+static const GUID G_IidScriptEvent = { 0x8f42c9da, 0xd37a, 0x499c, { 0x85, 0x82, 0x1a, 0x80, 0xeb, 0xf9, 0xb2, 0x3c } };
+#define PT_SCRIPTERROR 15000
+
+static rm_script *script_of(IUnknown *u)
+{
+    if (!u || IsBadReadPtr(u, sizeof(void *))) return NULL;
+    IDirectMusicScript *i = (IDirectMusicScript *)u;
+    return i->lpVtbl == &sc_vtbl ? scr(i) : NULL;
+}
+
+/* 004109b6: the error as a message of type 15000 (the error info after the header), now, stamped by the state's
+ * graph */
+static HRESULT script_error_pmsg(IDirectMusicPerformance *perf, IUnknown *state, DWORD vtrack, const DMUS_SCRIPT_ERRORINFO *ei)
+{
+    IDirectMusicGraph *g = NULL;
+    if (!state || !perf) return E_POINTER;
+    HRESULT hr = IUnknown_QueryInterface(state, &G_IidGraph, (void **)&g);
+    if (FAILED(hr)) return hr;
+    DMUS_PMSG *m = NULL;
+    ULONG size = sizeof(DMUS_PMSG) + sizeof(DMUS_SCRIPT_ERRORINFO);
+    hr = IDirectMusicPerformance_AllocPMsg(perf, size, &m);
+    if (SUCCEEDED(hr)) {
+        memset(m, 0, size);
+        m->dwSize = size;
+        REFERENCE_TIME rt = 0;
+        hr = IDirectMusicPerformance_GetTime(perf, &rt, NULL);
+        if (SUCCEEDED(hr)) {
+            m->rtTime = rt;
+            m->dwFlags = 0xc1;
+            m->dwVirtualTrackID = vtrack;
+            m->dwType = PT_SCRIPTERROR;
+            m->dwGroupID = 0xffffffff;
+            memcpy(m + 1, ei, sizeof(*ei));
+            hr = IDirectMusicGraph_StampPMsg(g, m);
+            if (SUCCEEDED(hr)) hr = IDirectMusicPerformance_SendPMsg(perf, m);
+            if (SUCCEEDED(hr)) { m = NULL; hr = S_OK; }
+        }
+        if (m) IDirectMusicPerformance_FreePMsg(perf, m);
+    }
+    IDirectMusicGraph_Release(g);
+    return hr;
+}
+
+/* whether a script's Init would run its engine on the scripts' thread (an OLE engine not started yet): the track's
+ * caller lets the performance go meanwhile, as the script's code may call it */
+BOOL rm_script_init_blocks(IUnknown *script)
+{
+    rm_script *s = script_of(script);
+    return s && !s->zombie && s->mgr && s->mgr->ole && !s->perf;
+}
+
+/* 0040fb32: a script's Init for a state starting the track; a script error as a message when the track was asked */
+void rm_script_track_init(IUnknown *script, IDirectMusicPerformance *perf, IUnknown *state, DWORD vtrack, BOOL errnotify)
+{
+    DMUS_SCRIPT_ERRORINFO ei;
+    memset(&ei, 0, sizeof(ei));
+    ei.dwSize = sizeof(ei);             /* (00404121) */
+    if (!script) return;
+    HRESULT hr = ((IDirectMusicScript *)script)->lpVtbl->Init((IDirectMusicScript *)script, perf, &ei);
+    if (errnotify && hr == E_SCRIPTERR) script_error_pmsg(perf, state, vtrack, &ei);
+}
+
+/* the event's copy a message carries (0040f805): its state, script and routine, and the time it was due */
+typedef struct {
+    IUnknown IUnknown_iface;
+    LONG ref;
+    IUnknown *state;                    /* +0x04 */
+    IUnknown *script;                   /* +0x08 the event */
+    WCHAR *routine;
+    REFERENCE_TIME t;                   /* +0x10 */
+    DWORD tflags;                       /* +0x18 */
+} scriptev;
+static scriptev *sev(IUnknown *i) { return CONTAINING_RECORD(i, scriptev, IUnknown_iface); }
+static HRESULT WINAPI sev_qi(IUnknown *i, REFIID r, void **o)     /* 0040f84e */
+{
+    if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &G_IidScriptEvent)) { *o = i; InterlockedIncrement(&sev(i)->ref); return S_OK; }
+    *o = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI sev_addref(IUnknown *i) { return InterlockedIncrement(&sev(i)->ref); }
+static ULONG WINAPI sev_release(IUnknown *i)
+{
+    scriptev *x = sev(i);
+    LONG n = InterlockedDecrement(&x->ref);
+    if (!n) {
+        if (x->state) IUnknown_Release(x->state);
+        if (x->script) IUnknown_Release(x->script);
+        free(x->routine);
+        free(x);
+    }
+    return n;
+}
+static IUnknownVtbl sev_vtbl = { sev_qi, sev_addref, sev_release };
+
+/* 0040fbe9: an event's message: due at its time (music time) with the tool flags its own ask for, to the track's
+ * tool, the copy as its user object */
+HRESULT rm_script_track_event(IDirectMusicPerformance *perf, IUnknown *state, IDirectMusicTool *tool, IUnknown *script,
+                              const WCHAR *routine, DWORD evflags, MUSIC_TIME mt, DWORD vtrack)
+{
+    DMUS_PMSG *m = NULL;
+    HRESULT hr = IDirectMusicPerformance_AllocPMsg(perf, sizeof(DMUS_PMSG), &m);
+    if (FAILED(hr)) return hr;
+    memset(m, 0, sizeof(*m));
+    m->dwSize = sizeof(*m);
+    scriptev *x = calloc(1, sizeof(*x));
+    size_t n = wcslen(routine) + 1;
+    if (x) x->routine = malloc(n * sizeof(WCHAR));
+    if (!x || !x->routine) { free(x); IDirectMusicPerformance_FreePMsg(perf, m); return E_OUTOFMEMORY; }
+    memcpy(x->routine, routine, n * sizeof(WCHAR));
+    x->IUnknown_iface.lpVtbl = &sev_vtbl;
+    x->ref = 1;
+    x->state = state; if (state) IUnknown_AddRef(state);
+    x->script = script; IUnknown_AddRef(script);
+    DWORD f = (evflags & 1) ? DMUS_PMSGF_TOOL_IMMEDIATE : (evflags & 2) ? DMUS_PMSGF_TOOL_QUEUE :
+              (evflags & 4) ? DMUS_PMSGF_TOOL_ATTIME : DMUS_PMSGF_MUSICTIME;
+    m->mtTime = mt;
+    m->dwFlags = f | DMUS_PMSGF_MUSICTIME;
+    if (!(evflags & 4)) { x->t = mt; x->tflags = 0; }
+    m->dwVirtualTrackID = vtrack;
+    m->punkUser = &x->IUnknown_iface;
+    m->pTool = tool; IDirectMusicTool_AddRef(tool);
+    m->dwType = DMUS_PMSGT_USER;
+    hr = IDirectMusicPerformance_SendPMsg(perf, m);
+    if (SUCCEEDED(hr)) return hr;
+    IDirectMusicPerformance_FreePMsg(perf, m);     /* (its tool and user object with it) */
+    return hr;
+}
+
+/* 0040f8c2 with 00408a16 / 0040416a: the tool's ProcessPMsg of an event's message: the routine called with the
+ * event's time as what the script plays starts from; a script error as a message when the track was asked */
+HRESULT rm_script_track_process(IUnknown *user, DWORD vtrack, BOOL errnotify)
+{
+    if (!user) return E_POINTER;
+    IUnknown *u = NULL;
+    if (FAILED(IUnknown_QueryInterface(user, &G_IidScriptEvent, (void **)&u))) return DMUS_S_FREE;
+    scriptev *x = sev(u);
+    rm_script *s = script_of(x->script);
+    if (s && !s->zombie) {
+        EnterCriticalSection(&s->cs);
+        if (s->mgr && s->perf) {
+            manager *m = s->mgr;
+            DMUS_SCRIPT_ERRORINFO ei;
+            memset(&ei, 0, sizeof(ei));
+            ei.dwSize = sizeof(ei);
+            REFERENCE_TIME t0 = m->tstart; DWORD f0 = m->tflags;
+            m->tstart = x->t; m->tflags = x->tflags;
+            HRESULT hr = mgr_call(m, x->routine, &ei);
+            m->tstart = t0; m->tflags = f0;
+            /* (dmscript takes the performance from the host's reference count and crashes: the script's here) */
+            if (errnotify && hr == E_SCRIPTERR)
+                script_error_pmsg((IDirectMusicPerformance *)s->perf, x->state, vtrack, &ei);
+        }
+        LeaveCriticalSection(&s->cs);
+    }
+    IUnknown_Release(u);
+    return DMUS_S_FREE;
 }
