@@ -8,6 +8,10 @@ aimed at Linux + Wine. Put it next to a game's executable and the game gets ALch
 DLLs needed. Both halves are tested against the originals: the EAX processing bit-for-bit against ALchemy,
 and DirectMusic call-for-call against Windows XP's DLLs. One `.ini`, no GUI.
 
+*reAL is an independent project, not affiliated with or endorsed by Creative Technology or Microsoft, and
+contains none of their files. Creative, ALchemy, EAX, Microsoft, DirectSound and DirectMusic are trademarks of
+their owners.*
+
 ALchemy has two engines. On Creative X-Fi/Audigy hardware it translates DirectSound to OpenAL.
 On everything else (and under Wine) it runs Creative's own software renderer straight to WASAPI:
 HRTF, CMSS-3D, an "HRvb" reverb and all 12 EAX 4/5 effects. That second engine is the sound reAL
