@@ -1,7 +1,12 @@
 # reAL
 
-A from-scratch reimplementation of **Creative ALchemy**'s `dsound.dll`, aimed at Linux + Wine.
-Drop-in DirectSound replacement, configured from one `.ini`, no GUI.
+**A drop-in `dsound.dll` that brings back EAX, 3D audio and DirectMusic in classic games.**
+
+reAL is an open reimplementation of **Creative ALchemy**'s `dsound.dll` and of Microsoft's **DirectMusic**,
+aimed at Linux + Wine. Put it next to a game's executable and the game gets ALchemy's EAX 1-4 effects, HRTF
+3D audio and reverb, and (with `music=true`) a DirectMusic of its own, with no Creative hardware or Windows
+DLLs needed. Both halves are tested against the originals: the EAX processing bit-for-bit against ALchemy,
+and DirectMusic call-for-call against Windows XP's DLLs. One `.ini`, no GUI.
 
 ALchemy has two engines. On Creative X-Fi/Audigy hardware it translates DirectSound to OpenAL.
 On everything else (and under Wine) it runs Creative's own software renderer straight to WASAPI:
