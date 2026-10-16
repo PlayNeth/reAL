@@ -150,6 +150,43 @@ Doppler, and WASAPI output.
   descriptors and flags of every item, lookups by GUID, name, alias and file, NOLOADS, embedded containers,
   ReleaseObject of a container from the cache, ScanDirectory, SetObject, a disabled cache, EnumObject of all types.
 
+**DirectMusic: scripts, stages 1 and 2** (the whole AudioVBScript interpreter came with stage 1) (`src/music/dmscript.c`, `src/music/dmavs.c`, from dmscript.dll)
+- The script object (CLSID_DirectMusicScript): IPersistStream::Load of a 'DMSC' form ('schd' flags, descriptor
+  chunks up to 'scve', the embedded container loaded through the stream's loader, 'scla', 'scsr'); Init, CallRoutine,
+  Set/GetVariableVariant/Number/Object, EnumRoutine/EnumVariable, Get/Set/ParseDescriptor (ParseDescriptor writes
+  the script's own descriptor first, as dmscript's does), IDirectMusicObjectP's Zombie, and IDispatch for other
+  scripts (routines, variables and "Load"). Error information (DMUS_SCRIPT_ERRORINFO) is filled as dmscript does
+  it: the "file»line»description" split, 1-based line and column, the script's file name when the error names none,
+  only as much as the caller's dwSize holds. A syntax error lets Load succeed and makes Init fail with it.
+- The language comes from the registry as in dmscript (HKCR\<language> with a DMScript key; OLEScript engines
+  are stage 4); AudioVBScript is reDM's own engine and works without the registry entry. An unknown language
+  fails Load with DMUS_E_SCRIPT_LANGUAGE_INCOMPATIBLE, a file without source with DMUS_E_SCRIPT_INVALID_FILE.
+- AudioVBScript (dmavs.c, CAudioVBScriptEngine): the lexer, the parser with its 26 messages, the shunting-yard
+  expression compiler and the executor over a stack of VARIANTs: Dim, Sub, Set, Call, If/ElseIf/Else, integer
+  arithmetic (wrapping), comparisons as -1/0, bitwise And/Or/Not, Is on objects, implicit routine variables,
+  dotted property chains and method calls, the runtime messages, and dmscript's own variant conversions and copies
+  (no arrays or references; Let/Set checking). Quirks kept: "sub_x" lexes as Sub; an If condition's own error is
+  replaced by the If's type mismatch; a VT_I2 or VT_R8 set from the application is kept as is (and is then not a
+  number to the script).
+- The "DirectMusic" item: the constants (IsSecondary ... NoCutoff), the performance's methods, the content by
+  alias. The content (the container's objects) are proxies loaded with the script (schd 1), downloaded at Init
+  (schd 1+2), or on the script's "x.Load" through the loader's dynamic references; a nested script is Init'ed.
+- The performance's IDispatch (CAutDirectMusicPerformance, aggregated, made on first QueryInterface):
+  SetMasterTempo/GetMasterTempo, SetMasterVolume (a CC7 curve message to every channel, the volume table of
+  dmscript) / GetMasterVolume, SetMasterGrooveLevel/Get, SetMasterTranspose (a transpose message)/Get, Trace (a
+  script lyric message) and Rand, with the argument checks and "An error occurred in a call to X". The segment's
+  IDispatch has only Load so far (Play and the rest are stage 3).
+- Found on the way: the performance's global parameters are now dmime's list (any GUID, its size fixed by the
+  first set; E_INVALIDARG when not set), InitAudio sets automatic download off as dmime does, and
+  GUID_PerfMasterTempo now changes the tempo map (it was ignored).
+- `tests/comcmp.sh scrtest.exe <dir> lang` (884 lines: 55 syntax cases, a 70-routine script, the variable calls,
+  a script driving another, the messages the performance methods send, global parameters) and `files`
+  (`cases.py script`: content loaded in each way, a missing item, errors with the file name) match, except a
+  VBScript file (stage 4).
+- dmscript loses a syntax error inside a call's arguments in an expression (its error code is overwritten) and
+  then crashes running the routine; reDM reports the error. GetVariableObject of a variable holding Nothing
+  crashes in dmscript as in reDM. Script source by reference (a DMRF list) is not supported.
+
 **DirectMusic: track objects on their own** (`src/music/dmseg.c`, `dmtrack.c`, `dmcom.c`)
 - CoCreateInstance of every track class reDM has (sequence, tempo, time signature, SysEx, band, wave, chord,
   command, style, motif, pattern, mute, chord map, signpost, marker, lyrics, segment trigger, parameter control)
@@ -244,7 +281,9 @@ Doppler, and WASAPI output.
 
 ## Remaining, in the agreed order
 
-1. Scripts (dmscript; needs an AudioVBScript interpreter)
+1. Scripts: stages 1 and 2 done (loading, variables, routines, all of AudioVBScript, the performance's methods);
+   next the IDispatch layer of segments, segment states and audiopaths (stage 3, with the rest of the interpreter's
+   surface), then the script track and VBScript/JScript through Active Scripting (stage 4)
 2. Surround / CMSS
 3. EAX 5
 

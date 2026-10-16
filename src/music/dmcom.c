@@ -16,6 +16,7 @@
 #include "dmtheory.h"
 #include "dmcomp.h"
 #include "dmldr.h"
+#include "dmscript.h"
 #include <dmplugin.h>
 #include <mmreg.h>
 #include <msacm.h>
@@ -46,6 +47,7 @@ typedef struct {
     dm_segment *seg;
     DMUS_OBJECTDESC desc;
     IDirectMusicGraph *graph;               /* +0x44 SetGraph (a segment state starts with a clone of it) */
+    IDispatch *autod;                       /* its automation (made on first QueryInterface) */
 } rm_segment;
 
 typedef struct {
@@ -95,6 +97,9 @@ struct rm_perf {
     IDirectMusic8 *dm;
     BOOL closed;
     HANDLE notify;
+    IDispatch *autod;                       /* its automation (dmscript's, aggregated: made on first QueryInterface) */
+    struct rm_global { struct rm_global *next; GUID g; DWORD size; BYTE *data; } *globals;   /* +0x104 */
+    CRITICAL_SECTION gcs;
 };
 
 typedef struct {
@@ -424,6 +429,10 @@ static HRESULT WINAPI seg_qi(IDirectMusicSegment8 *i, REFIID riid, void **out)
         IsEqualIID(riid, &IID_IDirectMusicSegment2) || IsEqualIID(riid, &IID_IDirectMusicSegment8)) *out = &s->IDirectMusicSegment8_iface;
     else if (IsEqualIID(riid, &IID_IDirectMusicObject)) *out = &s->IDirectMusicObject_iface;
     else if (IsEqualIID(riid, &IID_IPersistStream) || IsEqualIID(riid, &IID_IPersist)) *out = &s->IPersistStream_iface;
+    else if (IsEqualIID(riid, &IID_IDispatch)) {
+        if (!s->autod && !(s->autod = rm_auto_new((IUnknown *)&s->IDirectMusicSegment8_iface, RM_AUTO_SEGMENT))) { *out = NULL; return E_OUTOFMEMORY; }
+        *out = s->autod;
+    }
     else { return rm_noiface(__func__, riid, out); }
     InterlockedIncrement(&s->ref);
     return S_OK;
@@ -438,6 +447,7 @@ static ULONG WINAPI seg_release(IDirectMusicSegment8 *i)
         if (s->seg && s->seg->wrapper == s) s->seg->wrapper = NULL;
         dm_segment_release(s->seg);
         if (s->graph) IDirectMusicGraph_Release(s->graph);
+        rm_auto_free(s->autod);
         free(s);
     }
     return r;
@@ -2058,6 +2068,11 @@ static HRESULT WINAPI pf_qi(IDirectMusicPerformance8 *i, REFIID riid, void **out
     /* 77303eb4: the output tool and the graph (+4, +8) */
     if (IsEqualIID(riid, &IID_IDirectMusicTool)) { *out = &prf(i)->IDirectMusicTool_iface; InterlockedIncrement(&prf(i)->ref); return S_OK; }
     if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &prf(i)->IDirectMusicGraph_iface; InterlockedIncrement(&prf(i)->ref); return S_OK; }
+    if (IsEqualIID(riid, &IID_IDispatch)) {
+        rm_perf *p = prf(i);
+        if (!p->autod && !(p->autod = rm_auto_new((IUnknown *)&p->IDirectMusicPerformance8_iface, RM_AUTO_PERFORMANCE))) { *out = NULL; return E_OUTOFMEMORY; }
+        *out = p->autod; InterlockedIncrement(&p->ref); return S_OK;
+    }
     char b[64];
     LOG_INFO("music: Performance::QueryInterface(%s): no", guidstr(riid, b));
     *out = NULL;
@@ -2094,12 +2109,16 @@ static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
         rm_port_release(p->port);
         dm_host_free(p->host);
         if (p->dm) IDirectMusic8_Release(p->dm);
+        rm_auto_free(p->autod);
+        while (p->globals) { struct rm_global *e = p->globals; p->globals = e->next; free(e->data); free(e); }
+        DeleteCriticalSection(&p->gcs);
         free(p);
     }
     return r;
 }
 
 static const dm_toolops s_toolops;
+static HRESULT WINAPI pf_setglobal(IDirectMusicPerformance8 *i, REFGUID g, void *v, DWORD sz);
 static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
 {
     if (p->host) return S_OK;
@@ -2111,7 +2130,11 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     g_lastperf = p;
     dm_host_lock(p->host);
     dm_perf_set_toolops(dm_host_perf(p->host), &s_toolops, p);
+    for (struct rm_global *e = p->globals; e; e = e->next)        /* (set before the performance was) */
+        if (IsEqualGUID(&e->g, &G_PerfMasterGrooveLevel) && e->size >= 1) dm_perf_set_groove(dm_host_perf(p->host), *(char *)e->data);
     dm_host_unlock(p->host);
+    BOOL off = FALSE;                       /* 77303d4d: automatic download off */
+    pf_setglobal(&p->IDirectMusicPerformance8_iface, &GUID_PerfAutoDownload, &off, 4);
     return S_OK;
 }
 
@@ -2934,31 +2957,49 @@ static HRESULT WINAPI pf_setparam(IDirectMusicPerformance8 *i, REFGUID g, DWORD 
     LOG_CALL("music: Performance::SetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, (unsigned)hr);
     return hr;
 }
+/* 7730709c: the global parameters are what SetGlobalParam kept (E_INVALIDARG when not set, or of another size) */
 static HRESULT WINAPI pf_getglobal(IDirectMusicPerformance8 *i, REFGUID g, void *v, DWORD sz)
 {
     rm_perf *p = prf(i);
-    if (!v) return E_POINTER;
-    if (IsEqualGUID(g, &GUID_PerfMasterVolume) && sz >= 4) { *(long *)v = 0; return S_OK; }
-    if (IsEqualGUID(g, &GUID_PerfMasterTempo) && sz >= 4) { *(float *)v = 1.0f; return S_OK; }
-    if (IsEqualGUID(g, &GUID_PerfAutoDownload) && sz >= 4) { int on = 0; PERF_LOCKED(p, on = dm_perf_get_auto_download(dm_host_perf(p->host))); *(BOOL *)v = on; return S_OK; }
-    if (IsEqualGUID(g, &G_PerfMasterGrooveLevel) && sz >= 1) {
-        int8_t gl = 0; int ok = 0;
-        PERF_LOCKED(p, ok = dm_perf_get_groove(dm_host_perf(p->host), &gl));
-        if (!ok) return DMUS_E_NOT_FOUND;
-        *(char *)v = gl;
-        return S_OK;
-    }
-    return DMUS_E_NOT_FOUND;
+    if (!g || (sz && !v)) return E_POINTER;
+    HRESULT hr = E_INVALIDARG;
+    EnterCriticalSection(&p->gcs);
+    for (struct rm_global *e = p->globals; e; e = e->next)
+        if (IsEqualGUID(&e->g, g)) {
+            if (e->size == sz) { memcpy(v, e->data, sz); hr = S_OK; }
+            break;
+        }
+    LeaveCriticalSection(&p->gcs);
+    return hr;
 }
+/* 7730c4c3: kept by GUID (the size fixed by the first); the master tempo and volume take effect, as do the
+ * groove level and automatic download the engine reads */
 static HRESULT WINAPI pf_setglobal(IDirectMusicPerformance8 *i, REFGUID g, void *v, DWORD sz)
 {
     rm_perf *p = prf(i);
     char b[64];
-    if (!v) return E_POINTER;
+    if (!g || (sz && !v)) return E_POINTER;
     LOG_CALL("music: Performance::SetGlobalParam(%s)", guidstr(g, b));
-    if (IsEqualGUID(g, &GUID_PerfMasterVolume) && sz >= 4) { if (p->host) dm_host_set_volume(p->host, *(long *)v); return S_OK; }
-    if (IsEqualGUID(g, &GUID_PerfAutoDownload) && sz >= 4) { PERF_LOCKED(p, dm_perf_set_auto_download(dm_host_perf(p->host), *(BOOL *)v)); return S_OK; }
-    if (IsEqualGUID(g, &G_PerfMasterGrooveLevel) && sz >= 1) { PERF_LOCKED(p, dm_perf_set_groove(dm_host_perf(p->host), *(char *)v)); return S_OK; }
+    if (IsEqualGUID(g, &GUID_PerfMasterTempo)) {
+        if (sz != 4) return E_INVALIDARG;
+        if (p->host) { dm_host_lock(p->host); dm_perf_set_master_tempo(dm_host_perf(p->host), *(float *)v); dm_host_unlock(p->host); }
+    } else if (IsEqualGUID(g, &GUID_PerfMasterVolume)) {
+        if (sz != 4) return E_INVALIDARG;
+        if (p->host) dm_host_set_volume(p->host, *(long *)v);
+    }
+    struct rm_global *e;
+    EnterCriticalSection(&p->gcs);
+    for (e = p->globals; e; e = e->next) if (IsEqualGUID(&e->g, g)) break;
+    if (e && e->size != sz) { LeaveCriticalSection(&p->gcs); return E_INVALIDARG; }
+    if (!e) {
+        if (!(e = calloc(1, sizeof(*e))) || (sz && !(e->data = malloc(sz)))) { free(e); LeaveCriticalSection(&p->gcs); return E_OUTOFMEMORY; }
+        e->g = *g; e->size = sz;
+        e->next = p->globals; p->globals = e;
+    }
+    if (sz) memcpy(e->data, v, sz);
+    LeaveCriticalSection(&p->gcs);
+    if (IsEqualGUID(g, &GUID_PerfAutoDownload) && sz >= 4 && p->host) { dm_host_lock(p->host); dm_perf_set_auto_download(dm_host_perf(p->host), *(BOOL *)v); dm_host_unlock(p->host); }
+    if (IsEqualGUID(g, &G_PerfMasterGrooveLevel) && sz >= 1 && p->host) { dm_host_lock(p->host); dm_perf_set_groove(dm_host_perf(p->host), *(char *)v); dm_host_unlock(p->host); }
     return S_OK;
 }
 static HRESULT WINAPI pf_getlatency(IDirectMusicPerformance8 *i, REFERENCE_TIME *t) { rm_perf *p = prf(i); if (!t) return E_POINTER; PERF_LOCKED(p, *t = dm_perf_latency_time(dm_host_perf(p->host))); return S_OK; }
@@ -3565,6 +3606,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         p->IDirectMusicTool_iface.lpVtbl = &pft_vtbl;
         p->IDirectMusicGraph_iface.lpVtbl = &pfg_vtbl;
         p->ref = 1;
+        InitializeCriticalSection(&p->gcs);
         HRESULT hr = pf_qi(&p->IDirectMusicPerformance8_iface, riid, out);
         pf_release(&p->IDirectMusicPerformance8_iface);
         return hr;
@@ -3612,6 +3654,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         return hr;
     }
     if (IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig)) return rm_apcfg_create(riid, out);
+    if (IsEqualCLSID(clsid, &CLSID_DirectMusicScript)) return rm_script_create(riid, out);
     if (IsEqualCLSID(clsid, &CLSID_DirectMusic)) {
         IDirectMusic8 *d = new_dmusic();
         if (!d) return E_OUTOFMEMORY;
@@ -3630,6 +3673,6 @@ BOOL rm_handles(REFCLSID clsid)
            IsEqualCLSID(clsid, &CLSID_DirectMusicSegment) || IsEqualCLSID(clsid, &CLSID_DirectMusic) ||
            IsEqualCLSID(clsid, &CLSID_DirectMusicGraph) || IsEqualCLSID(clsid, &CLSID_DirectMusicAudioPathConfig) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicStyle) ||
-           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicBand) ||
+           IsEqualCLSID(clsid, &RM_CLSID_DirectMusicBand) || IsEqualCLSID(clsid, &CLSID_DirectMusicScript) ||
            IsEqualCLSID(clsid, &RM_CLSID_DirectMusicChordMap) || IsEqualCLSID(clsid, &RM_CLSID_DirectMusicComposer);
 }

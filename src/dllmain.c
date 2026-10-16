@@ -442,6 +442,7 @@ static const struct { const CLSID *clsid; const char *dll; } s_music_classes[] =
     { &s_CLSID_DirectMusicBand, "dmband.dll" },
     { &s_CLSID_DirectMusicChordMap, "dmcompos.dll" },
     { &s_CLSID_DirectMusicComposer, "dmcompos.dll" },
+    { &CLSID_DirectMusicScript, "dmscript.dll" },
 };
 #define MUSIC_PREV "reAL.previous"
 

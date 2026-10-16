@@ -20,7 +20,7 @@ SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffe
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reDM: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
-MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c src/music/dmldr.c"
+MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c src/music/dmldr.c src/music/dmavs.c src/music/dmscript.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
 CFLAGS="$CFLAGS_EXACT -ffast-math"
 
@@ -51,7 +51,7 @@ for f in $MUSIC_SRCS; do
     OBJS="$OBJS $o"
 done
 # shellcheck disable=SC2086
-$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32
+$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32 -loleaut32
 rm -f build/dsound.lib build/dsound.pdb build/dllmain.lib
 echo "built build/dsound.dll"
 
@@ -99,6 +99,7 @@ $CC -O1 -Wno-format -o build/stylecom.exe tests/stylecom.c -lole32 -luuid -ldxgu
 $CC -O1 -Wno-format -o build/cmapcom.exe tests/cmapcom.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/comptest.exe tests/comptest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/trktest.exe tests/trktest.c -lole32 -luuid -ldxguid
+$CC -O1 -Wno-format -o build/scrtest.exe tests/scrtest.c -lole32 -loleaut32 -luuid -ldxguid
 $CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -luuid -ladvapi32
 rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound

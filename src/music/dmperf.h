@@ -196,6 +196,9 @@ int dm_band_download_to(dm_perf *pf, dm_band *b);
 void dm_band_unload_from(dm_perf *pf, dm_band *b);
 /* GUID_PerfMasterGrooveLevel (a global parameter: unset until SetGlobalParam) */
 void dm_perf_set_groove(dm_perf *pf, int8_t g);
+/* SetGlobalParam(GUID_PerfMasterTempo) (7730c4c3): 0.01 to 100, the tempo map rebuilt from the prepared time
+ * when a primary segment plays there */
+void dm_perf_set_master_tempo(dm_perf *pf, float f);
 int dm_perf_get_groove(dm_perf *pf, int8_t *g);
 /* the application thread's rand() (a style track's creation seeds it with time(NULL), 77411f7d) */
 void dm_perf_set_app_seed(dm_perf *pf, uint32_t seed);

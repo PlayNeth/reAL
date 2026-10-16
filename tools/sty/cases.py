@@ -614,7 +614,70 @@ def case_container(out):
     files['host.sgt'] = host.build()
     return files
 
-CASES = {'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_script(out):
+    """scripts (tests/scrtest.c): content in the script's container (loaded with the script or on demand, and
+    downloaded), a script inside a script, errors reported with the script's file name"""
+    SEG, SCR = CLSID['segment'], '810b5013-e88d-11d2-8bc1-00600893b1b6'
+    def seg(name, guid, note):
+        g = Segment(guid, name, BAR)
+        g.tempo([(0, 120.0)])
+        g.seq([(t, 200, 0, 0x90, note, 100) for t in range(0, BAR, 768)])
+        return g.build()
+    inner = script('8f6d1a10-1500-4000-8000-000000000020', 'inner', """
+Dim Count
+Sub Bump
+    Count = Count + 1
+End Sub
+""")
+    src = """' content
+Dim Result
+Dim Obj
+Sub LoadOne
+    Lazy.Load
+End Sub
+Sub LoadTwice
+    Lazy.Load
+    Lazy.Load
+End Sub
+Sub GetSeg
+    Set Obj = Tune
+End Sub
+Sub SetSeg
+    Tune = 5
+End Sub
+Sub IsSame
+    If Obj Is Tune Then
+        Result = 1
+    Else
+        Result = 2
+    End If
+End Sub
+Sub CallInner
+    Inner.Bump
+    Inner.Bump
+    Result = Inner.Count
+End Sub
+Sub LoadMissing
+    Missing.Load
+End Sub
+"""
+    items = [(SEG, 0, 'Tune', seg('tune', '8f6d1a10-1500-4000-8000-000000000001', 60)),
+             (SEG, 0, 'Lazy', seg('lazy', '8f6d1a10-1500-4000-8000-000000000002', 62)),
+             (SCR, 0, 'Inner', inner),
+             (SEG, 0, 'Missing', objref(SEG, file='nothere.sgt'))]
+    files = {}
+    for f, fl in (('content0.spt', 0), ('content1.spt', 1), ('content3.spt', 3)):
+        files[f] = script('8f6d1a10-1500-4000-8000-0000000000%02x' % (0x10 + fl), 'content', src,
+                          items if not fl else items[:3], flags=fl)
+    files['content1m.spt'] = script(None, 'content', src, items, flags=1)
+    files['synerr.spt'] = script('8f6d1a10-1500-4000-8000-000000000030', 'synerr', "Dim A\nSub X\n  A = (1 + \nEnd Sub\n")
+    files['rterr.spt'] = script('8f6d1a10-1500-4000-8000-000000000031', 'rterr', "Dim A\nSub X\n  A = 1\n  A = A \\ 0\nEnd Sub\nSub Y\n  X\nEnd Sub\n")
+    files['nosrc.spt'] = script(None, None, None)
+    files['vbs.spt'] = script(None, 'vbs', "Sub X\nEnd Sub\n", lang='VBScript')
+    files['nolang.spt'] = script(None, 'nolang', "Sub X\nEnd Sub\n", lang='NoSuchLanguage')
+    return files
+
+CASES = {'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

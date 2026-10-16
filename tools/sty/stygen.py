@@ -421,3 +421,17 @@ def container(guid, name, items, flags=0):
     if guid: hdr.append(chunk('guid', guid_bytes(guid)))
     if name: hdr.append(unfo(name))
     return RIFF('DMCN', *hdr, LIST('cosl', *cl))
+
+
+def script(guid, name, source, items=(), flags=0, lang='AudioVBScript', version=(0x00080000, 0)):
+    """a script ('DMSC'): DMUS_SCRIPTIOF_* flags, its content (container items, as container() takes them), the
+    language and the source text (lines ended by CRLF)"""
+    body = [chunk('schd', struct.pack('<I', flags))]
+    if guid: body.append(chunk('guid', guid_bytes(guid)))
+    body.append(chunk('vers', struct.pack('<II', 0x00010000, 2)))
+    if name: body.append(unfo(name))
+    body.append(chunk('scve', struct.pack('<II', *version)))
+    body.append(container(None, None, list(items)))
+    body.append(chunk('scla', wstr(lang)))
+    if source is not None: body.append(chunk('scsr', wstr(source.replace('\r\n', '\n').replace('\n', '\r\n'))))
+    return RIFF('DMSC', *body)
