@@ -11,6 +11,7 @@ set -e
 cd "$(dirname "$0")"
 PREFIX="${WINEPREFIX:-$HOME/.wine}"
 DLL="build/dsound.dll"
+if [ -f dsound.dll ]; then DLL="dsound.dll"; fi     # (a release package: the DLL next to this script)
 export WINEPREFIX="$PREFIX"
 export WINEDEBUG=-all
 
