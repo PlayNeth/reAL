@@ -24,6 +24,13 @@ resampler=sinc
 ; to the device's with ALchemy's channel converter. headphones only changes what GetSpeakerConfig reports.
 ;speakers=auto
 
+; CMSS-3D: ALchemy's stereo-to-surround upmix for 2D stereo buffers (music, ambience, videos). On quad,
+; 5.1 and 7.1 it moves centred sound to the centre speaker and ambience to the rear (and side) speakers;
+; on stereo speakers it virtualizes that rear pair. Off by default, as in ALchemy; not on headphones yet.
+; cmssintensity: the rear/side level, -100 (most) .. 99 (least), 0 = ALchemy's default.
+;cmss=off
+;cmssintensity=0
+
 ; logging: 0 off, 1 info, 2 API calls, 3 everything (per Lock/Play - very verbose)
 log=0
 log3d=false

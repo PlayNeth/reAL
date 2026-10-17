@@ -37,6 +37,8 @@ typedef struct rl_config {
     int  resampler;             /* RL_INTERP_* (default sinc) */
     uint32_t speakers;          /* output layout (RL_LAYOUT_*); 0 = the device's (ALchemy: Windows' speaker setup) */
     int  headphones;            /* -1 = the device's form factor, 0 = speakers, 1 = headphones */
+    int  cmss;                  /* CMSS-3D: upmix 2D stereo buffers (ALchemy: off) */
+    int  cmss_intensity;        /* its rear/side level, percent -100..99 (0 = ALchemy's default) */
     int  music;                 /* reDM: serve DirectMusic (loader/performance) ourselves */
     char gm_dls[MAX_PATH];      /* custom GM collection; "" = the system's gm.dls */
     int  midi_trace;            /* log the game's winmm MIDI / MCI calls */
@@ -184,6 +186,7 @@ struct rl_buffer {
     BOOL          src3d_dirty;
 
     rl_hrtf_voice *hrtf;        /* 3D buffers only */
+    UINT32        cmss_rate, cmss_layout;   /* what voice.cmss was made for */
     struct rl_dsound *owner;    /* IDirectSound that created it (weak); NULL once that is released */
     BOOL          dead;         /* owner released: stopped for good, like real DirectSound */
 

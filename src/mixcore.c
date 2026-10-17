@@ -1,4 +1,6 @@
 #include "mixcore.h"
+#include "cmss3.h"
+#include "virt.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -244,6 +246,7 @@ void rl_voice_start(rl_voice *v)
         for (int k = 0; k < RL_SENDS; k++) v->send_z[k] = 0.0f;
         memcpy(v->rc, v->rt, sizeof(v->rc));
         v->lfe_lim.env = 0.0f;
+        if (v->cmss) rl_cmss3_reset(v->cmss);
     }
     v->playing = 1;
 }
@@ -510,10 +513,54 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
 
 #define ROUTE_CHUNK 512
 
+/* CMSS-3D: the voice's pair (with its volume and pan) through the upmixer onto the speakers */
+static int mix_cmss(rl_voice *v, float *out, uint32_t nout, float *const *sends, uint32_t frames, uint32_t out_rate,
+                    rl_signal_fn signal)
+{
+    float pair[ROUTE_CHUNK * 2], l[ROUTE_CHUNK], r[ROUTE_CHUNK], bit[12][ROUTE_CHUNK], tmp[ROUTE_CHUNK * 2];
+    uint32_t m = rl_cmss3_mask(v->cmss), done = 0;
+    int stopped = 0;
+    while (done < frames) {
+        uint32_t n = frames - done > ROUTE_CHUNK ? ROUTE_CHUNK : frames - done;
+        memset(pair, 0, n * 2 * sizeof(float));
+        if (!stopped && v->playing) {
+            float *sub[RL_SENDS];
+            for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
+            stopped = mix_inner(v, pair, 2, NULL, sends ? sub : NULL, n, out_rate, signal);
+        }
+        for (uint32_t i = 0; i < n; i++) { l[i] = pair[2 * i]; r[i] = pair[2 * i + 1]; }
+        float *o[12];
+        for (int b = 0; b < 12; b++) o[b] = (m >> b) & 1 ? bit[b] : NULL;
+        rl_cmss3_process(v->cmss, l, r, o, n);
+        float *dst = out + (size_t)done * nout;
+        if (v->cmss_virt) {
+            /* stereo speakers: the quad through the converter's mode 3 */
+            static float zero[ROUTE_CHUNK];
+            float *ch[ALRV_NOUT] = { bit[0], bit[1], zero, bit[4], bit[5], zero, zero, zero };
+            if (nout == 2) {
+                rl_virt_process(v->cmss_virt, ch, dst, n, tmp);
+            } else {
+                memset(pair, 0, n * 2 * sizeof(float));
+                rl_virt_process(v->cmss_virt, ch, pair, n, tmp);
+                for (uint32_t i = 0; i < n; i++) { dst[i * nout] += pair[2 * i]; dst[i * nout + 1] += pair[2 * i + 1]; }
+            }
+        } else {
+            for (int b = 0; b < 12; b++) {
+                int c = v->cmss_idx[b];
+                if (!o[b] || c < 0 || (uint32_t)c >= nout) continue;
+                for (uint32_t i = 0; i < n; i++) dst[i * nout + c] += bit[b][i];
+            }
+        }
+        done += n;
+    }
+    return stopped;
+}
+
 int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, uint32_t frames, uint32_t out_rate,
                    rl_signal_fn signal)
 {
     if (v->mc_on && v->channels > 2) return mix_inner_mc(v, out, nout, sends, frames, out_rate, signal);
+    if (v->cmss && v->channels == 2) return mix_cmss(v, out, nout, sends, frames, out_rate, signal);
     int hrtf = v->hrtf && v->hrtf_set && v->hrtf_set->dirs;
     if (!v->route_on) {
         if (nout == 2) return rl_voice_mix(v, out, sends, frames, out_rate, signal);

@@ -67,6 +67,13 @@ typedef struct rl_voice {
     float    mc[RL_MAXOUT][RL_MAXOUT];
     rl_bass_limiter lfe_lim;
 
+    /* CMSS-3D (rl_voice_mix_n): a 2D stereo voice through its own upmixer (owned by the buffer), its output
+     * bits spread by cmss_idx (speaker bit -> output channel, -1 absent); on stereo speakers the rear pair
+     * goes through cmss_virt (ALchemy's converter mode 3) instead */
+    struct rl_cmss3 *cmss;
+    struct rl_virt  *cmss_virt;
+    int8_t           cmss_idx[12];
+
     /* notifications (sorted not required) */
     const rl_notify *notifies;
     uint32_t n_notifies;

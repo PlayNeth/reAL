@@ -16,9 +16,9 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/alrv.c src/hrtf.c"
+SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/virt.c src/alrv.c src/hrtf.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
-EXACT_SRCS="src/speakers.c src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
+EXACT_SRCS="src/speakers.c src/cmss3.c src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reDM: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
 MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c src/music/dmldr.c src/music/dmavs.c src/music/dmscript.c"
 CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
@@ -111,11 +111,13 @@ rm -f build/mc2sim.lib build/mc2sim.pdb
 
 # native unit tests for the platform independent core
 if command -v cc >/dev/null 2>&1; then
-    cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/speakers.c src/spatial.c src/reverb.c src/alrv.c src/alrv_params.c src/eax.c src/eax4fx.c src/hrtf.c -lm
+    cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/speakers.c src/cmss3.c src/virt.c src/spatial.c src/reverb.c src/alrv.c src/alrv_params.c src/eax.c src/eax4fx.c src/hrtf.c -lm
     ./build/test_mixcore
     cc -O1 -g -std=gnu11 -Wall -o build/test_speakers tests/test_speakers.c src/speakers.c -lm
     ./build/test_speakers tests/gt/speakers_gt.txt
-    cc -O1 -g -std=gnu11 -Wall -o build/test_doppler tests/test_doppler.c src/spatial.c src/speakers.c src/mixcore.c src/hrtf.c -lm
+    cc -O1 -g -std=gnu11 -Wall -o build/test_cmss3 tests/test_cmss3.c src/cmss3.c -lm
+    ./build/test_cmss3 tests/gt/cmss3_gt.bin
+    cc -O1 -g -std=gnu11 -Wall -o build/test_doppler tests/test_doppler.c src/spatial.c src/speakers.c src/cmss3.c src/virt.c src/mixcore.c src/hrtf.c -lm
     # comparison with ALchemy's own reverb (ground truth from the emulator, see docs; optional)
     cc -O2 -std=gnu11 -Wall -o build/test_alrv tests/test_alrv.c src/alrv.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_alrv_params tests/test_alrv_params.c src/alrv_params.c -lm

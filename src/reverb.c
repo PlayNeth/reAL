@@ -44,90 +44,7 @@ int rl_eax1_room_hf(uint32_t env, float t)
     return mb;
 }
 
-/* ------------------------------------------------------------------------- stereo virtualizer */
-
-#include "alrv_virt_tables.h"
-
-#define VIRT_MAXLEN 80
 #define CX_TO_REAR 0.7070000171661377f       /* plug: rear pair += centre copy * 0.707 (0x100b54e4) */
-#define C_TO_LR    0.7071067690849304f       /* converter: centre into both sides (0x100b5158) */
-
-static void virt_init(rl_virt *v, uint32_t rate)
-{
-    memset(v, 0, sizeof(*v));
-    for (int i = 0; i < 3; i++) if (k_virt[i].rate == rate) v->tab = &k_virt[i];
-    v->hist_len = VIRT_MAXLEN;
-}
-
-static inline float biquad(float x, const float *c, float *s)
-{
-    float w = x + c[0] * s[0] + c[1] * s[1];
-    float y = c[2] * w + c[3] * s[0] + c[4] * s[1];
-    s[1] = s[0]; s[0] = w;
-    return y;
-}
-
-/* y[n] += sum h[k] u[n-1-k];  u points at sample n=0, history before it */
-static void fir_add(float *y, const float *u, const float *h, uint32_t len, uint32_t frames)
-{
-    for (uint32_t n = 0; n < frames; n++) {
-        const float *x = u + n - 1;
-        float acc = 0.0f;
-        for (uint32_t k = 0; k < len; k++) acc += h[k] * x[-(int32_t)k];
-        y[n] += acc;
-    }
-}
-
-/* ch: 8 channel buffers (ALRV_* order, centre copy already folded), out: interleaved stereo += */
-static int virt_process(rl_virt *v, float *const ch[ALRV_NOUT], float *out, uint32_t frames, float *tmp)
-{
-    const alrv_virt_tables *t = v->tab;
-    if (!t) {
-        for (uint32_t n = 0; n < frames; n++) {
-            float c = ch[ALRV_FC][n] * C_TO_LR;
-            out[2 * n]     += ch[ALRV_FL][n] + ch[ALRV_BL][n] + ch[ALRV_SL][n] + c;
-            out[2 * n + 1] += ch[ALRV_FR][n] + ch[ALRV_BR][n] + ch[ALRV_SR][n] + c;
-        }
-        return 1;
-    }
-    uint32_t stride = VIRT_MAXLEN + frames;
-    if (v->hist_cap < stride) {
-        float *nh = calloc((size_t)4 * stride, sizeof(float));
-        if (!nh) return 0;
-        if (v->hist) for (int s = 0; s < 4; s++) memcpy(nh + s * stride, v->hist + s * v->hist_cap, VIRT_MAXLEN * sizeof(float));
-        free(v->hist);
-        v->hist = nh; v->hist_cap = stride;
-    }
-    float *u[4];
-    for (int s = 0; s < 4; s++) u[s] = v->hist + s * v->hist_cap + VIRT_MAXLEN;
-    for (uint32_t n = 0; n < frames; n++) {
-        u[0][n] = ch[ALRV_SL][n] + ch[ALRV_SR][n]; u[1][n] = ch[ALRV_SL][n] - ch[ALRV_SR][n];
-        u[2][n] = ch[ALRV_BL][n] + ch[ALRV_BR][n]; u[3][n] = ch[ALRV_BL][n] - ch[ALRV_BR][n];
-    }
-    float *S = tmp, *D = tmp + frames;
-    memset(tmp, 0, 2 * frames * sizeof(float));
-    fir_add(S, u[0], t->side_s, t->side_len, frames);
-    fir_add(D, u[1], t->side_d, t->side_len, frames);
-    fir_add(S, u[2], t->back_s, t->back_len, frames);
-    fir_add(D, u[3], t->back_d, t->back_len, frames);
-    for (int s = 0; s < 4; s++)       /* keep history */
-        memmove(u[s] - VIRT_MAXLEN, u[s] + frames - VIRT_MAXLEN, VIRT_MAXLEN * sizeof(float));
-    const uint32_t D_ = t->delay;
-    for (uint32_t n = 0; n < frames; n++) {
-        float l = S[n] + D[n], r = S[n] - D[n];
-        for (int k = 0; k < 3; k++) { l = biquad(l, t->bq[k], v->bq[k]); r = biquad(r, t->bq[3 + k], v->bq[3 + k]); }
-        float a = biquad(biquad(l, t->bq[6], v->bq[6]), t->bq[7], v->bq[7]);
-        float b = biquad(biquad(r, t->bq[8], v->bq[8]), t->bq[9], v->bq[9]);
-        /* crossfeed: each side gets the other's filtered signal D samples late */
-        float bd = v->dly[0][v->dpos], ad = v->dly[1][v->dpos];
-        v->dly[0][v->dpos] = b; v->dly[1][v->dpos] = a;
-        if (++v->dpos == D_) v->dpos = 0;
-        float c = ch[ALRV_FC][n] * C_TO_LR;
-        out[2 * n]     += (l + bd) + ch[ALRV_FL][n] + c;
-        out[2 * n + 1] += (r + ad) + ch[ALRV_FR][n] + c;
-    }
-    return 1;
-}
 
 /* ------------------------------------------------------------------------- reverb */
 
@@ -139,7 +56,7 @@ int rl_reverb_init(rl_reverb *r, uint32_t rate)
     memset(r, 0, sizeof(*r));
     r->rate = rate;
     if (!alrv_init(&r->eng[0], rate) || !alrv_init(&r->eng[1], rate)) { rl_reverb_free(r); return 0; }
-    virt_init(&r->virt, rate);
+    rl_virt_init(&r->virt, rate);
     alrv_props e;
     alrv_props_default(&e);
     alrv_props_from_eax1(&e, 0, rl_eax1_presets[0].volume, rl_eax1_presets[0].decay, rl_eax1_presets[0].damping);
@@ -151,7 +68,7 @@ void rl_reverb_free(rl_reverb *r)
 {
     alrv_free(&r->eng[0]);
     alrv_free(&r->eng[1]);
-    free(r->virt.hist);
+    rl_virt_free(&r->virt);
     free(r->scratch);
     memset(r, 0, sizeof(*r));
 }
@@ -279,7 +196,7 @@ static float *render(rl_reverb *r, const float *in, uint32_t frames, float *ch[A
 void rl_reverb_process(rl_reverb *r, const float *in, float *out, uint32_t frames)
 {
     float *ch[ALRV_NOUT], *tmp = render(r, in, frames, ch);
-    if (tmp) virt_process(&r->virt, ch, out, frames, tmp);
+    if (tmp) rl_virt_process(&r->virt, ch, out, frames, tmp);
 }
 
 /* the speaker bit of each reverb output (the centre copy is folded away before this) */

@@ -278,6 +278,66 @@ speakers (kernel 0x108).  Gains for a source of level g (az: 0 ahead, + right, �
 tools/gen_speakers_gt.py runs 0x10036740 and 0x10034900 in the emulator; tests/test_speakers.c compares (128
 converter cases exact, 1924 3D cases within 6e-8).
 
+## CMSS-3D (CCMSS3Upmix, ported in src/cmss3.c; verified in the emulator)
+
+**Where it runs.** fn 0x10032790 (2D stream setup) gives a stream whose format is stereo (mask 3 or 0xb, or no
+mask and 2 channels) a container (fn 0x10034ce0) when the mixer's CMSS switch (+0x7c) is on: CCMSS3Upmix
+(0xb6be4 bytes, fn 0x1003a050) when +0x84 is set, else CMSS1Upmix (0x80f4, fn 0x10038530), plus a CCMSSSurround
+fallback.  fn 0x10034de0 picks the mode (0 headphones, 1 stereo speakers, 2 more speakers) and runs the upmixer
+when that mode's enable (mixer +0x34/+0x38/+0x3c → upmixer +0x20/+0x24/+0x28) is set; intensities in percent at
+mixer +0x40/+0x44/+0x48 (→ upmixer +0x2c..), configure fn 0x1003a2d0 divides by 100 and caps at 0.99.  All off
+by default.  reAL: `cmss=on` enables it for every mode except headphones, `cmssintensity=` the percent.
+
+**Outer process** (fn 0x1003a740, input rings 5120, output rings 9216 per bit): frames collect until a block of
+bs = 512·ceil(rate/24000) is there; the block is dithered (vtable 0x68: ±1e-8 in the pattern - - + - + + + -),
+processed by the component (fn 0x1003bfb0, at +0x76104), and its outputs (FL FR FC BL BR BC SL SR, by mask
+out & ~LFE) are read bs frames later.  The first call fades its output in (kernel 0xb8), inaudible since it
+is silence.  A stereo output (mask 3/0xb) runs the quad path (mask 0x33) and returns an internal quad for the
+stream's converter, set to mode 3 (the stereo virtualizer); `virt` (stereo speakers, not headphones) adds two
+fixed 4th-order allpasses (0x1009d8f4) on the rear pair.
+
+**Component** (configure fn 0x1003b550; rate24 = min(rate, 24000), rate48 = min(rate, 48000): note 44.1 kHz is
+analysed as 24 kHz although its base band is 22.05 kHz):
+- tiers: > 24 kHz the input is split by a polyphase half-band (two chains of four first-order allpasses
+  y = c x + s, s = x - c y; down 0x100cc538/528, gain 0.5; low = (A + B)/2, high = (A - B)/2), again above 48
+  and 96 kHz.  The high band of FL/FR waits one block (vtable 0xf4 swap) and is added back on the way up
+  (0x100cc558/548); the other speakers are interpolated from their low band only (no content above 12 kHz).
+- STFT: frame = [this block's 512 | the previous 512] (the half-frame layout), window 0x100aad10 (1024),
+  real FFT in a packed layout (buf[k] = Re X[k], buf[n-k] = Im X[k], X = sum x e^{-i...}; inverse /n).
+- per bin k = 1..511 (kernel 0x224): PL, PR, cross = L·R (re LrRr - LiRi, im LiRr + LrRi), similarity
+  s = 2|cross|/(PL + PR) (1 when PL + PR < 1e-6).
+- centre (mask & 4, fn 0x1003de20): d = PL >= PR ? s - 1 : 1 - s, v = table 0x100cc568[trunc((d + 1)·27.5)],
+  g += (v - g)(1 - a), a = 0.5683 when v < g else 0.9006 (powered by 24000/rate24 below 24 kHz); g[0] = g[512]
+  = 0.001.  Weights (fn 0x1003f9a0): bins below 120 Hz (5 at 24 kHz) ramp 0.0025·(5 - k)/4, 1 up to 12 kHz.
+  fn 0x1003f610: a = w·g; FC = (FL + FR)·a·0.7071, FL and FR ·(1 - a); FC's DC and Nyquist (FL + FR)·0.0025.
+- ambience (mask & 0x630, kernel 0x22c + fn 0x1003f0e0): PL, PR and the cross spectrum smoothed by 0.6254;
+  amb = 1 - |cross|/sqrt(PL·PR) when both are >= 0.0016, else 0; v = 2·(s < 0.5 ? 0.001 : 1)·table
+  0x100cc200[trunc(amb·201)], smoothed 0.674 / 0.9295.  Rear spectra (kernel 0x228): L, R ·(v·2.0417·0.96 +
+  2.0417·0.04) from bin 5, bins 1..4 ·floor (0.4125 with sides and rear, 0.5834 with one pair), Nyquist ·0.001.
+- inverse, ·window, overlap-add, ·0x100abd10 (fn 0x1003dcc0); the output is the older half (512 base frames
+  of delay on top of bs).
+- rear (fn 0x1003f020, at rate48): rotate by pi/10 (BL' = BL cos - BR sin, BR' = BR cos - BL sin), delay 15 ms,
+  first-order shelf -10 dB at 8 kHz (fn 0x1003ea40: A = 10^(g/20), h = (A + 1)/2, alpha = sin w·sinh(ln2/2·√2·
+  w/sin w), q = alpha·√A, r = (1 - q)/(1 + q); b0 = h + r(h - 1), b1 = (1 - h) - r h, y = b0 w + b1 z, w = x + r z).
+- sides (mask & 0x600) from the rear pair, then the rear pair itself (fn 0x1003e780): allpasses c = -0.6465
+  over 480-sample rings, delays 2.64 ms × (1.6, 1.2) for the sides and × (1.8, 1.4) for the rear; level
+  y(i)^1.5 × (0.44 sides, 0.9 rear with both pairs; 1.0 with one), y piecewise through (-1, 1.9) (0, 1) (0.7, 0.7)
+  (1, 0) (fn 0x1003e5a0 over 0x100cc1e0).  The intensity i slews 0.1 per block from 0.99 (construction) to the
+  setting.  BC (mask & 0x100) = (last pair)·0.7071 through a 4.224 ms allpass.
+- centre presence (rate48 >= 44.1 kHz): fn 0x100705b0 multiplies two peaking sections (gain 1.4125 at 8 kHz and
+  at 2368 Hz, bandwidth factor 2.5) into one 4th-order filter, run by kernel 0x154 (direct form II; a block of
+  zeros/denormals clears it).
+- ALchemy detail kept: the rear gate reads the similarity array through a raw pointer (+0x3a674); it equals
+  the aligned array when the component sits at 12 mod 16, which is what reAL (and the ground truth) assume.
+
+tools/gen_cmss3_gt.py runs the upmixer in the emulator (48 kHz 5.1 and 7.1, 44.1 kHz quad, 96 kHz 7.1, 22.05 kHz
+5.1, 48 kHz stereo); tests/test_cmss3.c compares: -124 dB or better on surround layouts, -80 dB on the stereo quad
+(its rear allpasses are sensitive to the x87's extra precision).  Under Wine (tests/surround.c, step "2d stereo
+noise", `cmss=on`) the centre and rear speakers get the expected share.
+
+Not ported: CMSS1Upmix and CCMSSSurround (used only when +0x84 is clear), and the headphone branch of converter
+mode 3 (fn 0x100376d0: CEarlyRefBuffer taps per rate from fn 0x10037470, FIRs from fn 0x10037b90).
+
 ## CHRvbReverb (ALchemy's software reverb) — DSP
 
 Tooling: Ghidra 11.0.3 headless project in `~/re/ghidra` (`dec.sh addr…` decompiles), Unicorn harness

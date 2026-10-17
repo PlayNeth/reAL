@@ -325,7 +325,9 @@ Doppler, and WASAPI output.
 
 ## Remaining, in the agreed order
 
-1. Surround / CMSS (scripts done: stages 1 to 4)
+1. Surround / CMSS (scripts done: stages 1 to 4).  Done: speakers beyond stereo, CMSS-3D on quad/5.1/7.1 and
+   stereo speakers.  Open: CMSS-3D on headphones (the headphone branch of converter mode 3, fn 0x100376d0:
+   early-reflection buffers and per-rate FIRs, plus the variant tables of fn 0x10037b90).
 (EAX 5 dropped: games used it through OpenAL, which OpenAL Soft covers; the EAX 5 property set stays
 reported unsupported so games fall back to EAX 4.)
 

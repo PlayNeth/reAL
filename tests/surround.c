@@ -5,7 +5,8 @@
  *   1. a 3D mono tone at 3 m, azimuth 0, 45, 90, 135, 180, -135, -90, -45
  *   2. a 2D stereo buffer with the tone on its left channel only, then on its right only
  *   3. a 6-channel buffer (5.1) with the tone in one channel at a time
- *   4. an 8-channel buffer (7.1) with the tone in its side left then its side right channel */
+ *   4. an 8-channel buffer (7.1) with the tone in its side left then its side right channel
+ *   5. a 2D stereo buffer of partly correlated noise (for CMSS-3D: cmss=on puts some on the centre and rear) */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -40,6 +41,29 @@ static IDirectSoundBuffer *make(IDirectSound8 *ds, int ch, DWORD mask, DWORD fla
         for (DWORD i = 0; i < frames; i++)
             for (int c = 0; c < ch; c++)
                 s[i * ch + c] = c == tone_ch ? (INT16)(sinf(2.0f * 3.14159265f * 1000.0f * i / RATE) * 8000.0f) : 0;
+        IDirectSoundBuffer_Unlock(b, p, n, NULL, 0);
+    }
+    return b;
+}
+
+/* stereo noise: a common part (centre) plus an independent part per side (ambience) */
+static IDirectSoundBuffer *make_mix(IDirectSound8 *ds)
+{
+    WAVEFORMATEX f = { WAVE_FORMAT_PCM, 2, RATE, RATE * 4, 4, 16, 0 };
+    DWORD frames = RATE / 2, bytes = frames * 4;
+    DSBUFFERDESC bd = { sizeof(bd), DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, bytes, 0, &f };
+    IDirectSoundBuffer *b = NULL;
+    if (FAILED(IDirectSound8_CreateSoundBuffer(ds, &bd, &b, NULL))) return NULL;
+    void *p; DWORD n;
+    if (SUCCEEDED(IDirectSoundBuffer_Lock(b, 0, bytes, &p, &n, NULL, NULL, 0))) {
+        INT16 *s = p;
+        unsigned seed = 1;
+#define RND() ((seed = seed * 1103515245u + 12345u), ((int)(seed >> 9 & 0xffff) - 32768) / 32768.0f)
+        for (DWORD i = 0; i < frames; i++) {
+            float c = RND(), l = RND(), r = RND();
+            s[2 * i] = (INT16)((0.7f * c + 0.5f * l) * 6000.0f);
+            s[2 * i + 1] = (INT16)((0.7f * c + 0.5f * r) * 6000.0f);
+        }
         IDirectSoundBuffer_Unlock(b, p, n, NULL, 0);
     }
     return b;
@@ -97,6 +121,7 @@ int main(int argc, char **argv)
     }
     play(make(ds, 8, KSAUDIO_SPEAKER_7POINT1_SURROUND, 0, 6), "7.1 buffer SL");
     play(make(ds, 8, KSAUDIO_SPEAKER_7POINT1_SURROUND, 0, 7), "7.1 buffer SR");
+    play(make_mix(ds), "2d stereo noise");
     printf("%6lu end\n", GetTickCount() - t0);
     return 0;
 }

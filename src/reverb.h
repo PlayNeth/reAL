@@ -11,18 +11,12 @@
 #include <stdint.h>
 #include "alrv.h"
 #include "speakers.h"
+#include "virt.h"
 
 /* EAX 1.0 environment presets (environment, volume, decay, damping) — ALchemy .rdata 0x100a7ef0 */
 typedef struct rl_eax1_preset { float volume, decay, damping; } rl_eax1_preset;
 extern const rl_eax1_preset rl_eax1_presets[26];
 
-typedef struct rl_virt {                 /* stereo virtualizer state */
-    const void *tab;                     /* alrv_virt_tables*, NULL = plain fold-down */
-    float  *hist;                        /* 4 FIR inputs (side sum/diff, back sum/diff) with history */
-    uint32_t hist_cap, hist_len;
-    float   bq[10][2];                   /* biquad states w1 w2 */
-    float   dly[2][16]; uint32_t dpos;   /* crossfeed delay (<= 12 samples) */
-} rl_virt;
 
 typedef struct rl_reverb {
     uint32_t rate;

@@ -2,6 +2,9 @@
  *        + IDirectSound3DListener (primary buffer) */
 #include "real.h"
 #include "fx.h"
+#include "cmss3.h"
+#include "virt.h"
+#include <stdlib.h>
 #include <math.h>
 #include <stdio.h>
 #include <float.h>
@@ -171,6 +174,38 @@ static void update_gains(rl_buffer *b)
     route_speakers(b, spatial, use_hrtf, pan, direct * base);
 }
 
+static void cmss_free(rl_voice *v)
+{
+    rl_cmss3_destroy(v->cmss);
+    v->cmss = NULL;
+    if (v->cmss_virt) { rl_virt_free(v->cmss_virt); free(v->cmss_virt); v->cmss_virt = NULL; }
+}
+
+/* CMSS-3D: ALchemy gives each 2D stereo buffer its own upmixer (fn 0x10032790) when it is on for the speaker
+ * mode; on stereo speakers the upmixer's quad goes through the converter's mode 3.  Not for headphones yet
+ * (ALchemy's headphone branch of mode 3 is not ported). */
+static void route_cmss(rl_buffer *b)
+{
+    rl_device *dev = b->dev;
+    rl_voice *v = &b->voice;
+    const rl_layout *lay = &dev->layout;
+    BOOL want = g_cfg.cmss && v->channels == 2 && !b->is_primary && !(b->desc.dwFlags & DSBCAPS_CTRL3D) &&
+                lay->n >= 2 && dev->out_rate && !(lay->n == 2 && dev->headphones);
+    if (v->cmss && (!want || b->cmss_rate != dev->out_rate || b->cmss_layout != lay->mask)) cmss_free(v);
+    if (!want || v->cmss) return;
+    v->cmss = rl_cmss3_create(dev->out_rate, lay->mask, lay->n == 2);
+    if (!v->cmss) return;
+    rl_cmss3_set_intensity(v->cmss, g_cfg.cmss_intensity);
+    if (lay->n == 2) {
+        v->cmss_virt = calloc(1, sizeof(rl_virt));
+        if (!v->cmss_virt) { cmss_free(v); return; }
+        rl_virt_init(v->cmss_virt, dev->out_rate);
+    }
+    for (int bit = 0; bit < 12; bit++) v->cmss_idx[bit] = lay->idx[bit];
+    b->cmss_rate = dev->out_rate;
+    b->cmss_layout = lay->mask;
+}
+
 /* more than two channels on either side: the voice's way onto the speakers (speakers.c) */
 static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const float pan[2], float level)
 {
@@ -178,6 +213,7 @@ static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const floa
     rl_voice *v = &b->voice;
     const rl_layout *lay = &dev->layout;
     v->route_on = v->mc_on = 0;
+    route_cmss(b);
     if (!lay->n) return;
     if (v->channels > 2) {
         /* ALchemy's 2D stream: every channel through the converter, the level applied after it */
@@ -332,6 +368,7 @@ static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
     }
     HeapFree(GetProcessHeap(), 0, This->notifies);
     HeapFree(GetProcessHeap(), 0, This->hrtf);
+    cmss_free(&This->voice);
     HeapFree(GetProcessHeap(), 0, This);
     rl_device_release(dev);
     return 0;
@@ -1750,6 +1787,8 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     b->eax3 = src->eax3;
     b->eax4 = src->eax4;
     b->voice.hrtf = NULL;
+    b->voice.cmss = NULL;
+    b->voice.cmss_virt = NULL;
     if (b->desc.dwFlags & DSBCAPS_CTRL3D)
         b->hrtf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(rl_hrtf_voice));
     rl_buffer_update_gains(b);
