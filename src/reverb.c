@@ -223,16 +223,17 @@ void rl_reverb_set_eax1(rl_reverb *r, uint32_t env, float volume, float decay, f
 
 #define CHUNK 64
 
-void rl_reverb_process(rl_reverb *r, const float *in, float *out, uint32_t frames)
+/* the 8 reverb channels of this block (centre copy folded into the rear pair), or NULL when silent */
+static float *render(rl_reverb *r, const float *in, uint32_t frames, float *ch[ALRV_NOUT])
 {
-    if (!r->eng[0].mem || (!r->active && !r->ring_left)) return;
+    if (!r->eng[0].mem || (!r->active && !r->ring_left)) return NULL;
     if (r->scratch_frames < frames) {
         free(r->scratch);
         r->scratch = calloc((size_t)frames * 19, sizeof(float));
-        if (!r->scratch) { r->scratch_frames = 0; return; }
+        if (!r->scratch) { r->scratch_frames = 0; return NULL; }
         r->scratch_frames = frames;
     }
-    float *ch[ALRV_NOUT], *och[ALRV_NOUT];
+    float *och[ALRV_NOUT];
     for (int c = 0; c < ALRV_NOUT; c++) { ch[c] = r->scratch + c * frames; och[c] = r->scratch + (8 + c) * frames; }
     float *zero = r->scratch + 16 * frames, *tmp = r->scratch + 17 * frames;
 
@@ -272,5 +273,36 @@ void rl_reverb_process(rl_reverb *r, const float *in, float *out, uint32_t frame
         ch[ALRV_BL][i] += ch[ALRV_CX][i] * CX_TO_REAR;
         ch[ALRV_BR][i] += ch[ALRV_CX][i] * CX_TO_REAR;
     }
-    virt_process(&r->virt, ch, out, frames, tmp);
+    return tmp;
+}
+
+void rl_reverb_process(rl_reverb *r, const float *in, float *out, uint32_t frames)
+{
+    float *ch[ALRV_NOUT], *tmp = render(r, in, frames, ch);
+    if (tmp) virt_process(&r->virt, ch, out, frames, tmp);
+}
+
+/* the speaker bit of each reverb output (the centre copy is folded away before this) */
+static const uint32_t k_alrv_bit[ALRV_NOUT] = { RL_SPK_FL, RL_SPK_FR, RL_SPK_FC, RL_SPK_BL, RL_SPK_BR, 0, RL_SPK_SL, RL_SPK_SR };
+
+void rl_reverb_process_n(rl_reverb *r, const float *in, float *out, const rl_layout *lay, uint32_t frames)
+{
+    if (lay->n <= 2) { rl_reverb_process(r, in, out, frames); return; }
+    float *ch[ALRV_NOUT], *tmp = render(r, in, frames, ch);
+    if (!tmp) return;
+    /* more speakers: the plug's converter (modes 6 and 7) instead of the virtualizer */
+    rl_layout src;
+    rl_layout_init(&src, RL_SPK_FL | RL_SPK_FR | RL_SPK_FC | RL_SPK_BL | RL_SPK_BR | RL_SPK_SL | RL_SPK_SR);
+    float m[RL_MAXOUT][RL_MAXOUT];
+    rl_convert_matrix(&src, lay, m, NULL);
+    for (int c = 0; c < ALRV_NOUT; c++) {
+        if (!k_alrv_bit[c]) continue;
+        int i = src.idx[__builtin_ctz(k_alrv_bit[c])];
+        for (uint32_t o = 0; o < lay->n; o++) {
+            float g = m[i][o];
+            if (g == 0.0f) continue;
+            const float *x = ch[c];
+            for (uint32_t n = 0; n < frames; n++) out[n * lay->n + o] += x[n] * g;
+        }
+    }
 }

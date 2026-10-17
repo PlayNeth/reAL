@@ -35,6 +35,8 @@ typedef struct rl_config {
     int  hrtf_mode;             /* 0 off, 1 auto (use reAL_hrtf.bin if found) */
     char hrtf_path[MAX_PATH];   /* explicit file, overrides the search */
     int  resampler;             /* RL_INTERP_* (default sinc) */
+    uint32_t speakers;          /* output layout (RL_LAYOUT_*); 0 = the device's (ALchemy: Windows' speaker setup) */
+    int  headphones;            /* -1 = the device's form factor, 0 = speakers, 1 = headphones */
     int  music;                 /* reDM: serve DirectMusic (loader/performance) ourselves */
     char gm_dls[MAX_PATH];      /* custom GM collection; "" = the system's gm.dls */
     int  midi_trace;            /* log the game's winmm MIDI / MCI calls */
@@ -75,7 +77,13 @@ typedef struct rl_device {
     HANDLE      quit_event;
     volatile LONG running;
     UINT32      out_rate;
-    UINT32      out_channels;
+    UINT32      out_channels;     /* channels in the mix: layout.n */
+    rl_layout   layout;           /* the speaker layout mixed (ALchemy's: stereo, quad, 5.1 or 7.1) */
+    rl_layout   dev_layout;       /* the device's own, when different (folded with out_mtx at the output) */
+    BOOL        out_direct;       /* the device takes the layout as it is */
+    BOOL        headphones;       /* stereo layout on headphones (GetSpeakerConfig: DSSPEAKER_HEADPHONE) */
+    float       out_mtx[RL_MAXOUT][RL_MAXOUT];
+    float      *fxtmp;            /* stereo scratch for the EAX 4 effects on more than two channels */
     UINT32      period_frames;    /* approx frames mixed per wakeup */
     rl_buffer  *playing;          /* intrusive list of playing buffers */
     rl_buffer  *all;              /* intrusive list of all buffers (for 3D commits) */
@@ -84,10 +92,11 @@ typedef struct rl_device {
     BOOL        listener_dirty;
     BOOL        primary_playing;
     LONG        primary_volume;
-    float       *mixbuf;          /* stereo float scratch */
+    float       *mixbuf;          /* the mix: out_channels interleaved */
     UINT32      mixbuf_frames;
     WAVEFORMATEX primary_fmt;
-    DWORD       speaker_config;
+    DWORD       speaker_config;   /* what GetSpeakerConfig reports */
+    BOOL        speaker_config_set;   /* the application set it (SetSpeakerConfig: kept across device reopens) */
     LONG        n_buffers;        /* live secondary buffers */
     LONG        n_hw_buffers;     /* live non-LOCSOFTWARE secondaries (ALchemy counts these in GetCaps) */
 

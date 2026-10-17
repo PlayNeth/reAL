@@ -19,6 +19,11 @@ disabledirectmusic=false
 ; linear (what ALchemy does: duller top end, audible aliasing on low-rate sounds)
 resampler=sinc
 
+; speakers: auto (default: the speakers Windows / the sound server is set up for, as ALchemy), or
+; stereo, headphones, quad, 5.1, 7.1. A layout with more speakers than the device has is folded down
+; to the device's with ALchemy's channel converter. headphones only changes what GetSpeakerConfig reports.
+;speakers=auto
+
 ; logging: 0 off, 1 info, 2 API calls, 3 everything (per Lock/Play - very verbose)
 log=0
 log3d=false

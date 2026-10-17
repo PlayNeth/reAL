@@ -7,6 +7,7 @@
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <propsys.h>
 #include <string.h>
 
 DEFINE_GUID(RL_CLSID_MMDeviceEnumerator, 0xBCDE0395, 0xE52F, 0x467C, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E);
@@ -206,18 +207,22 @@ static void mix(rl_device *dev, UINT32 frames)
     if (frames > dev->mixbuf_frames) {
         HeapFree(GetProcessHeap(), 0, dev->mixbuf);
         HeapFree(GetProcessHeap(), 0, dev->sendbuf);
+        HeapFree(GetProcessHeap(), 0, dev->fxtmp);
         dev->mixbuf_frames = frames * 2;
-        dev->mixbuf = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * 2 * sizeof(float));
+        dev->mixbuf = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * RL_MAXOUT * sizeof(float));
         dev->sendbuf = HeapAlloc(GetProcessHeap(), 0, RL_SENDS * dev->mixbuf_frames * sizeof(float));
-        if (!dev->mixbuf || !dev->sendbuf) {
+        dev->fxtmp = HeapAlloc(GetProcessHeap(), 0, dev->mixbuf_frames * 2 * sizeof(float));
+        if (!dev->mixbuf || !dev->sendbuf || !dev->fxtmp) {
             HeapFree(GetProcessHeap(), 0, dev->mixbuf);
             HeapFree(GetProcessHeap(), 0, dev->sendbuf);
-            dev->mixbuf = dev->sendbuf = NULL;
+            HeapFree(GetProcessHeap(), 0, dev->fxtmp);
+            dev->mixbuf = dev->sendbuf = dev->fxtmp = NULL;
             dev->mixbuf_frames = 0;
             return;
         }
     }
-    memset(dev->mixbuf, 0, frames * 2 * sizeof(float));
+    const UINT32 nch = dev->layout.n ? dev->layout.n : 2;
+    memset(dev->mixbuf, 0, frames * nch * sizeof(float));
 
     EnterCriticalSection(&dev->lock);
     if (dev->reverb_dirty) {
@@ -257,7 +262,7 @@ static void mix(rl_device *dev, UINT32 frames)
     while (b) {
         rl_buffer *next = b->next_playing;
         if (b->fx) rl_buffer_fx_run(b, frames, dev->out_rate);
-        if (rl_voice_mix(&b->voice, dev->mixbuf, nbus ? bus : NULL, frames, dev->out_rate, rl_signal_event))
+        if (rl_voice_mix_n(&b->voice, dev->mixbuf, nch, nbus ? bus : NULL, frames, dev->out_rate, rl_signal_event))
             rl_device_stop_voice(dev, b);
         else if (!b->voice.playing)
             rl_device_stop_voice(dev, b);
@@ -268,32 +273,120 @@ static void mix(rl_device *dev, UINT32 frames)
 
     for (int k = 0; k < RL_SENDS; k++) {
         if (!bus[k]) continue;
-        if (fxu[k]) { eax4fx_unit_process(fxu[k], bus[k], dev->mixbuf, fxg[k], frames); continue; }  /* volume on the output */
+        if (fxu[k]) {                 /* volume on the output; the effects are stereo (front pair) */
+            if (nch == 2) { eax4fx_unit_process(fxu[k], bus[k], dev->mixbuf, fxg[k], frames); continue; }
+            memset(dev->fxtmp, 0, frames * 2 * sizeof(float));
+            eax4fx_unit_process(fxu[k], bus[k], dev->fxtmp, fxg[k], frames);
+            for (UINT32 i = 0; i < frames; i++) {
+                dev->mixbuf[i * nch] += dev->fxtmp[2 * i];
+                dev->mixbuf[i * nch + 1] += dev->fxtmp[2 * i + 1];
+            }
+            continue;
+        }
         if (fxg[k] != 1.0f) for (UINT32 i = 0; i < frames; i++) bus[k][i] *= fxg[k];   /* slot volume */
-        rl_reverb_process(fxr[k], bus[k], dev->mixbuf, frames);
+        rl_reverb_process_n(fxr[k], bus[k], dev->mixbuf, &dev->layout, frames);
     }
 
     if (master != 1.0f)
-        for (UINT32 i = 0; i < frames * 2; i++) dev->mixbuf[i] *= master;
+        for (UINT32 i = 0; i < frames * nch; i++) dev->mixbuf[i] *= master;
 }
 
 static inline float clampf(float v) { return v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v; }
 
+static inline void put(const wasapi_out *w, BYTE *dst, UINT32 at, float v)
+{
+    v = clampf(v);
+    switch (w->fmt) {
+    case OUT_F32: ((float *)dst)[at] = v; break;
+    case OUT_S16: ((INT16 *)dst)[at] = (INT16)(v * 32767.0f); break;
+    case OUT_S32: ((INT32 *)dst)[at] = (INT32)(v * 2147483647.0f); break;
+    }
+}
+
 static void write_out(const rl_device *dev, const wasapi_out *w, BYTE *dst, UINT32 frames)
 {
     const float *src = dev->mixbuf;
-    const UINT32 ch = w->channels;
+    const UINT32 ch = w->channels, n = dev->layout.n ? dev->layout.n : 2;
     for (UINT32 i = 0; i < frames; i++) {
-        float l = clampf(src[i * 2]), r = clampf(src[i * 2 + 1]);
+        const float *x = src + (size_t)i * n;
+        if (ch == 1) { put(w, dst, i, (clampf(x[0]) + clampf(x[1])) * 0.5f); continue; }
+        if (dev->out_direct) {
+            for (UINT32 c = 0; c < ch; c++) put(w, dst, i * ch + c, c < n ? x[c] : 0.0f);
+            continue;
+        }
+        /* the device has other speakers than the layout: ALchemy's converter between the two */
         for (UINT32 c = 0; c < ch; c++) {
-            float v = ch == 1 ? (l + r) * 0.5f : c == 0 ? l : c == 1 ? r : 0.0f;
-            switch (w->fmt) {
-            case OUT_F32: ((float *)dst)[i * ch + c] = v; break;
-            case OUT_S16: ((INT16 *)dst)[i * ch + c] = (INT16)(v * 32767.0f); break;
-            case OUT_S32: ((INT32 *)dst)[i * ch + c] = (INT32)(v * 2147483647.0f); break;
-            }
+            float v = 0.0f;
+            if (c < RL_MAXOUT) for (UINT32 k = 0; k < n; k++) v += x[k] * dev->out_mtx[k][c];
+            put(w, dst, i * ch + c, v);
         }
     }
+}
+
+/* ---------------------------------------------------------------- speaker layout */
+
+DEFINE_GUID(RL_PKEY_FormFactor_fmtid, 0x1da5d803, 0xd492, 0x4edd, 0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e);
+
+static BOOL endpoint_is_headphones(IMMDevice *mmdev)
+{
+    IPropertyStore *ps = NULL;
+    BOOL hp = FALSE;
+    if (FAILED(IMMDevice_OpenPropertyStore(mmdev, STGM_READ, &ps)) || !ps) return FALSE;
+    PROPERTYKEY key = { RL_PKEY_FormFactor_fmtid, 0 };
+    PROPVARIANT v;
+    PropVariantInit(&v);
+    if (SUCCEEDED(IPropertyStore_GetValue(ps, &key, &v)) && v.vt == VT_UI4)
+        hp = v.ulVal == 3 || v.ulVal == 5;    /* Headphones, Headset */
+    PropVariantClear(&v);
+    IPropertyStore_Release(ps);
+    return hp;
+}
+
+static const char *layout_name(uint32_t m)
+{
+    switch (m) {
+    case RL_LAYOUT_STEREO: return "stereo";
+    case RL_LAYOUT_QUAD: return "quad";
+    case RL_LAYOUT_51: return "5.1";
+    case RL_LAYOUT_71: return "7.1";
+    default: return "other";
+    }
+}
+
+/* ALchemy renders the speakers Windows is set up for (fn 0x1001c1a0): stereo (or headphones), quad, 5.1 or 7.1 */
+static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *mixfmt)
+{
+    UINT32 ch = mixfmt->nChannels;
+    DWORD dmask = 0;
+    if (mixfmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixfmt->cbSize >= 22)
+        dmask = ((const WAVEFORMATEXTENSIBLE *)mixfmt)->dwChannelMask;
+    if (!dmask || (UINT32)__builtin_popcount(dmask & 0xfff) != ch) dmask = rl_default_mask(ch);
+    uint32_t lay = g_cfg.speakers ? g_cfg.speakers : rl_layout_for_channels(ch);
+    BOOL hp = FALSE;
+    if (lay == RL_LAYOUT_STEREO) hp = g_cfg.headphones >= 0 ? g_cfg.headphones : endpoint_is_headphones(mmdev);
+    rl_layout_init(&dev->layout, lay);
+    rl_layout_init(&dev->dev_layout, dmask & 0xfff);
+    dev->out_direct = ch >= 2 && (dmask & 0xfff) == lay;
+    if (!dev->out_direct && ch >= 2) {
+        /* Windows plays a rear pair on side speakers (5.1 "surround" devices) and the other way round */
+        uint32_t src = lay;
+        const uint32_t back = RL_SPK_BL | RL_SPK_BR, side = RL_SPK_SL | RL_SPK_SR;
+        if ((lay & back) == back && !(lay & side) && !(dmask & back) && (dmask & side) == side) src = (lay & ~back) | side;
+        else if ((lay & side) == side && !(lay & back) && !(dmask & side) && (dmask & back) == back) src = (lay & ~side) | back;
+        rl_layout s;
+        rl_layout_init(&s, src);
+        rl_convert_matrix(&s, &dev->dev_layout, dev->out_mtx, NULL);
+        if (src == (dmask & 0xfff)) dev->out_direct = TRUE;      /* same speakers in the same order */
+    }
+    EnterCriticalSection(&dev->lock);
+    BOOL changed = dev->out_channels != dev->layout.n || dev->headphones != hp;
+    dev->out_channels = dev->layout.n;
+    dev->headphones = hp;
+    if (!dev->speaker_config_set) dev->speaker_config = rl_layout_speaker_config(lay, hp);
+    if (changed) update_all_gains(dev);
+    LeaveCriticalSection(&dev->lock);
+    LOG_INFO("speakers: %s%s, device %lu ch (mask %03lx)%s", layout_name(lay), hp ? " (headphones)" : "",
+             (unsigned long)ch, (unsigned long)dmask, dev->out_direct || ch < 2 ? "" : ", folded to the device's speakers");
 }
 
 /* ---------------------------------------------------------------- HRTF data */
@@ -409,7 +502,7 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     if (g_cfg.hrtf_mode && (dev->hrtf.rate != mixfmt->nSamplesPerSec || !dev->hrtf.dirs))
         load_hrtf(dev, mixfmt->nSamplesPerSec);
     dev->out_rate = mixfmt->nSamplesPerSec;
-    dev->out_channels = w->channels;
+    choose_layout(dev, w->mmdev, mixfmt);
     dev->period_frames = period ? (UINT32)(period * dev->out_rate / 10000000) : dev->out_rate / 100;
 
     /* pre-fill with silence so the first period doesn't underrun */
@@ -515,7 +608,7 @@ HRESULT rl_device_acquire(rl_device **out)
     dev->primary_fmt.wBitsPerSample = 8;
     dev->primary_fmt.nBlockAlign = 2;
     dev->primary_fmt.nAvgBytesPerSec = 44100;
-    dev->speaker_config = DSSPEAKER_COMBINED(DSSPEAKER_STEREO, DSSPEAKER_GEOMETRY_WIDE);
+    dev->speaker_config = 4;     /* DSSPEAKER_STEREO, until the device is open (ALchemy reports no geometry) */
     dev->eax1_env = 0;  /* EAX_ENVIRONMENT_GENERIC */
     dev->eax1_volume = rl_eax1_presets[0].volume;
     dev->eax1_decay = rl_eax1_presets[0].decay;
@@ -566,6 +659,7 @@ void rl_device_release(rl_device *dev)
     DeleteCriticalSection(&dev->lock);
     HeapFree(GetProcessHeap(), 0, dev->mixbuf);
     HeapFree(GetProcessHeap(), 0, dev->sendbuf);
+    HeapFree(GetProcessHeap(), 0, dev->fxtmp);
     rl_reverb_free(&dev->reverb);
     for (int k = 0; k < 3; k++) if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); }
     for (int k = 0; k < 4; k++) eax4fx_unit_free(dev->fxunit[k]);

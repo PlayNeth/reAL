@@ -25,6 +25,7 @@ static void defaults(void)
     g_cfg.resampler = RL_INTERP_SINC;
     g_cfg.midi_rate = 22050;
     g_cfg.midi_reverb = 1;
+    g_cfg.headphones = -1;
 }
 
 static char *trim(char *s)
@@ -83,6 +84,15 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "gmdls"))      lstrcpynA(g_cfg.gm_dls, val, MAX_PATH);
     else if (!_stricmp(key, "resampler"))
         g_cfg.resampler = (!_stricmp(val, "linear") || !_stricmp(val, "alchemy")) ? RL_INTERP_LINEAR : RL_INTERP_SINC;
+    else if (!_stricmp(key, "speakers")) {
+        g_cfg.headphones = -1;
+        if (!_stricmp(val, "headphones") || !_stricmp(val, "headphone")) { g_cfg.speakers = RL_LAYOUT_STEREO; g_cfg.headphones = 1; }
+        else if (!_stricmp(val, "stereo") || !_stricmp(val, "2.0") || !_stricmp(val, "2")) { g_cfg.speakers = RL_LAYOUT_STEREO; g_cfg.headphones = 0; }
+        else if (!_stricmp(val, "quad") || !_stricmp(val, "4.0") || !_stricmp(val, "4")) g_cfg.speakers = RL_LAYOUT_QUAD;
+        else if (!_stricmp(val, "5.1") || !_stricmp(val, "6")) g_cfg.speakers = RL_LAYOUT_51;
+        else if (!_stricmp(val, "7.1") || !_stricmp(val, "8")) g_cfg.speakers = RL_LAYOUT_71;
+        else g_cfg.speakers = 0;             /* auto */
+    }
     else if (!_stricmp(key, "hrtf")) {
         if (!_stricmp(val, "off") || !_stricmp(val, "false") || !_stricmp(val, "0")) g_cfg.hrtf_mode = 0;
         else if (!_stricmp(val, "auto") || !_stricmp(val, "on") || !_stricmp(val, "true") || !_stricmp(val, "1")) g_cfg.hrtf_mode = 1;
@@ -188,6 +198,9 @@ void rl_config_load(void)
         LOG_INFO("  module: %s (pid %lu)", self, (unsigned long)GetCurrentProcessId());
     }
     if (g_cfg.log_level > 0) rl_crash_logger();
+    if (g_cfg.speakers)
+        LOG_INFO("  speakers=%s", g_cfg.speakers == RL_LAYOUT_71 ? "7.1" : g_cfg.speakers == RL_LAYOUT_51 ? "5.1" :
+                 g_cfg.speakers == RL_LAYOUT_QUAD ? "quad" : g_cfg.headphones == 1 ? "headphones" : "stereo");
     LOG_INFO("  music=%d (set by %s) gmdls=%s", g_cfg.music, s_music_from, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
     if (g_cfg.midi || g_cfg.midi_trace)
         LOG_INFO("  midi=%d midirate=%d midireverb=%d miditrace=%d", g_cfg.midi, g_cfg.midi_rate, g_cfg.midi_reverb, g_cfg.midi_trace);

@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include "hrtf.h"
+#include "speakers.h"
 
 #define RL_NOTIFY_STOP 0xFFFFFFFFu
 #define RL_SENDS 4                  /* effect sends per voice (EAX 4 FX slots) */
@@ -55,6 +56,17 @@ typedef struct rl_voice {
     rl_hrtf_voice     *hrtf;
     const rl_hrtf_set *hrtf_set;
 
+    /* more than two speakers (rl_voice_mix_n).  route_on: the voice's left/right pair (or its HRTF output) and its
+     * mono sum spread over the output channels, gain[] then carrying no panning.  A source of more than two
+     * channels goes through mc[source channel][output channel] (ALchemy's channel converter) instead, its
+     * level in gain[0]; mc_lfe is its LFE channel when that goes to the front pair through the bass limiter. */
+    int      route_on;
+    float    rt[3][RL_MAXOUT];      /* target weights of left, right, mono */
+    float    rc[3][RL_MAXOUT];      /* current (smoothed) */
+    int      mc_on, mc_lfe;
+    float    mc[RL_MAXOUT][RL_MAXOUT];
+    rl_bass_limiter lfe_lim;
+
     /* notifications (sorted not required) */
     const rl_notify *notifies;
     uint32_t n_notifies;
@@ -74,6 +86,12 @@ int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, 
 
 /* Start playing (snaps smoothed gains to target if the voice was stopped). */
 void rl_voice_start(rl_voice *v);
+
+/* rl_voice_mix into `nout` interleaved channels (the device layout): plain voices land on channels 0 and 1 (front
+ * left and right in every layout), routed and multichannel voices as set up above.  nout == 2 with neither is
+ * exactly rl_voice_mix. */
+int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, uint32_t frames, uint32_t out_rate,
+                   rl_signal_fn signal);
 /* Move the play position; a playing voice crossfades from the old position (declick). */
 void rl_voice_jump(rl_voice *v, uint64_t newpos);
 

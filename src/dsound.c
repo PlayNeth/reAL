@@ -169,6 +169,7 @@ static HRESULT WINAPI ds_SetSpeakerConfig(IDirectSound8 *iface, DWORD cfg)
     rl_dsound *This = impl(iface);
     if (!This->dev) return DSERR_UNINITIALIZED;
     This->dev->speaker_config = cfg;
+    This->dev->speaker_config_set = TRUE;
     return DS_OK;
 }
 

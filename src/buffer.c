@@ -53,6 +53,8 @@ void rl_buffer_update_gains(rl_buffer *b)
     rl_fpu_leave(cw);
 }
 
+static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const float pan[2], float level);
+
 static void update_gains(rl_buffer *b)
 {
     rl_device *dev = b->dev;
@@ -166,6 +168,53 @@ static void update_gains(rl_buffer *b)
     }
     b->voice.gain[0] = pan[0] * direct * base;
     b->voice.gain[1] = pan[1] * direct * base;
+    route_speakers(b, spatial, use_hrtf, pan, direct * base);
+}
+
+/* more than two channels on either side: the voice's way onto the speakers (speakers.c) */
+static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const float pan[2], float level)
+{
+    rl_device *dev = b->dev;
+    rl_voice *v = &b->voice;
+    const rl_layout *lay = &dev->layout;
+    v->route_on = v->mc_on = 0;
+    if (!lay->n) return;
+    if (v->channels > 2) {
+        /* ALchemy's 2D stream: every channel through the converter, the level applied after it */
+        DWORD mask = 0;
+        if (b->fmt.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE) mask = b->fmt.dwChannelMask & 0xfff;
+        if (!mask || (uint32_t)__builtin_popcount(mask) != v->channels) mask = rl_default_mask(v->channels);
+        rl_layout in;
+        rl_layout_init(&in, mask);
+        int redirect;
+        rl_convert_matrix(&in, lay, v->mc, &redirect);
+        v->mc_lfe = redirect ? in.idx[3] : -1;
+        if (!v->mc_on) rl_bass_limiter_init(&v->lfe_lim, dev->out_rate ? dev->out_rate : 48000);
+        v->mc_on = 1;
+        v->gain[0] = v->gain[1] = level;
+        return;
+    }
+    if (!spatial || lay->n <= 2) return;
+    /* a 3D source on four or more speakers (fn 0x10034900): its pair (HRTF or panned) on the front and rear
+     * speakers, its mono sum on the centre, LFE and side ones */
+    float az, el, g[12];
+    rl_spatial_direction(&dev->listener, &b->src3d, &az, &el);
+    if (az > 180.0f) az -= 360.0f;
+    double dist = (double)rl_spatial_distance(&dev->listener, &b->src3d) * dev->listener.distance_factor;
+    rl_speaker_gains3d(lay->mask, lay->n, az, el, dist, g);
+    float pl = use_hrtf ? 1.0f : pan[0], pr = use_hrtf ? 1.0f : pan[1];
+    memset(v->rt, 0, sizeof(v->rt));
+    for (int bit = 0; bit < 12; bit++) {
+        int c = lay->idx[bit];
+        if (c < 0 || !g[bit]) continue;
+        switch (bit) {
+        case 0: case 4: v->rt[0][c] = g[bit] * pl; break;    /* front / rear left */
+        case 1: case 5: v->rt[1][c] = g[bit] * pr; break;    /* front / rear right */
+        default: v->rt[2][c] = g[bit]; break;                /* centre, LFE, sides */
+        }
+    }
+    v->route_on = 1;
+    v->gain[0] = v->gain[1] = level;
 }
 
 static DWORD orig_rate(rl_buffer *b) { return b->fmt.Format.nSamplesPerSec; }

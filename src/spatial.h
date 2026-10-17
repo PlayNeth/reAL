@@ -56,6 +56,8 @@ int32_t rl_sink_cents(uint32_t freq, uint32_t rate);
 /* dist_gain (may be NULL) receives the distance+cone attenuation without panning */
 void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2], float *dist_gain);
 /* direction of the source as heard by the listener: azimuth clockwise from front, elevation up (deg) */
+/* listener-source distance (head-relative: from the origin), in the application's units */
+float rl_spatial_distance(const rl_listener3d *l, const rl_source3d *s);
 void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *az, float *el);
 
 #endif

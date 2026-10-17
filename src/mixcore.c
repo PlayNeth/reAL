@@ -242,11 +242,13 @@ void rl_voice_start(rl_voice *v)
         v->xfade_left = 0;
         v->lp_z[0] = v->lp_z[1] = 0.0f;
         for (int k = 0; k < RL_SENDS; k++) v->send_z[k] = 0.0f;
+        memcpy(v->rc, v->rt, sizeof(v->rc));
+        v->lfe_lim.env = 0.0f;
     }
     v->playing = 1;
 }
 
-static int mix_inner(rl_voice *v, float *out, float *mono, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
+static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
 {
     uint32_t nframes = rl_voice_frames(v);
     if (!v->playing || !nframes || !out_rate) return 0;
@@ -324,8 +326,8 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *const *sends, 
         if (mono) {
             mono[i] = 0.5f * (l + r) * gl;
         } else {
-            out[i * 2]     += l * gl;
-            out[i * 2 + 1] += r * gr;
+            out[i * ostride]     += l * gl;
+            out[i * ostride + 1] += r * gr;
         }
 
         v->pos += step;
@@ -358,7 +360,7 @@ static int mix_inner(rl_voice *v, float *out, float *mono, float *const *sends, 
 int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
 {
     if (!v->hrtf || !v->hrtf_set || !v->hrtf_set->dirs)
-        return mix_inner(v, out, NULL, sends, frames, out_rate, signal);
+        return mix_inner(v, out, 2, NULL, sends, frames, out_rate, signal);
 
     /* HRTF path: render the voice to mono in chunks, then convolve into the stereo output */
     float mono[512];
@@ -369,10 +371,195 @@ int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, 
         if (!stopped && v->playing) {
             float *sub[RL_SENDS];
             for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
-            stopped = mix_inner(v, NULL, mono, sends ? sub : NULL, n, out_rate, signal);
+            stopped = mix_inner(v, NULL, 2, mono, sends ? sub : NULL, n, out_rate, signal);
         }
         rl_hrtf_render(v->hrtf, v->hrtf_set, mono, out + done * 2, n);
         done += n;
     }
+    return stopped;
+}
+
+/* ------------------------------------------------------------------ more than two output channels */
+
+/* every channel of a frame (sources of more than two channels) */
+static inline void read_at_n(const rl_voice *v, uint64_t pos, uint32_t nframes, float *x)
+{
+    uint32_t idx = (uint32_t)(pos >> 32);
+    float frac = (float)(uint32_t)pos * (1.0f / 4294967296.0f);
+    uint32_t nxt = idx + 1;
+    int have_next = 1;
+    if (nxt >= nframes) { if (v->looping) nxt = 0; else have_next = 0; }
+    for (int c = 0; c < v->channels; c++) {
+        float a = fetch(v, idx, c), b = have_next ? fetch(v, nxt, c) : 0.0f;
+        x[c] = a + (b - a) * frac;
+    }
+}
+
+static inline void read_sinc_n(const rl_voice *v, const sinc_tab *t, uint64_t pos, uint32_t nframes, float *x)
+{
+    const int T = t->taps;
+    const uint32_t f32 = (uint32_t)pos;
+    const float *a = t->w + (size_t)(f32 >> 24) * T, *b = a + T;
+    const float u = (float)(f32 & 0xFFFFFF) * (1.0f / 16777216.0f);
+    float w[SINC_MAXT];
+    for (int k = 0; k < T; k++) w[k] = a[k] + u * (b[k] - a[k]);
+    const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
+    for (int c = 0; c < v->channels; c++) x[c] = 0.0f;
+    for (int k = 0; k < T; k++) {
+        int64_t n = base + k;
+        if (n < 0 || n >= (int64_t)nframes) {
+            if (!v->looping) continue;
+            n %= (int64_t)nframes;
+            if (n < 0) n += nframes;
+        }
+        for (int c = 0; c < v->channels; c++) x[c] += w[k] * fetch(v, (uint32_t)n, c);
+    }
+}
+
+/* a source of more than two channels through its conversion matrix (C2DStream with the channel converter) */
+static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *sends, uint32_t frames, uint32_t out_rate,
+                        rl_signal_fn signal)
+{
+    uint32_t nframes = rl_voice_frames(v);
+    if (!v->playing || !nframes || !out_rate) return 0;
+    const uint64_t end  = (uint64_t)nframes << 32;
+    const uint64_t step = (v->pitch > 0.0f && v->pitch != 1.0f)
+        ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
+        : ((uint64_t)v->rate << 32) / out_rate;
+    const uint32_t p0 = rl_voice_play_bytes(v);
+    int use_sinc = v->interp == RL_INTERP_SINC && !(step == (1ull << 32) && (uint32_t)v->pos == 0 &&
+                                                   (!v->xfade_left || (uint32_t)v->xfade_pos == 0));
+    const sinc_tab *kt = use_sinc ? sinc_for_step(step) : NULL;
+    if (!kt) use_sinc = 0;
+    uint32_t wraps = 0;
+    int stopped = 0;
+    const int nch = v->channels > RL_MAXOUT ? RL_MAXOUT : v->channels;
+    const uint32_t no = nout > RL_MAXOUT ? RL_MAXOUT : nout;
+
+    uint32_t ramp = out_rate / 200;
+    if (ramp > frames) ramp = frames;
+    if (ramp < 1) ramp = 1;
+    float g = v->cur_gain[0];
+    const float dg = (v->gain[0] - g) / (float)ramp;
+    int ns = 0, sk[RL_SENDS];
+    float *sb[RL_SENDS], gs[RL_SENDS], ds[RL_SENDS];
+    for (int k = 0; k < RL_SENDS; k++) {
+        if (!sends || !sends[k] || (v->cur_send[k] <= 0.0f && v->send_gain[k] <= 0.0f)) continue;
+        sk[ns] = k; sb[ns] = sends[k]; gs[ns] = v->cur_send[k];
+        ds[ns] = (v->send_gain[k] - gs[ns]) / (float)ramp;
+        ns++;
+    }
+    if (v->xfade_left == RL_XFADE_PENDING) v->xfade_left = out_rate / 200 ? out_rate / 200 : 1;
+    const uint32_t xf_total = out_rate / 200 ? out_rate / 200 : 1;
+    const int lfe = v->mc_lfe, fl = no > 0 ? 0 : -1, fr = no > 1 ? 1 : -1;
+
+    for (uint32_t i = 0; i < frames; i++) {
+        if (i < ramp) { g += dg; for (int j = 0; j < ns; j++) gs[j] += ds[j]; }
+        else { g = v->gain[0]; for (int j = 0; j < ns; j++) gs[j] = v->send_gain[sk[j]]; }
+        float x[RL_MAXOUT] = { 0 }, ox[RL_MAXOUT] = { 0 };
+        if (use_sinc) read_sinc_n(v, kt, v->pos, nframes, x); else read_at_n(v, v->pos, nframes, x);
+        if (v->xfade_left) {
+            float t = (float)v->xfade_left / (float)xf_total;
+            if (v->xfade_pos < end) {
+                if (use_sinc) read_sinc_n(v, kt, v->xfade_pos, nframes, ox); else read_at_n(v, v->xfade_pos, nframes, ox);
+            }
+            for (int c = 0; c < nch; c++) x[c] = x[c] * (1.0f - t) + ox[c] * t;
+            v->xfade_pos += step;
+            if (v->xfade_pos >= end && v->looping) v->xfade_pos -= end;
+            v->xfade_left--;
+        }
+        if (ns) {
+            float m = 0.0f;
+            for (int c = 0; c < nch; c++) m += x[c];
+            m /= (float)nch;
+            for (int j = 0; j < ns; j++) sb[j][i] += m * gs[j];
+        }
+        float bass = 0.0f;
+        if (lfe >= 0 && lfe < nch)
+            bass = rl_bass_limit(&v->lfe_lim, x[lfe] * RL_LFE_IN_GAIN) * RL_LFE_OUT_GAIN;
+        float *o = out + (size_t)i * nout;
+        for (uint32_t c = 0; c < no; c++) {
+            float acc = 0.0f;
+            for (int s = 0; s < nch; s++) acc += x[s] * v->mc[s][c];
+            if ((int)c == fl || (int)c == fr) acc += bass;
+            o[c] += acc * g;
+        }
+        v->pos += step;
+        if (v->pos >= end) {
+            if (v->looping) {
+                while (v->pos >= end) { v->pos -= end; wraps++; }
+            } else {
+                v->pos = 0;
+                v->playing = 0;
+                stopped = 1;
+                break;
+            }
+        }
+    }
+    v->cur_gain[0] = v->cur_gain[1] = g;
+    for (int j = 0; j < ns; j++) v->cur_send[sk[j]] = gs[j];
+    if (stopped) {
+        v->xfade_left = 0;
+        fire_range(v, p0, v->size, 0, signal);
+        rl_fire_stop(v, signal);
+    } else {
+        rl_fire_notifies(v, p0, rl_voice_play_bytes(v), wraps, signal);
+    }
+    return stopped;
+}
+
+#define ROUTE_CHUNK 512
+
+int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, uint32_t frames, uint32_t out_rate,
+                   rl_signal_fn signal)
+{
+    if (v->mc_on && v->channels > 2) return mix_inner_mc(v, out, nout, sends, frames, out_rate, signal);
+    int hrtf = v->hrtf && v->hrtf_set && v->hrtf_set->dirs;
+    if (!v->route_on) {
+        if (nout == 2) return rl_voice_mix(v, out, sends, frames, out_rate, signal);
+        if (!hrtf) return mix_inner(v, out, nout, NULL, sends, frames, out_rate, signal);
+    }
+    /* render the pair (and the mono sum) in chunks, then spread them over the speakers */
+    float pair[ROUTE_CHUNK * 2], mono[ROUTE_CHUNK];
+    const uint32_t no = nout > RL_MAXOUT ? RL_MAXOUT : nout;
+    uint32_t ramp = out_rate / 200 ? out_rate / 200 : 1, done = 0;
+    int stopped = 0;
+    float w[3][RL_MAXOUT], dw[3][RL_MAXOUT];
+    for (int k = 0; k < 3; k++)
+        for (uint32_t c = 0; c < no; c++) {
+            w[k][c] = v->route_on ? v->rc[k][c] : (k == 2 ? 0.0f : (uint32_t)k == c ? 1.0f : 0.0f);
+            float t = v->route_on ? v->rt[k][c] : w[k][c];
+            dw[k][c] = (t - w[k][c]) / (float)ramp;
+        }
+    uint32_t left = ramp;
+    while (done < frames) {
+        uint32_t n = frames - done > ROUTE_CHUNK ? ROUTE_CHUNK : frames - done;
+        memset(pair, 0, n * 2 * sizeof(float));
+        if (!stopped && v->playing) {
+            float *sub[RL_SENDS];
+            for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
+            if (hrtf) {
+                memset(mono, 0, n * sizeof(float));
+                stopped = mix_inner(v, NULL, 2, mono, sends ? sub : NULL, n, out_rate, signal);
+            } else {
+                stopped = mix_inner(v, pair, 2, NULL, sends ? sub : NULL, n, out_rate, signal);
+                for (uint32_t i = 0; i < n; i++) mono[i] = 0.5f * (pair[2 * i] + pair[2 * i + 1]);
+            }
+        } else {
+            memset(mono, 0, n * sizeof(float));
+        }
+        if (hrtf) rl_hrtf_render(v->hrtf, v->hrtf_set, mono, pair, n);
+        for (uint32_t i = 0; i < n; i++) {
+            if (left) {
+                for (int k = 0; k < 3; k++) for (uint32_t c = 0; c < no; c++) w[k][c] += dw[k][c];
+                left--;
+            }
+            float *o = out + (size_t)(done + i) * nout;
+            const float l = pair[2 * i], r = pair[2 * i + 1], m = mono[i];
+            for (uint32_t c = 0; c < no; c++) o[c] += l * w[0][c] + r * w[1][c] + m * w[2][c];
+        }
+        done += n;
+    }
+    if (v->route_on) memcpy(v->rc, v->rt, sizeof(v->rc));
     return stopped;
 }

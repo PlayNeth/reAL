@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include "alrv.h"
+#include "speakers.h"
 
 /* EAX 1.0 environment presets (environment, volume, decay, damping) — ALchemy .rdata 0x100a7ef0 */
 typedef struct rl_eax1_preset { float volume, decay, damping; } rl_eax1_preset;
@@ -47,6 +48,9 @@ void rl_reverb_set_eax1(rl_reverb *r, uint32_t env, float volume, float decay, f
 void rl_reverb_set_props(rl_reverb *r, const alrv_props *props);
 /* in: mono send bus (frames), out: interleaved stereo, accumulated */
 void rl_reverb_process(rl_reverb *r, const float *in, float *out, uint32_t frames);
+/* the same into a speaker layout (out interleaved with lay->n channels, accumulated): the stereo virtualizer on
+ * two channels, ALchemy's channel converter on more */
+void rl_reverb_process_n(rl_reverb *r, const float *in, float *out, const rl_layout *lay, uint32_t frames);
 
 /* ALchemy's EAX 1.0 damping -> decay HF ratio, and the derived room HF (mB); exposed for tests */
 float rl_eax1_damping_to_hf_ratio(uint32_t env, float damping);

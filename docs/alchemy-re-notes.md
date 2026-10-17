@@ -230,6 +230,54 @@ multiplies the voice's playback rate (sink method +4).  Verified against the emu
   out identical to the previous one even with a 100 ms lead-in).
 * With the EAX listener volume at 0 there is no reverb tail at all.
 
+## Speakers beyond stereo (ported in src/speakers.c; verified in the emulator)
+
+Layout (CSensDirectSound ctor 0x1001acd0 → 0x1001be70 → 0x1001c1a0): the engine starts at 44.1 kHz stereo, takes
+the endpoint's mix format through Mmdevapi, then asks the system dsound.dll for GetSpeakerConfig and maps its low
+byte: 1 headphones → 2 ch 0x3, 3 quad → 4 ch 0x33, 4 stereo → 2 ch 0x3, 6/9 (5.1 back / 5.1 surround) → 6 ch 0x3f,
+7/8 (7.1 wide / 7.1 surround) → 8 ch 0x63f.  Any other value leaves the mix format.  The value stored at
+CSensDirectSound+0x84c (default 6) is what GetSpeakerConfig returns (1, 3, 4, 6 or 7: no geometry);
+SetSpeakerConfig only overwrites it.  The renderer (CSensDirectSoundRender 0x10021010) copies the engine's
+per-bit buffers into the device channels by speaker bit.
+
+Every buffer is mixed into one channel buffer per speaker bit (descriptor +8 + 4·bit).
+
+2D streams (C2DStream 0x10032440): a stream whose mask fits the output's is copied channel by channel (a mono
+stream without a mask becomes dual mono, mask 3); otherwise it goes through the stream's channel converter
+(0x10036740, object at stream+0x11d4: +0x10 mode, +0x14 out mask, +0x18 in mask, +0x20 in count; mode chosen by
+0x10035fd0 from the out mask: 3/0xb → 4 (3 = the reverb's stereo virtualizer when +8 is set), 7/0xf → 5,
+0x33/0x3b → 6, otherwise 7):
+- mode 4 (0x10036c10): L = (FC + BC + TC)·0.7071, R = L, then FL/BL/SL into L and FR/BR/SR into R at 1.0.
+- mode 5 (0x10036d90): as 4, but FC to FC.
+- mode 6 (0x10036f00): L = TC·0.5, BL = L, L += FC·0.7071, R = L, BL += BC·0.7071, BR = BL, the four corners
+  at 1.0, SL into FL and BL at 0.7071 each (SR likewise).
+- mode 7 (0x100370e0): shared speakers copied; FC missing → FL/FR ·0.7071 (when the input has FL/FR); TC → FL/FR
+  ·0.5 and BL/BR (or SL/SR) ·0.5; BC missing → BL/BR, else SL/SR, else FL/FR ·0.7071; SL missing → FL ·0.366 +
+  BL ·0.634 (SR likewise); BL missing → SL (BR → SR).
+- after every mode (0x10036690): FLC/FRC missing → FL (FR) at 1.0, or FL and FC at 0.7071 each when there is a FC.
+- LFE: only mode 7 copies it.  With no LFE in the output, CBassBoostMixerSmallSpeakersAndLFE (0x10034700) sends
+  the input's LFE ·0.5623 through a limiter (kernel 0x1006bc70: e = max(|x| - e, 0)·a + e·b, x·thr/e above thr;
+  0x1006bc30: a = 0.03 / (10·rate/48000), b = 1 - 0.01 / (50·rate/48000), thr 0.1778) and ·3.35 into FL and FR.
+
+The reverb plug uses the same converter on four or more speakers (its 7 outputs, the centre copy already folded
+into BL/BR), the stereo virtualizer (mode 3) on two.
+
+3D streams on four or more speakers (C3DStream update 0x10033f90 → 0x10034900, Q15 step 0x10035780, render
+0x10035190): the HRTF output is split between the front pair and the rear pair (kernels 0x1d8/0x1e8 write the
+larger with the filter scaled by it, the other at the Q15 ratio), and the mono signal goes straight to the other
+speakers (kernel 0x108).  Gains for a source of level g (az: 0 ahead, + right, ±180 behind; el up; both from
+0x10042af0; d = distance × distance factor):
+- p = ((1 - |el|/90)(|az|/90 - 1) + 1)/2 clamped to 0.25..0.75; when d < 0.5: p = (p - 0.5)·2d + 0.5.
+  f = (0.75 - p)·2: front pair g·f, rear pair g·(1 - f).  (Ghidra shows the |az|/90 as 90/|az|: read the x87.)
+- 6+ channels: LFE = max(front)·0.5 (halved again in 0x10035780); with whole degrees a = |rint(az ∓ 0.5 ± 1.5e-8)|
+  (likewise e for el), when a, e ≤ 44: FC = lobe[a]·lobe[e]·max(front pair), front pair ·(1 - duck[e]·duck[a]),
+  lobe[i] = 2^-1/4 cos(2i°) (0x100ae7f8), duck[i] = 2^-1/2 cos²(2i°) (0x100ae8b0).
+- 8 channels, 0x63f: when 46 ≤ a ≤ 134 and e < 45, the side speaker of az's sign gets lobe[|a - 90|]·lobe[e]·
+  max(g) and all four corners ·(1 - duck[|a-90|]·duck[e]).  (0xff, 7.1 wide, gets FLC/FRC from lobe[|2a - 45|]
+  instead; ALchemy never picks that layout.)
+tools/gen_speakers_gt.py runs 0x10036740 and 0x10034900 in the emulator; tests/test_speakers.c compares (128
+converter cases exact, 1924 3D cases within 6e-8).
+
 ## CHRvbReverb (ALchemy's software reverb) — DSP
 
 Tooling: Ghidra 11.0.3 headless project in `~/re/ghidra` (`dec.sh addr…` decompiles), Unicorn harness

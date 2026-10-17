@@ -175,3 +175,9 @@ void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *a
     if (*az < 0.0f) *az += 360.0f;
     *el = atan2f(rel.y, h) * (180.0f / 3.14159265f);
 }
+
+float rl_spatial_distance(const rl_listener3d *l, const rl_source3d *s)
+{
+    if (s->mode == RL_DS3DMODE_HEADRELATIVE) return len(s->pos);
+    return len(sub(s->pos, l->pos));
+}

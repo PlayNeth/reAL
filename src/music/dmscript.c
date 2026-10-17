@@ -17,6 +17,8 @@
 #include "dmldr.h"
 #include "dmcom.h"
 #include <activscp.h>
+/* IActiveScriptParse (the 32-bit one): defined here, as not every MinGW's libuuid has it */
+static const GUID rm_IID_IActiveScriptParse = { 0xbb1a2ae2, 0xa4f9, 0x11cf, { 0x8f, 0x20, 0x00, 0x80, 0x5f, 0x2c, 0xd0, 0x64 } };
 #include <process.h>
 #include <objsafe.h>
 
@@ -1361,7 +1363,7 @@ static manager *mgr_new_ole(rm_script *s, const WCHAR *src, REFCLSID cls, HRESUL
     }
     if (FAILED(*hr = IActiveScript_SetScriptSite(m->as, &m->IActiveScriptSite_iface))) goto fail;
     if (FAILED(*hr = IActiveScript_AddNamedItem(m->as, L"DirectMusic", SCRIPTITEM_ISVISIBLE | SCRIPTITEM_GLOBALMEMBERS | SCRIPTITEM_NOCODE))) goto fail;
-    *hr = IActiveScript_QueryInterface(m->as, &IID_IActiveScriptParse, (void **)&ps);
+    *hr = IActiveScript_QueryInterface(m->as, &rm_IID_IActiveScriptParse, (void **)&ps);
     if (FAILED(*hr)) { if (*hr == E_NOINTERFACE) *hr = E_LANGUAGE; ps = NULL; goto fail; }
     if (FAILED(*hr = ps->lpVtbl->InitNew(ps))) goto fail;
     EXCEPINFO ei;
