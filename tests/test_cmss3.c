@@ -24,7 +24,8 @@ int main(int argc, char **argv)
         int32_t hdr[3]; uint32_t s0, count, nbits;
         if (fread(hdr, 4, 3, f) != 3 || fread(&s0, 4, 1, f) != 1 || fread(&count, 4, 1, f) != 1 ||
             fread(&nbits, 4, 1, f) != 1) return 1;
-        uint32_t rate = (uint32_t)hdr[0], mask = (uint32_t)hdr[1];
+        uint32_t rate = (uint32_t)hdr[0], mask = (uint32_t)hdr[1] & 0x7fffffff;
+        int hp = (uint32_t)hdr[1] >> 31;
         int inten = hdr[2];
         uint32_t n = s0 + count;
         float *l = malloc(n * 4), *r = malloc(n * 4), *o[12] = { 0 };
@@ -35,7 +36,7 @@ int main(int argc, char **argv)
             r[i] = 0.35f * c + 0.25f * b;
         }
         for (int b = 0; b < 12; b++) o[b] = calloc(n, 4);
-        rl_cmss3 *c = rl_cmss3_create(rate, mask, mask == 0x3);   /* stereo: the quad for stereo speakers */
+        rl_cmss3 *c = rl_cmss3_create(rate, mask, mask == 0x3 && !hp);   /* stereo: the quad, rear allpasses on speakers */
         rl_cmss3_set_intensity(c, inten);
         /* uneven chunks, as a mixer would call it */
         for (uint32_t p = 0, step = 1; p < n; step = step * 7 % 997 + 64) {
@@ -60,7 +61,7 @@ int main(int argc, char **argv)
             if (db > -70.0) { printf("cmss3: %u Hz mask %03x intensity %d: speaker bit %u at %.1f dB\n", rate, mask, inten, bit, db); fails++; }
             free(gt);
         }
-        printf("cmss3: %6u Hz mask %03x intensity %4d: worst speaker %.1f dB from ALchemy\n", rate, mask, inten, worst);
+        printf("cmss3: %6u Hz mask %03x%s intensity %4d: worst speaker %.1f dB from ALchemy\n", rate, mask, hp ? " (headphones)" : "", inten, worst);
         rl_cmss3_destroy(c);
         for (int b = 0; b < 12; b++) free(o[b]);
         free(l); free(r);

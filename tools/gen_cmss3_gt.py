@@ -61,7 +61,7 @@ class CM3:
         return out
 
 CASES = [(48000, 0x3f, 0), (48000, 0x63f, -50), (44100, 0x33, 30), (96000, 0x63f, 0), (22050, 0x3f, -100),
-         (48000, 0x3, -20)]
+         (48000, 0x3, -20), (48000, 0x80000003, 0)]   # 0x80000000: headphones (no rear allpasses)
 START_BLOCKS, COUNT = 10, 512
 
 def noise(n):
@@ -83,7 +83,8 @@ with open(sys.argv[1], 'wb') as f:
         bs = ((rate + 23999) // 24000) * 512
         n = bs * (START_BLOCKS + 1)
         x = noise(n)
-        c = CM3(mask, rate, inten=inten)
+        hp = bool(mask & 0x80000000); mask &= 0x7fffffff
+        c = CM3(mask, rate, inten=inten, hp=hp)
         res = np.zeros((12, n), np.float32)
         # stereo returns ALchemy's internal quad, whose buffers hold 576 frames: smaller calls there
         ch = 512 if mask == 3 else bs
@@ -92,7 +93,7 @@ with open(sys.argv[1], 'wb') as f:
             for b in range(12): res[b, s:s + ch] = o[b]
         bits = [b for b in range(12) if ((0x33 if mask == 3 else mask) & ~8) >> b & 1]
         s0 = START_BLOCKS * bs
-        f.write(struct.pack('<iiiIII', rate, mask, inten, s0, COUNT, len(bits)))
+        f.write(struct.pack('<iIiIII', rate, mask | (0x80000000 if hp else 0), inten, s0, COUNT, len(bits)))
         for b in bits:
             f.write(struct.pack('<I', b))
             f.write(res[b, s0:s0 + COUNT].astype('<f4').tobytes())

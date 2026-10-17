@@ -21,12 +21,13 @@ resampler=sinc
 
 ; speakers: auto (default: the speakers Windows / the sound server is set up for, as ALchemy), or
 ; stereo, headphones, quad, 5.1, 7.1. A layout with more speakers than the device has is folded down
-; to the device's with ALchemy's channel converter. headphones only changes what GetSpeakerConfig reports.
+; to the device's with ALchemy's channel converter. headphones changes what GetSpeakerConfig reports and
+; which stereo virtualizer CMSS-3D uses.
 ;speakers=auto
 
 ; CMSS-3D: ALchemy's stereo-to-surround upmix for 2D stereo buffers (music, ambience, videos). On quad,
 ; 5.1 and 7.1 it moves centred sound to the centre speaker and ambience to the rear (and side) speakers;
-; on stereo speakers it virtualizes that rear pair. Off by default, as in ALchemy; not on headphones yet.
+; on stereo speakers and headphones it virtualizes that rear pair. Off by default, as in ALchemy.
 ; cmssintensity: the rear/side level, -100 (most) .. 99 (least), 0 = ALchemy's default.
 ;cmss=off
 ;cmssintensity=0

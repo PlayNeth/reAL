@@ -534,7 +534,7 @@ static int mix_cmss(rl_voice *v, float *out, uint32_t nout, float *const *sends,
         rl_cmss3_process(v->cmss, l, r, o, n);
         float *dst = out + (size_t)done * nout;
         if (v->cmss_virt) {
-            /* stereo speakers: the quad through the converter's mode 3 */
+            /* stereo device: the quad through the converter's virtualizer (mode 3, or 0 on headphones) */
             static float zero[ROUTE_CHUNK];
             float *ch[ALRV_NOUT] = { bit[0], bit[1], zero, bit[4], bit[5], zero, zero, zero };
             if (nout == 2) {

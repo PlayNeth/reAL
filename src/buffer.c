@@ -182,28 +182,34 @@ static void cmss_free(rl_voice *v)
 }
 
 /* CMSS-3D: ALchemy gives each 2D stereo buffer its own upmixer (fn 0x10032790) when it is on for the speaker
- * mode; on stereo speakers the upmixer's quad goes through the converter's mode 3.  Not for headphones yet
- * (ALchemy's headphone branch of mode 3 is not ported). */
+ * mode; on a stereo device the upmixer's quad goes through the converter's stereo virtualizer: mode 3 on
+ * speakers (with the upmixer's rear allpasses), mode 0 on headphones. */
 static void route_cmss(rl_buffer *b)
 {
     rl_device *dev = b->dev;
     rl_voice *v = &b->voice;
     const rl_layout *lay = &dev->layout;
     BOOL want = g_cfg.cmss && v->channels == 2 && !b->is_primary && !(b->desc.dwFlags & DSBCAPS_CTRL3D) &&
-                lay->n >= 2 && dev->out_rate && !(lay->n == 2 && dev->headphones);
-    if (v->cmss && (!want || b->cmss_rate != dev->out_rate || b->cmss_layout != lay->mask)) cmss_free(v);
+                lay->n >= 2 && dev->out_rate;
+    uint32_t layout = lay->mask | (lay->n == 2 && dev->headphones ? 0x80000000u : 0);
+    if (v->cmss && (!want || b->cmss_rate != dev->out_rate || b->cmss_layout != layout)) cmss_free(v);
     if (!want || v->cmss) return;
-    v->cmss = rl_cmss3_create(dev->out_rate, lay->mask, lay->n == 2);
+    BOOL hp = lay->n == 2 && dev->headphones;
+    v->cmss = rl_cmss3_create(dev->out_rate, lay->mask, lay->n == 2 && !hp);
     if (!v->cmss) return;
     rl_cmss3_set_intensity(v->cmss, g_cfg.cmss_intensity);
     if (lay->n == 2) {
         v->cmss_virt = calloc(1, sizeof(rl_virt));
         if (!v->cmss_virt) { cmss_free(v); return; }
-        rl_virt_init(v->cmss_virt, dev->out_rate);
+        if (hp) {
+            if (!rl_virt_init_hp(v->cmss_virt, dev->out_rate)) { cmss_free(v); return; }
+        } else {
+            rl_virt_init(v->cmss_virt, dev->out_rate);
+        }
     }
     for (int bit = 0; bit < 12; bit++) v->cmss_idx[bit] = lay->idx[bit];
     b->cmss_rate = dev->out_rate;
-    b->cmss_layout = lay->mask;
+    b->cmss_layout = layout;
 }
 
 /* more than two channels on either side: the voice's way onto the speakers (speakers.c) */

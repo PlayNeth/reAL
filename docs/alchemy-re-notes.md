@@ -286,7 +286,7 @@ mask and 2 channels) a container (fn 0x10034ce0) when the mixer's CMSS switch (+
 fallback.  fn 0x10034de0 picks the mode (0 headphones, 1 stereo speakers, 2 more speakers) and runs the upmixer
 when that mode's enable (mixer +0x34/+0x38/+0x3c → upmixer +0x20/+0x24/+0x28) is set; intensities in percent at
 mixer +0x40/+0x44/+0x48 (→ upmixer +0x2c..), configure fn 0x1003a2d0 divides by 100 and caps at 0.99.  All off
-by default.  reAL: `cmss=on` enables it for every mode except headphones, `cmssintensity=` the percent.
+by default.  reAL: `cmss=on` enables it for every mode, `cmssintensity=` the percent.
 
 **Outer process** (fn 0x1003a740, input rings 5120, output rings 9216 per bit): frames collect until a block of
 bs = 512·ceil(rate/24000) is there; the block is dithered (vtable 0x68: ±1e-8 in the pattern - - + - + + + -),
@@ -335,8 +335,31 @@ tools/gen_cmss3_gt.py runs the upmixer in the emulator (48 kHz 5.1 and 7.1, 44.1
 (its rear allpasses are sensitive to the x87's extra precision).  Under Wine (tests/surround.c, step "2d stereo
 noise", `cmss=on`) the centre and rear speakers get the expected share.
 
-Not ported: CMSS1Upmix and CCMSSSurround (used only when +0x84 is clear), and the headphone branch of converter
-mode 3 (fn 0x100376d0: CEarlyRefBuffer taps per rate from fn 0x10037470, FIRs from fn 0x10037b90).
+Not ported: CMSS1Upmix and CCMSSSurround (used only when +0x84 is clear).
+
+**Headphones** (the stream's converter on a stereo output with the headphone flag, mixer +0x60 → container
++0xc → converter +1): fn 0x10035fd0 picks mode = variant (container +0x10, always 0: the C2DStream constructor
+clears it; variants 1 and 2 would add the FIR pair of fn 0x10037b90 and kernel 0x1ec).  Mode 0 (fn 0x10036860's
+headphone branch) at 22.05/44.1/48 kHz, else the plain fold-down (mode 4):
+- the rear and side pairs through the same sum/difference FIRs as mode 3 (kernel 0x1cc: L += S + D, R += S - D,
+  tables stored reversed), and the front pair too (60/56/28 taps at 48/44.1/22.05 kHz, 0x100ac5d0/6c0, ...);
+  no biquads, no crossfeed, no direct front pair;
+- early reflections (fn 0x100376d0, set up by fn 0x10037470): eight input slots FL FR SL SR BL BR FC BC
+  (0x100ae310), each a ring with eight taps (delays per rate from 0x100ae330/530/630, at least 8; gains
+  0x100ae430), taps 0..3 into the left ear and 4..7 into the right; each ear then y = (y + x)/2 (fn 0x10037990)
+  and an allpass c = 0.6 of rate·256/48000 frames (fn 0x1003ad10), added in; FC at 0.7071 into both.
+- ALchemy reads a block's taps before writing the block into the rings (length (size + 8) & ~7), so a tap
+  shorter than the block would be a ring length late for the rest of it.  Latent: ALchemy mixes in blocks of
+  GetBufferSize() / 24 frames (CWASAPIRender, fns 0x1001a560 / 0x1001a3f0: shared mode, 24 periods of
+  128·floor(30000·rate / 1.28e9) frames requested, then GetBuffer/render/ReleaseBuffer one block at a time
+  while there is room), i.e. 128 frames at 44.1 and 48 kHz, and the shortest taps are 128 and 139 frames.
+  reAL reads the taps per sample, which gives the same output; rl_virt_hp_alchemy_er() models ALchemy's
+  block-wise reads for the tests.  tests/alblock.c prints the block ALchemy would get on a given PC
+  (Windows and Wine at 48 kHz: 3072 frames, so 128).
+- ALchemy's reverb never takes this path: its plug clears the converter's headphone flag (fn 0x10053a00).
+tools/gen_virt_gt.py runs the converter in the emulator; tests/test_virt.c: headphones -134 dB at 22.05/44.1/48
+kHz (and ALchemy's long-block timing with the flag), speakers -113 dB; tests/test_cmss3.c covers the upmixer
+for headphones (no rear allpasses) at -130 dB.
 
 ## CHRvbReverb (ALchemy's software reverb) — DSP
 

@@ -106,6 +106,7 @@ $CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -
 rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
+$CC -O1 -o build/alblock.exe tests/alblock.c -lole32 -luuid
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
 rm -f build/mc2sim.lib build/mc2sim.pdb
 
@@ -117,6 +118,8 @@ if command -v cc >/dev/null 2>&1; then
     ./build/test_speakers tests/gt/speakers_gt.txt
     cc -O1 -g -std=gnu11 -Wall -o build/test_cmss3 tests/test_cmss3.c src/cmss3.c -lm
     ./build/test_cmss3 tests/gt/cmss3_gt.bin
+    cc -O1 -g -std=gnu11 -Wall -o build/test_virt tests/test_virt.c src/virt.c -lm
+    ./build/test_virt tests/gt/virt_gt.bin
     cc -O1 -g -std=gnu11 -Wall -o build/test_doppler tests/test_doppler.c src/spatial.c src/speakers.c src/cmss3.c src/virt.c src/mixcore.c src/hrtf.c -lm
     # comparison with ALchemy's own reverb (ground truth from the emulator, see docs; optional)
     cc -O2 -std=gnu11 -Wall -o build/test_alrv tests/test_alrv.c src/alrv.c src/alrv_params.c -lm
