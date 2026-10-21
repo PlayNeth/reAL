@@ -364,10 +364,13 @@ static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *
     uint32_t lay = g_cfg.speakers ? g_cfg.speakers : rl_layout_for_channels(ch);
     BOOL hp = FALSE;
     if (lay == RL_LAYOUT_STEREO) hp = g_cfg.headphones >= 0 ? g_cfg.headphones : endpoint_is_headphones(mmdev);
-    rl_layout_init(&dev->layout, lay);
-    rl_layout_init(&dev->dev_layout, dmask & 0xfff);
-    dev->out_direct = ch >= 2 && (dmask & 0xfff) == lay;
-    if (!dev->out_direct && ch >= 2) {
+    rl_layout nl, dl;
+    float mtx[RL_MAXOUT][RL_MAXOUT];
+    memset(mtx, 0, sizeof(mtx));
+    rl_layout_init(&nl, lay);
+    rl_layout_init(&dl, dmask & 0xfff);
+    BOOL direct = ch >= 2 && (dmask & 0xfff) == lay;
+    if (!direct && ch >= 2) {
         /* Windows plays a rear pair on side speakers (5.1 "surround" devices) and the other way round */
         uint32_t src = lay;
         const uint32_t back = RL_SPK_BL | RL_SPK_BR, side = RL_SPK_SL | RL_SPK_SR;
@@ -375,10 +378,15 @@ static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *
         else if ((lay & side) == side && !(lay & back) && !(dmask & side) && (dmask & back) == back) src = (lay & ~side) | back;
         rl_layout s;
         rl_layout_init(&s, src);
-        rl_convert_matrix(&s, &dev->dev_layout, dev->out_mtx, NULL);
-        if (src == (dmask & 0xfff)) dev->out_direct = TRUE;      /* same speakers in the same order */
+        rl_convert_matrix(&s, &dl, mtx, NULL);
+        if (src == (dmask & 0xfff)) direct = TRUE;      /* same speakers in the same order */
     }
+    /* (under the lock: the application's threads read the layout for their sources' gains) */
     EnterCriticalSection(&dev->lock);
+    dev->layout = nl;
+    dev->dev_layout = dl;
+    dev->out_direct = direct;
+    memcpy(dev->out_mtx, mtx, sizeof(mtx));
     BOOL changed = dev->out_channels != dev->layout.n || dev->headphones != hp;
     dev->out_channels = dev->layout.n;
     dev->headphones = hp;
