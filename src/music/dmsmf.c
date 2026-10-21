@@ -74,7 +74,12 @@ static ev *ev_new(smf *s)
 {
     ev *e = calloc(1, sizeof(*e));
     if (!e) return NULL;
-    s->pool = realloc(s->pool, (s->npool + 1) * sizeof(*s->pool));
+    /* (grown by doubling from 64: a realloc an event is quadratic on big files) */
+    if (!s->npool || (s->npool >= 64 && !(s->npool & (s->npool - 1)))) {
+        ev **p = realloc(s->pool, (s->npool ? s->npool * 2 : 64) * sizeof(*s->pool));
+        if (!p) { free(e); return NULL; }
+        s->pool = p;
+    }
     s->pool[s->npool++] = e;
     return e;
 }
@@ -197,9 +202,12 @@ static int parse_event(smf *s, uint32_t ticks, ev **list, patchitem **bands)
             for (i = 0; i < 10 && i < (int)n; i++) if (i != 2 && x[i] != gs[i]) break;
             if (i == 10) add_mode(s, t, 2);
         } else if (len >= 3 && d[0] == 0x7e && d[2] == 0x09) add_mode(s, t, 1);
-        s->sx = realloc(s->sx, (s->nsx + 1) * sizeof(*s->sx));
+        sxit *nsx = realloc(s->sx, (s->nsx + 1) * sizeof(*s->sx));
+        uint8_t *data = malloc((size_t)len + 1);
+        if (!nsx || !data) { if (nsx) s->sx = nsx; free(data); return used + (int)len; }
+        s->sx = nsx;
         sxit *it = &s->sx[s->nsx++];
-        it->t = t; it->len = len + 1; it->data = malloc(len + 1);
+        it->t = t; it->len = len + 1; it->data = data;
         it->data[0] = 0xf0;
         memcpy(it->data + 1, d, len);
         return used + (int)len;
@@ -221,7 +229,9 @@ static int parse_event(smf *s, uint32_t ticks, ev **list, patchitem **bands)
         for (uint32_t i = 0; i < len; i++) us = us << 8 | s->p[i];
         s->p += len;
         if (!us) us = 1;
-        s->tempo = realloc(s->tempo, (s->ntempo + 1) * sizeof(*s->tempo));
+        tempoit *nt = realloc(s->tempo, (s->ntempo + 1) * sizeof(*s->tempo));
+        if (!nt) return used + (int)len;
+        s->tempo = nt;
         s->tempo[s->ntempo].t = mt; s->tempo[s->ntempo].tempo = 60000000.0 / (double)us;
         s->ntempo++;
         return used + (int)len;
@@ -230,12 +240,15 @@ static int parse_event(smf *s, uint32_t ticks, ev **list, patchitem **bands)
         s->tsok = 2;
         s->tsbpm = s->p[0];
         s->tsbeat = (uint8_t)(1u << (s->p[1] & 0x1f));
+        if (!s->tsbeat) s->tsbeat = 4;      /* (a denominator of 2^8 or more: a 0 beat divides by 0 in quantise) */
         s->tsgrids = 4;
         s->tstime = mt;
-        s->ts = realloc(s->ts, (s->nts + 1) * sizeof(*s->ts));
+        tsit *nts = realloc(s->ts, (s->nts + 1) * sizeof(*s->ts));
+        s->p += len;
+        if (!nts) return used + (int)len;
+        s->ts = nts;
         s->ts[s->nts].t = mt; s->ts[s->nts].bpm = s->tsbpm; s->ts[s->nts].beat = s->tsbeat; s->ts[s->nts].grids = 4;
         s->nts++;
-        s->p += len;
         return used + (int)len;
     }
     s->p += len;       /* key signatures feed the chord track, which plays nothing; other meta events are skipped */
@@ -332,8 +345,8 @@ static ev *pair_notes(ev *list)
         p3 = p5;
     } while (p5);
     list = head.next;
-    static ev *open[16 * 128];
-    memset(open, 0, sizeof(open));
+    ev **open = calloc(16 * 128, sizeof(*open));    /* (not static: loads may run on several threads) */
+    if (!open) return list;
     ev *prev = NULL, *cur = list;
     while (cur) {
         ev *next = cur->next;
@@ -351,6 +364,7 @@ static ev *pair_notes(ev *list)
         } else prev = cur;
         cur = next;
     }
+    free(open);
     for (ev *e = list; e; e = e->next) if ((e->st & 0xf0) == 0x90 && e->dur == 0) e->dur = 1;
     return list;
 }
@@ -500,8 +514,13 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
     /* RMID: the MIDI file is the 'data' chunk */
     if (size >= 12 && !memcmp(s->p, "RIFF", 4) && !memcmp(s->p + 8, "RMID", 4)) {
         const uint8_t *q = s->p + 12;
-        while (q + 8 <= s->e && memcmp(q, "data", 4)) { uint32_t n; memcpy(&n, q + 4, 4); q += 8 + n + (n & 1); }
-        if (q + 8 > s->e) return NULL;
+        /* (sizes checked against what is left: a huge one must not wrap the pointer, as it does on 32 bits) */
+        while (s->e - q >= 8 && memcmp(q, "data", 4)) {
+            uint32_t n; memcpy(&n, q + 4, 4);
+            if ((size_t)(s->e - q - 8) < (size_t)n + (n & 1)) return NULL;
+            q += 8 + (size_t)n + (n & 1);
+        }
+        if (s->e - q < 8) return NULL;
         s->p = q + 8;
     }
     if (s->e - s->p < 14 || memcmp(s->p, "MThd", 4)) return NULL;
@@ -509,14 +528,15 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
     int16_t div = (int16_t)(s->p[12] << 8 | s->p[13]);
     if (div < 0) return NULL;                       /* SMPTE time */
     s->ppq = div ? div : 768;
-    s->p += 8 + (hlen < 6 ? 6 : hlen);
+    if (hlen < 6) hlen = 6;
+    s->p = (size_t)(s->e - s->p - 8) < hlen ? s->e : s->p + 8 + (size_t)hlen;   /* (past the end: no tracks) */
     ev *all = NULL;
     patchitem *bands = NULL;
     uint32_t maxticks = 0;
     while (s->e - s->p >= 8 && !memcmp(s->p, "MTrk", 4)) {
         uint32_t len = be32(s->p + 4);
         s->p += 8;
-        const uint8_t *end = s->p + len <= s->e ? s->p + len : s->e;
+        const uint8_t *end = len <= (size_t)(s->e - s->p) ? s->p + len : s->e;    /* (no pointer wrap) */
         const uint8_t *save_e = s->e;
         s->e = end;
         ev *list = NULL;
@@ -579,9 +599,11 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
         /* as loaded: a copy of the first signature at 0 */
         ts = malloc((s->nts + 1) * sizeof(*ts));
         nts = 0;
-        if (s->ts[0].t > 0) { ts[0] = s->ts[0]; ts[0].t = 0; nts = 1; }
-        memcpy(ts + nts, s->ts, s->nts * sizeof(*ts));
-        nts += s->nts;
+        if (ts) {
+            if (s->ts[0].t > 0) { ts[0] = s->ts[0]; ts[0].t = 0; nts = 1; }
+            memcpy(ts + nts, s->ts, s->nts * sizeof(*ts));
+            nts += s->nts;
+        }
     }
     quantise(s, all, ts, nts, s->nts != 0);
     all = sort_list(all);
@@ -616,11 +638,15 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
         /* the band track: a band per patch item (AddBand), then the GM / GS / XG modes */
         dm_bandtrack *bt = calloc(1, sizeof(*bt));
         dm_collection *gm = getcoll ? getcoll(ctx, NULL, NULL) : NULL;
-        for (patchitem *p = bands; p; p = p->next) {
+        for (patchitem *p = bt ? bands : NULL; p; p = p->next) {
             dm_band *b = calloc(1, sizeof(*b));
+            dm_inst *bi = b ? calloc(1, sizeof(*bi)) : NULL;
+            dm_band **nb = bi ? realloc(bt->bands, (bt->nbands + 1) * sizeof(*bt->bands)) : NULL;
+            if (!nb) { free(bi); free(b); continue; }
+            bt->bands = nb;
             b->groupbits = 0xffffffff;
             b->logical = b->physical = p->t;
-            b->inst = calloc(1, sizeof(*b->inst));
+            b->inst = bi;
             b->ninst = 1;
             dm_inst *in = b->inst;
             in->flags = p->flags;
@@ -636,16 +662,15 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
             /* sorted by time, a new band before others at its time (7720271c) */
             int i = 0;
             while (i < bt->nbands && b->logical > bt->bands[i]->logical) i++;
-            bt->bands = realloc(bt->bands, (bt->nbands + 1) * sizeof(*bt->bands));
             memmove(bt->bands + i + 1, bt->bands + i, (bt->nbands - i) * sizeof(*bt->bands));
             bt->bands[i] = b;
             bt->nbands++;
         }
         modeitem def = { -1, 1, NULL };
-        for (modeitem *m = s->modes ? s->modes : &def; m; m = m->next)
+        for (modeitem *m = s->modes ? s->modes : &def; bt && m; m = m->next)
             for (int i = 0; i < bt->nbands; i++)
                 if (m->t <= bt->bands[i]->logical && (!m->next || bt->bands[i]->logical < m->next->t)) bt->bands[i]->mode = m->mode;
-        dm_track *t = dm_track_new(TRK_BAND, &CLSID_BandTrack, bt);
+        dm_track *t = bt ? dm_track_new(TRK_BAND, &CLSID_BandTrack, bt) : NULL;
         if (t) dm_segment_insert_track(seg, t, 0, 1, 0x38, 0);
         /* the length: whole measures of the last signature */
         uint8_t beat = s->tsbeat ? s->tsbeat : 4, bpm = s->tsbpm ? s->tsbpm : 4;

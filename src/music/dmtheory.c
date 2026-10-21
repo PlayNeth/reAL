@@ -328,7 +328,8 @@ int dmt_music_value(uint32_t mv, uint8_t pm, const dm_subchord *s, uint8_t key)
 
 const dm_subchord *dmt_subchord(const dm_chord_key *c, uint8_t level)
 {
-    for (int i = 0; i < c->nsub; i++) if (c->sub[i].levels & (1u << (level & 31))) return &c->sub[i];
+    int n = c->nsub < 8 ? c->nsub : 8;     /* (the count may say more than the eight there are) */
+    for (int i = 0; i < n; i++) if (c->sub[i].levels & (1u << (level & 31))) return &c->sub[i];
     return &c->sub[0];
 }
 

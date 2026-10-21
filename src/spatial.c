@@ -171,6 +171,7 @@ void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *a
     }
     float h = sqrtf(rel.x * rel.x + rel.z * rel.z);
     if (h < 1e-6f && fabsf(rel.y) < 1e-6f) { *az = 0.0f; *el = 0.0f; return; }
+    if (!rl_finite(h) || !rl_finite(rel.y)) { *az = 0.0f; *el = 0.0f; return; }   /* NaN/Inf positions */
     *az = atan2f(rel.x, rel.z) * (180.0f / 3.14159265f);
     if (*az < 0.0f) *az += 360.0f;
     *el = atan2f(rel.y, h) * (180.0f / 3.14159265f);

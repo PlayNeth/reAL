@@ -144,7 +144,8 @@ typedef struct fx_osc { float phase, inc, two_over_fs; int tri; } fx_osc;
 typedef struct fx_chorus {             /* CPlugChorus (offsets from the plug): mono in (left), stereo out */
     float fs, step;                   /* 0x134, 0x3270: cross-fade / ramp step = 1 / (0.02 fs) */
     fx_osc osc[2];                    /* 0x44 + 0x14 k */
-    float buf[FXC_DLEN]; uint32_t wp; /* 0x140, 0x31a4 */
+    float *buf; uint32_t len, wp;     /* 0x140, 0x31a4: inl, or allocated by fxc_init above 192 kHz (fxc_free) */
+    float inl[FXC_DLEN];
     float ph_cur, ph_new, phase;      /* 0x31a8, 0x31ac (offset of the right LFO, units of pi), 0x31b0 degrees */
     float depth, amt_cur, amt_new;    /* 0x31b4, 0x31b8, 0x31bc: modulation depth in samples */
     float delay;                      /* 0x31c0 */
@@ -157,6 +158,7 @@ typedef struct fx_chorus {             /* CPlugChorus (offsets from the plug): m
 } fx_chorus;
 
 void fxc_init(fx_chorus *c, uint32_t rate);
+void fxc_free(fx_chorus *c);
 void fxc_waveform(fx_chorus *c, uint32_t tri);
 void fxc_phase(fx_chorus *c, int32_t deg);
 void fxc_rate(fx_chorus *c, float hz);
@@ -169,7 +171,8 @@ void fxc_process(fx_chorus *c, float *const ch[2], uint32_t frames);
 typedef struct fx_flanger {            /* CPlugFlanger: like the chorus, but stereo with a delay line per channel */
     float fs, step;                   /* 0x134, 0x1ae8 */
     fx_osc osc[2];                    /* 0x44 */
-    float buf[2][FXL_DLEN]; uint32_t wp[2];   /* 0x140 + 0xc30 k */
+    float *buf[2]; uint32_t len, wp[2];       /* 0x140 + 0xc30 k: inl, or allocated by fxl_init above 192 kHz (fxl_free) */
+    float inl[2][FXL_DLEN];
     float ph_cur, ph_new, phase;      /* 0x199c, 0x19a0, 0x19a4 */
     float depth, amt_cur, amt_new;    /* 0x19a8, 0x19ac, 0x19b0 */
     float delay;                      /* 0x19b4 */
@@ -182,6 +185,7 @@ typedef struct fx_flanger {            /* CPlugFlanger: like the chorus, but ste
 } fx_flanger;
 
 void fxl_init(fx_flanger *f, uint32_t rate);
+void fxl_free(fx_flanger *f);
 void fxl_waveform(fx_flanger *f, uint32_t tri);
 void fxl_phase(fx_flanger *f, int32_t deg);
 void fxl_rate(fx_flanger *f, float hz);

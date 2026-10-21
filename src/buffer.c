@@ -218,6 +218,7 @@ static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const floa
     rl_device *dev = b->dev;
     rl_voice *v = &b->voice;
     const rl_layout *lay = &dev->layout;
+    const int was_mc = v->mc_on;
     v->route_on = v->mc_on = 0;
     route_cmss(b);
     if (!lay->n) return;
@@ -231,7 +232,10 @@ static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const floa
         int redirect;
         rl_convert_matrix(&in, lay, v->mc, &redirect);
         v->mc_lfe = redirect ? in.idx[3] : -1;
-        if (!v->mc_on) rl_bass_limiter_init(&v->lfe_lim, dev->out_rate ? dev->out_rate : 48000);
+        /* coefficients for the current rate; the envelope carries on (a gain update must not reset it) */
+        float env = v->lfe_lim.env;
+        rl_bass_limiter_init(&v->lfe_lim, dev->out_rate ? dev->out_rate : 48000);
+        if (was_mc) v->lfe_lim.env = env;
         v->mc_on = 1;
         v->gain[0] = v->gain[1] = level;
         return;
@@ -626,7 +630,7 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
             /* make sure a deferred position set before Play is not lost */
             rl_buffer_update_gains(This);
         }
-        if (This->fx) {
+        if (This->fx && !This->voice.playing) {     /* Play on a playing buffer only changes the flags */
             if (This->desc.dwFlags & DSBCAPS_LOCDEFER) {
                 rl_fxchain_place(This->fx, TRUE);
                 This->fx_placed = TRUE;

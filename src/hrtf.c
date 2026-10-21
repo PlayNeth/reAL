@@ -109,9 +109,21 @@ void rl_hrtf_voice_reset(rl_hrtf_voice *v)
     memset(v, 0, sizeof(*v));
 }
 
+void rl_hrtf_voice_restart(rl_hrtf_voice *v)
+{
+    memset(v->hist, 0, sizeof(v->hist));
+    v->w = 0;
+    if (v->have_cur) { v->cur = v->target; v->dirty = 0; }
+}
+
 void rl_hrtf_voice_set(rl_hrtf_voice *v, const rl_hrtf_filter *f)
 {
-    v->target = *f;
+    /* reversed (coef[RL_HRTF_MAX_TAPS - 1 - k] = h[k]) so the convolution reads both arrays forwards */
+    v->target.delay[0] = f->delay[0];
+    v->target.delay[1] = f->delay[1];
+    for (int ch = 0; ch < 2; ch++)
+        for (int k = 0; k < RL_HRTF_MAX_TAPS; k++)
+            v->target.coef[ch][RL_HRTF_MAX_TAPS - 1 - k] = f->coef[ch][k];
     if (!v->have_cur) { v->cur = *f; v->have_cur = 1; v->dirty = 0; }
     else v->dirty = 1;
 }
@@ -122,10 +134,11 @@ static inline void conv(const rl_hrtf_voice *v, const rl_hrtf_filter *f, uint32_
     float acc[2];
     for (int ch = 0; ch < 2; ch++) {
         uint32_t d = (uint32_t)(f->delay[ch] + 0.5f);
-        const float *h = v->hist + ((w - d) & mask) + RL_HRTF_HIST;   /* h[-k], k < taps, is contiguous */
-        const float *c = f->coef[ch];
+        /* x[w - d - k] for k < taps is contiguous: x0[j] = x[w - d - (taps - 1) + j] */
+        const float *x0 = v->hist + ((w - d) & mask) + RL_HRTF_HIST - (taps - 1);
+        const float *c = f->coef[ch] + RL_HRTF_MAX_TAPS - taps;          /* reversed: c[j] = h[taps - 1 - j] */
         float a = 0.0f;
-        for (uint32_t k = 0; k < taps; k++) a += c[k] * h[-(int32_t)k];
+        for (uint32_t j = 0; j < taps; j++) a += c[j] * x0[j];
         acc[ch] = a;
     }
     *l = acc[0];

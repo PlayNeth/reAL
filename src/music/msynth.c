@@ -394,6 +394,8 @@ struct msynth {
     int64_t statstart;      /* +30 */
     msynth_stats acc, last; /* +38 / +50 */
     uint32_t (*clock_ms)(void);     /* 7748edc0's millisecond clock (NULL: no CPU time) */
+    /* the bus description of the Mix call in progress (per synth: two hosts render on two threads at once) */
+    struct { const uint32_t *ids, *funcs; const int32_t *pitch; uint32_t n; } bus;
 };
 
 /* ================================================================== downloads (CInstManager) */
@@ -869,7 +871,9 @@ int msynth_download(msynth *s, const void *buf, uint32_t size, void **handle)
     const uint32_t *h = buf;
     if (size < 16 || h[3] > size) return -1;
     uint32_t nofs = h[2];
+    if (nofs > (size - 16) / 4) return -1;      /* the offset table must fit in the buffer */
     uint32_t *ofs = malloc(nofs * sizeof(uint32_t) + 4);
+    if (!ofs) return -1;
     for (uint32_t i = 0; i < nofs; i++) {
         if (h[4 + i] >= h[3]) { free(ofs); return -1; }
         ofs[i] = h[4 + i];
@@ -1875,7 +1879,7 @@ static void cl_sysex(ms_cl *c, int64_t t, const uint8_t *m, uint32_t len)
             uint32_t addr = ((uint32_t)m[5] << 16) | ((uint32_t)(m[6] & 0xf0) << 8) | m[7];
             if (addr == 0x401040) {     /* scale tuning */
                 if (c->gsmode) {
-                    for (int k = 0; k < 12 && !(m[8 + k + 1] & 0x80); k++) {
+                    for (int k = 0; k < 12 && (uint32_t)(8 + k + 1) < len && !(m[8 + k + 1] & 0x80); k++) {   /* (a short message ends early) */
                         c->scale[part][k] = m[8 + k] - 0x40;
                         if (k == 11) break;
                     }
@@ -2005,6 +2009,7 @@ static void cl_process(ms_cl *c, int64_t start, int64_t end)
                 if (!c->drum[slot] && (!c->xgmode || (patch & 0x7f0000) != 0x7f0000)) tune += c->coarse[slot];
                 v->note = (uint16_t)note;
                 v->slot = (uint16_t)slot;
+                v->voiceid = -1;    /* a note is no wave voice: a StopVoice must never find it (dmsynth leaves it stale) */
                 v->patch = patch;
                 v->prio = c->prio[slot];
                 v->seq = s->seq;
@@ -2079,15 +2084,12 @@ static void cl_retire(ms_cl *c, int64_t end)
 
 /* ================================================================== synth (CSynth) */
 
-static struct { const uint32_t *ids, *funcs; const int32_t *pitch; uint32_t n; } g_bus;   /* set during a Mix */
-
 static int find_bus(msynth *s, uint32_t id, uint32_t *func, int32_t *pitch, uint32_t *index)   /* 774848c0 */
 {
-    (void)s;
-    for (uint32_t i = 0; i < g_bus.n; i++)
-        if (g_bus.ids[i] == id) {
-            *func = g_bus.funcs[i];
-            if (pitch) *pitch = g_bus.pitch[i];
+    for (uint32_t i = 0; i < s->bus.n; i++)
+        if (s->bus.ids[i] == id) {
+            *func = s->bus.funcs[i];
+            if (pitch) *pitch = s->bus.pitch[i];
             if (index) *index = i;
             return 1;
         }
@@ -2103,6 +2105,7 @@ static ms_voice *voice_new(void)    /* 7748afa0 */
     v->peg.p.sustain = 1000; v->veg.p.sustain = 1000;
     fltp_init(&v->flt.p, 0x5622);
     v->stop = I64MAX;
+    v->voiceid = -1;
     v->buses[0] = 4; v->buses[1] = 0; v->buses[2] = 1; v->buses[3] = 0x40; v->buses[4] = 0x41;
     return v;
 }
@@ -2235,10 +2238,10 @@ static void synth_mix(msynth *s, int16_t **bufs, uint32_t nbuf, uint32_t flags, 
 void msynth_read(msynth *s, int16_t **bufs, const uint32_t *busids, const uint32_t *funcs, const int32_t *pitch,
                  uint32_t nbuf, uint32_t frames)
 {
-    g_bus.ids = busids; g_bus.funcs = funcs; g_bus.pitch = pitch; g_bus.n = nbuf;
+    s->bus.ids = busids; s->bus.funcs = funcs; s->bus.pitch = pitch; s->bus.n = nbuf;
     synth_mix(s, bufs, nbuf, 2, frames, s->readpos);
     s->readpos += frames;
-    g_bus.n = 0;
+    s->bus.n = 0;
 }
 
 void msynth_set_mmx(msynth *s, int on) { s->mmx = on; }
@@ -2255,19 +2258,17 @@ static void free_list(ms_voice *v) { while (v) { ms_voice *n = v->next; free(v);
 void msynth_free(msynth *s)
 {
     if (!s) return;
+    for (ms_voice *v = s->active; v; v = v->next) voice_free_wave(v);    /* (a dead wave goes with its last user) */
     free_list(s->freelist); free_list(s->extra); free_list(s->active);
     for (uint32_t i = 0; i < s->ncl; i++) { cl_free(s->cl[i]); free(s->cl[i]); }
     free(s->cl);
-    for (int b = 0; b < NBUCKET; b++) {
+    /* the waves last: instruments and wave articulations of any bucket still let go of theirs */
+    for (int b = 0; b < NBUCKET; b++)
         while (s->instr[b]) { ms_instr *in = s->instr[b]; s->instr[b] = in->next; instr_free(in); }
-        while (s->wartic[b]) {
-            ms_wartic *a = s->wartic[b];
-            s->wartic[b] = a->next;
-            while (a->bufs) { ms_bufnode *n = a->bufs; a->bufs = n->next; free(n); }
-            free(a);
-        }
+    for (int b = 0; b < NBUCKET; b++)
+        while (s->wartic[b]) { ms_wartic *a = s->wartic[b]; s->wartic[b] = a->next; wartic_free(a); }
+    for (int b = 0; b < NBUCKET; b++)
         while (s->waves[b]) { ms_wave *w = s->waves[b]; s->waves[b] = w->next; free(w->block); free(w); }
-    }
     free(s);
 }
 
@@ -2572,7 +2573,7 @@ void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos)
     static const uint32_t ids[2] = { 0, 1 }, funcs[2] = { 0, 1 };
     static const int32_t pitch[2] = { 0, 0 };
     int16_t *bufs[1] = { buf };
-    g_bus.ids = ids; g_bus.funcs = funcs; g_bus.pitch = pitch; g_bus.n = s->stereo ? 2 : 1;
+    s->bus.ids = ids; s->bus.funcs = funcs; s->bus.pitch = pitch; s->bus.n = s->stereo ? 2 : 1;
     synth_mix(s, bufs, s->stereo ? 2 : 1, (uint32_t)s->stereo, frames, pos);
-    g_bus.n = 0;
+    s->bus.n = 0;
 }

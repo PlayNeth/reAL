@@ -75,6 +75,20 @@ static inline void read_at(const rl_voice *v, uint64_t pos, uint32_t nframes, fl
     uint32_t idx  = (uint32_t)(pos >> 32);
     float    frac = (float)(uint32_t)pos * (1.0f / 4294967296.0f);
     uint32_t nxt  = idx + 1;
+    if (v->sfmt == RL_S16 && v->channels <= 2 && nxt < nframes) {
+        /* the common case, without the per-sample format switch */
+        const int16_t *q = (const int16_t *)(const void *)(v->data + (size_t)idx * v->block);
+        if (v->channels == 1) {
+            float a = q[0] * (1.0f / 32768.0f), b = q[1] * (1.0f / 32768.0f);
+            *l = *r = a + (b - a) * frac;
+        } else {
+            float a = q[0] * (1.0f / 32768.0f), b = q[2] * (1.0f / 32768.0f);
+            float c = q[1] * (1.0f / 32768.0f), d = q[3] * (1.0f / 32768.0f);
+            *l = a + (b - a) * frac;
+            *r = c + (d - c) * frac;
+        }
+        return;
+    }
     int have_next = 1;
     if (nxt >= nframes) { if (v->looping) nxt = 0; else have_next = 0; }
     float l0 = fetch(v, idx, 0), l1 = have_next ? fetch(v, nxt, 0) : 0.0f;
@@ -148,6 +162,11 @@ static const sinc_tab *sinc_get(int j)
     return t;
 }
 
+void rl_mix_prepare(void)
+{
+    for (int j = 0; j < SINC_LEVELS; j++) sinc_get(j);
+}
+
 /* the table for a step (source frames per output frame, 32.32) */
 static const sinc_tab *sinc_for_step(uint64_t step)
 {
@@ -162,6 +181,45 @@ static const sinc_tab *sinc_for_step(uint64_t step)
 typedef int16_t __attribute__((may_alias)) s16a;
 typedef float   __attribute__((may_alias)) f32a;
 
+#ifdef __SSE2__
+#include <emmintrin.h>
+/* the S16 kernels four taps at a time: weights interpolated between the two phase rows, samples widened */
+static inline float sinc_s16_mono(const float *a, const float *b, float u, const uint8_t *p, int T)
+{
+    const __m128 vu = _mm_set1_ps(u);
+    __m128 acc = _mm_setzero_ps();
+    for (int k = 0; k < T; k += 4) {
+        __m128 wa = _mm_loadu_ps(a + k), wb = _mm_loadu_ps(b + k);
+        __m128 w = _mm_add_ps(wa, _mm_mul_ps(vu, _mm_sub_ps(wb, wa)));
+        __m128i s = _mm_loadl_epi64((const __m128i *)(p + 2 * k));
+        __m128 x = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpacklo_epi16(s, s), 16));
+        acc = _mm_add_ps(acc, _mm_mul_ps(w, x));
+    }
+    acc = _mm_add_ps(acc, _mm_movehl_ps(acc, acc));
+    acc = _mm_add_ss(acc, _mm_shuffle_ps(acc, acc, 1));
+    return _mm_cvtss_f32(acc);
+}
+
+static inline void sinc_s16_stereo(const float *a, const float *b, float u, const uint8_t *p, int T,
+                                   float *l, float *r)
+{
+    const __m128 vu = _mm_set1_ps(u);
+    __m128 acc = _mm_setzero_ps();
+    for (int k = 0; k < T; k += 4) {
+        __m128 wa = _mm_loadu_ps(a + k), wb = _mm_loadu_ps(b + k);
+        __m128 w = _mm_add_ps(wa, _mm_mul_ps(vu, _mm_sub_ps(wb, wa)));
+        __m128i s = _mm_loadu_si128((const __m128i *)(p + 4 * k));           /* L0 R0 L1 R1 L2 R2 L3 R3 */
+        __m128 x01 = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpacklo_epi16(s, s), 16));
+        __m128 x23 = _mm_cvtepi32_ps(_mm_srai_epi32(_mm_unpackhi_epi16(s, s), 16));
+        acc = _mm_add_ps(acc, _mm_mul_ps(_mm_unpacklo_ps(w, w), x01));
+        acc = _mm_add_ps(acc, _mm_mul_ps(_mm_unpackhi_ps(w, w), x23));
+    }
+    acc = _mm_add_ps(acc, _mm_movehl_ps(acc, acc));                          /* L R */
+    *l = _mm_cvtss_f32(acc);
+    *r = _mm_cvtss_f32(_mm_shuffle_ps(acc, acc, 1));
+}
+#endif
+
 static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos, uint32_t nframes,
                              float *l, float *r)
 {
@@ -169,13 +227,26 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
     const uint32_t f32 = (uint32_t)pos;
     const float *a = t->w + (size_t)(f32 >> 24) * T, *b = a + T;
     const float u = (float)(f32 & 0xFFFFFF) * (1.0f / 16777216.0f);
+    const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
+    const int stereo = v->channels >= 2;
+    const int inside = base >= 0 && base + T <= (int64_t)nframes;
+#ifdef __SSE2__
+    if (inside && v->sfmt == RL_S16 && v->channels <= 2) {
+        const uint8_t *p = v->data + (size_t)base * v->block;
+        if (v->channels == 1) {
+            *l = *r = sinc_s16_mono(a, b, u, p, T) * (1.0f / 32768.0f);
+        } else {
+            sinc_s16_stereo(a, b, u, p, T, l, r);
+            *l *= 1.0f / 32768.0f; *r *= 1.0f / 32768.0f;
+        }
+        return;
+    }
+#endif
     float w[SINC_MAXT];
     for (int k = 0; k < T; k++) w[k] = a[k] + u * (b[k] - a[k]);
 
-    const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
-    const int stereo = v->channels >= 2;
     float al = 0.0f, ar = 0.0f;
-    if (base >= 0 && base + T <= (int64_t)nframes) {
+    if (inside) {
         const uint8_t *p = v->data + (size_t)base * v->block;
         if (v->sfmt == RL_S16 && v->channels == 1) {
             const s16a *q = (const s16a *)p;
@@ -247,8 +318,44 @@ void rl_voice_start(rl_voice *v)
         memcpy(v->rc, v->rt, sizeof(v->rc));
         v->lfe_lim.env = 0.0f;
         if (v->cmss) rl_cmss3_reset(v->cmss);
+        if (v->cmss_virt) rl_virt_reset(v->cmss_virt);
+        if (v->hrtf) rl_hrtf_voice_restart(v->hrtf);
     }
     v->playing = 1;
+}
+
+#define MIXCHUNK 256
+
+/* source frames at pos, pos + step, ... into l[] and r[] (mono sources: r = l); a one-shot that reaches its
+ * end stops after that frame (*ended set) */
+static uint32_t render_src(const rl_voice *v, const sinc_tab *kt, uint64_t *ppos, uint64_t step, uint64_t end,
+                           uint32_t nframes, uint32_t n, float *l, float *r, uint32_t *wraps, int *ended)
+{
+    uint64_t pos = *ppos;
+    uint32_t i = 0;
+    while (i < n) {
+        if (kt) read_sinc(v, kt, pos, nframes, &l[i], &r[i]);
+        else read_at(v, pos, nframes, &l[i], &r[i]);
+        i++;
+        pos += step;
+        if (pos >= end) {
+            if (!v->looping) { *ended = 1; break; }
+            while (pos >= end) { pos -= end; (*wraps)++; }
+        }
+    }
+    *ppos = pos;
+    return i;
+}
+
+/* a gain ramped from g by d per frame for the first `ramp` frames of the voice's block (i0 = this chunk's
+ * start), then held at t: the same sequence the per-frame loop produced */
+static inline void gain_run(float *gv, float g, float d, float t, uint32_t ramp, uint32_t i0, uint32_t n, float *out_g)
+{
+    for (uint32_t i = 0; i < n; i++) {
+        if (i0 + i < ramp) g += d; else g = t;
+        gv[i] = g;
+    }
+    *out_g = g;
 }
 
 static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal)
@@ -266,7 +373,6 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
     int use_sinc = v->interp == RL_INTERP_SINC && !(step == (1ull << 32) && (uint32_t)v->pos == 0 &&
                                                    (!v->xfade_left || (uint32_t)v->xfade_pos == 0));
     const sinc_tab *kt = use_sinc ? sinc_for_step(step) : NULL;
-    if (!kt) use_sinc = 0;
     uint32_t wraps = 0;
     int stopped = 0;
 
@@ -295,60 +401,68 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
     if (v->xfade_left == RL_XFADE_PENDING) v->xfade_left = out_rate / 200 ? out_rate / 200 : 1;
     const uint32_t xf_total = out_rate / 200 ? out_rate / 200 : 1;
 
-    for (uint32_t i = 0; i < frames; i++) {
-        if (i < ramp) { gl += dl; gr += dr; for (int j = 0; j < ns; j++) gs[j] += ds[j]; }
-        else { gl = v->gain[0]; gr = v->gain[1]; for (int j = 0; j < ns; j++) gs[j] = v->send_gain[sk[j]]; }
+    float L[MIXCHUNK], R[MIXCHUNK], G[MIXCHUNK], G2[MIXCHUNK];
+    for (uint32_t i0 = 0; i0 < frames && !stopped; ) {
+        uint32_t want = frames - i0 > MIXCHUNK ? MIXCHUNK : frames - i0;
+        uint64_t pos = v->pos;
+        uint32_t n = render_src(v, kt, &pos, step, end, nframes, want, L, R, &wraps, &stopped);
+        if (stopped) {
+            v->pos = 0;                /* DirectSound rewinds a finished buffer to 0 */
+            v->playing = 0;
+        } else {
+            v->pos = pos;
+        }
 
-        float l, r;
-        if (use_sinc) read_sinc(v, kt, v->pos, nframes, &l, &r);
-        else read_at(v, v->pos, nframes, &l, &r);
-
-        if (v->xfade_left) {
+        /* the old position fading out after a jump */
+        for (uint32_t i = 0; i < n && v->xfade_left; i++) {
             float t = (float)v->xfade_left / (float)xf_total;   /* 1 -> 0 */
             float ol = 0.0f, orr = 0.0f;
             if (v->xfade_pos < end) {
-                if (use_sinc) read_sinc(v, kt, v->xfade_pos, nframes, &ol, &orr);
+                if (kt) read_sinc(v, kt, v->xfade_pos, nframes, &ol, &orr);
                 else read_at(v, v->xfade_pos, nframes, &ol, &orr);
             }
-            l = l * (1.0f - t) + ol * t;
-            r = r * (1.0f - t) + orr * t;
+            L[i] = L[i] * (1.0f - t) + ol * t;
+            R[i] = R[i] * (1.0f - t) + orr * t;
             v->xfade_pos += step;
             if (v->xfade_pos >= end && v->looping) v->xfade_pos -= end;
             v->xfade_left--;
         }
 
-        if (ns) {
-            const float m = 0.5f * (l + r);
-            for (int j = 0; j < ns; j++) {
-                float s = m;
-                if (sa[j] < 1.0f) { zs[j] += sa[j] * (s - zs[j]); s = zs[j]; }
-                sb[j][i] += s * gs[j];
-            }
-        }
-        if (la < 1.0f) { z0 += la * (l - z0); z1 += la * (r - z1); l = z0; r = z1; }
-        if (mono) {
-            mono[i] = 0.5f * (l + r) * gl;
-        } else {
-            out[i * ostride]     += l * gl;
-            out[i * ostride + 1] += r * gr;
-        }
-
-        v->pos += step;
-        if (v->pos >= end) {
-            if (v->looping) {
-                while (v->pos >= end) { v->pos -= end; wraps++; }
+        /* effect sends: the mono sum, through each send's HF filter */
+        for (int j = 0; j < ns; j++) {
+            gain_run(G, gs[j], ds[j], v->send_gain[sk[j]], ramp, i0, n, &gs[j]);
+            float *dst = sb[j] + i0;
+            if (sa[j] < 1.0f) {
+                float z = zs[j];
+                for (uint32_t i = 0; i < n; i++) { z += sa[j] * (0.5f * (L[i] + R[i]) - z); dst[i] += z * G[i]; }
+                zs[j] = z;
             } else {
-                v->pos = 0;            /* DirectSound rewinds a finished buffer to 0 */
-                v->playing = 0;
-                stopped = 1;
-                break;
+                for (uint32_t i = 0; i < n; i++) dst[i] += 0.5f * (L[i] + R[i]) * G[i];
             }
         }
+        /* direct path */
+        if (la < 1.0f) {
+            for (uint32_t i = 0; i < n; i++) { z0 += la * (L[i] - z0); z1 += la * (R[i] - z1); L[i] = z0; R[i] = z1; }
+        }
+        gain_run(G, gl, dl, v->gain[0], ramp, i0, n, &gl);
+        if (mono) {
+            float *dst = mono + i0;
+            for (uint32_t i = 0; i < n; i++) dst[i] = 0.5f * (L[i] + R[i]) * G[i];
+            gain_run(G2, gr, dr, v->gain[1], ramp, i0, n, &gr);
+        } else {
+            gain_run(G2, gr, dr, v->gain[1], ramp, i0, n, &gr);
+            float *dst = out + (size_t)i0 * ostride;
+            if (ostride == 2) {
+                for (uint32_t i = 0; i < n; i++) { dst[2 * i] += L[i] * G[i]; dst[2 * i + 1] += R[i] * G2[i]; }
+            } else {
+                for (uint32_t i = 0; i < n; i++) { dst[i * ostride] += L[i] * G[i]; dst[i * ostride + 1] += R[i] * G2[i]; }
+            }
+        }
+        i0 += n;
     }
     v->cur_gain[0] = gl; v->cur_gain[1] = gr;
     for (int j = 0; j < ns; j++) { v->cur_send[sk[j]] = gs[j]; v->send_z[sk[j]] = zs[j]; }
     v->lp_z[0] = z0; v->lp_z[1] = z1;
-    if (ramp == frames) { /* ramp finished exactly at the block end */ }
 
     if (stopped) {
         v->xfade_left = 0;
@@ -390,6 +504,15 @@ static inline void read_at_n(const rl_voice *v, uint64_t pos, uint32_t nframes, 
     uint32_t idx = (uint32_t)(pos >> 32);
     float frac = (float)(uint32_t)pos * (1.0f / 4294967296.0f);
     uint32_t nxt = idx + 1;
+    if (v->sfmt == RL_S16 && nxt < nframes) {
+        const int16_t *q = (const int16_t *)(const void *)(v->data + (size_t)idx * v->block);
+        const int nc = v->channels;
+        for (int c = 0; c < nc; c++) {
+            float a = q[c] * (1.0f / 32768.0f), b = q[nc + c] * (1.0f / 32768.0f);
+            x[c] = a + (b - a) * frac;
+        }
+        return;
+    }
     int have_next = 1;
     if (nxt >= nframes) { if (v->looping) nxt = 0; else have_next = 0; }
     for (int c = 0; c < v->channels; c++) {
@@ -408,6 +531,21 @@ static inline void read_sinc_n(const rl_voice *v, const sinc_tab *t, uint64_t po
     for (int k = 0; k < T; k++) w[k] = a[k] + u * (b[k] - a[k]);
     const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
     for (int c = 0; c < v->channels; c++) x[c] = 0.0f;
+    if (v->sfmt == RL_S16 && base >= 0 && base + T <= (int64_t)nframes) {
+        /* inside the buffer: straight through the frames, scaled once at the end */
+        const int nc = v->channels;
+        const int16_t *q = (const int16_t *)(const void *)(v->data + (size_t)base * v->block);
+#define SINC_N(NC) for (int k = 0; k < T; k++, q += NC) for (int c = 0; c < NC; c++) x[c] += w[k] * (float)q[c]
+        switch (nc) {                                  /* constant channel counts unroll */
+        case 4: SINC_N(4); break;
+        case 6: SINC_N(6); break;
+        case 8: SINC_N(8); break;
+        default: SINC_N(nc); break;
+        }
+#undef SINC_N
+        for (int c = 0; c < nc; c++) x[c] *= 1.0f / 32768.0f;
+        return;
+    }
     for (int k = 0; k < T; k++) {
         int64_t n = base + k;
         if (n < 0 || n >= (int64_t)nframes) {
@@ -455,6 +593,13 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
     if (v->xfade_left == RL_XFADE_PENDING) v->xfade_left = out_rate / 200 ? out_rate / 200 : 1;
     const uint32_t xf_total = out_rate / 200 ? out_rate / 200 : 1;
     const int lfe = v->mc_lfe, fl = no > 0 ? 0 : -1, fr = no > 1 ? 1 : -1;
+    /* the matrix's non-zero entries (most are zero) */
+    int ne = 0;
+    uint8_t es[RL_MAXOUT * RL_MAXOUT], ec[RL_MAXOUT * RL_MAXOUT];
+    float eg[RL_MAXOUT * RL_MAXOUT];
+    for (uint32_t c = 0; c < no; c++)
+        for (int s = 0; s < nch; s++)
+            if (v->mc[s][c] != 0.0f) { es[ne] = (uint8_t)s; ec[ne] = (uint8_t)c; eg[ne] = v->mc[s][c]; ne++; }
 
     for (uint32_t i = 0; i < frames; i++) {
         if (i < ramp) { g += dg; for (int j = 0; j < ns; j++) gs[j] += ds[j]; }
@@ -481,12 +626,11 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
         if (lfe >= 0 && lfe < nch)
             bass = rl_bass_limit(&v->lfe_lim, x[lfe] * RL_LFE_IN_GAIN) * RL_LFE_OUT_GAIN;
         float *o = out + (size_t)i * nout;
-        for (uint32_t c = 0; c < no; c++) {
-            float acc = 0.0f;
-            for (int s = 0; s < nch; s++) acc += x[s] * v->mc[s][c];
-            if ((int)c == fl || (int)c == fr) acc += bass;
-            o[c] += acc * g;
-        }
+        float acc[RL_MAXOUT] = { 0 };
+        for (int e = 0; e < ne; e++) acc[ec[e]] += x[es[e]] * eg[e];
+        if (fl >= 0) acc[fl] += bass;
+        if (fr >= 0) acc[fr] += bass;
+        for (uint32_t c = 0; c < no; c++) o[c] += acc[c] * g;
         v->pos += step;
         if (v->pos >= end) {
             if (v->looping) {
@@ -607,6 +751,10 @@ int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, 
         }
         done += n;
     }
-    if (v->route_on) memcpy(v->rc, v->rt, sizeof(v->rc));
+    /* the weights reached: a call shorter than the ramp continues from here next time */
+    if (v->route_on) {
+        if (!left) memcpy(v->rc, v->rt, sizeof(v->rc));
+        else for (int k = 0; k < 3; k++) for (uint32_t c = 0; c < no; c++) v->rc[k][c] = w[k][c];
+    }
     return stopped;
 }

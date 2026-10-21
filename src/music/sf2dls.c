@@ -76,24 +76,33 @@ static int parse_sf2(sf2 *f, const uint8_t *data, size_t size)
             const uint8_t *p = x.p;
             if (t == FCC('s','d','t','a') && xid == FCC('s','m','p','l')) { f->smpl = (const int16_t *)p; f->nsmpl = (uint32_t)(n / 2); }
             else if (t != FCC('p','d','t','a')) continue;
+            /* a chunk given twice replaces the first; out of memory leaves it empty (the font is then refused) */
             else if (xid == FCC('p','h','d','r')) {
+                free(f->ph);
                 f->nph = (int)(n / 38); f->ph = calloc(f->nph + 1, sizeof(*f->ph));
+                if (!f->ph) f->nph = 0;
                 for (int i = 0; i < f->nph; i++) { name20(f->ph[i].name, p + 38 * i); f->ph[i].preset = u16(p + 38 * i + 20); f->ph[i].bank = u16(p + 38 * i + 22); f->ph[i].bag = u16(p + 38 * i + 24); }
             } else if (xid == FCC('p','b','a','g') || xid == FCC('i','b','a','g')) {
                 int m = (int)(n / 4);
                 sf_bag *b = calloc(m + 1, sizeof(*b));
+                if (!b) m = 0;
                 for (int i = 0; i < m; i++) { b[i].gen = u16(p + 4 * i); b[i].mod = u16(p + 4 * i + 2); }
-                if (xid == FCC('p','b','a','g')) { f->pb = b; f->npb = m; } else { f->ib = b; f->nib = m; }
+                if (xid == FCC('p','b','a','g')) { free(f->pb); f->pb = b; f->npb = m; } else { free(f->ib); f->ib = b; f->nib = m; }
             } else if (xid == FCC('p','g','e','n') || xid == FCC('i','g','e','n')) {
                 int m = (int)(n / 4);
                 sf_gen *g = calloc(m + 1, sizeof(*g));
+                if (!g) m = 0;
                 for (int i = 0; i < m; i++) { g[i].oper = u16(p + 4 * i); g[i].amount = (int16_t)u16(p + 4 * i + 2); }
-                if (xid == FCC('p','g','e','n')) { f->pg = g; f->npg = m; } else { f->ig = g; f->nig = m; }
+                if (xid == FCC('p','g','e','n')) { free(f->pg); f->pg = g; f->npg = m; } else { free(f->ig); f->ig = g; f->nig = m; }
             } else if (xid == FCC('i','n','s','t')) {
+                free(f->ih);
                 f->nih = (int)(n / 22); f->ih = calloc(f->nih + 1, sizeof(*f->ih));
+                if (!f->ih) f->nih = 0;
                 for (int i = 0; i < f->nih; i++) { name20(f->ih[i].name, p + 22 * i); f->ih[i].bag = u16(p + 22 * i + 20); }
             } else if (xid == FCC('s','h','d','r')) {
+                free(f->sh);
                 f->nsh = (int)(n / 46); f->sh = calloc(f->nsh + 1, sizeof(*f->sh));
+                if (!f->sh) f->nsh = 0;
                 for (int i = 0; i < f->nsh; i++) {
                     const uint8_t *s = p + 46 * i;
                     sf_shdr *h = &f->sh[i];
@@ -187,14 +196,22 @@ static void close_chunk(out *o, size_t at)
 static size_t open_chunk(out *o, uint32_t id) { p32(o, id); size_t at = o->n; p32(o, 0); return at; }
 
 /* ------------------------------------------------------------------ waves */
-typedef struct { int sample; uint32_t s, e; } wavekey;
-typedef struct { wavekey *k; int n, cap; } wavelist;
+typedef struct { int sample; uint32_t s, e; int next; } wavekey;
+typedef struct { wavekey *k; int n, cap; int *head; } wavelist;     /* head: per sample, its newest wave (-1: none) */
 
+/* the wave for a sample window, -1 out of memory; only the sample's own waves are searched (a large font has tens
+ * of thousands) */
 static int wave_for(wavelist *w, int sample, uint32_t s, uint32_t e)
 {
-    for (int i = 0; i < w->n; i++) if (w->k[i].sample == sample && w->k[i].s == s && w->k[i].e == e) return i;
-    if (w->n == w->cap) { w->cap = w->cap ? w->cap * 2 : 256; w->k = realloc(w->k, w->cap * sizeof(*w->k)); }
-    w->k[w->n].sample = sample; w->k[w->n].s = s; w->k[w->n].e = e;
+    for (int i = w->head[sample]; i >= 0; i = w->k[i].next) if (w->k[i].s == s && w->k[i].e == e) return i;
+    if (w->n == w->cap) {
+        int cap = w->cap ? w->cap * 2 : 256;
+        wavekey *k = realloc(w->k, cap * sizeof(*k));
+        if (!k) return -1;
+        w->k = k; w->cap = cap;
+    }
+    w->k[w->n].sample = sample; w->k[w->n].s = s; w->k[w->n].e = e; w->k[w->n].next = w->head[sample];
+    w->head[sample] = w->n;
     return w->n++;
 }
 
@@ -320,7 +337,7 @@ void *sf2_to_dls(const void *data, size_t size, size_t *outsize, int *ninstr)
     m.measure = 1;
     emit(&m, &f);
     out o = { 0 };
-    o.b = malloc(m.n ? m.n : 1);
+    o.b = m.failed ? NULL : malloc(m.n ? m.n : 1);     /* (measuring ran out of memory: refused) */
     o.cap = m.n;
     int ninst = o.b ? emit(&o, &f) : 0;
     free_sf2(&f);
@@ -335,6 +352,9 @@ static int emit(out *op, sf2 *fp)
     out o = *op;
     sf2 f = *fp;
     wavelist wl = { 0 };
+    wl.head = malloc((f.nsh ? f.nsh : 1) * sizeof(int));
+    if (!wl.head) { o.failed = 1; *op = o; return 0; }
+    for (int i = 0; i < f.nsh; i++) wl.head[i] = -1;
     size_t riff = open_list(&o, FCC('R','I','F','F'), FCC('D','L','S',' '));
     size_t colh = o.n;
     size_t c = open_chunk(&o, FCC('c','o','l','h')); p32(&o, 0); close_chunk(&o, c);
@@ -402,9 +422,15 @@ static int emit(out *op, sf2 *fp)
                 if (en <= st + 1) continue;
                 if (ls < st) ls = st;
                 if (le > en) le = en;
+                if (le < ls) le = ls;       /* a loop ending before the window (or its loop start): no loop */
                 r.wave = wave_for(&wl, iz.v[G_SAMPLE], (uint32_t)st, (uint32_t)en);
                 r.sloop = (uint32_t)(ls - st); r.eloop = (uint32_t)(le - st);
-                if (nr == rcap) { rcap = rcap ? rcap * 2 : 64; rs = realloc(rs, rcap * sizeof(*rs)); }
+                if (nr == rcap) {
+                    int cap = rcap ? rcap * 2 : 64;
+                    region *n = realloc(rs, cap * sizeof(*rs));
+                    if (n) { rs = n; rcap = cap; }
+                }
+                if (r.wave < 0 || nr == rcap) { o.failed = 1; continue; }     /* out of memory: refused */
                 rs[nr++] = r;
             }
         }
@@ -436,7 +462,7 @@ static int emit(out *op, sf2 *fp)
     size_t base = o.n;
     for (int i = 0; i < wl.n; i++) {
         uint32_t off = (uint32_t)(o.n - base);
-        if (o.b) memcpy(o.b + ptbl + 4 * i, (uint8_t[4]){ (uint8_t)off, (uint8_t)(off >> 8), (uint8_t)(off >> 16), (uint8_t)(off >> 24) }, 4);
+        if (o.b && !o.failed) memcpy(o.b + ptbl + 4 * i, (uint8_t[4]){ (uint8_t)off, (uint8_t)(off >> 8), (uint8_t)(off >> 16), (uint8_t)(off >> 24) }, 4);
         const sf_shdr *s = &f.sh[wl.k[i].sample];
         size_t wv = open_list(&o, FCC('L','I','S','T'), FCC('w','a','v','e'));
         c = open_chunk(&o, FCC('f','m','t',' '));
@@ -450,7 +476,7 @@ static int emit(out *op, sf2 *fp)
     close_chunk(&o, wvpl);
     close_chunk(&o, riff);
     if (o.b) { uint32_t n = (uint32_t)ninst; memcpy(o.b + colh + 8, &n, 4); }
-    free(rs); free(wl.k);
+    free(rs); free(wl.k); free(wl.head);
     *op = o;
     return ninst;
 }

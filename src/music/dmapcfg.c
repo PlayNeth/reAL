@@ -222,12 +222,13 @@ static HRESULT parse_port(apc *a, const ck *c)
                 DMUS_IO_PCHANNELTOBUFFER_HEADER h;
                 get(&m, &h, sizeof(h));
                 apc_map map = { h.dwPChannelBase, h.dwPChannelCount, h.dwBufferCount, h.dwFlags, NULL };
-                map.bufs = calloc(map.nbuf + 1, sizeof(GUID));
-                apc_map *nm = realloc(p.maps, (p.nmaps + 1) * sizeof(*nm));
-                if (!map.bufs || !nm) { free(map.bufs); hr = E_OUTOFMEMORY; break; }
                 DWORD avail = m.d.n > sizeof(h) ? (m.d.n - (DWORD)sizeof(h)) / sizeof(GUID) : 0;
-                memcpy(map.bufs, m.d.p + sizeof(h), (map.nbuf < avail ? map.nbuf : avail) * sizeof(GUID));
-                p.maps = nm;
+                if (map.nbuf > avail) map.nbuf = avail;     /* (only the GUIDs there: a huge count wrapped nbuf + 1) */
+                apc_map *nm = realloc(p.maps, (p.nmaps + 1) * sizeof(*nm));
+                if (nm) p.maps = nm;
+                map.bufs = calloc(map.nbuf + 1, sizeof(GUID));
+                if (!map.bufs || !nm) { free(map.bufs); hr = E_OUTOFMEMORY; break; }
+                memcpy(map.bufs, m.d.p + sizeof(h), map.nbuf * sizeof(GUID));
                 p.maps[p.nmaps++] = map;
             }
         }

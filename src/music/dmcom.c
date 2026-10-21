@@ -34,6 +34,18 @@ static HRESULT rm_noiface(const char *fn, REFIID riid, void **out)
     *out = NULL;
     return E_NOINTERFACE;
 }
+/* a reference on an object met through the engine's weak pointer to it, unless its last one has already gone (its
+ * Release waits for the lock to unhook it, then frees it): then it counts as not there */
+static BOOL ref_if_alive(LONG *r)
+{
+    LONG n = *(volatile LONG *)r;
+    while (n > 0) {
+        LONG o = InterlockedCompareExchange(r, n + 1, n);
+        if (o == n) return TRUE;
+        n = o;
+    }
+    return FALSE;
+}
 
 /* ------------------------------------------------------------------ objects */
 typedef struct rm_perf rm_perf;
@@ -316,11 +328,11 @@ static HRESULT WINAPI colo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJEC
     if (!b) return E_OUTOFMEMORY;
     cap = 4096;
     memcpy(b, h, 12);
-    for (DWORD used = 4; used + 8 <= n; ) {
+    for (ULONGLONG used = 4; used + 8 <= n; ) {
         BYTE ch[8];
         if (FAILED(IStream_Read(s, ch, 8, &got)) || got != 8) break;
         DWORD cs = *(DWORD *)(ch + 4);
-        used += 8 + cs + (cs & 1);
+        used += 8 + (ULONGLONG)cs + (cs & 1);
         BOOL want = !memcmp(ch, "dlid", 4) || !memcmp(ch, "vers", 4) || !memcmp(ch, "LIST", 4);
         if (want && !memcmp(ch, "LIST", 4)) {
             BYTE t[4];
@@ -329,14 +341,15 @@ static HRESULT WINAPI colo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJEC
             IStream_Seek(s, back, STREAM_SEEK_CUR, NULL);
             want = !memcmp(t, "INFO", 4);
         }
-        DWORD pad = cs + (cs & 1);
+        ULONGLONG pad = (ULONGLONG)cs + (cs & 1);
+        if (want && pad > 0x100000) break;      /* (a header chunk of 1 MB is a broken size: no growing to it) */
         if (want) {
             if (len + 8 + pad > cap) { while (len + 8 + pad > cap) cap *= 2; BYTE *nb = realloc(b, cap); if (!nb) break; b = nb; }
             memcpy(b + len, ch, 8);
-            if (FAILED(IStream_Read(s, b + len + 8, pad, &got)) || got < cs) break;
+            if (FAILED(IStream_Read(s, b + len + 8, (ULONG)pad, &got)) || got < cs) break;
             len += 8 + pad;
         } else {
-            LARGE_INTEGER sk; sk.QuadPart = pad;
+            LARGE_INTEGER sk; sk.QuadPart = (LONGLONG)pad;
             if (FAILED(IStream_Seek(s, sk, STREAM_SEEK_CUR, NULL))) break;
         }
     }
@@ -446,8 +459,12 @@ static ULONG WINAPI seg_release(IDirectMusicSegment8 *i)
     LONG r = InterlockedDecrement(&s->ref);
     LOG_CALL("music: Segment::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
+        /* under the lock: the engine thread reads the wrapper (and its graph) and counts the segment under it */
+        dm_host *h = any_host();
+        if (h) dm_host_lock(h);
         if (s->seg && s->seg->wrapper == s) s->seg->wrapper = NULL;
         dm_segment_release(s->seg);
+        if (h) dm_host_unlock(h);
         if (s->graph) IDirectMusicGraph_Release(s->graph);
         rm_auto_free(s->autod);
         free(s);
@@ -796,7 +813,12 @@ static dm_segment *segment_from_data(const BYTE *b, DWORD n, IDirectMusicLoader8
         return g;
     }
     dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg, loader_getscript };
-    return dm_segment_load_cb(b, n, &cb);
+    /* under the lock, like a track's Load: the segment's style tracks re-sort shared styles that may be playing */
+    dm_host *h = any_host();
+    if (h) dm_host_lock(h);
+    dm_segment *g = dm_segment_load_cb(b, n, &cb);
+    if (h) dm_host_unlock(h);
+    return g;
 }
 static rm_segment *sgp(IPersistStream *i) { return impl_from(i, rm_segment, IPersistStream_iface); }
 static HRESULT WINAPI sgp_qi(IPersistStream *i, REFIID r, void **o) { return seg_qi(&sgp(i)->IDirectMusicSegment8_iface, r, o); }
@@ -811,11 +833,11 @@ static IDirectMusicGraph *segment_graph_from_data(const BYTE *b, DWORD n, HRESUL
 {
     *res = S_OK;
     if (n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMSG", 4)) return NULL;
-    DWORD end = 8 + *(const DWORD *)(b + 4);
-    if (end > n) end = n;
+    DWORD fsz = *(const DWORD *)(b + 4), end = fsz > n - 8 ? n : 8 + fsz;
     for (DWORD off = 12; off + 12 <= end; ) {
         DWORD sz = *(const DWORD *)(b + off + 4);
-        if (!memcmp(b + off, "RIFF", 4) && !memcmp(b + off + 8, "DMTG", 4) && off + 8 + sz <= end) {
+        if (sz > end - off - 8) break;          /* (a chunk past the form's end: the last; no wrapping round) */
+        if (!memcmp(b + off, "RIFF", 4) && !memcmp(b + off + 8, "DMTG", 4)) {
             IDirectMusicGraph *g = NULL;
             HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, 8 + sz);
             IStream *st = NULL;
@@ -841,8 +863,7 @@ static int segment_containers(IStream *st, ULONGLONG at, const BYTE *b, DWORD n,
 {
     *out = NULL;
     if (!l || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMSG", 4)) return 0;
-    DWORD end = 8 + *(const DWORD *)(b + 4);
-    if (end > n) end = n;
+    DWORD fsz = *(const DWORD *)(b + 4), end = fsz > n - 8 ? n : 8 + fsz;
     int k = 0;
     for (DWORD off = 12; off + 12 <= end; ) {
         DWORD sz = *(const DWORD *)(b + off + 4);
@@ -861,6 +882,7 @@ static int segment_containers(IStream *st, ULONGLONG at, const BYTE *b, DWORD n,
                 if (a) { *out = a; a[k++] = o; } else IDirectMusicObject_Release(o);
             }
         }
+        if (sz > end - off - 8) break;          /* (past the form's end: the last; no wrapping round) */
         off += 8 + sz + (sz & 1);
     }
     return k;
@@ -889,10 +911,15 @@ static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
     free(cont);
     if (!g) return DMUS_E_UNSUPPORTED_STREAM;
     if (gr && FAILED(ghr)) { IDirectMusicGraph_Release(gr); dm_segment_release(g); return ghr; }
+    dm_host *h = any_host();                /* (the old segment may be playing: its count and wrapper under the lock) */
+    if (h) dm_host_lock(h);
     if (s->seg) { if (s->seg->wrapper == s) s->seg->wrapper = NULL; dm_segment_release(s->seg); }
     s->seg = g;
     g->wrapper = s;
-    if (gr) { if (s->graph) IDirectMusicGraph_Release(s->graph); s->graph = gr; }
+    IDirectMusicGraph *og = NULL;
+    if (gr) { og = s->graph; s->graph = gr; }
+    if (h) dm_host_unlock(h);
+    if (og) IDirectMusicGraph_Release(og);
     s->desc.dwValidData |= DMUS_OBJ_LOADED;
     return g->partial ? DMUS_S_PARTIALLOAD : S_OK;
 }
@@ -1093,7 +1120,7 @@ static dm_host *any_host(void) { return g_lastperf ? g_lastperf->host : NULL; }
 static IDirectMusicTrack8 *track_object(dm_track *t)
 {
     rm_track *r = t->wrapper;
-    if (r) { InterlockedIncrement(&r->ref); return &r->IDirectMusicTrack8_iface; }
+    if (r && ref_if_alive(&r->ref)) return &r->IDirectMusicTrack8_iface;
     if (!(r = calloc(1, sizeof(*r)))) return NULL;
     r->IDirectMusicTrack8_iface.lpVtbl = &trk_vtbl;
     r->IPersistStream_iface.lpVtbl = &trp_vtbl;
@@ -1327,6 +1354,7 @@ static BOOL read_chunk(IStream *s, BYTE **data, DWORD *size)
     *data = NULL; *size = 0;
     if (FAILED(IStream_Read(s, h, 8, &got)) || got != 8) return FALSE;
     DWORD n = *(DWORD *)(h + 4);
+    if (n > 0x7ffffff0u) return FALSE;      /* (a broken size: 8 + n + 1 would wrap) */
     BYTE *b = malloc(8 + (size_t)n + 1);
     if (!b) return FALSE;
     memcpy(b, h, 8);
@@ -1340,14 +1368,16 @@ static DWORD wavetrack_noloader_stop(const BYTE *b, DWORD n)
 {
     for (DWORD off = 12; off + 12 <= n; ) {
         DWORD sz = *(const DWORD *)(b + off + 4);
+        if (sz > n - off - 8) sz = n - off - 8;     /* (sizes past the data cut to it: no reading beyond, no wrapping) */
         if (!memcmp(b + off, "LIST", 4) && !memcmp(b + off + 8, "wavp", 4)) {
             for (DWORD q = off + 12; q + 12 <= off + 8 + sz; ) {
                 DWORD qs = *(const DWORD *)(b + q + 4);
                 if (!memcmp(b + q, "LIST", 4) && !memcmp(b + q + 8, "wavi", 4)) {
                     DWORD r = q + 12;
-                    if (r + 8 <= n) { DWORD rs = *(const DWORD *)(b + r + 4); r += 8 + rs + (rs & 1) + 8; }
+                    if (r + 8 <= n) { DWORD rs = *(const DWORD *)(b + r + 4); ULONGLONG e = (ULONGLONG)r + 16 + rs + (rs & 1); r = e < n ? (DWORD)e : n; }
                     return r < n ? r : n;
                 }
+                if (qs > off + 8 + sz - q - 8) break;
                 q += 8 + qs + (qs & 1);
             }
         }
@@ -2567,8 +2597,8 @@ static IDirectMusicGraph *owner_graph(rm_perf *p, int owner, void *obj)
     }
     void **w = dm_audiopath_wrapper(obj);
     rm_path *a = *w;
-    if (a) { InterlockedIncrement(&a->ref); return &a->IDirectMusicGraph_iface; }
-    dm_audiopath_addref(obj);                   /* a path the application let go of: a new object for it */
+    if (a && ref_if_alive(&a->ref)) return &a->IDirectMusicGraph_iface;
+    dm_audiopath_addref(obj);                   /* a path the application let go of (or is letting go of): a new object */
     if (!(a = new_path(p, obj))) { dm_audiopath_release(obj); return NULL; }
     *w = a;
     return &a->IDirectMusicGraph_iface;
@@ -2871,18 +2901,18 @@ static IUnknown *state_object(rm_perf *p, dm_segstate *ss)
 {
     void **w = dm_segstate_wrapper(ss);
     rm_state *s = *w;
-    if (s) { InterlockedIncrement(&s->ref); return (IUnknown *)&s->IDirectMusicSegmentState8_iface; }
-    if (!(s = calloc(1, sizeof(*s)))) return NULL;
+    if (s && ref_if_alive(&s->ref)) return (IUnknown *)&s->IDirectMusicSegmentState8_iface;
+    if (!(s = calloc(1, sizeof(*s)))) return NULL;      /* (one being let go of unhooks itself only if still *w) */
     s->IDirectMusicSegmentState8_iface.lpVtbl = &st_vtbl;
     s->IDirectMusicGraph_iface.lpVtbl = &stg_vtbl;
     s->ref = 1; s->ss = ss; s->lazy = TRUE;
     dm_segstate_addref(ss);
     dm_segment *g = dm_segstate_segment(ss);
-    if (g && g->wrapper) { s->seg = g->wrapper; IDirectMusicSegment8_AddRef(&s->seg->IDirectMusicSegment8_iface); }
+    if (g && g->wrapper && ref_if_alive(&((rm_segment *)g->wrapper)->ref)) s->seg = g->wrapper;
     s->perf = p; IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
     dm_audiopath *ap = dm_segstate_audiopath(ss);
     rm_path *a = ap ? *dm_audiopath_wrapper(ap) : NULL;
-    if (a) { s->path = &a->IDirectMusicAudioPath_iface; IDirectMusicAudioPath_AddRef(s->path); }
+    if (a && ref_if_alive(&a->ref)) s->path = &a->IDirectMusicAudioPath_iface;
     *w = s;
     return (IUnknown *)&s->IDirectMusicSegmentState8_iface;
 }
@@ -3232,9 +3262,8 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     rm_state *n = calloc(1, sizeof(*n));   /* (made before the lock, put in under it: a tool may make one meanwhile) */
     dm_host_lock(p->host);
     rm_state *s = *dm_segstate_wrapper(ss);
-    if (s) {        /* made on demand already (a tool or notification met the state first): it is the application's now */
+    if (s && ref_if_alive(&s->ref)) {       /* made on demand already (a tool or notification met the state first): the application's now */
         free(n);
-        InterlockedIncrement(&s->ref);
         if (s->lazy) { s->lazy = FALSE; s->xref++; }    /* it holds the play's reference now, and still its own */
         else dm_segstate_release(ss);
         if (!s->path) {
@@ -3288,7 +3317,8 @@ static HRESULT WINAPI pf_playex(IDirectMusicPerformance8 *i, IUnknown *src, WCHA
     if (st) {
         dm_segment *g = dm_segstate_segment(st);
         dm_segstate_start_time(st, &st0);
-        if (g && g->wrapper) { fromseg = (IDirectMusicSegment *)&((rm_segment *)g->wrapper)->IDirectMusicSegment8_iface; IDirectMusicSegment_AddRef(fromseg); }
+        if (g && g->wrapper && ref_if_alive(&((rm_segment *)g->wrapper)->ref))
+            fromseg = (IDirectMusicSegment *)&((rm_segment *)g->wrapper)->IDirectMusicSegment8_iface;
     }
     dm_host_unlock(p->host);
     IDirectMusicSegment *ts = NULL;
@@ -3380,17 +3410,20 @@ static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
         for (DWORD m = 0; SUCCEEDED(hr) && m < cp->nmaps; m++) {
             rm_pmap *pm = &pc->maps[pc->nmaps++];
             pm->base = cp->maps[m].base; pm->count = cp->maps[m].count; pm->nbuf = cp->maps[m].nbuf;
+            if (pm->nbuf > 0xffffu) { pm->nbuf = 0; hr = E_INVALIDARG; break; }   /* (a broken count: nbuf + 1 would wrap) */
             pm->b = calloc(pm->nbuf + 1, sizeof(rm_buf *));
             if (!pm->b) { hr = E_OUTOFMEMORY; break; }
             for (DWORD i = 0; i < pm->nbuf; i++) if ((pm->b[i] = path_find(a, pc, &cp->maps[m].bufs[i]))) hold(a, pm->b[i]);
         }
     }
     /* the PChannels */
-    DWORD total = 0;
+    ULONGLONG total64 = 0;
     for (DWORD k = 0; k < c->nports; k++) {
-        total += c->ports[k].h.dwPChannelCount;
-        for (DWORD m = 0; m < c->ports[k].nmaps; m++) total += c->ports[k].maps[m].count;
+        total64 += c->ports[k].h.dwPChannelCount;
+        for (DWORD m = 0; m < c->ports[k].nmaps; m++) total64 += c->ports[k].maps[m].count;
     }
+    if (total64 > 0x100000 && SUCCEEDED(hr)) hr = E_INVALIDARG;    /* (broken counts: the arrays below would wrap) */
+    DWORD total = total64 > 0x100000 ? 0 : (DWORD)total64;
     uint32_t *virt = malloc((total + 1) * sizeof(uint32_t)), *nbus = calloc(total + 1, sizeof(uint32_t));
     uint32_t *buses = calloc(total + 1, 32 * sizeof(uint32_t));
     int *drum = calloc(total + 1, sizeof(int));
@@ -3679,7 +3712,10 @@ static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, 
     }
     rm_segment *r = o->lpVtbl == &seg_vtbl ? sgm(o) : NULL;
     dm_segment *x = r ? r->seg : NULL;
+    dm_host *h = any_host();                /* (the engine thread counts it too) */
+    if (h) dm_host_lock(h);
     if (x) x->refs++;
+    if (h) dm_host_unlock(h);
     IDirectMusicSegment8_Release(o);
     return x;
 }

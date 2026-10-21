@@ -185,13 +185,18 @@ static int gargle_param(dsfx *f, int i, float v)
         if (r > 1000) r = 1000;
         f->u.gargle.hz = r;
         f->u.gargle.period = f->rate / r;
+        if (!f->u.gargle.period) f->u.gargle.period = 1;    /* a rate below the gargle's: no division by 0 */
     } else if (i == 1) {
         if (v < 0.0f || v > 1.0f) return DSFX_E_INVALIDARG;
         f->u.gargle.shape = (uint32_t)ftol(v);
     }
     return DSFX_OK;
 }
-static void gargle_init(dsfx *f) { f->u.gargle.period = f->rate / f->u.gargle.hz; }     /* 100158a0 */
+static void gargle_init(dsfx *f)                                                       /* 100158a0 */
+{
+    f->u.gargle.period = f->rate / f->u.gargle.hz;
+    if (!f->u.gargle.period) f->u.gargle.period = 1;
+}
 static void gargle_discont(dsfx *f) { f->u.gargle.phase = 0; }                         /* 100158f0 */
 /* 10015910 FBRProcess */
 static void gargle_process(dsfx *f, void *data, uint32_t n)
@@ -279,8 +284,11 @@ static int echo_init(dsfx *f)
 /* a line position: idx + delay, 20.12 fixed point, wrapped */
 static int32_t echo_at(int32_t idx, int32_t delay, int32_t len)
 {
-    int32_t e = delay + idx;
-    if (e < 0) { int32_t w = (int32_t)((uint32_t)len << 12); do e += w; while (e < 0); }
+    /* 32-bit wrapping sums, as the original's adds (long lines at high rates overflow 20.12; no UB, no endless
+     * loop: a nonzero multiple of 4096 always brings e back to 0 .. 2^31) */
+    uint32_t w = (uint32_t)len << 12;
+    int32_t e = (int32_t)((uint32_t)delay + (uint32_t)idx);
+    if (e < 0 && w) do e = (int32_t)((uint32_t)e + w); while (e < 0);
     e = (int32_t)((uint32_t)e >> 12);
     while (e >= len) e -= len;
     return e;
@@ -288,14 +296,14 @@ static int32_t echo_at(int32_t idx, int32_t delay, int32_t len)
 /* 10010420: both lines one sample on */
 static void echo_step(dsfx *f)
 {
-    int32_t e = f->u.echo.l.idx;
-    if (!e) e = (int32_t)((uint32_t)f->u.echo.l.len << 12);
-    if (e < 0) e += (int32_t)((uint32_t)f->u.echo.l.len << 12);
-    f->u.echo.l.idx = e - 0x1000;
-    e = f->u.echo.r.idx;
-    if (!e) e = (int32_t)((uint32_t)f->u.echo.r.len << 12);
-    if (e < 0) f->u.echo.r.idx = (int32_t)((uint32_t)f->u.echo.r.len << 12) - 0x1000 + e;
-    else f->u.echo.r.idx = e - 0x1000;
+    uint32_t e = (uint32_t)f->u.echo.l.idx;
+    if (!e) e = (uint32_t)f->u.echo.l.len << 12;
+    if ((int32_t)e < 0) e += (uint32_t)f->u.echo.l.len << 12;
+    f->u.echo.l.idx = (int32_t)(e - 0x1000);
+    e = (uint32_t)f->u.echo.r.idx;
+    if (!e) e = (uint32_t)f->u.echo.r.len << 12;
+    if ((int32_t)e < 0) f->u.echo.r.idx = (int32_t)(((uint32_t)f->u.echo.r.len << 12) - 0x1000 + e);
+    else f->u.echo.r.idx = (int32_t)(e - 0x1000);
 }
 static float clamp_trunc16(float v)
 {
@@ -1105,6 +1113,8 @@ int dsfx_set_param(dsfx *f, int i, float v)
 {
     if (i < 0 || i >= s_nparams[f->kind]) return DSFX_E_INVALIDARG;
     if (f->kind == DSFX_I3DL2) return i3dl2_set_param(f->u.i3, i, v);
+    /* the range checks let NaN through; Chorus' and Flanger's Phase would then index past their tables */
+    if (v != v) return DSFX_E_INVALIDARG;
     int hr = apply(f, i, &v);
     if (hr >= 0) record(f, i, v);
     return hr;
@@ -1179,7 +1189,8 @@ static void update_params(dsfx *f, int64_t t)
             if (e == head) f->active &= ~(1u << i);
         } else if (e->s.curve & DSFX_CURVE_JUMP) v = e->s.v1;
         else {
-            float x = (float)(double)(t - e->s.start) / (float)(double)(e->s.end - e->s.start);
+            /* a segment of no length (start == end == t) is at its end, not 0 / 0 */
+            float x = e->s.end > e->s.start ? (float)(double)(t - e->s.start) / (float)(double)(e->s.end - e->s.start) : 1.0f;
             switch (e->s.curve) {
             case DSFX_CURVE_SQUARE: x = x * x; break;
             case DSFX_CURVE_INVSQUARE: x = (float)sqrt((double)x); break;

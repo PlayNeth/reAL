@@ -29,6 +29,8 @@ int  rl_virt_init_hp(rl_virt *v, uint32_t rate);
  * gives the same output with blocks of any size.  on = ALchemy's block-wise reads, for the tests. */
 void rl_virt_hp_alchemy_er(rl_virt *v, int on);
 void rl_virt_free(rl_virt *v);
+/* clear the filter histories (a restarted source) */
+void rl_virt_reset(rl_virt *v);
 /* ch: ALRV_NOUT channel buffers in ALRV_* order (ALRV_CX unused), out: interleaved stereo, added to;
  * tmp: 2 x frames floats.  0 on allocation failure. */
 int  rl_virt_process(rl_virt *v, float *const ch[ALRV_NOUT], float *out, uint32_t frames, float *tmp);

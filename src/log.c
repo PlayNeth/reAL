@@ -85,12 +85,21 @@ static LONG CALLBACK crash_handler(EXCEPTION_POINTERS *ep)
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_INT_DIVIDE_BY_ZERO &&
         code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_PRIV_INSTRUCTION)
         return EXCEPTION_CONTINUE_SEARCH;
-    if (InterlockedIncrement(&count) > 6 || !s_log) return EXCEPTION_CONTINUE_SEARCH;
+    if (!s_log) return EXCEPTION_CONTINUE_SEARCH;
+    /* this sees first-chance exceptions too, some of which the game or Wine handle (probing reads, SEH):
+     * report each address once so a repeated handled one does not use up the budget before a real crash */
+    static void *seen[16];
+    static LONG nseen;
+    void *at = ep->ExceptionRecord->ExceptionAddress;
+    for (LONG i = 0; i < nseen && i < 16; i++) if (seen[i] == at) return EXCEPTION_CONTINUE_SEARCH;
+    LONG k = InterlockedIncrement(&nseen) - 1;
+    if (k < 16) seen[k] = at;
+    if (InterlockedIncrement(&count) > 6) return EXCEPTION_CONTINUE_SEARCH;
     char a[MAX_PATH + 32];
     addr_str((DWORD_PTR)ep->ExceptionRecord->ExceptionAddress, a, sizeof(a));
     CONTEXT *c = ep->ContextRecord;
 #ifdef _M_IX86
-    rl_log(0, "EXCEPTION %08lx at %s (access %lu %08lx) eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx ebp=%08lx esp=%08lx",
+    rl_log(0, "EXCEPTION %08lx (first chance) at %s (access %lu %08lx) eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx ebp=%08lx esp=%08lx",
            code, a, (unsigned long)ep->ExceptionRecord->ExceptionInformation[0], (unsigned long)ep->ExceptionRecord->ExceptionInformation[1],
            c->Eax, c->Ebx, c->Ecx, c->Edx, c->Esi, c->Edi, c->Ebp, c->Esp);
     DWORD *sp = (DWORD *)c->Esp;

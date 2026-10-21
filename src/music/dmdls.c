@@ -67,7 +67,8 @@ static void add_arts(blob **arts, int *n, rd c)
     while (next_chunk(&c, &id, &x, &t))
         if ((id == FCC('a','r','t','1') || id == FCC('a','r','t','2')) && x.e - x.p >= 8) {
             uint32_t cb = u32(x.p), nc = u32(x.p + 4);
-            if (cb < 8 || x.p + cb + 12ull * nc > x.e) continue;
+            size_t len = (size_t)(x.e - x.p);       /* sizes, not pointers: pointer sums wrap in a 32-bit process */
+            if (cb < 8 || cb > len || nc > (len - cb) / 12) continue;
             *arts = realloc(*arts, (*n + 1) * sizeof(**arts));
             (*arts)[*n].p = x.p; (*arts)[*n].n = cb + 12 * nc;
             (*n)++;
@@ -86,8 +87,8 @@ static void load_region(dls_instr *in, rd r)
         else if (id == FCC('w','l','n','k')) { memcpy(g.wlnk, c.p, n < 12 ? n : 12); have_wlnk = 1; }
         else if (id == FCC('w','s','m','p')) {
             memcpy(g.wsmp, c.p, n < 20 ? n : 20);
-            uint32_t cb = u32(c.p);
-            if (u32(g.wsmp + 16) && n >= cb + 16) memcpy(g.loop, c.p + cb, 16);
+            uint32_t cb = u32(g.wsmp);      /* (from the copy: the chunk may be shorter than 4 bytes) */
+            if (u32(g.wsmp + 16) && n >= 16 && cb <= n - 16) memcpy(g.loop, c.p + cb, 16);
         } else if (id == FCC('L','I','S','T') && (t == FCC('l','a','r','t') || t == FCC('l','a','r','2')))
             add_arts(&g.arts, &g.narts, c);
     }
@@ -150,10 +151,15 @@ dm_collection *dls_load_owned(void *data, size_t size, int gm)
             while (next_chunk(&c, &xid, &x, &xt)) if (xid == FCC('L','I','S','T') && xt == FCC('i','n','s',' ')) load_instrument(col, x);
         } else if (id == FCC('p','t','b','l') && c.e - c.p >= 8) {
             uint32_t cb = u32(c.p), n = u32(c.p + 4);
-            if (c.p + cb + 4ull * n <= c.e) {
+            size_t len = (size_t)(c.e - c.p);       /* sizes, not pointers (see add_arts) */
+            if (cb <= len && n <= (len - cb) / 4) {
+                free(col->cues);
+                col->ncues = 0;
                 col->cues = malloc((n ? n : 1) * sizeof(uint32_t));
-                for (uint32_t i = 0; i < n; i++) col->cues[i] = u32(c.p + cb + 4 * i);
-                col->ncues = (int)n;
+                if (col->cues) {
+                    for (uint32_t i = 0; i < n; i++) col->cues[i] = u32(c.p + cb + 4 * i);
+                    col->ncues = (int)n;
+                }
             }
         } else if (id == FCC('L','I','S','T') && t == FCC('w','v','p','l')) {
             const uint8_t *base = c.p;
@@ -203,7 +209,7 @@ int dls_find(const dm_collection *c, uint32_t patch)
 /* the wave a table index refers to */
 static int wave_index(const dm_collection *c, uint32_t table)
 {
-    if ((int)table >= c->ncues) return -1;
+    if (table >= (uint32_t)c->ncues) return -1;     /* unsigned: a file's index can be 2^31 or more */
     for (int i = 0; i < c->nwaves; i++) if (c->waves[i].off == c->cues[table]) return i;
     return -1;
 }

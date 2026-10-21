@@ -218,6 +218,7 @@ static BYTE volume_midi(LONG vol)
         table[0] = 0x7f;
     }
     LONG d = -vol / 100;
+    if (d >= 0x60) return (BYTE)table[0x60];       /* (-96 dB: nothing to step towards past the table) */
     LONG f = ((table[d + 1] - table[d]) * (-vol % 100)) / 100;
     return (BYTE)((BYTE)f + (BYTE)table[d]);
 }
@@ -1156,7 +1157,7 @@ static HRESULT mgr_names(manager *m, int routines)
                 else list[got++] = nm;
             }
             m->names[routines] = list;
-            m->nnames[routines] = n;
+            m->nnames[routines] = got;      /* (the names kept: the content's follow them in EnumVariable) */
             m->built[routines] = TRUE;
         }
         ITypeInfo_ReleaseTypeAttr(ti, ta);
@@ -1312,7 +1313,7 @@ static HRESULT WINAPI site_iteminfo(IActiveScriptSite *i, LPCOLESTR name, DWORD 
 static HRESULT WINAPI site_docversion(IActiveScriptSite *i, BSTR *v) { return E_NOTIMPL; }
 static HRESULT WINAPI site_terminate(IActiveScriptSite *i, const VARIANT *res, const EXCEPINFO *ei)    /* 0040403f */
 {
-    if (ei) { EXCEPINFO c = *ei; mgr_store_ei(msite(i), &c); }
+    if (ei) mgr_store(msite(i), ei->scode, 0, 0, ei->bstrSource, ei->bstrDescription, NULL);  /* (its strings the engine's) */
     return S_OK;
 }
 static HRESULT WINAPI site_statechange(IActiveScriptSite *i, SCRIPTSTATE st) { return S_OK; }
@@ -1593,23 +1594,28 @@ static HRESULT WINAPI sc_enumroutine(IDirectMusicScript *i, DWORD idx, WCHAR *na
     rm_script *s = scr(i);
     if (!name) return E_POINTER;
     name[0] = 0;
+    EnterCriticalSection(&s->cs);       /* (the names are built on the first call) */
     HRESULT hr = ready(s);
-    if (hr != S_OK) return hr;
-    return mgr_enum(s->mgr, 1, idx, name, NULL);
+    if (hr == S_OK) hr = mgr_enum(s->mgr, 1, idx, name, NULL);
+    LeaveCriticalSection(&s->cs);
+    return hr;
 }
 static HRESULT WINAPI sc_enumvariable(IDirectMusicScript *i, DWORD idx, WCHAR *name)     /* 00408997: then the content */
 {
     rm_script *s = scr(i);
     if (!name) return E_POINTER;
     name[0] = 0;
+    EnterCriticalSection(&s->cs);
     HRESULT hr = ready(s);
-    if (hr != S_OK) return hr;
-    UINT n = 0;
-    hr = mgr_enum(s->mgr, 0, idx, name, &n);
-    if (hr == S_FALSE) {
-        DWORD k = idx - n;
-        hr = k < s->nitems ? wcopy(name, s->items[k]->name, 0x104) : S_FALSE;
+    if (hr == S_OK) {
+        UINT n = 0;
+        hr = mgr_enum(s->mgr, 0, idx, name, &n);
+        if (hr == S_FALSE) {
+            DWORD k = idx - n;
+            hr = k < s->nitems ? wcopy(name, s->items[k]->name, 0x104) : S_FALSE;
+        }
     }
+    LeaveCriticalSection(&s->cs);
     return hr;
 }
 static const IDirectMusicScriptVtbl sc_vtbl = {
@@ -1674,6 +1680,7 @@ static BOOL chunk_at(span s, DWORD off, chunk *c)
 static DWORD chunk_next(const chunk *c, span s)
 {
     DWORD sz = *(const DWORD *)(s.p + c->off + 4);
+    if (sz > s.n - c->off - 8) return s.n;          /* (a size past the data ends the list: the sum would wrap) */
     return c->off + 8 + sz + (sz & 1);
 }
 /* 0040ee97: from `off` on, the first of this type and id */
@@ -1717,6 +1724,7 @@ static HRESULT desc_parse(rm_script *s, span f, DWORD *off)
             if (chunk_find(c.data, &o, 2, mmioFOURCC('U', 'N', 'A', 'M'), &u) && !(u.data.n & 1)) {
                 DWORD n = u.data.n < 126 ? u.data.n : 126;
                 memcpy(s->name, u.data.p, n);
+                s->name[n / 2] = 0;                 /* (a name stored without its terminator) */
                 s->name[63] = 0;
             }
         }

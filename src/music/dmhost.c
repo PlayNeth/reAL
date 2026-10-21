@@ -65,6 +65,13 @@ struct dm_host {
     volatile LONG stop;
     int noreverb;
     FILE *dump;                 /* REDM_DUMP=file: raw 16-bit stereo of the dry + wet output (debugging) */
+    /* sink_pass's bus buffers (per host: each performance's host renders on its own thread) */
+    uint32_t sids[2 * MAXHB], sfn[2 * MAXHB];
+    int32_t spitch[2 * MAXHB];
+    int16_t stmp[2 * MAXHB][BLOCK], sout[BLOCK * 2];
+    /* the waves downloaded to this host's synth (see port_wave_download) and the next ids */
+    struct hwdl *wdls;
+    uint32_t waveid, voiceid;
 };
 
 /* ------------------------------------------------------------------ clocks */
@@ -149,13 +156,12 @@ typedef struct hwdl {
     uint32_t artid[8];
 } hwdl;
 typedef struct { hwdl *dl; uint32_t id, chan, group; uint64_t start, ls, le; } hvoice;
-static hwdl *g_wdls;
-static uint32_t g_waveid = 0x40000000, g_voiceid;
+/* the list and the ids are the host's: a download lives in one host's synth, never to be shared with another's */
 
 static void hwdl_release(dm_host *h, hwdl *d)
 {
     if (--d->refs > 0) return;
-    for (hwdl **p = &g_wdls; *p; p = &(*p)->next) if (*p == d) { *p = d->next; break; }
+    for (hwdl **p = &h->wdls; *p; p = &(*p)->next) if (*p == d) { *p = d->next; break; }
     for (uint32_t c = 0; c < d->nch; c++) {
         if (d->art[c]) msynth_unload(h->syn, d->art[c]);
         if (d->buf[c]) msynth_unload(h->syn, d->buf[c]);
@@ -169,7 +175,7 @@ static void *port_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr)
     dm_host *h = ctx;
     (void)hint;
     if (!w->streaming)
-        for (hwdl *d = g_wdls; d; d = d->next) if (d->w == w) { d->refs++; *hr = 0; return d; }
+        for (hwdl *d = h->wdls; d; d = d->next) if (d->w == w) { d->refs++; *hr = 0; return d; }
     if (w->channels == 0 || w->channels > 8) { *hr = (int)0x8878112a; return NULL; }
     hwdl *d = calloc(1, sizeof(*d));
     if (!d) { *hr = (int)0x8007000e; return NULL; }
@@ -180,7 +186,8 @@ static void *port_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr)
         /* DMUS_DOWNLOADINFO + 2 offsets + DMUS_WAVEDATA (771927fe) */
         uint32_t size = 0x1c + ((bytes + 3) & ~3u);
         uint32_t *b = calloc(1, size + 4);
-        uint32_t bid = g_waveid++;
+        if (!b) { *hr = (int)0x8007000e; d->nch = c; hwdl_release(h, d); return NULL; }
+        uint32_t bid = h->waveid++;
         b[0] = 6; b[1] = bid; b[2] = 2; b[3] = size; b[4] = 0x18; b[5] = 0x1c; b[6] = bytes;
         uint8_t *o = (uint8_t *)(b + 7);
         for (uint32_t k = 0; k < w->frames; k++)
@@ -190,7 +197,7 @@ static void *port_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr)
         if (r < 0) { *hr = (int)0x80004005; d->nch = c; hwdl_release(h, d); return NULL; }
         /* the articulation (77192ff8): DMUS_WAVEARTDL, WAVEFORMATEX, the buffer's id */
         uint32_t a[32] = { 0 };
-        uint32_t aid = g_waveid++;
+        uint32_t aid = h->waveid++;
         a[0] = 4; a[1] = aid; a[2] = 3; a[3] = 0x50; a[4] = 0x1c; a[5] = 0x30; a[6] = 0x44;
         a[7] = 1; a[8] = c; a[9] = 1; a[10] = 0; a[11] = d->nch > 1 ? 2 : 0;
         uint8_t *wf = (uint8_t *)(a + 12);
@@ -206,7 +213,7 @@ static void *port_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr)
         if (r < 0) { *hr = (int)0x80004005; d->nch = c + 1; hwdl_release(h, d); return NULL; }
         d->artid[c] = aid;
     }
-    d->next = g_wdls; g_wdls = d;
+    d->next = h->wdls; h->wdls = d;
     *hr = 0;
     return d;
 }
@@ -215,11 +222,14 @@ static void port_wave_unload(void *ctx, void *dl) { hwdl_release(ctx, dl); }
 static void *port_voice_alloc(void *ctx, void *dl, uint32_t chan, uint32_t group, rtime_t start, uint32_t ls,
                               uint32_t le, int *hr)
 {
+    dm_host *h = ctx;
     hwdl *d = dl;
     hvoice *v = calloc(1, sizeof(*v));
     if (!v) { *hr = (int)0x8007000e; return NULL; }
     v->dl = d; d->refs++;
-    v->id = g_voiceid; g_voiceid += d->nch;       /* 77193fa9 */
+    /* consecutive ids (77193fa9), from 1 and never 0xffffffff: the synth's MIDI voices have -1 */
+    if (h->voiceid == 0 || h->voiceid > 0xffffffffu - 16) h->voiceid = 1;
+    v->id = h->voiceid; h->voiceid += d->nch;
     v->chan = chan; v->group = group;
     v->start = (uint64_t)((uint64_t)d->rate * (uint64_t)start / 10000000);   /* 77192f56 */
     v->ls = ls; v->le = le;
@@ -292,9 +302,9 @@ static void sink_pass(dm_host *h)
         h->written = h->played;
         msynth_seek(h->syn, h->written);
     }
-    static uint32_t ids[2 * MAXHB], fn[2 * MAXHB];
-    static int32_t pitch[2 * MAXHB];
-    static int16_t tmp[2 * MAXHB][256], out[512];
+    uint32_t *ids = h->sids, *fn = h->sfn;
+    int32_t *pitch = h->spitch;
+    int16_t (*tmp)[BLOCK] = h->stmp, *out = h->sout;
     int16_t *bufs[2 * MAXHB];
     int nb = 0, first[MAXHB];
     for (int k = 0; k < MAXHB; k++) {
@@ -451,11 +461,13 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
         if (GetEnvironmentVariableA("REDM_DUMP", dp, MAX_PATH)) h->dump = fopen(dp, "wb");
         h->buslog = GetEnvironmentVariableA("REDM_BUSLOG", dp, MAX_PATH) != 0;
     }
-    if (FAILED(rl_device_acquire(&h->dev))) { free(h); return NULL; }
+    h->waveid = 0x40000000;
+    h->voiceid = 1;
+    if (FAILED(rl_device_acquire(&h->dev))) { h->dev = NULL; dm_host_free(h); return NULL; }
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, 1);
     if (h->syn) msynth_set_clock(h->syn, host_clock_ms);
     if (h->syn) msynth_set_fixes(h->syn, MS_FIX_WAVE_END | MS_FIX_WAVE_PASTEND);
-    msynth_set_gain(h->syn, 0);
+    if (h->syn) msynth_set_gain(h->syn, 0);
     dls_sink sk = { sink_dl, sink_ul };
     h->dls = dls_port_new(&sk, h);
     h->rev = wavesrev_new(h->rate);
@@ -469,6 +481,7 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->nextbus = 0x1000;
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
+    if (!h->pf) { dm_host_free(h); return NULL; }
     /* fixes of Microsoft's flaws: on, except for comparison runs (REDM_NOFIXES in the environment) */
     int fixes = !GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0);
     if (h->pf && fixes) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER | DM_FIX_WAVE_SEEK |
@@ -504,7 +517,15 @@ void dm_host_free(dm_host *h)
     if (!h) return;
     InterlockedExchange(&h->stop, 1);
     if (h->quit) SetEvent(h->quit);
-    for (int i = 0; i < 3; i++) if (h->th[i]) { WaitForSingleObject(h->th[i], 2000); CloseHandle(h->th[i]); }
+    int alive = 0;
+    for (int i = 0; i < 3; i++) if (h->th[i]) {
+        if (WaitForSingleObject(h->th[i], 2000) != WAIT_OBJECT_0) alive = 1;
+        CloseHandle(h->th[i]);
+    }
+    if (alive) {    /* a thread stuck (in an application's tool): the host stays, leaked, rather than freed under it */
+        LOG_INFO("music: host %p: a thread did not stop; not freed", (void *)h);
+        return;
+    }
     for (int i = 0; i < 2; i++) if (h->ev[i]) CloseHandle(h->ev[i]);
     if (h->quit) CloseHandle(h->quit);
     for (int k = 2; k < MAXHB; k++) if (h->hb[k].b) {
@@ -515,6 +536,7 @@ void dm_host_free(dm_host *h)
     if (h->dry) IDirectSoundBuffer8_Release(&h->dry->IDirectSoundBuffer8_iface);
     if (h->wet) IDirectSoundBuffer8_Release(&h->wet->IDirectSoundBuffer8_iface);
     dm_perf_free(h->pf);
+    while (h->wdls) { hwdl *d = h->wdls; h->wdls = d->next; dm_wave_release(d->w); free(d); }  /* (the synth goes next) */
     dls_port_free(h->dls);
     msynth_free(h->syn);
     wavesrev_free(h->rev);
@@ -528,7 +550,13 @@ void dm_host_lock(dm_host *h) { EnterCriticalSection(&h->lock); }
 void dm_host_unlock(dm_host *h) { LeaveCriticalSection(&h->lock); }
 dm_perf *dm_host_perf(dm_host *h) { return h->pf; }
 uint32_t dm_host_rate(dm_host *h) { return h->rate; }
-rtime_t dm_host_clock(dm_host *h) { return host_clock(h); }
+rtime_t dm_host_clock(dm_host *h)      /* under the lock: an application's clock read races the sink otherwise */
+{
+    EnterCriticalSection(&h->lock);
+    rtime_t t = host_clock(h);
+    LeaveCriticalSection(&h->lock);
+    return t;
+}
 void dm_host_set_volume(dm_host *h, int32_t mb)
 {
     EnterCriticalSection(&h->lock);

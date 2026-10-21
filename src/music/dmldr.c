@@ -599,6 +599,20 @@ static BOOL read_all(IStream *s, BYTE *p, DWORD n)
     ULONG got = 0;
     return SUCCEEDED(IStream_Read(s, p, n, &got)) && got == n;
 }
+/* the stream's length: Stat, else (the loader's own file and memory streams have none) its end, sought and back */
+static BOOL stream_size(IStream *s, ULONGLONG at, ULONGLONG *n)
+{
+    STATSTG st;
+    if (SUCCEEDED(IStream_Stat(s, &st, STATFLAG_NONAME))) { *n = st.cbSize.QuadPart; return TRUE; }
+    LARGE_INTEGER z = { { 0, 0 } }, p;
+    ULARGE_INTEGER end;
+    if (FAILED(IStream_Seek(s, z, STREAM_SEEK_END, &end))) return FALSE;
+    p.QuadPart = (LONGLONG)at;
+    IStream_Seek(s, p, STREAM_SEEK_SET, NULL);
+    *n = end.QuadPart;
+    return TRUE;
+}
+#define FORM_MAX 0x7ffffff0u        /* (no form is near 2 GB: a bigger size is a broken one) */
 BOOL rm_read_form(IStream *s, BYTE **data, DWORD *size)
 {
     *data = NULL; *size = 0;
@@ -608,25 +622,22 @@ BOOL rm_read_form(IStream *s, BYTE **data, DWORD *size)
     if (FAILED(IStream_Seek(s, z, STREAM_SEEK_CUR, &start)) || !read_all(s, h, 8)) return FALSE;
     DWORD n = *(DWORD *)(h + 4);
     if (!memcmp(h, "RIFF", 4) || !memcmp(h, "LIST", 4)) {
-        BYTE *b = malloc(8 + n + 1);
+        /* a short form: what there is (as a stream reader would get); its size cut to the stream before allocating */
+        ULONGLONG len;
+        if (stream_size(s, start.QuadPart + 8, &len) && len >= start.QuadPart + 8 && n > len - start.QuadPart - 8)
+            n = (DWORD)(len - start.QuadPart - 8);
+        if (n > FORM_MAX) return FALSE;
+        BYTE *b = malloc((size_t)n + 9);
         if (!b) return FALSE;
         memcpy(b, h, 8);
-        if (!read_all(s, b + 8, n)) {           /* a short form: what there is (as a stream reader would get) */
-            STATSTG st;
-            if (FAILED(IStream_Stat(s, &st, STATFLAG_NONAME))) { free(b); return FALSE; }
-            ULARGE_INTEGER cur;
-            LARGE_INTEGER p; p.QuadPart = (LONGLONG)start.QuadPart + 8;
-            IStream_Seek(s, p, STREAM_SEEK_SET, &cur);
-            DWORD left = (DWORD)(st.cbSize.QuadPart - cur.QuadPart);
-            if (left > n || !read_all(s, b + 8, left)) { free(b); return FALSE; }
-            n = left;
-        }
+        if (!read_all(s, b + 8, n)) { free(b); return FALSE; }
         *data = b; *size = 8 + n;
         return TRUE;
     }
     /* anything else (a MIDI file): the rest of the stream, chunk by chunk where it says how long they are */
     STATSTG st;
     if (SUCCEEDED(IStream_Stat(s, &st, STATFLAG_NONAME)) && st.cbSize.QuadPart >= start.QuadPart + 8) {
+        if (st.cbSize.QuadPart - start.QuadPart > FORM_MAX) return FALSE;
         DWORD left = (DWORD)(st.cbSize.QuadPart - start.QuadPart);
         BYTE *b = malloc(left + 1);
         if (!b) return FALSE;
@@ -640,6 +651,8 @@ BOOL rm_read_form(IStream *s, BYTE **data, DWORD *size)
     if (!b) return FALSE;
     memcpy(b, h, 8);
     for (DWORD cl = __builtin_bswap32(n);; ) {          /* SMF chunks: big-endian lengths */
+        /* (no MIDI chunk is 64 MB, nor a file 1 GB: junk after the tracks, not a length to grow to) */
+        if (cl > 0x4000000u || got > 0x40000000u) break;
         if (got + cl + 8 > cap) { while (got + cl + 8 > cap) cap *= 2; BYTE *nb = realloc(b, cap); if (!nb) { free(b); return FALSE; } b = nb; }
         if (cl && !read_all(s, b + got, cl)) break;
         got += cl;
@@ -904,11 +917,11 @@ static void class_clear(lclass *c)
             } else if (SUCCEEDED(entry_replace(e))) ldr_retire(L, e);
             if (ld_noloc(&e->d)) class_remove(c, NULL);
         }
-        /* (the next entry may have gone with the others that say nowhere to load from) */
+        /* (the next entry may have gone with the others that say nowhere to load from: then from the start again,
+         * where the entries done have no object left to let go of) */
         lentry *x;
         for (x = c->list; x && x != next; x = x->next) {}
-        e = x ? next : NULL;
-        if (!x && next) { for (x = c->list; x && x->obj == NULL; x = x->next) {} e = NULL; }
+        e = !next ? NULL : x ? next : c->list;
     }
     c->ecur = NULL;
 }
@@ -1171,13 +1184,13 @@ static HRESULT WINAPI ldr_scandir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *ex
 {
     loader *L = ldo(i);
     if ((ext && IsBadReadPtr(ext, 2)) || (cachefile && IsBadReadPtr(cachefile, 2))) return S_OK;
+    EnterCriticalSection(&L->cs);
     for (lclass *c = L->classes; c; c = c->next)
         for (lentry *e = c->list; e; e = e->next) e->flags = (e->flags & ~0xdu) | 2;     /* 773839c2 */
-    if (IsEqualGUID(cls, &G_AllTypes)) return S_OK;
+    if (IsEqualGUID(cls, &G_AllTypes)) { LeaveCriticalSection(&L->cs); return S_OK; }
     ldesc D;
     ld_init(&D);
     D.cls = *cls; D.valid = DMUS_OBJ_CLASS;
-    EnterCriticalSection(&L->cs);
     lclass *c = NULL;
     HRESULT hr = S_OK;
     ldr_class(L, &D, &c, TRUE);
@@ -1732,6 +1745,7 @@ static HRESULT ct_load(container *c, IStream *s, IDirectMusicLoader *l)
                     if (u.id == FCC('U','N','A','M')) {
                         DWORD n = u.size < 0x80 ? u.size : 0x80;
                         if (SUCCEEDED(r_read(s, c->desc.wszName, n))) c->desc.dwValidData |= DMUS_OBJ_NAME;
+                        c->desc.wszName[DMUS_MAX_NAME - 1] = 0;     /* (64 characters fill it: no terminator) */
                     }
                     r_ascend(s, &u);
                 }
@@ -1756,6 +1770,7 @@ static HRESULT ct_load(container *c, IStream *s, IDirectMusicLoader *l)
             c->desc.dwValidData |= DMUS_OBJ_DATE;
         } else if (k.id == FCC('c','a','t',' ')) {
             if (FAILED(hr = r_read(s, c->desc.wszCategory, k.size < 0x80 ? k.size : 0x80))) break;
+            c->desc.wszCategory[DMUS_MAX_CATEGORY - 1] = 0;
             c->desc.dwValidData |= DMUS_OBJ_CATEGORY;
         } else if (k.id == FCC('c','n','t','h')) {
             DWORD f = 0;

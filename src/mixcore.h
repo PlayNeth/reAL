@@ -91,6 +91,9 @@ static inline uint32_t rl_voice_play_bytes(const rl_voice *v) { return (uint32_t
  * send_gain[k] through its own HF filter. */
 int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, uint32_t out_rate, rl_signal_fn signal);
 
+/* Build the resampler's tables ahead of time (else the mixer builds them on first use, holding the lock). */
+void rl_mix_prepare(void);
+
 /* Start playing (snaps smoothed gains to target if the voice was stopped). */
 void rl_voice_start(rl_voice *v);
 

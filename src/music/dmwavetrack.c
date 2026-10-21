@@ -306,6 +306,7 @@ static int ws_alloc_voice(dm_perf *pf, dm_wavetrack *T, wstate *S, void *dl, uin
         }
     }
     if (!use) use = dl;
+    if (!rec && !S->voices) return DM_E_OUTOFMEMORY;     /* (the voice slots could not be made) */
     hr = DM_OK;
     void *h = po->ops.voice_alloc ? po->ops.voice_alloc(po->ctx, use, chan, group, startoff, it->loopstart, it->loopend, &hr) : NULL;
     if (!h) return hr < 0 ? hr : DM_E_FAIL;
@@ -340,6 +341,12 @@ static int wt_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e)
     ws_reset(T, S);
     if (T->nparts) {
         S->var = calloc(T->nparts, 4); S->varused = calloc(T->nparts, 4);
+        if (!S->var || !S->varused) {
+            free(S->var); free(S->varused); free(S->cursor);
+            if (S->ap) dm_audiopath_release(S->ap);
+            free(S);
+            return DM_E_OUTOFMEMORY;
+        }
         if ((T->flags & 2) && T->persistvar && T->persistused)
             for (uint32_t i = 0; i < T->nparts; i++) { S->var[i] = T->persistvar[i]; S->varused[i] = T->persistused[i]; }
     }

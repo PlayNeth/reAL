@@ -59,8 +59,17 @@ static int s_host_failed;     /* don't retry on every message; midiOutOpen tries
 static dm_host *midi_host(void)
 {
     if (s_host || s_host_failed) return s_host;
-    s_host = dm_host_new(g_cfg.midi_rate, 64, 1);
-    if (!s_host) { s_host_failed = 1; LOG_INFO("midi: cannot start the synth (no audio device?)"); return NULL; }
+    EnterCriticalSection(&s_mcs);           /* two first uses at once must not make two synths */
+    if (s_host || s_host_failed) { LeaveCriticalSection(&s_mcs); return s_host; }
+    dm_host *h = dm_host_new(g_cfg.midi_rate, 64, 1);
+    if (!h) {
+        s_host_failed = 1;
+        LeaveCriticalSection(&s_mcs);
+        LOG_INFO("midi: cannot start the synth (no audio device?)");
+        return NULL;
+    }
+    s_host = h;
+    LeaveCriticalSection(&s_mcs);
     dm_host_set_reverb(s_host, g_cfg.midi_reverb);
     const char *gm = dm_gm_dls_path();
     dm_collection *c = dm_collection_from_file(gm, 1);
@@ -232,7 +241,8 @@ static MMRESULT WINAPI h_short(HMIDIOUT h, DWORD m)
 static MMRESULT WINAPI h_long(HMIDIOUT h, LPMIDIHDR hd, UINT sz)
 {
     char x[200];
-    if (hd) hexs(x, sizeof(x), (const BYTE *)hd->lpData, hd->dwBufferLength); else x[0] = 0;
+    x[0] = 0;
+    if (g_cfg.midi_trace && hd && hd->lpData) hexs(x, sizeof(x), (const BYTE *)hd->lpData, hd->dwBufferLength);
     ENTER();
     MMRESULT r;
     rm_midiout *o = ours(h);
@@ -385,7 +395,16 @@ struct rm_stream {
     LARGE_INTEGER run_start, qpf;
     double last_us;                 /* stream time of the last event played */
     DWORD ticks;                    /* tick position of that event */
+    volatile LONG owners;           /* the stream thread and the handle: the last one out frees */
 };
+
+static void stream_free(rm_stream *st)
+{
+    CloseHandle(st->wake);
+    DeleteCriticalSection(&st->cs);
+    free(st->o);
+    free(st);
+}
 
 static double tick_us(rm_stream *st)
 {
@@ -490,6 +509,8 @@ static DWORD WINAPI stream_thread(LPVOID p)
         if (w) WaitForSingleObject(st->wake, w);
     }
     timeEndPeriod(1);
+    /* closed from one of our own callbacks, or a callback outlived the close's wait: free it here */
+    if (!InterlockedDecrement(&st->owners)) stream_free(st);
     return 0;
 }
 
@@ -541,8 +562,10 @@ static MMRESULT WINAPI hs_open(LPHMIDISTRM ph, LPUINT dev, DWORD n, DWORD_PTR cb
             for (int i = 0; i < 16; i++) if (!s_outs[i]) { s_outs[i] = o; r = 0; break; }
             LeaveCriticalSection(&s_mcs);
             if (!r) {
+                st->owners = 2;
                 st->thread = CreateThread(NULL, 0, stream_thread, st, 0, NULL);
-                SetThreadPriority(st->thread, THREAD_PRIORITY_TIME_CRITICAL);
+                if (st->thread) SetThreadPriority(st->thread, THREAD_PRIORITY_TIME_CRITICAL);
+                else LOG_INFO("midi: cannot start the stream thread (%lu)", (unsigned long)GetLastError());
                 *ph = (HMIDISTRM)o;
                 *dev = real_devs();
                 midi_host();
@@ -630,16 +653,14 @@ static void stream_close(rm_midiout *o)
     stream_flush(st);
     InterlockedExchange(&st->quit, 1);
     SetEvent(st->wake);
-    if (GetCurrentThreadId() != GetThreadId(st->thread)) WaitForSingleObject(st->thread, 2000);
-    CloseHandle(st->thread);
-    CloseHandle(st->wake);
-    DeleteCriticalSection(&st->cs);
+    if (st->thread && GetCurrentThreadId() != GetThreadId(st->thread)) WaitForSingleObject(st->thread, 2000);
+    if (st->thread) CloseHandle(st->thread);
     EnterCriticalSection(&s_mcs);
     for (int i = 0; i < 16; i++) if (s_outs[i] == o) s_outs[i] = NULL;
     LeaveCriticalSection(&s_mcs);
     callback(o, MOM_CLOSE, 0);
-    free(st);
-    free(o);
+    /* the thread may still be running (closed from its callback, or stuck in one): it frees on its way out */
+    if (!st->thread || !InterlockedDecrement(&st->owners)) stream_free(st);
 }
 static MMRESULT WINAPI hs_close(HMIDISTRM h)
 {
@@ -665,11 +686,11 @@ static MMRESULT WINAPI hs_prop(HMIDISTRM h, LPBYTE p, DWORD fl)
             DWORD *v = &((DWORD *)p)[1];
             EnterCriticalSection(&st->cs);
             DWORD *field = what == MIDIPROP_TEMPO ? &st->tempo : &st->timediv;
+            r = 0;
             if (fl & MIDIPROP_GET) *v = *field;
             else if (what == MIDIPROP_TIMEDIV && st->running) r = MMSYSERR_INVALPARAM;     /* only while stopped / paused */
             else *field = *v ? *v : *field;
             LeaveCriticalSection(&st->cs);
-            r = 0;
         }
     } else r = s_prop(h, p, fl);
     LEAVE();

@@ -103,10 +103,11 @@ static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags, dm_a
 {
     dm_segstate *ss = calloc(1, sizeof(*ss));
     if (!ss) return NULL;
+    ss->tr = calloc(seg->ntracks ? seg->ntracks : 1, sizeof(*ss->tr));
+    if (!ss->tr) { free(ss); return NULL; }
     ss->refs = 1;
     ss->perf = pf; ss->seg = seg; seg->refs++;
     ss->trackflags = TF_SEEK | TF_START; ss->mtstart = -1; ss->i64start = -1; ss->canstop = 1;
-    ss->tr = calloc(seg->ntracks ? seg->ntracks : 1, sizeof(*ss->tr));
     ss->ntr = seg->ntracks;
     for (int i = 0; i < seg->ntracks; i++) {
         ss->tr[i].t = seg->tracks[i].t; dm_track_addref(ss->tr[i].t);
@@ -388,13 +389,16 @@ static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
     } else ss->rtlast = M2R(pf, ss->mtlast);
     if (ss->started) {
         mtime_t span = (ss->mtstop != 0 && ss->mtstop < pf->target) ? ss->mtstop - ss->mtlast : pf->target - ss->mtlast;
-        while (hr == DM_OK && span > 0) {
+        while (hr == DM_OK && span > 0 && list_find(pf, ss) == k) {
             mtime_t chunk = span <= 0x300 ? span : 0x300;
             span -= chunk;
             hr = ss_play(pf, ss, chunk);
             run_early(pf);
         }
     }
+    /* a segment trigger track's PlaySegment while it played may have aborted it into another list already: that list
+     * keeps it (moving it again would link it into two lists, and the retire pass would end it twice) */
+    if (list_find(pf, ss) != k) { pf->inside_c7c8 = 0; return; }
     if (hr == DMUS_S_END || (ss->mtstop != 0 && ss->mtstop <= ss->mtlast)) {
         if (ss->mtstop != 0 && ss->mtstop == ss->mtlast) ss_abort(pf, ss, ss->mtstop - 1);
         mtime_t last = ss->mtlast;
@@ -630,7 +634,6 @@ static void start_primary(dm_perf *pf, dm_segstate *ss)
 static int perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out)
 {
     if (!pf->nports) return DMUS_E_NOT_INIT;
-    pf->xprec = pf->appxprec;
     if (flags & SEGF_DEFAULT) flags = (flags & ~SEGF_DEFAULT) | seg->resolution;
     if (seg->ioflags & 2) flags &= 0xffeefcff;
     if (flags & SEGF_CONTROL) flags |= SEGF_SECONDARY;
@@ -669,6 +672,7 @@ static int perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start
 /* the application thread's own rand() (the transport thread's is seeded with the time it started) */
 int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out)
 {
+    pf->xprec = pf->appxprec;           /* (here, not in perf_play: a segment trigger track plays on the transport's) */
     pf->apprand = 1;
     int hr = perf_play(pf, seg, flags, start, ap, out);
     pf->apprand = 0;
@@ -828,6 +832,9 @@ uint32_t dm_perf_transport(dm_perf *pf)
         while ((s = pf->lists[k]) && s->i64start <= lat + pf->bumper + (rtime_t)(uint32_t)(pf->prepare_ms * 10000) + 2000000) {
             pf->lists[k] = s->lnext; s->lnext = NULL;
             if (k == 0) start_primary(pf, s); else start_secondary(pf, s);
+            /* a REFTIME start not due yet (past the horizon, or the latency time for a secondary) went back to its
+             * list: it waits for a later pass (taking it again now would loop for ever) */
+            if (list_find(pf, s) == k) break;
         }
     }
     for (int k = 6; k < 10; k++)

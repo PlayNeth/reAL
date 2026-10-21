@@ -7,6 +7,13 @@
 
 typedef struct rl_vec3 { float x, y, z; } rl_vec3;
 
+/* finite test by bits: the DLL is built with -ffast-math, which lets isfinite() fold to 1 */
+static inline int rl_finite(float f)
+{
+    union { float f; uint32_t u; } b = { f };
+    return (b.u & 0x7f800000u) != 0x7f800000u;
+}
+
 typedef struct rl_listener3d {
     rl_vec3 pos, vel, front, top;
     float distance_factor, rolloff_factor, doppler_factor;

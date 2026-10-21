@@ -212,11 +212,11 @@ void *rl_hotpatch(void *fn, void *repl, const char *name)
     return t;
 }
 
-/* called at load (ole32 already mapped) and again from DirectSoundCreate, where ole32 can be loaded */
-void rl_music_hook(int can_load)
+static volatile LONG s_music_done;
+static LONG s_music_reported;
+
+static void music_hook_once(int can_load)
 {
-    static LONG done, reported;
-    if (!g_cfg.enabled || !g_cfg.music || done) return;
     static HANDLE mine;
     if (!mine) {   /* only one copy of reAL in a process hooks COM */
         char name[64];
@@ -224,7 +224,7 @@ void rl_music_hook(int can_load)
         HANDLE m = CreateMutexA(NULL, FALSE, name);
         if (m && GetLastError() == ERROR_ALREADY_EXISTS) {
             CloseHandle(m);
-            done = 1;
+            s_music_done = 1;
             LOG_INFO("music: another reAL in this process already serves DirectMusic");
             return;
         }
@@ -232,16 +232,16 @@ void rl_music_hook(int can_load)
         /* reDM's threads, objects and COM hooks live in this module: games that FreeLibrary dsound.dll when
          * they release DirectSound (Midnight Club II does) must not unload it under them */
         HMODULE pin;
-        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_music_hook, &pin))
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)music_hook_once, &pin))
             LOG_INFO("music: cannot pin reAL in memory (%lu)", GetLastError());
     }
     HMODULE ole = GetModuleHandleA("ole32.dll");
     if (!ole && can_load) ole = LoadLibraryA("ole32.dll");
     if (!ole) {
-        if (!reported) { reported = 1; LOG_INFO("music: ole32 not loaded yet, hooking later"); }
+        if (!s_music_reported) { s_music_reported = 1; LOG_INFO("music: ole32 not loaded yet, hooking later"); }
         return;
     }
-    done = 1;
+    s_music_done = 1;
     void *a = (void *)GetProcAddress(ole, "CoCreateInstance");
     void *b = (void *)GetProcAddress(ole, "CoCreateInstanceEx");
     void *c = (void *)GetProcAddress(ole, "CoGetClassObject");
@@ -249,6 +249,19 @@ void rl_music_hook(int can_load)
     if (b) s_cocreateex = (cocreateex_fn)rl_hotpatch(b, (void *)hook_cocreateex, "CoCreateInstanceEx");
     if (c) s_cogetclass = (cogetclass_fn)rl_hotpatch(c, (void *)hook_cogetclass, "CoGetClassObject");
     if (!s_cocreate) LOG_INFO("music: CoCreateInstance not hooked; DirectMusic stays with Windows");
+}
+
+/* called at load (ole32 already mapped) and again from DirectSoundCreate, where ole32 can be loaded */
+void rl_music_hook(int can_load)
+{
+    static SRWLOCK lock = SRWLOCK_INIT;
+    if (!g_cfg.enabled || !g_cfg.music || s_music_done) return;
+    /* two threads creating DirectSound at once must not hot-patch twice (the second patch would hook our
+     * own hook and recurse) */
+    AcquireSRWLockExclusive(&lock);
+    if (s_music_done) { ReleaseSRWLockExclusive(&lock); return; }
+    music_hook_once(can_load);
+    ReleaseSRWLockExclusive(&lock);
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)

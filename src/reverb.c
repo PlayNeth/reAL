@@ -50,6 +50,21 @@ int rl_eax1_room_hf(uint32_t env, float t)
 
 #define RAMP_LEN  1024                 /* input-gain ramp for level-only changes */
 #define RING_MAX  2.0f                 /* the old environment's tail fades out over at most 2 s */
+#define RING_FAST 1024                 /* a tail cut short by another room change fades out over this */
+#define TAIL_MAX  20.0f                /* longest decay a level-0 room rings for (EAX's maximum) */
+
+/* start a fresh network for a new room; the current one rings out */
+static void swap_room(rl_reverb *r, const alrv_params *p)
+{
+    r->cur ^= 1;
+    alrv *nw = &r->eng[r->cur];
+    alrv_reset(nw);
+    alrv_set_params(nw, p);
+    float secs = r->decay < RING_MAX ? r->decay : RING_MAX;      /* the old room's decay */
+    r->ring_total = r->ring_left = (uint32_t)((secs > 0.25f ? secs : 0.25f) * r->rate);
+    r->ramp_left = 0;
+    r->target = *p;
+}
 
 int rl_reverb_init(rl_reverb *r, uint32_t rate)
 {
@@ -100,12 +115,17 @@ void rl_reverb_set_props(rl_reverb *r, const alrv_props *props)
     if (!r->eng[0].mem) return;
     alrv_params p;
     alrv_compute_params(&p, props, r->rate);
-    if (!memcmp(&p, &r->target, sizeof(p)) && r->active) return;
+    int was_active = r->active;
+    if (r->pending && !memcmp(&p, &r->pend, sizeof(p))) return;
+    if (!r->pending && !memcmp(&p, &r->target, sizeof(p)) && r->active) return;
     alrv *cur = &r->eng[r->cur];
     if (!cur->have_params) {
         alrv_set_params(cur, &p);
+        r->target = p;
+        r->pending = 0;
     } else if (same_structure(&p, &r->target)) {
-        /* same room, different levels/decay: update in place, ramp the input gains */
+        /* same room, different levels/decay: update in place, ramp the input gains (this also drops a room
+         * change still waiting, as the game went back to the current room) */
         float from[5];
         memcpy(from, r->gain_cur, sizeof(from));
         if (!r->ramp_left) get_gains(&cur->p, from);
@@ -113,21 +133,33 @@ void rl_reverb_set_props(rl_reverb *r, const alrv_props *props)
         memcpy(r->gain_from, from, sizeof(from));
         r->ramp_left = RAMP_LEN;
         put_gains(&cur->p, from);
+        r->target = p;
+        r->pending = 0;
+    } else if (r->ring_left) {
+        /* a different room while the one before last still rings in the other network: fade that tail out
+         * quickly (from where its fade is now) and change rooms once it is gone, rather than cutting it */
+        if (r->ring_left > RING_FAST) {
+            float w = (float)r->ring_left / (float)r->ring_total;
+            r->ring_left = RING_FAST;
+            r->ring_total = (uint32_t)(RING_FAST / w);
+        }
+        r->pend = p;
+        r->pend_decay = props->decay;
+        r->pending = 1;
+        r->active = props->room > 0.0f || r->active;   /* the current room keeps playing until the change */
+        return;
     } else {
         /* a different room: new input goes to a fresh network, the old one rings out */
-        int old = r->cur;
-        r->cur ^= 1;
-        alrv *nw = &r->eng[r->cur];
-        alrv_reset(nw);
-        alrv_set_params(nw, &p);
-        (void)old;
-        float secs = r->decay < RING_MAX ? r->decay : RING_MAX;   /* the old room's decay */
-        r->ring_total = r->ring_left = (uint32_t)((secs > 0.25f ? secs : 0.25f) * r->rate);
-        r->ramp_left = 0;
+        swap_room(r, &p);
+        r->pending = 0;
     }
-    r->target = p;
     r->decay = props->decay;
     r->active = props->room > 0.0f;
+    if (was_active && !r->active) {
+        /* level 0: no new input, but what is in the network rings out (instead of freezing until later) */
+        float secs = props->decay < TAIL_MAX ? props->decay : TAIL_MAX;
+        r->tail_left = (uint32_t)((secs > 0.25f ? secs : 0.25f) * 1.5f * r->rate) + RAMP_LEN;
+    }
 }
 
 void rl_reverb_set_eax1(rl_reverb *r, uint32_t env, float volume, float decay, float damping)
@@ -143,7 +175,25 @@ void rl_reverb_set_eax1(rl_reverb *r, uint32_t env, float volume, float decay, f
 /* the 8 reverb channels of this block (centre copy folded into the rear pair), or NULL when silent */
 static float *render(rl_reverb *r, const float *in, uint32_t frames, float *ch[ALRV_NOUT])
 {
-    if (!r->eng[0].mem || (!r->active && !r->ring_left)) return NULL;
+    if (!r->eng[0].mem) return NULL;
+    if (r->pending && !r->ring_left) {
+        /* the room change that waited for the old tail */
+        float d = r->pend_decay;
+        swap_room(r, &r->pend);
+        r->pending = 0;
+        r->decay = d;
+        r->active = r->pend.room > 0.0f;
+        r->tail_left = 0;
+    }
+    if (!r->active && !r->ring_left && !r->tail_left) return NULL;
+    if (!r->active && r->tail_left) {
+        if (r->tail_left > frames) r->tail_left -= frames;
+        else {
+            /* rung out: start clean when the level comes back */
+            r->tail_left = 0;
+            if (!r->ring_left) { alrv_reset(&r->eng[r->cur]); return NULL; }
+        }
+    }
     if (r->scratch_frames < frames) {
         free(r->scratch);
         r->scratch = calloc((size_t)frames * 19, sizeof(float));

@@ -101,6 +101,7 @@ static HRESULT WINAPI cmo_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECT
     if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "DMPR", 4)) {
         DWORD end = 8 + *(const DWORD *)(b + 4);
         if (end > n) end = n;
+        if (end < 12) end = 12;         /* (a size under 4: no chunks, not a wrapped length) */
         dm_guid g;
         uint16_t name[17];
         d->dwValidData = DMUS_OBJ_CLASS;
@@ -126,6 +127,7 @@ static HRESULT chordmap_load_data(dmc_chordmap *m, const BYTE *b, DWORD n)
     if (n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMPR", 4)) return DMUS_E_CHUNKNOTFOUND;
     DWORD end = 8 + *(const DWORD *)(b + 4);
     if (end > n) end = n;
+    if (end < 12) end = 12;
     return dmc_chordmap_load(m, b + 12, end - 12);
 }
 static HRESULT WINAPI cms_load(IPersistStream *i, IStream *st)
@@ -171,7 +173,8 @@ static IDirectMusicChordMap *chordmap_iface(dmc_chordmap *m)
 {
     if (!m) return NULL;
     rm_chordmap *o = m->wrapper;
-    if (o) { cmp_addref(&o->IDirectMusicChordMap_iface); dmc_chordmap_release(m); return &o->IDirectMusicChordMap_iface; }
+    /* (not one whose last Release is under way on another thread: a new wrapper then) */
+    if (o && ref_if_alive(&o->ref)) { dmc_chordmap_release(m); return &o->IDirectMusicChordMap_iface; }
     o = new_chordmap(m);
     if (!o) { dmc_chordmap_release(m); return NULL; }
     return &o->IDirectMusicChordMap_iface;

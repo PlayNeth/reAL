@@ -118,7 +118,7 @@ static WCHAR lower(WCHAR c) { return c >= 'A' && c <= 'Z' ? c + 0x20 : c; }
 static void lex_advance(lexer *L)                  /* 0040bd24 */
 {
     if (L->next) { L->col += (int)(L->next - L->cur); L->cur = L->next; L->next = NULL; }
-    else { L->cur++; L->col++; }
+    else if (*L->cur) { L->cur++; L->col++; }    /* (never past the text's end) */
 }
 static void lex_error(lexer *L, int code)          /* 0040bd42 */
 {
@@ -232,7 +232,9 @@ typedef struct {
     symtab routines, globals, props;    /* +0x14 +0x18 +0x20 */
     VEC(int) proplist;                  /* +0x24 */
     VEC(item) ops;                      /* +0x30 the operator stack while an expression is converted */
+    int depth;                          /* nested Ifs and calls in arguments (the parser and executor recurse) */
 } parser;
+#define MAXNEST 256
 
 static const char *const s_perr[27] = {
     "Unexpected error!", "Expected Sub or Dim statement", "Expected identifier", "Expected line break",
@@ -568,7 +570,10 @@ static int call_parse(parser *P, int r, symtab *locals, target *t, int paren)
         if (x == 1 && set_hr(P, VPUSH(P->proplist, off))) return 0;
         kind = 0; data = off;
     } else { kind = 1; data = t->ref; }
+    if (P->depth >= MAXNEST) { perror_(P, 0); return 0; }
+    P->depth++;
     int args = arguments(P, r, locals, paren);
+    P->depth--;
     if (P->hr < 0) return 0;
     int n = P->g->calls.n;
     if (set_hr(P, VPUSH(P->g->calls, kind, data, args))) return 0;
@@ -621,15 +626,19 @@ static int block(parser *P, int r, symtab *locals);
 static void if_statement(parser *P, int r, symtab *locals)
 {
     if (P->hr < 0) return;
+    if (P->depth >= MAXNEST) { perror_(P, 0); return; }
     prog *g = P->g;
     int si = g->stmts.n;
     if (set_hr(P, VPUSH(g->stmts, 1, P->L->line, 0, 0))) return;
     VEC(clause) cl = { 0 };
     int first = 1;
+    P->depth++;
     do {
         int cond = 1;
-        if (!first) { if (P->L->tok == T_ELSE) cond = 0; }
-        else first = 0;
+        if (!first) {
+            if (P->L->tok == T_EOF) { perror_(P, 0x14); goto out; }  /* (the text ended inside the If) */
+            if (P->L->tok == T_ELSE) cond = 0;
+        } else first = 0;
         if (p_accept(P)) goto out;
         int e = 0;
         if (cond) {
@@ -648,6 +657,7 @@ static void if_statement(parser *P, int r, symtab *locals)
     g->stmts.p[si].a = ci;
     g->stmts.p[si].b = g->stmts.n;
 out:
+    P->depth--;
     free(cl.p);
 }
 
@@ -773,12 +783,20 @@ HRESULT avs_parse(const WCHAR *src, IDispatch *global, avs_engine **out, avs_err
 }
 
 /* ------------------------------------------------------------------ the executor (00409887 and 0040a73e on) */
+/* the script's variables (True, False, Nothing, then its own), shared by the calls of its routines: each call from
+ * outside runs on a stack of its own, as threads (the application's, the performance's) may call the script at
+ * once, and the variables are only touched under the lock, never held while anything is called */
 typedef struct {
-    int init;
+    CRITICAL_SECTION cs;
+    int init;                       /* (before the script has run a variable reads as empty) */
+    VARIANT *v;
+    int n;
+} vars;
+typedef struct {
+    vars *vs;
     prog *g;
     IDispatch *named;
-    VARIANT none;                   /* (what a variable reads before the script has run) */
-    VARIANT *stack;
+    VARIANT *stack;                 /* the routines' own variables, arguments and values */
     int n, cap;
 } exec;
 
@@ -793,16 +811,42 @@ static void stack_pop(exec *x, int to)             /* 0040a423 */
 {
     while (x->n > to) VariantClear(&x->stack[--x->n]);
 }
-static HRESULT ex_init(exec *x)                     /* 0040a794: the variables, True -1, False 0, Nothing */
+static HRESULT avs_clear(VARIANT *v);
+static void vars_start(vars *vs)                    /* 0040a794: the variables, True -1, False 0, Nothing */
 {
-    if (x->init) return S_OK;
-    HRESULT hr = stack_push(x, x->g->globals.n);
+    if (vs->init) return;
+    V_VT(&vs->v[0]) = VT_I4; V_I4(&vs->v[0]) = -1;
+    V_VT(&vs->v[1]) = VT_I4; V_I4(&vs->v[1]) = 0;
+    V_VT(&vs->v[2]) = VT_UNKNOWN; V_UNKNOWN(&vs->v[2]) = NULL;
+    vs->init = 1;
+}
+static HRESULT ex_init(exec *x)
+{
+    if (x->vs->n < NBUILTIN) return E_UNEXPECTED;
+    EnterCriticalSection(&x->vs->cs);
+    vars_start(x->vs);
+    LeaveCriticalSection(&x->vs->cs);
+    return S_OK;
+}
+static HRESULT var_get(vars *vs, int k, VARIANT *out)          /* 0040a46c */
+{
+    EnterCriticalSection(&vs->cs);
+    HRESULT hr = vs->init ? avs_copy(out, &vs->v[k]) : S_OK;
+    LeaveCriticalSection(&vs->cs);
+    return hr;
+}
+static HRESULT var_set(vars *vs, int k, const VARIANT *v)
+{
+    VARIANT nv, old;
+    VariantInit(&nv);
+    HRESULT hr = avs_copy(&nv, v);
     if (FAILED(hr)) return hr;
-    if (x->n < NBUILTIN) return E_UNEXPECTED;
-    V_VT(&x->stack[0]) = VT_I4; V_I4(&x->stack[0]) = -1;
-    V_VT(&x->stack[1]) = VT_I4; V_I4(&x->stack[1]) = 0;
-    V_VT(&x->stack[2]) = VT_UNKNOWN; V_UNKNOWN(&x->stack[2]) = NULL;
-    x->init = 1;
+    EnterCriticalSection(&vs->cs);
+    vars_start(vs);
+    old = vs->v[k];
+    vs->v[k] = nv;
+    LeaveCriticalSection(&vs->cs);
+    avs_clear(&old);                /* (outside the lock: letting go of an object may run anything) */
     return S_OK;
 }
 
@@ -959,13 +1003,12 @@ static HRESULT reference_do(exec *x, int mode, int rf, VARIANT *v, EXCEPINFO *ei
         hr = d_get(x->named, gl.dispid, &tmp, ei);
         hr = map_err(x, mode, hr, gl.name, ei);
     } else {
-        VARIANT *slot = &x->stack[(r.local ? frame : 0) + r.index];
         if (!props && (mode == 1 || mode == 2)) {
             hr = check_set(x, v, mode == 2, c[0], ei);
             if (FAILED(hr)) return hr;
-            return avs_copy(slot, v);
+            return r.local ? avs_copy(&x->stack[frame + r.index], v) : var_set(x->vs, r.index, v);
         }
-        hr = avs_copy(&tmp, slot);
+        hr = r.local ? avs_copy(&tmp, &x->stack[frame + r.index]) : var_get(x->vs, r.index, &tmp);
     }
     if (FAILED(hr)) goto out;
     if (g->chain.p[pos + 1] == -1) goto done;
@@ -1009,16 +1052,28 @@ out:
 static HRESULT run(exec *x, int s, EXCEPINFO *ei, int frame);
 static HRESULT eval(exec *x, VARIANT *out, int e, EXCEPINFO *ei, int frame);
 
+/* how deep routines (of any script, the calls between scripts included) run on this thread: a script calling
+ * itself for ever stops with a runtime error before the thread's stack runs out */
+#define MAXCALLS 1000
+static DWORD s_depth_tls = TLS_OUT_OF_INDEXES;
+static INIT_ONCE s_depth_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK depth_start(INIT_ONCE *o, void *p, void **c) { s_depth_tls = TlsAlloc(); return TRUE; }
+
 /* 0040adde: a routine of the script, its variables on the stack while it runs */
 static HRESULT call_routine(exec *x, int r, EXCEPINFO *ei)
 {
     HRESULT hr = ex_init(x);
     if (FAILED(hr)) return hr;
+    InitOnceExecuteOnce(&s_depth_once, depth_start, NULL, NULL);
+    INT_PTR depth = s_depth_tls != TLS_OUT_OF_INDEXES ? (INT_PTR)TlsGetValue(s_depth_tls) : 0;
+    if (depth >= MAXCALLS) return rt_error(ei, 0, L"Out of stack space", NULL, NULL);
     routine rt = x->g->routines.p[r];
     int base = x->n;
     hr = stack_push(x, rt.nlocals);
     if (FAILED(hr)) return hr;
+    if (s_depth_tls != TLS_OUT_OF_INDEXES) TlsSetValue(s_depth_tls, (void *)(depth + 1));
     hr = run(x, rt.stmt, ei, base);
+    if (s_depth_tls != TLS_OUT_OF_INDEXES) TlsSetValue(s_depth_tls, (void *)depth);
     stack_pop(x, base);
     return hr;
 }
@@ -1111,14 +1166,14 @@ static HRESULT value_do(exec *x, int vi, VARIANT *out, EXCEPINFO *ei, int frame)
 
 static int ipow(int b, int e)                      /* 0040a3bf */
 {
-    unsigned u = e < 0 ? -(unsigned)e : (unsigned)e;
-    int r = 1;
+    unsigned u = e < 0 ? -(unsigned)e : (unsigned)e, ub = (unsigned)b, ur = 1;    /* (wrapping, as dmscript's) */
     for (;;) {
-        if (u & 1) r *= b;
+        if (u & 1) ur *= ub;
         u >>= 1;
         if (!u) break;
-        b *= b;
+        ub *= ub;
     }
+    int r = (int)ur;
     if (e < 0) r = r ? 1 / r : 0;       /* (dmscript divides by zero there) */
     return r;
 }
@@ -1179,16 +1234,18 @@ static HRESULT eval(exec *x, VARIANT *out, int e, EXCEPINFO *ei, int frame)
             VARIANT *top = &x->stack[x->n - 1];
             if (u) {
                 if (V_VT(top) != VT_I4) hr = DISP_E_TYPEMISMATCH;       /* 0040a30e */
-                else V_I4(top) = it.data == T_NOT ? ~V_I4(top) : -V_I4(top);
+                else V_I4(top) = it.data == T_NOT ? ~V_I4(top) : (int)(0u - (unsigned)V_I4(top));
             } else {
                 hr = binop(it.data, top, &x->stack[x->n - 2], ei);
                 stack_pop(x, x->n - 1);
             }
         } else if (it.kind == 2) {
             hr = stack_push(x, 1);
-            VARIANT *top = &x->stack[x->n - 1];
-            if (SUCCEEDED(hr)) hr = value_do(x, it.data, top, ei, frame);
-            if (V_VT(top) == VT_EMPTY) { V_VT(top) = VT_I4; V_I4(top) = 0; }
+            if (SUCCEEDED(hr)) {
+                VARIANT *top = &x->stack[x->n - 1];
+                hr = value_do(x, it.data, top, ei, frame);
+                if (V_VT(top) == VT_EMPTY) { V_VT(top) = VT_I4; V_I4(top) = 0; }
+            }
         } else if (it.kind == 3) {
             if (FAILED(hr)) break;
             hr = call_do(x, it.data, 1, ei, frame);
@@ -1212,7 +1269,14 @@ static HRESULT if_do(exec *x, int ci, EXCEPINFO *ei, int frame)
         if (c.kind == 2) {
             VARIANT v;
             VariantInit(&v);
-            if (FAILED(eval(x, &v, c.expr, ei, frame))) VariantClear(&v);    /* (the error is not the If's) */
+            HRESULT hr = eval(x, &v, c.expr, ei, frame);
+            if (FAILED(hr)) {                       /* (the error is not the If's: its strings let go of) */
+                VariantClear(&v);
+                if (hr == DISP_E_EXCEPTION && ei) {
+                    SysFreeString(ei->bstrSource); SysFreeString(ei->bstrDescription); SysFreeString(ei->bstrHelpFile);
+                    memset(ei, 0, sizeof(*ei));
+                }
+            }
             if (V_VT(&v) != VT_I4) {
                 const WCHAR *m = V_VT(&v) == VT_BSTR ?
                     L"Type mismatch: the condition of an if statement evaluated as a string where a numeric True/False value was expected" :
@@ -1286,7 +1350,7 @@ typedef struct {
     ITypeInfo ITypeInfo_iface;      /* (+0x04: GetTypeInfo hands out the object itself) */
     LONG ref;
     avs_engine *e;
-    exec x;
+    vars vs;
 } sdisp;
 static sdisp *sd(IDispatch *i) { return CONTAINING_RECORD(i, sdisp, IDispatch_iface); }
 static sdisp *st_(ITypeInfo *i) { return CONTAINING_RECORD(i, sdisp, ITypeInfo_iface); }
@@ -1304,8 +1368,9 @@ static ULONG WINAPI sd_release(IDispatch *i)
     sdisp *s = sd(i);
     LONG r = InterlockedDecrement(&s->ref);
     if (!r) {
-        stack_pop(&s->x, 0);
-        free(s->x.stack);
+        for (int k = 0; k < s->vs.n; k++) VariantClear(&s->vs.v[k]);
+        free(s->vs.v);
+        DeleteCriticalSection(&s->vs.cs);
         free(s);
     }
     return r;
@@ -1360,7 +1425,11 @@ static HRESULT WINAPI sd_invoke(IDispatch *i, DISPID id, REFIID r, LCID l, WORD 
             if (p->cArgs) return DISP_E_BADPARAMCOUNT;
             if (p->cNamedArgs) return DISP_E_NONAMEDARGS;
             if (res) return E_UNEXPECTED;
-            return call_routine(&s->x, id - 1, ei);
+            exec x = { &s->vs, g, s->e->named, NULL, 0, 0 };     /* (a stack of this call's own) */
+            HRESULT hr = call_routine(&x, id - 1, ei);
+            stack_pop(&x, 0);
+            free(x.stack);
+            return hr;
         }
         return DISP_E_MEMBERNOTFOUND;
     }
@@ -1371,8 +1440,7 @@ static HRESULT WINAPI sd_invoke(IDispatch *i, DISPID id, REFIID r, LCID l, WORD 
         if (p->cNamedArgs) return DISP_E_NONAMEDARGS;
         if (res) {
             VariantInit(res);
-            VARIANT *v = s->x.init ? &s->x.stack[k] : &s->x.none;     /* 0040a46c */
-            avs_copy(res, v);
+            var_get(&s->vs, k, res);
         }
         return S_OK;
     }
@@ -1380,11 +1448,12 @@ static HRESULT WINAPI sd_invoke(IDispatch *i, DISPID id, REFIID r, LCID l, WORD 
     if (p->cArgs != 1 || p->cNamedArgs != 1) return DISP_E_BADPARAMCOUNT;
     if (p->rgdispidNamedArgs[0] != DISPID_PROPERTYPUT) return DISP_E_PARAMNOTFOUND;
     if (res) return E_INVALIDARG;
-    HRESULT hr = ex_init(&s->x);                    /* 0040a913 */
+    exec x = { &s->vs, g, s->e->named, NULL, 0, 0 };
+    HRESULT hr = ex_init(&x);                       /* 0040a913 */
     if (FAILED(hr)) return hr;
-    hr = check_set(&s->x, p->rgvarg, (f & DISPATCH_PROPERTYPUTREF) != 0, g->globals.p[k].name, ei);
+    hr = check_set(&x, p->rgvarg, (f & DISPATCH_PROPERTYPUTREF) != 0, g->globals.p[k].name, ei);
     if (FAILED(hr)) return hr;
-    return avs_copy(&s->x.stack[k], p->rgvarg);
+    return var_set(&s->vs, k, p->rgvarg);
 }
 static const IDispatchVtbl sd_vtbl = { sd_qi, sd_addref, sd_release, sd_typecount, sd_typeinfo, sd_ids, sd_invoke };
 
@@ -1475,13 +1544,14 @@ HRESULT avs_dispatch(avs_engine *e, IDispatch **out)     /* 0040b982: made once,
     if (!e->disp) {
         sdisp *s = calloc(1, sizeof(*s));
         if (!s) return E_OUTOFMEMORY;
+        s->vs.v = calloc(e->g.globals.n ? e->g.globals.n : 1, sizeof(VARIANT));     /* (all VT_EMPTY) */
+        if (!s->vs.v) { free(s); return E_OUTOFMEMORY; }
+        s->vs.n = e->g.globals.n;
+        InitializeCriticalSection(&s->vs.cs);
         s->IDispatch_iface.lpVtbl = (IDispatchVtbl *)&sd_vtbl;
         s->ITypeInfo_iface.lpVtbl = (ITypeInfoVtbl *)&ti_vtbl;
         s->ref = 1;
         s->e = e;
-        s->x.g = &e->g;
-        s->x.named = e->named;
-        VariantInit(&s->x.none);
         e->disp = &s->IDispatch_iface;
     }
     *out = e->disp;
@@ -1493,9 +1563,16 @@ void avs_free(avs_engine *e)
 {
     if (!e) return;
     if (e->disp) {
-        sdisp *s = sd(e->disp);
-        stack_pop(&s->x, 0);            /* (the variables let go of with the engine; the object may live on) */
-        s->x.init = 0;
+        sdisp *s = sd(e->disp);         /* (the variables let go of with the engine; the object may live on) */
+        VARIANT *old = malloc((s->vs.n ? s->vs.n : 1) * sizeof(VARIANT));
+        EnterCriticalSection(&s->vs.cs);
+        for (int k = 0; k < s->vs.n; k++) {
+            if (old) old[k] = s->vs.v[k]; else VariantClear(&s->vs.v[k]);
+            VariantInit(&s->vs.v[k]);
+        }
+        s->vs.init = 0;
+        LeaveCriticalSection(&s->vs.cs);
+        if (old) { for (int k = 0; k < s->vs.n; k++) VariantClear(&old[k]); free(old); }
         IDispatch_Release(e->disp);
     }
     if (e->named) IDispatch_Release(e->named);

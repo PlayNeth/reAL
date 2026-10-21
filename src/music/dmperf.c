@@ -462,6 +462,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
 {
     if (t->kind == TRK_TEMPO && (prm == PRM_TEMPO || prm == PRM_PRIVTEMPO)) {
         const dm_tempotrack *tt = t->data;
+        if (!data) return DM_E_POINTER;
         if (prm == PRM_PRIVTEMPO) {
             tempoparam tp;
             mtime_t n = 0;
@@ -484,6 +485,7 @@ static int track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next,
     }
     if (t->kind == TRK_TIMESIG && prm == PRM_TIMESIG) {
         const dm_tstrack *ts = t->data;
+        if (!data) return DM_E_POINTER;
         if (!ts->active) return DMUS_E_TYPE_DISABLED;
         if (!ts->n) return DMUS_E_NOT_FOUND;
         int prev = 0, i;
@@ -582,7 +584,14 @@ static int ss_fold(dm_segstate *ss, mtime_t *t, mtime_t *off, uint32_t *loops)
 {
     mtime_t o = ss->mtstart - ss->startpoint, s = *t - ss->mtstart + ss->startpoint, len = ss->loopend - ss->loopstart;
     uint32_t n = 0;
-    while (ss->loopend <= s && n < ss->repeats) { o += len; s -= len; n++; }
+    if (len <= 0) {         /* an empty or inverted loop never leaves the loop: all the repeats at once, not one by one */
+        if (ss->loopend <= s && ss->repeats) {
+            n = ss->repeats;
+            o = (mtime_t)(uint32_t)((uint32_t)o + (uint32_t)len * n);
+            s = (mtime_t)(uint32_t)((uint32_t)s - (uint32_t)len * n);
+        }
+    } else
+        while (ss->loopend <= s && n < ss->repeats) { o += len; s -= len; n++; }
     *t = s; *off = o; *loops = n;
     return (s < 0 || ss->length <= s) ? 1 : 0;
 }
@@ -695,7 +704,7 @@ int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uin
         for (int k = 0; k < 9 && !ctx; k++)
             for (dm_segstate *s = pf->lists[k]; s && !ctx; s = s->lnext)
                 for (int i = 0; i < s->ntr; i++) if (s->tr[i].vid == trackid) { ctx = s; cf = s->tr[i].cfg & 7; break; }
-    if ((prm == PRM_TEMPO || prm == PRM_TIMESIG) && !data) return DM_E_POINTER;
+    if ((prm == PRM_TEMPO || prm == PRM_PRIVTEMPO || prm == PRM_TIMESIG) && !data) return DM_E_POINTER;
     pf->apprand = 1;                    /* (called from the application) */
     int hr = perf_getparam_ex(pf, ctx, cf, prm, group, index, mt, next, data);
     pf->apprand = 0;
@@ -1019,7 +1028,7 @@ static void stamp_send(dm_perf *pf, dm_segstate *ss, dm_pmsg *p)
 static pchentry *pch_lookup(dm_perf *pf, uint32_t pch)
 {
     for (pchblock *b = pf->blocks; b; b = b->next)
-        if (b->base <= pch && pch < b->base + 16) return &b->e[pch - b->base];
+        if (pch - b->base < 16) return &b->e[pch - b->base];     /* (no wrap for the block at 0xfffffff0) */
     return NULL;
 }
 
@@ -2075,6 +2084,7 @@ dm_audiopath *dm_perf_create_audiopath_ex(dm_perf *pf, int activate, uint32_t n,
     if (!ap) return NULL;
     ap->refs = 1; ap->pf = pf; ap->vid = ++g_trackid; ap->active = activate;
     ap->virt = malloc((n + 1) * sizeof(uint32_t)); ap->real = malloc((n + 1) * sizeof(uint32_t));
+    if (!ap->virt || !ap->real) { free(ap->virt); free(ap->real); free(ap); return NULL; }
     for (uint32_t i = 0; i < n; i++) {
         uint32_t r;
         if (ap_alloc(pf, drum ? drum[i] : 0, &r) < 0) break;

@@ -359,14 +359,22 @@ static float curve_y(float x)
     return (float)pow(y, 1.5);
 }
 
+/* frames per block at the output rate.  ALchemy uses 512 * ceil(rate / 24000), which only matches the
+ * half-band tiers its process runs (512 << tiers) up to 48 kHz and at 72..96 kHz; at 48..72 kHz and above
+ * 96 kHz its blocks come out garbled.  reAL takes the size the tiers need (the same everywhere else). */
+static unsigned block_frames(uint32_t rate)
+{
+    return HOP << (rate > 96000 ? 3 : rate > 48000 ? 2 : rate > 24000 ? 1 : 0);
+}
+
 static void configure(rl_cmss3 *c)
 {
     float rate = (float)c->rate;
     c->rate24 = rate < 24000.0f ? rate : 24000.0f;
     c->rate48 = rate < 48000.0f ? rate : 48000.0f;
-    c->bs = ((c->rate + 23999) / 24000) * 512;
-    c->n48 = c->bs > 1024 ? 1024 : c->bs;
     c->tiers = c->rate > 96000 ? 3 : c->rate > 48000 ? 2 : c->rate > 24000 ? 1 : 0;
+    c->bs = block_frames(c->rate);
+    c->n48 = c->bs > 1024 ? 1024 : c->bs;
 
     /* fn 0x1003b4d0: rear gain floor and the side/rear levels by layout */
     c->floor_lo = 0.4125f; c->rmult = 0.9f; c->smult = 0.44f;
@@ -412,6 +420,8 @@ static void configure(rl_cmss3 *c)
         c->sh_b0 = h - -(h - 1.0f) * r;
         c->sh_b1 = -(h - 1.0f) - r * h;
         c->sh_r = r;
+        /* 8 kHz at or above Nyquist (a 16 kHz device): sin w ~ 0 makes the design NaN (in ALchemy too) */
+        if (!(8000.0f < 0.5f * c->rate48) || !(r == r)) { c->sh_b0 = 1.0f; c->sh_b1 = 0.0f; c->sh_r = 0.0f; }
     }
 
     /* fn 0x100705b0 with (1.4125, 8000, 2.5, 1.4125, 2368, 2.5): the centre's presence peaks */
@@ -472,7 +482,7 @@ rl_cmss3 *rl_cmss3_create(uint32_t rate, uint32_t mask, int virt)
 {
     if (rate < 8000 || rate > 192000)
         return NULL;
-    unsigned bs = ((rate + 23999) / 24000) * 512;
+    unsigned bs = block_frames(rate);
     unsigned outlen = 2 * bs;
     size_t floats = (size_t)O_N * 2 * bs + 2 * bs              /* o[], tmp */
                   + 3 * 2 * 2 * (HOP << 2)                       /* hi, hidl (upper bound) */

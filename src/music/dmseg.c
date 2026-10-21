@@ -93,8 +93,7 @@ static dm_seqtrack *load_seq(rd r)
         while (c.e - c.p >= (ptrdiff_t)rsz) {
             if (curl) buf[0x1e] = buf[0x1f] = 0;        /* wMergeIndex is cleared before every read */
             memcpy(buf, c.p, rsz);
-            c.p += isz;
-            if (c.p > c.e) c.p = c.e;
+            c.p = (size_t)(c.e - c.p) < isz ? c.e : c.p + isz;     /* (a huge size must not wrap a 32-bit pointer) */
             if (!curl) {
                 dm_seqpart *p = seq_part(t, u32(buf + 8), &last);
                 p->ev = realloc(p->ev, (p->nev + 1) * sizeof(*p->ev));
@@ -130,8 +129,7 @@ static dm_tempotrack *load_tempo(rd c)
     uint8_t buf[16] = { 0 };
     while (c.e - c.p >= (ptrdiff_t)rsz) {
         memcpy(buf, c.p, rsz);
-        c.p += isz;
-        if (c.p > c.e) c.p = c.e;
+        c.p = (size_t)(c.e - c.p) < isz ? c.e : c.p + isz;         /* (a huge size must not wrap a 32-bit pointer) */
         t->items = realloc(t->items, (t->n + 1) * sizeof(*t->items));
         t->items[t->n].mt = (int32_t)u32(buf);
         memcpy(&t->items[t->n].tempo, buf + 8, 8);
@@ -151,8 +149,7 @@ static void load_tims(dm_tstrack *t, rd c)
     while (c.e - c.p >= (ptrdiff_t)rsz) {
         uint8_t buf[8] = { 0 };
         memcpy(buf, c.p, rsz);
-        c.p += isz;
-        if (c.p > c.e) c.p = c.e;
+        c.p = (size_t)(c.e - c.p) < isz ? c.e : c.p + isz;         /* (a huge size must not wrap a 32-bit pointer) */
         dm_tsitem it = { (int32_t)u32(buf), buf[4], buf[5], u16(buf + 6) };
         if (!it.bpm) it.bpm = 4;
         if (!it.beat) it.beat = 4;
@@ -271,6 +268,7 @@ static void band_add(dm_bandtrack *t, dm_band *b)
 static dm_bandtrack *load_band(rd r, dm_getcoll_fn getcoll, void *ctx)
 {
     dm_bandtrack *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
     uint32_t id, type; rd c;
     while (next_chunk(&r, &id, &c, &type)) {
         if (id == FCC('b','d','t','h') && c.e - c.p >= 4) { t->lockautodl = 1; t->autodl = u32(c.p) != 0; }
@@ -279,6 +277,7 @@ static dm_bandtrack *load_band(rd r, dm_getcoll_fn getcoll, void *ctx)
         while (next_chunk(&c, &sid, &s, &st)) {
             if (sid != FCC('L','I','S','T') || st != FCC('l','b','n','d')) continue;
             dm_band *b = calloc(1, sizeof(*b));
+            if (!b) break;
             b->groupbits = 0xffffffff;
             int seen2 = 0;
             rd x; uint32_t xid, xt;
@@ -1036,11 +1035,12 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
             else if (guid_eq(&t.clsid, &CLSID_TempoTrack) && id == FCC('t','e','t','r')) { t.kind = TRK_TEMPO; t.data = load_tempo(c); }
             else if (guid_eq(&t.clsid, &CLSID_TimeSigTrack)) {
                 dm_tstrack *ts = calloc(1, sizeof(*ts));
+                if (!ts) return;
                 ts->active = 1;
                 if (id == FCC('t','i','m','s')) load_tims(ts, c);
                 else { rd x; uint32_t xid; while (next_chunk(&c, &xid, &x, NULL)) if (xid == FCC('t','i','m','s')) load_tims(ts, x); }
                 t.kind = TRK_TIMESIG; t.data = ts;
-            } else if (guid_eq(&t.clsid, &CLSID_BandTrack)) { t.kind = TRK_BAND; t.data = load_band(c, getcoll, ctx); }
+            } else if (guid_eq(&t.clsid, &CLSID_BandTrack)) { t.data = load_band(c, getcoll, ctx); t.kind = t.data ? TRK_BAND : TRK_OTHER; }
             else if (guid_eq(&t.clsid, &CLSID_SysExTrack) && id == FCC('s','y','e','x')) { t.kind = TRK_SYSEX; t.data = load_sysex(c); }
             else if (guid_eq(&t.clsid, &CLSID_WaveTrack) && id == FCC('L','I','S','T') && type == FCC('w','a','v','t')) {
                 t.kind = TRK_WAVE; t.data = load_wavetrack(c, getwave, ctx);
@@ -1249,6 +1249,7 @@ dm_segment *dm_segment_load_cb(const void *data, size_t size, const dm_loadcb *c
     uint32_t id, type;
     if (!next_chunk(&f, &id, &r, &type) || id != FCC('R','I','F','F') || type != FCC('D','M','S','G')) return NULL;
     dm_segment *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
     s->refs = 1;
     rd c;
     while (next_chunk(&r, &id, &c, &type)) {
@@ -1586,7 +1587,7 @@ static int32_t markers_load(dm_marker **l, rd c)
     uint32_t take = rs < 5 ? rs : 4, skip = rs < 5 ? 0 : rs - 4;
     while (left > 0) {
         dm_marker *m = calloc(1, sizeof(*m));
-        if (!m) continue;
+        if (!m) { hr = DM_E_OUTOFMEMORY; break; }
         if ((uint32_t)(c.e - c.p) < take) { free(m); hr = (int32_t)0x88781133; break; }
         uint8_t b[4] = { 0 };
         memcpy(b, c.p, take);
@@ -1881,7 +1882,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         const dm_tempotrack *O = other->data;
         if (!O->n) break;
         dm_tempoitem *x = realloc(T->items, (size_t)(T->n + O->n) * sizeof(*x));
-        if (!x) return DM_E_OUTOFMEMORY;
+        if (!x) { hr = DM_E_OUTOFMEMORY; goto fail; }
         T->items = x;
         for (int i = 0; i < O->n; i++) { x[T->n].mt = O->items[i].mt + mtjoin; x[T->n].tempo = O->items[i].tempo; T->n++; }
         break;
@@ -1893,7 +1894,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         while (*pp) pp = &(*pp)->next;
         for (const dms_chord *c = ((const dms_chordtrack *)other->data)->chords; c; c = c->next) {
             dms_chord *n = calloc(1, sizeof(*n));
-            if (!n) return DM_E_OUTOFMEMORY;
+            if (!n) { hr = DM_E_OUTOFMEMORY; goto fail; }
             memcpy(n->name, c->name, sizeof(n->name));
             n->t = c->t + mtjoin;
             n->measure = (uint16_t)(c->measure + m);
@@ -1916,7 +1917,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         while (*pp) pp = &(*pp)->next;
         for (const dms_command *c = ((const dms_cmdtrack *)other->data)->cmds; c; c = c->next) {
             dms_command *n = malloc(sizeof(*n));
-            if (!n) return DM_E_OUTOFMEMORY;
+            if (!n) { hr = DM_E_OUTOFMEMORY; goto fail; }
             *n = *c; n->next = NULL;
             n->t += mtjoin; n->measure = (uint16_t)(n->measure + m);
             *pp = n; pp = &n->next;
@@ -1929,7 +1930,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         while (*pp) pp = &(*pp)->next;
         for (const dms_stynode *s = ((const dms_styletrack *)other->data)->styles; s; s = s->next) {
             dms_stynode *n = calloc(1, sizeof(*n));
-            if (!n) return DM_E_OUTOFMEMORY;
+            if (!n) { hr = DM_E_OUTOFMEMORY; goto fail; }
             n->t = s->t + mtjoin; n->style = s->style;
             if (n->style) dms_style_addref(n->style);
             *pp = n; pp = &n->next;
@@ -1940,7 +1941,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         const dm_bandtrack *O = other->data;
         for (int i = 0; i < O->nbands && hr >= 0; i++) {
             dm_band *b = dm_band_copy(O->bands[i]);
-            if (!b) return DM_E_OUTOFMEMORY;
+            if (!b) { hr = DM_E_OUTOFMEMORY; goto fail; }
             memset(b->name, 0, sizeof(b->name)); b->hasguid = 0;
             b->logical += mtjoin; b->physical += mtjoin;
             dm_bandtrack_add(d->data, b);
@@ -1953,7 +1954,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         while (*pp) pp = &(*pp)->next;
         for (const dmc_cmnode *c = ((const dmc_cmtrack *)other->data)->items; c; c = c->next) {
             dmc_cmnode *n = calloc(1, sizeof(*n));
-            if (!n) return DM_E_OUTOFMEMORY;
+            if (!n) { hr = DM_E_OUTOFMEMORY; goto fail; }
             n->t = c->t + mtjoin; n->map = c->map;
             if (n->map) dmc_chordmap_addref(n->map);
             *pp = n; pp = &n->next;
@@ -1973,7 +1974,7 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         while (*pp) pp = &(*pp)->next;
         for (const dmc_sp *c = ((const dmc_sptrack *)other->data)->items; c; c = c->next) {
             dmc_sp *n = malloc(sizeof(*n));
-            if (!n) return DM_E_OUTOFMEMORY;
+            if (!n) { hr = DM_E_OUTOFMEMORY; goto fail; }
             *n = *c; n->next = NULL;
             n->t += mtjoin; n->measure = (uint16_t)(n->measure + m);
             *pp = n; pp = &n->next;
@@ -1981,5 +1982,8 @@ int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment
         break;
     }
     }
+    return hr;
+fail:                                   /* (a clone made for the result is let go of) */
+    if (result) { dm_track_release(*result); *result = NULL; }
     return hr;
 }

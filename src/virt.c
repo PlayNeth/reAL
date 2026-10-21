@@ -55,13 +55,16 @@ static inline float biquad(float x, const float *c, float *s)
     return y;
 }
 
-/* y[n] += sum h[k] u[n-1-k];  u points at sample n=0, history before it */
+/* y[n] += sum h[k] u[n-1-k];  u points at sample n=0, history before it.  The taps are reversed once per
+ * call so the inner loop reads both arrays forwards (it vectorizes). */
 static void fir_add(float *y, const float *u, const float *h, uint32_t len, uint32_t frames)
 {
+    float hr[VIRT_MAXLEN];
+    for (uint32_t k = 0; k < len; k++) hr[k] = h[len - 1 - k];
     for (uint32_t n = 0; n < frames; n++) {
-        const float *x = u + n - 1;
+        const float *x = u + n - len;              /* x[j] = u[n - len + j] = u[n - 1 - (len - 1 - j)] */
         float acc = 0.0f;
-        for (uint32_t k = 0; k < len; k++) acc += h[k] * x[-(int32_t)k];
+        for (uint32_t j = 0; j < len; j++) acc += hr[j] * x[j];
         y[n] += acc;
     }
 }
@@ -193,6 +196,21 @@ int rl_virt_process(rl_virt *v, float *const ch[ALRV_NOUT], float *out, uint32_t
         out[2 * n + 1] += (r + ad) + ch[ALRV_FR][n] + c;
     }
     return 1;
+}
+
+void rl_virt_reset(rl_virt *v)
+{
+    if (v->hist) memset(v->hist, 0, (size_t)NHIST * v->hist_cap * sizeof(float));
+    memset(v->bq, 0, sizeof v->bq);
+    memset(v->dly, 0, sizeof v->dly);
+    v->dpos = 0;
+    if (v->hp) {
+        memset(v->hp->ring, 0, sizeof v->hp->ring);
+        memset(v->hp->pos, 0, sizeof v->hp->pos);
+        memset(v->hp->lp, 0, sizeof v->hp->lp);
+        memset(v->hp->ap, 0, sizeof v->hp->ap);
+        v->hp->ap_pos = 0;
+    }
 }
 
 void rl_virt_hp_alchemy_er(rl_virt *v, int on)

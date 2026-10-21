@@ -6,8 +6,8 @@
 
 #include <stdint.h>
 
-#define RL_HRTF_MAX_TAPS 128
-#define RL_HRTF_HIST     512          /* power of two, > taps + max delay */
+#define RL_HRTF_MAX_TAPS 256          /* 64 measured taps at 48 kHz resampled for 192 kHz */
+#define RL_HRTF_HIST     1024         /* power of two, > taps + max delay */
 #define RL_HRTF_MAX_RINGS 16
 
 typedef struct rl_hrtf_filter {
@@ -27,7 +27,7 @@ typedef struct rl_hrtf_set {
 typedef struct rl_hrtf_voice {
     float    hist[RL_HRTF_HIST * 2];   /* doubled so every window is contiguous */
     uint32_t w;
-    rl_hrtf_filter cur, target;
+    rl_hrtf_filter cur, target;        /* coefficients stored reversed, for a forward dot product */
     int      have_cur, dirty;
 } rl_hrtf_voice;
 
@@ -40,6 +40,8 @@ void rl_hrtf_lookup(const rl_hrtf_set *set, float az, float el, rl_hrtf_filter *
 
 void rl_hrtf_voice_reset(rl_hrtf_voice *v);
 void rl_hrtf_voice_set(rl_hrtf_voice *v, const rl_hrtf_filter *f);
+/* a (re)started voice: no history from its previous play, the current direction without a crossfade */
+void rl_hrtf_voice_restart(rl_hrtf_voice *v);
 /* convolve mono `in` into interleaved stereo `out` (accumulate); crossfades on filter change */
 void rl_hrtf_render(rl_hrtf_voice *v, const rl_hrtf_set *set, const float *in, float *out, uint32_t frames);
 

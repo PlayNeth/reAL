@@ -89,10 +89,11 @@ static void chordmap_clear(dmc_chordmap *m)
     }
     m->signposts = NULL;
 }
-void dmc_chordmap_addref(dmc_chordmap *m) { if (m) m->refs++; }
+/* (atomic: the application's Release and the playing thread's recomposing share chord maps) */
+void dmc_chordmap_addref(dmc_chordmap *m) { if (m) __sync_add_and_fetch(&m->refs, 1); }
 void dmc_chordmap_release(dmc_chordmap *m)
 {
-    if (!m || --m->refs > 0) return;
+    if (!m || __sync_sub_and_fetch(&m->refs, 1) > 0) return;
     chordmap_clear(m);
     free(m);
 }

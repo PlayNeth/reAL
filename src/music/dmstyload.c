@@ -138,6 +138,7 @@ static dms_chord *load_crdb(const dms_chordtrack *T, rd r)
     uint8_t sb[0x14];               /* (cleared once per chord: a short record keeps the previous one's rest) */
     memset(sb, 0, sizeof(sb));
     for (; n; n--) {
+        if (!ssz || r.p >= r.e) break;  /* (a count past the chunk's data: no endless zero records) */
         if (ssz < 0x15) take(&r, sb, ssz);
         else { take(&r, sb, 0x14); skip(&r, ssz - 0x14); }
         dm_subchord s;
@@ -162,14 +163,14 @@ dms_chordtrack *dms_chordtrack_load(const uint8_t *p, size_t n, int32_t *hr)
     T->root = (uint8_t)(h >> 24);
     if (T->root > 23) T->root %= 24;
     T->scale = h & 0xffffff;
-    int32_t left = (int32_t)n - 8 - (int32_t)size;     /* (the list size counts its type: size - 12 - crdh) */
+    int64_t left = (int64_t)n - 8 - size;              /* (the list size counts its type: size - 12 - crdh) */
     while (left > 0 && next_chunk(&r, &id, &c, &size)) {
         if (id == FCC('c','r','d','b')) {
             dms_chord *ch = load_crdb(T, c);
             if (!ch) break;
             APPEND(T->chords, ch);
         }
-        left -= 8 + (int32_t)size;
+        left -= 8 + (int64_t)size;
     }
     if (left != 0) { *hr = E_FAIL_; dms_chordtrack_free(T); return NULL; }
     T->chords = dms_msort(T->chords, offsetof(dms_chord, next), chord_cmp);
@@ -235,7 +236,7 @@ static dms_chord *chord_from_key(const dm_chord_key *k)
     c->key = k->key;
     c->scale = k->scale;
     c->silent = k->flags & 1;
-    for (int i = 0; i < k->nsub; i++) chord_addsub(c, &k->sub[i]);
+    for (int i = 0; i < k->nsub && i < 8; i++) chord_addsub(c, &k->sub[i]);    /* (sub[] holds 8) */
     return c;
 }
 /* 774029a8: SetParam(GUID_ChordParam): the chord at time t (measure and beat 0) replaces one at the same time */
@@ -314,6 +315,7 @@ dms_cmdtrack *dms_cmdtrack_load(const uint8_t *p, size_t n, int32_t *hr)
     if (!T) return NULL;
     uint8_t b[12];                  /* (one buffer for every record, as the original's locals) */
     memset(b, 0, sizeof(b));
+    dms_command **tail = &T->cmds;  /* (appended through a tail: a long chunk is not quadratic) */
     for (; left > 0; left -= (int32_t)isz) {
         if (isz < 13) take(&r, b, isz);
         else { take(&r, b, 12); skip(&r, (size_t)left - 12); }    /* sic: the rest of the chunk, not of the item */
@@ -326,7 +328,7 @@ dms_cmdtrack *dms_cmdtrack_load(const uint8_t *p, size_t n, int32_t *hr)
         c->groove = b[8];
         c->range = b[9] > 100 ? 0 : b[9];
         c->repeat = b[10] > 5 ? 0 : b[10];
-        APPEND(T->cmds, c);
+        *tail = c; tail = &c->next;
     }
     if (left != 0) { *hr = 0; return T; }       /* (the original keeps what it read and returns the read's result) */
     T->cmds = dms_msort(T->cmds, offsetof(dms_command, next), cmd_cmp);
@@ -438,7 +440,8 @@ void dms_mutetrack_free(dms_mutetrack *T)
 }
 /* 77411a1e: by time */
 static int mute_cmp(const void *a, const void *b) { return ((const dms_muteitem *)a)->t < ((const dms_muteitem *)b)->t; }
-static int mute_add(dms_mutetrack *T, uint32_t pch, mtime_t t, uint32_t map, uint32_t mute)
+/* front: put first (Load, which turns the lists round after: appending each record is quadratic) */
+static int mute_add(dms_mutetrack *T, uint32_t pch, mtime_t t, uint32_t map, uint32_t mute, int front)
 {
     dms_mutepch *p = T->pchs;
     while (p && p->pch != pch) p = p->next;
@@ -450,8 +453,17 @@ static int mute_add(dms_mutetrack *T, uint32_t pch, mtime_t t, uint32_t map, uin
         p->pch = pch;
         APPEND(p->items, i);
         APPEND(T->pchs, p);
-    } else APPEND(p->items, i);
+    } else if (front) { i->next = p->items; p->items = i; }
+    else APPEND(p->items, i);
     return 0;
+}
+static void mute_reverse(dms_mutetrack *T)
+{
+    for (dms_mutepch *q = T->pchs; q; q = q->next) {
+        dms_muteitem *l = NULL;
+        for (dms_muteitem *i = q->items, *n; i; i = n) { n = i->next; i->next = l; l = i; }
+        q->items = l;
+    }
 }
 /* 77415bba: the 'mute' chunk */
 dms_mutetrack *dms_mutetrack_load(const uint8_t *p, size_t n, int32_t *hr)
@@ -469,14 +481,16 @@ dms_mutetrack *dms_mutetrack_load(const uint8_t *p, size_t n, int32_t *hr)
     while (left > 0) {
         if (isz < 13) take(&r, b, isz);
         else { take(&r, b, 12); skip(&r, (size_t)left - 12); }    /* sic */
-        if (mute_add(T, u32(b + 4), (int32_t)u32(b), u32(b + 8), u32(b + 8) == 0xffffffff) < 0) {
+        if (mute_add(T, u32(b + 4), (int32_t)u32(b), u32(b + 8), u32(b + 8) == 0xffffffff, 1) < 0) {
             *hr = DM_E_OUTOFMEMORY;
+            mute_reverse(T);
             return T;
         }
         if (!isz) break;
         left -= (int32_t)isz;
     }
     if (left != 0) { dms_mutetrack_free(T); return NULL; }
+    mute_reverse(T);
     for (dms_mutepch *q = T->pchs; q; q = q->next) q->items = dms_msort(q->items, offsetof(dms_muteitem, next), mute_cmp);
     *hr = 0;
     return T;
@@ -501,7 +515,7 @@ int dms_mute_getparam(const dms_mutetrack *T, mtime_t t, mtime_t *next, dms_mute
 /* 774158b7: appended, unsorted */
 int dms_mute_setparam(dms_mutetrack *T, mtime_t t, const dms_muteparam *m)
 {
-    return mute_add(T, m->pch, t, m->map, (uint32_t)m->mute);
+    return mute_add(T, m->pch, t, m->map, (uint32_t)m->mute, 0);
 }
 /* 77415a20 */
 dms_mutetrack *dms_mutetrack_clone(const dms_mutetrack *T, mtime_t start, mtime_t end)
@@ -665,6 +679,7 @@ static void pch_add(dms_style *s, uint32_t pch)
  * (the rest skipped); the record buffer is kept across records as the original's locals */
 #define RECORDS(c, max, buf, body) do { \
     uint8_t _s4[4]; if (take(&(c), _s4, 4) != 4) break; uint32_t _sz = u32(_s4), _rd = _sz, _sk = 0; \
+    if (!_sz) break;                /* (records of no size would never use the chunk up) */ \
     if (_sz > (max)) { _rd = (max); _sk = _sz - (max); } int32_t _left = (int32_t)((c).e - (c).p); \
     while (_left > 0) { take(&(c), buf, _rd); _left -= (int32_t)_rd; if ((uint16_t)_sk) { skip(&(c), (uint16_t)_sk); _left -= (uint16_t)_sk; } body } \
 } while (0)
@@ -837,9 +852,9 @@ static int load_pattern(dms_pattern *p, dms_style *s, rd r, dm_getcoll_fn getcol
                 pr->subchord = 1; pr->priority = 100;
                 APPEND(p->prefs, pr);
                 uint32_t xid, xs; rd y;
-                int found = 0;
                 while (next_chunk(&x, &xid, &y, &xs)) {                 /* 7740be95 */
                     if (xid != FCC('p','r','f','c')) continue;
+                    int found = 0;
                     uint8_t b[0x1c] = { 0 };
                     uint32_t n = xs > 0x1b ? 0x1c : xs;
                     if (take(&y, b, n) != n) return E_FAIL_;
@@ -850,8 +865,17 @@ static int load_pattern(dms_pattern *p, dms_style *s, rd r, dm_getcoll_fn getcol
                     dm_guid g;
                     get_guid(&g, b);
                     for (int i = 0; i < s->nparts; i++)
-                        if (guid_eq(&s->parts[i]->guid, &g)) { pr->part = s->parts[i]; pr->part->refs++; found = 1; break; }
+                        if (guid_eq(&s->parts[i]->guid, &g)) {
+                            part_release(pr->part);         /* (a second 'prfc': the first one's reference let go) */
+                            pr->part = s->parts[i]; pr->part->refs++; found = 1; break;
+                        }
                     if (!found) return E_FAIL_;
+                }
+                if (!pr->part) {            /* no 'prfc': the reference left out (playback needs its part) */
+                    dms_partref **q = &p->prefs;
+                    while (*q != pr) q = &(*q)->next;
+                    *q = NULL;
+                    free(pr);
                 }
             } else if (type == FCC('p','a','r','t')) {
                 dms_part *pt = part_new(s);
@@ -867,7 +891,14 @@ static int load_pattern(dms_pattern *p, dms_style *s, rd r, dm_getcoll_fn getcol
             if (take(&c, b, n) != n) return E_FAIL_;
             memcpy(p->ts, b, 4);
             p->groovelo = b[4]; p->groovehi = b[5]; p->embellish = u16(b + 6);
+            uint16_t had = p->measures ? p->measures : 1;  /* (what an earlier 'rhtm' was sized for) */
             p->measures = u16(b + 8); p->destlo = b[10]; p->desthi = b[11];
+            if (p->rhythm && p->measures > had) {   /* the rhythm is read for every measure: grown, the rest 0 */
+                uint32_t *x = realloc(p->rhythm, p->measures * sizeof(*x));
+                if (!x) return DM_E_OUTOFMEMORY;
+                memset(x + had, 0, (p->measures - had) * sizeof(*x));
+                p->rhythm = x;
+            }
             p->flags = u32(b + 12);
         } else if (id == FCC('r','h','t','m')) {
             free(p->rhythm);
@@ -1142,7 +1173,7 @@ static dms_pattern *pattern_clone(const dms_pattern *P, mtime_t start, mtime_t e
     C->rhythm = calloc(C->measures ? C->measures : 1, sizeof(uint32_t));
     if (!C->rhythm) { pattern_release(C); return NULL; }
     for (uint32_t i = 0; i < C->measures; i++)          /* (read past the source's rhythm in the original) */
-        C->rhythm[i] = m0 + i < P->measures ? P->rhythm[m0 + i] : 0;
+        C->rhythm[i] = P->rhythm && m0 + i < P->measures ? P->rhythm[m0 + i] : 0;    /* (none without 'rhtm') */
     if (P->band) { C->band = P->band; dm_band_addref(C->band); }
     int32_t glen = grid_len(P->ts);
     for (const dms_partref *r = P->prefs; r; r = r->next) {

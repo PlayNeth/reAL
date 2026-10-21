@@ -259,8 +259,9 @@ void fxr_process(fx_ringmod *r, float *const ch[2], uint32_t n)   /* fn 0x10054e
             else if (tgt == 0.0f && !(0.0001 < (double)nc)) r->hp_cur = 0.0f;
         }
         rm_set_hp(r);
-        for (int c = 0; c < 2; c++) if (ch[cm[c]]) hsp_hpf_run(&r->hp[cm[c]], ch[cm[c]] + pos, 8);
-        pos += 8; left -= 8;
+        uint32_t k = left < 8 ? left : 8;      /* the mixer's blocks need not be multiples of 8 */
+        for (int c = 0; c < 2; c++) if (ch[cm[c]]) hsp_hpf_run(&r->hp[cm[c]], ch[cm[c]] + pos, k);
+        pos += k; left -= k;
     }
     if (r->hp[0].k != 1.0f && left)
         for (int c = 0; c < 2; c++) if (ch[cm[c]]) hsp_hpf_run(&r->hp[cm[c]], ch[cm[c]] + pos, left);
@@ -928,8 +929,9 @@ static float chorus_read(const fx_chorus *c, float D)           /* fn 0x10057d50
 {
     uint32_t n = rnd_samples(D);
     float fr = (float)((double)D - (double)n);
-    uint32_t i0 = c->wp >= n ? c->wp - n : c->wp - n + FXC_DLEN;
-    uint32_t i1 = c->wp >= n + 1 ? c->wp - n - 1 : c->wp - n + FXC_DLEN - 1;
+    if (n + 1 >= c->len) n = c->len - 2;     /* a delay beyond the line (out of range input): its far end */
+    uint32_t i0 = c->wp >= n ? c->wp - n : c->wp - n + c->len;
+    uint32_t i1 = c->wp >= n + 1 ? c->wp - n - 1 : c->wp - n + c->len - 1;
     return (float)((double)c->buf[i0] * (1.0 - fr) + (double)fr * c->buf[i1]);
 }
 
@@ -1018,6 +1020,10 @@ void fxc_init(fx_chorus *c, uint32_t rate)                    /* ctor 0x10056b90
 {
     memset(c, 0, sizeof(*c));
     c->fs = (float)rate;
+    /* the taps reach twice the longest delay (0.016 s): the inline line covers up to 192 kHz */
+    uint32_t len = (uint32_t)(0.032 * rate) + 8;
+    c->buf = c->inl; c->len = FXC_DLEN;
+    if (len > FXC_DLEN) { float *b = calloc(len, sizeof(float)); if (b) { c->buf = b; c->len = len; } }
     c->step = (float)(1.0 / ((double)c->fs * 0.019999999552965164));
     for (int k = 0; k < 2; k++) {
         c->osc[k].two_over_fs = (float)(2.0 / c->fs);
@@ -1031,6 +1037,8 @@ void fxc_init(fx_chorus *c, uint32_t rate)                    /* ctor 0x10056b90
     fxc_depth(c, 0.1f);
     for (int k = 0; k < 2; k++) c->mix[k] = 1.0f;
 }
+
+void fxc_free(fx_chorus *c) { if (c->buf != c->inl) free(c->buf); c->buf = c->inl; c->len = FXC_DLEN; }
 
 static inline void ramp_step(float *cur, float tgt, float step, uint32_t *flags, uint32_t bit)
 {
@@ -1061,7 +1069,7 @@ void fxc_process(fx_chorus *c, float *const ch[2], uint32_t n)  /* fn 0x100571c0
             }
         }
         c->buf[c->wp] = w;
-        if (++c->wp == FXC_DLEN) c->wp = 0;
+        if (++c->wp == c->len) c->wp = 0;
         if (c->flags[0] & 8) ramp_step(&c->fb, c->fb_t, c->step, &c->flags[0], 8);
         for (int k = 0; k < 2; k++) {
             fx_osc *o = &c->osc[k];
@@ -1098,8 +1106,9 @@ static float flanger_read(const fx_flanger *f, int k, float D)  /* fn 0x10058dd0
 {
     uint32_t n = rnd_samples(D), wp = f->wp[k];
     float fr = (float)((double)D - (double)n);
-    uint32_t i0 = wp >= n ? wp - n : wp - n + FXL_DLEN;
-    uint32_t i1 = wp >= n + 1 ? wp - n - 1 : wp - n + FXL_DLEN - 1;
+    if (n + 1 >= f->len) n = f->len - 2;     /* a delay beyond the line (out of range input): its far end */
+    uint32_t i0 = wp >= n ? wp - n : wp - n + f->len;
+    uint32_t i1 = wp >= n + 1 ? wp - n - 1 : wp - n + f->len - 1;
     return (float)((double)f->buf[k][i0] * (1.0 - fr) + (double)fr * f->buf[k][i1]);
 }
 
@@ -1188,6 +1197,13 @@ void fxl_init(fx_flanger *f, uint32_t rate)                   /* ctor 0x10057e20
 {
     memset(f, 0, sizeof(*f));
     f->fs = (float)rate;
+    /* the taps reach twice the longest delay (0.004 s): the inline lines cover up to 192 kHz */
+    uint32_t len = (uint32_t)(0.008 * rate) + 8;
+    f->buf[0] = f->inl[0]; f->buf[1] = f->inl[1]; f->len = FXL_DLEN;
+    if (len > FXL_DLEN) {
+        float *b = calloc((size_t)len * 2, sizeof(float));
+        if (b) { f->buf[0] = b; f->buf[1] = b + len; f->len = len; }
+    }
     f->step = (float)(1.0 / ((double)f->fs * 0.019999999552965164));
     for (int k = 0; k < 2; k++) {
         f->osc[k].two_over_fs = (float)(2.0 / f->fs);
@@ -1199,6 +1215,12 @@ void fxl_init(fx_flanger *f, uint32_t rate)                   /* ctor 0x10057e20
     fxl_delay(f, 0.002f);
     fxl_depth(f, 1.0f);
     for (int k = 0; k < 2; k++) f->mix[k] = 1.0f;
+}
+
+void fxl_free(fx_flanger *f)
+{
+    if (f->buf[0] != f->inl[0]) free(f->buf[0]);
+    f->buf[0] = f->inl[0]; f->buf[1] = f->inl[1]; f->len = FXL_DLEN;
 }
 
 void fxl_process(fx_flanger *f, float *const ch[2], uint32_t n)  /* fn 0x100581e0 */
@@ -1220,7 +1242,7 @@ void fxl_process(fx_flanger *f, float *const ch[2], uint32_t n)  /* fn 0x100581e
                 }
             }
             f->buf[k][f->wp[k]] = w;
-            if (++f->wp[k] == FXL_DLEN) f->wp[k] = 0;
+            if (++f->wp[k] == f->len) f->wp[k] = 0;
             fx_osc *o = &f->osc[k];
             float lfo = lfo_value(o, right_side(k) ? f->ph_cur : 0.0f);
             float y;
@@ -1273,7 +1295,12 @@ static void pshift_coefs(fx_pshift *p)
     p->win_new = 3.1415927410125732 * fabs((double)r) * 0.00048828125;
 }
 
-void fxp_set(fx_pshift *p, int32_t semis, int32_t cents) { p->semis = semis; p->cents = cents; pshift_coefs(p); }
+void fxp_set(fx_pshift *p, int32_t semis, int32_t cents)
+{
+    p->semis = semis; p->cents = cents; pshift_coefs(p);
+    /* at unity (0 / 0) the window stands still and never wraps, so a new pitch would wait for ever: take it now */
+    if (p->win_inc == 0.0) { p->rate = p->rate_new; p->win_inc = p->win_new; }
+}
 
 void fxp_init(fx_pshift *p, uint32_t rate, int bug)          /* ctor 0x1005a7e0, 0x1005abc0 */
 {
@@ -1481,6 +1508,8 @@ void eax4fx_unit_free(eax4fx_unit *x)
 {
     if (!x) return;
     if (x->type == EAX4FX_ECHO) fxo_free(&x->u.echo);
+    if (x->type == EAX4FX_CHORUS) fxc_free(&x->u.ch);
+    if (x->type == EAX4FX_FLANGER) fxl_free(&x->u.fl);
     free(x->tmp[0]);
     free(x);
 }

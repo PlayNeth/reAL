@@ -171,13 +171,13 @@ static HRESULT insert_tool(rm_graph *g, IDirectMusicTool *t, const DWORD *pch, D
     if (FAILED(IDirectMusicTool_GetMediaTypeArraySize(t, &nt))) nt = 0;
     n->ntypes = nt;
     if (nt) {
-        DWORD *a = malloc(nt * sizeof(DWORD));
+        DWORD *a = nt <= 0xffffffu ? malloc(nt * sizeof(DWORD)) : NULL;     /* (no wrapping size) */
         if (!a) goto oom;
         if (IDirectMusicTool_GetMediaTypes(t, &a, nt) == E_NOTIMPL) { free(a); n->ntypes = 0; }
         else n->types = a;
     }
     if (pch) {
-        if (!(n->pch = malloc(npch ? npch * sizeof(DWORD) : 1))) goto oom;
+        if (npch > 0xffffffu || !(n->pch = malloc(npch ? npch * sizeof(DWORD) : 1))) goto oom;     /* (no wrapping size) */
         memcpy(n->pch, pch, npch * sizeof(DWORD));
         n->npch = npch;
     }
@@ -427,7 +427,12 @@ static HRESULT load_tool_form(rm_graph *g, IStream *s, const rck *form)
     if (c.id != DMUS_FOURCC_TOOL_CHUNK) return DMUS_E_TOOL_HDR_NOT_FIRST_CK;
     DMUS_IO_TOOL_HEADER h;
     HRESULT hr = rck_read(s, &c, &h, sizeof(h));
+    if (FAILED(hr)) return hr;
     if (!h.ckid && !h.fccType) return DMUS_E_INVALID_TOOL_HDR;
+    /* the further PChannels follow the header in its chunk: a count past the chunk is a broken one (and would wrap
+     * the sizes below) */
+    if (h.cPChannels > 1 && h.cPChannels - 1 > (c.size > sizeof(h) ? c.size - sizeof(h) : 0) / sizeof(DWORD))
+        return DMUS_E_INVALID_TOOL_HDR;
     DWORD *pch = NULL;
     if (h.cPChannels) {
         if (!(pch = malloc(h.cPChannels * sizeof(DWORD)))) return E_OUTOFMEMORY;

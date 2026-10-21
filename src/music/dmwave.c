@@ -26,7 +26,7 @@ static uint32_t wave_ms(const dm_wave *w)
     uint64_t n = w->fileframes;
     if (!n || !w->filerate) return 0;
     uint32_t f = (uint32_t)n;
-    if (w->skip) f -= w->skip;
+    f = w->skip < f ? f - w->skip : 0;  /* (a lead-in longer than the wave: none left, not a wrapped length) */
     return (uint32_t)((uint64_t)f * 1000 / w->filerate);
 }
 uint32_t dm_wave_length_ms(const dm_wave *w) { return wave_ms(w); }

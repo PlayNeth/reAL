@@ -266,7 +266,11 @@ int eax2l_set(eax2_listener *l, uint32_t id, const void *data, uint32_t len)
             !in_range(r.air_absorption_hf, -100.0f, 0.0f) || (r.flags & ~0x3fu))
             return EAX_BADVALUE;
         uint32_t d = 0;
-        l->s_reverb = l->s_reverb_delay = l->s_decay = l->s_reflections = l->s_refl_delay = r.env_size;
+        float sz = r.env_size < 1.0f ? 1.0f : r.env_size > 100.0f ? 100.0f : r.env_size;
+        /* the sizes the scaling divides by and takes log10 of: a size of (next to) 0, below or infinite (which
+         * the size itself is clamped from) would make them inf / NaN and the next size change's levels undefined */
+        float ss = r.env_size >= 1e-30f && isfinite(r.env_size) ? r.env_size : sz;
+        l->s_reverb = l->s_reverb_delay = l->s_decay = l->s_reflections = l->s_refl_delay = ss;
         if (l->p.room != r.room) { l->p.room = r.room; d |= 1; }
         if (l->p.room_hf != r.room_hf) { l->p.room_hf = r.room_hf; d |= 2; }
         if (fne(r.room_rolloff, l->p.room_rolloff)) { d |= 4; l->p.room_rolloff = r.room_rolloff; }
@@ -277,7 +281,6 @@ int eax2l_set(eax2_listener *l, uint32_t id, const void *data, uint32_t len)
         if (l->p.reverb != r.reverb) { l->b_reverb = l->p.reverb = r.reverb; d |= 0x80; }
         if (fne(r.reverb_delay, l->p.reverb_delay)) { d |= 0x100; l->b_reverb_delay = l->p.reverb_delay = r.reverb_delay; }
         if (l->p.environment != r.environment) { l->p.environment = r.environment; d |= 0x200; }
-        float sz = r.env_size < 1.0f ? 1.0f : r.env_size > 100.0f ? 100.0f : r.env_size;
         if (fne(sz, l->p.env_size)) { l->p.env_size = sz; d |= 0x400; }
         if (fne(r.env_diffusion, l->p.env_diffusion)) { d |= 0x800; l->p.env_diffusion = r.env_diffusion; }
         if (fne(r.air_absorption_hf, l->p.air_absorption_hf)) { d |= 0x1000; l->p.air_absorption_hf = r.air_absorption_hf; }
@@ -1593,5 +1596,6 @@ void eax4_source_gains(const eax4_source *s, const eax4_context *c, const eax4_s
     if (10.0f < dop) dop = 10.0f;
     out->doppler_factor = dop;
     double df = (double)g->distance_factor * c->distance_factor;
-    out->distance_factor = (float)(df > 3.4028234663852886e+38 ? 3.4028234663852886e+38 : df);
+    /* (ALL does not check the context's factor: a NaN one is capped like an infinite one, not passed on) */
+    out->distance_factor = (float)(!(df <= 3.4028234663852886e+38) ? 3.4028234663852886e+38 : df);
 }

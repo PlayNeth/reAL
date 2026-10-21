@@ -2,6 +2,7 @@
  * Same output strategy ALchemy's software path uses (CWASAPIRender), which under Wine goes
  * through mmdevapi -> winepulse/winealsa -> PipeWire/PulseAudio/ALSA. */
 #include "real.h"
+#include <xmmintrin.h>
 #include "eax4dsp.h"
 #include <math.h>
 #include <initguid.h>
@@ -299,7 +300,8 @@ static inline void put(const wasapi_out *w, BYTE *dst, UINT32 at, float v)
     switch (w->fmt) {
     case OUT_F32: ((float *)dst)[at] = v; break;
     case OUT_S16: ((INT16 *)dst)[at] = (INT16)(v * 32767.0f); break;
-    case OUT_S32: ((INT32 *)dst)[at] = (INT32)(v * 2147483647.0f); break;
+    /* in double: 1.0f * 2147483647.0f rounds to 2^31 in float, which wraps to INT32_MIN */
+    case OUT_S32: ((INT32 *)dst)[at] = (INT32)((double)v * 2147483647.0); break;
     }
 }
 
@@ -307,6 +309,15 @@ static void write_out(const rl_device *dev, const wasapi_out *w, BYTE *dst, UINT
 {
     const float *src = dev->mixbuf;
     const UINT32 ch = w->channels, n = dev->layout.n ? dev->layout.n : 2;
+    if (dev->out_direct && ch == n) {
+        /* the usual case: the device has the layout's speakers; one conversion loop per format */
+        const UINT32 tot = frames * ch;
+        switch (w->fmt) {
+        case OUT_F32: for (UINT32 i = 0; i < tot; i++) ((float *)dst)[i] = clampf(src[i]); return;
+        case OUT_S16: for (UINT32 i = 0; i < tot; i++) ((INT16 *)dst)[i] = (INT16)(clampf(src[i]) * 32767.0f); return;
+        default: break;
+        }
+    }
     for (UINT32 i = 0; i < frames; i++) {
         const float *x = src + (size_t)i * n;
         if (ch == 1) { put(w, dst, i, (clampf(x[0]) + clampf(x[1])) * 0.5f); continue; }
@@ -354,7 +365,7 @@ static const char *layout_name(uint32_t m)
 }
 
 /* ALchemy renders the speakers Windows is set up for (fn 0x1001c1a0): stereo (or headphones), quad, 5.1 or 7.1 */
-static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *mixfmt)
+static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *mixfmt, BOOL rate_changed)
 {
     UINT32 ch = mixfmt->nChannels;
     DWORD dmask = 0;
@@ -387,7 +398,8 @@ static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *
     dev->dev_layout = dl;
     dev->out_direct = direct;
     memcpy(dev->out_mtx, mtx, sizeof(mtx));
-    BOOL changed = dev->out_channels != dev->layout.n || dev->headphones != hp;
+    /* (a new rate too: CMSS upmixers and the EAX filter coefficients are made for the rate) */
+    BOOL changed = dev->out_channels != dev->layout.n || dev->headphones != hp || rate_changed;
     dev->out_channels = dev->layout.n;
     dev->headphones = hp;
     if (!dev->speaker_config_set) dev->speaker_config = rl_layout_speaker_config(lay, hp);
@@ -509,8 +521,9 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     }
     if (g_cfg.hrtf_mode && (dev->hrtf.rate != mixfmt->nSamplesPerSec || !dev->hrtf.dirs))
         load_hrtf(dev, mixfmt->nSamplesPerSec);
+    BOOL rate_changed = dev->out_rate && dev->out_rate != mixfmt->nSamplesPerSec;
     dev->out_rate = mixfmt->nSamplesPerSec;
-    choose_layout(dev, w->mmdev, mixfmt);
+    choose_layout(dev, w->mmdev, mixfmt, rate_changed);
     dev->period_frames = period ? (UINT32)(period * dev->out_rate / 10000000) : dev->out_rate / 100;
 
     /* pre-fill with silence so the first period doesn't underrun */
@@ -551,7 +564,11 @@ static DWORD WINAPI render_thread(LPVOID param)
         return 1;
     }
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    /* flush denormals to zero: decaying filter states and reverb tails would otherwise sit in the
+     * denormal range during silence and cost 15-50x per sample (output changes below 1e-38 only) */
+    _mm_setcsr(_mm_getcsr() | 0x8040);
 
+    int failures = 0;
     while (dev->running) {
         HANDLE hs[2] = { dev->quit_event, w.event };
         DWORD r = WaitForMultipleObjects(2, hs, FALSE, 200);
@@ -559,14 +576,18 @@ static DWORD WINAPI render_thread(LPVOID param)
 
         UINT32 padding = 0;
         HRESULT hr = IAudioClient_GetCurrentPadding(w.client, &padding);
-        if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-            LOG_INFO("WASAPI: device invalidated, reopening");
+        /* a lost device, or one that keeps failing (an audio service restart, say): open it again */
+        if (FAILED(hr) && hr != AUDCLNT_E_DEVICE_INVALIDATED && ++failures < 10) continue;
+        if (FAILED(hr)) {
+            LOG_INFO("WASAPI: %s (%08lx), reopening", hr == AUDCLNT_E_DEVICE_INVALIDATED ? "device invalidated" :
+                     "the device keeps failing", (unsigned long)hr);
+            failures = 0;
             wasapi_close(&w);
             while (dev->running && FAILED(wasapi_open(dev, &w)))
                 if (WaitForSingleObject(dev->quit_event, 500) == WAIT_OBJECT_0) break;
             continue;
         }
-        if (FAILED(hr)) continue;
+        failures = 0;
 
         UINT32 avail = w.buffer_frames - padding;
         if (!avail) continue;
@@ -627,6 +648,7 @@ HRESULT rl_device_acquire(rl_device **out)
     dev->quit_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     dev->running = 1;
 
+    rl_mix_prepare();            /* the resampler tables, here rather than on the mixer thread */
     thread_args a = { dev, CreateEventW(NULL, TRUE, FALSE, NULL), E_FAIL };
     dev->thread = CreateThread(NULL, 0, render_thread, &a, 0, NULL);
     if (dev->thread) WaitForSingleObject(a.ready, INFINITE);
@@ -639,7 +661,13 @@ HRESULT rl_device_acquire(rl_device **out)
         if (dev->thread) { WaitForSingleObject(dev->thread, INFINITE); CloseHandle(dev->thread); }
         CloseHandle(dev->quit_event);
         DeleteCriticalSection(&dev->lock);
+        HeapFree(GetProcessHeap(), 0, dev->mixbuf);
+        HeapFree(GetProcessHeap(), 0, dev->sendbuf);
+        HeapFree(GetProcessHeap(), 0, dev->fxtmp);
         rl_reverb_free(&dev->reverb);
+        for (int k = 0; k < 3; k++) if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); }
+        for (int k = 0; k < 4; k++) eax4fx_unit_free(dev->fxunit[k]);
+        rl_hrtf_free(&dev->hrtf);       /* wasapi_open may have loaded it before failing */
         HeapFree(GetProcessHeap(), 0, dev);
         LeaveCriticalSection(&s_dev_cs);
         return DSERR_NODRIVER;

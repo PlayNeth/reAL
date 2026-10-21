@@ -503,7 +503,7 @@ typedef struct cmdsp {              /* 77284f12: a measure's command and signpos
 
 static cnode *compose_steps(composer *cp, const uint8_t *ts, dmc_chordmap *m, const cmdsp *items, int actmode, int act)
 {
-    int16_t bpm = ts[0];
+    int16_t bpm = ts[0] ? ts[0] : 4;    /* (a style's 0 beats a measure: align_measures divides by it) */
     if (actmode && (uint16_t)act > 3) act = 3;
     for (dmc_signpost *p = m->signposts; p; p = p->next) p->used = 0;
     cstep *steps = NULL, **pp = &steps;
@@ -837,6 +837,7 @@ dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordma
             free(b);
             dm_track *t = ct ? dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct) : NULL;
             if (t) dm_segment_insert_track(out, t, 0, group, 0x38, 0);
+            else if (ct) dms_chordtrack_free(ct);
         }
         if (out && !ownstyle) {
             for (dm_segtrack *t; (t = seg_track(out, TRK_STYLE, 0xffffffff, 0)); ) seg_remove(out, t);
@@ -1766,6 +1767,8 @@ dm_segment *dmc_compose_transition(dms_style *fs, dm_band *band, const double *t
     if (fs) { fbpm = fs->ts[0]; fbeat = fs->ts[1]; }
     if (ts_) { tbpm = ts_->ts[0]; tbeat = ts_->ts[1]; }
     if (!tbpm) tbpm = 4;
+    if (!fbeat) fbeat = 4;              /* (a style's 0 beat would divide by 0 below) */
+    if (!tbeat) tbeat = 4;
     int16_t half = (int16_t)((tbpm >> 1) + ((tbpm >> 1) * 2 != tbpm));
     cnode *chords = NULL;
     cmdsp *head = calloc(1, sizeof(*head)), *tail = head;

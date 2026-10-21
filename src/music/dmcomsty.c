@@ -352,15 +352,15 @@ static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, IDirectMusicLo
     if (!l || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMST", 4)) return;
     DWORD end = 8 + *(const DWORD *)(b + 4);
     if (end > n) end = n;
+    /* (the chunk ends are clamped to their parents' before the next offset is taken from them: a huge size must not
+     * wrap the offset back, which looped for ever) */
     for (DWORD off = 12; off + 8 <= end; ) {
-        DWORD sz = *(const DWORD *)(b + off + 4), dend = off + 8 + sz;
-        if (dend > end) dend = end;
-        if (!memcmp(b + off, "LIST", 4) && sz >= 4 && !memcmp(b + off + 8, "prrf", 4)) {
+        DWORD sz = *(const DWORD *)(b + off + 4), dend = sz < end - off - 8 ? off + 8 + sz : end;
+        if (!memcmp(b + off, "LIST", 4) && dend - off >= 12 && !memcmp(b + off + 8, "prrf", 4)) {
             int first = 1;
             for (DWORD q = off + 12; q + 8 <= dend; ) {
-                DWORD qs = *(const DWORD *)(b + q + 4), qend = q + 8 + qs;
-                if (qend > dend) qend = dend;
-                if (!memcmp(b + q, "LIST", 4) && qs >= 4 && !memcmp(b + q + 8, "DMRF", 4)) {
+                DWORD qs = *(const DWORD *)(b + q + 4), qend = qs < dend - q - 8 ? q + 8 + qs : dend;
+                if (!memcmp(b + q, "LIST", 4) && qend - q >= 12 && !memcmp(b + q + 8, "DMRF", 4)) {
                     DMUS_OBJECTDESC d;
                     memset(&d, 0, sizeof(d));
                     BOOL bad = FALSE;
@@ -387,6 +387,7 @@ static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, IDirectMusicLo
                         } else if (!memcmp(b + r, "date", 4)) {
                             if (avail != 8) bad = TRUE; else { memcpy(&d.ftDate, rd, 8); d.dwValidData |= DMUS_OBJ_DATE; }
                         }
+                        if (rs >= qend - r - 8) break;
                         r += 8 + rs + (rs & 1);
                     }
                     if (!bad && (d.dwValidData & DMUS_OBJ_NAME)) {
@@ -397,10 +398,12 @@ static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, IDirectMusicLo
                     }
                     first = 0;
                 }
-                q += 8 + qs + (qs & 1);
+                if (qend == dend) break;
+                q = qend + (qs & 1);
             }
         }
-        off += 8 + sz + (sz & 1);
+        if (dend == end) break;
+        off = dend + (sz & 1);
     }
 }
 /* 77406df7 */
@@ -565,7 +568,8 @@ static IDirectMusicStyle8 *style_iface(dms_style *x)
 {
     if (!x) return NULL;
     rm_style *o = x->wrapper;
-    if (o) { sty_addref(&o->IDirectMusicStyle8_iface); dms_style_release(x); return &o->IDirectMusicStyle8_iface; }
+    /* (not one whose last Release is under way on another thread: a new wrapper then) */
+    if (o && ref_if_alive(&o->ref)) { dms_style_release(x); return &o->IDirectMusicStyle8_iface; }
     o = new_style(NULL);
     if (!o) { dms_style_release(x); return NULL; }
     style_take(o, x);

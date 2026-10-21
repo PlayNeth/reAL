@@ -787,6 +787,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         if (!S) break;
         S->nparts = T->nparts;
         S->ev = malloc((T->nparts + 1) * sizeof(int)); S->cv = malloc((T->nparts + 1) * sizeof(int));
+        if (!S->ev || !S->cv) { free(S->ev); free(S->cv); free(S); break; }
         for (int i = 0; i < T->nparts; i++) S->ev[i] = S->cv[i] = -1;
         S->beatlen = 0x300; S->measlen = 0xc00; S->gridlen = 0xc0;
         S->groupbits = e->group;

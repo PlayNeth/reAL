@@ -32,6 +32,10 @@ typedef struct rl_reverb {
     float   *scratch;                    /* 2 x 8 channel buffers */
     uint32_t scratch_frames;
     int      active;
+    uint32_t tail_left;                  /* samples eng[cur] keeps ringing after the room level went to 0 */
+    int      pending;                    /* a room change waiting for the old tail to clear eng[cur ^ 1] */
+    alrv_params pend;
+    float    pend_decay;
 } rl_reverb;
 
 int  rl_reverb_init(rl_reverb *r, uint32_t rate);

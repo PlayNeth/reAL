@@ -58,6 +58,7 @@ typedef struct {
     dm_guid au_guid;                            /* +0x370 */
     int au_byguid, au_all;                      /* +0x380 +0x384 */
     uint8_t au_lock;                            /* +0x38c the auditioned part's variation lock */
+    stychase chase;                             /* (st_play_parts' scratch: per state, performances play at once) */
 } stystate;
 
 /* 7740f577 / 774132ff (the pattern track state's): the variations a part reference plays: the one chosen, or
@@ -91,6 +92,12 @@ static int st_audition(stystate *S, uint32_t flags, uint32_t part, const dm_guid
 
 static int32_t sty_beat(const uint8_t *ts) { return dms_beat_clocks(ts); }
 static int32_t sty_meas(const uint8_t *ts) { return dms_beat_clocks(ts) * ts[0]; }
+/* the clocks of n measures (a file's huge count kept from overflowing, which would stall the loops over it) */
+static int32_t st_len(const uint8_t *ts, uint16_t n)
+{
+    int64_t l = (int64_t)sty_meas(ts) * n;
+    return l > 0x3fffffff ? 0x3fffffff : (int32_t)l;
+}
 
 /* 7740dd48: the signature in effect (the pattern's, the style's, 4/4) */
 static const uint8_t *st_ts(const stystate *S)
@@ -161,7 +168,7 @@ static int st_seed(stystate *S, int32_t seed)
 /* 7740f524: a random value below n for a time (the beat's seed, or rand()) */
 static int32_t st_rand(dm_perf *pf, stystate *S, mtime_t t, int32_t n)
 {
-    if (!S->rtab) return wt_rand(pf) % n;
+    if (!S->rtab || S->nrtab <= 0) return wt_rand(pf) % n;     /* (no beat's seed: a segment shorter than a beat) */
     int32_t beat = sty_beat(st_ts(S));
     uint32_t i = beat ? (uint32_t)t / (uint32_t)beat : 0;
     if ((int)i >= S->nrtab) i = (uint32_t)(S->nrtab - 1);
@@ -270,7 +277,7 @@ static uint8_t th_deg_above(const dm_subchord *s, int8_t key, uint32_t scale)
 static int th_notes(const dm_chord_key *c, int *n, int *high)
 {
     uint32_t u = 0;
-    for (int i = 0; i < c->nsub; i++) {
+    for (int i = 0; i < c->nsub && i < 8; i++) {      /* (sub[] holds 8; a file's count can be larger) */
         int32_t d = (int32_t)c->sub[i].chordroot - (int32_t)c->sub[0].chordroot;
         if (d < 0) d = d + 12 + (int32_t)(((uint32_t)(-d) - 1u) / 12u) * 12;
         u |= c->sub[i].chord << (d & 31);
@@ -283,7 +290,7 @@ static int th_notes(const dm_chord_key *c, int *n, int *high)
 /* 774076ea: all the subchords alike */
 static int th_simple(const dm_chord_key *c)
 {
-    for (int i = 1; i < c->nsub; i++)
+    for (int i = 1; i < c->nsub && i < 8; i++)
         if (c->sub[i].chord != c->sub[0].chord || c->sub[i].scale != c->sub[0].scale ||
             c->sub[i].chordroot != c->sub[0].chordroot || c->sub[i].scaleroot != c->sub[0].scaleroot) return 0;
     return 1;
@@ -376,6 +383,7 @@ static int st_variation(dm_perf *pf, stystate *S, const dms_pattern *pat, const 
     uint32_t m7x = th_flags7(pat, t, nextt, c, nc);
     uint8_t lockid = pr->lock;
     const dms_part *part = pr->part;
+    if (!part) return 0;
     mtime_t rel = S->partoff[idx] + (S->kind == TRK_STYLE ? S->pstart : 0);     /* 774113cf / 7740fe83 */
     rel = t < rel ? 0 : t - rel;
     mtime_t mark = 0;
@@ -596,12 +604,12 @@ static int32_t st_convert(stystate *S, const dms_partref *pr, const dms_event *e
     if (pm) {
         dm_subchord L = { 0, 0, 0, 2, 0, 0, { 0, 0 } };
         uint32_t bit = 1u << (pr->subchord & 31);
-        unsigned idx = 0, n = c->nsub;
+        unsigned idx = 0, n = c->nsub < 8 ? c->nsub : 8;     /* (sub[] holds 8; a file's count can be larger) */
         for (idx = 0; idx < n; idx++) if (c->sub[idx].levels & bit) { L = c->sub[idx]; break; }
         if (idx == n) { L = c->sub[0]; idx = 0; }
         dm_chord_key K;
         memset(&K, 0, sizeof(K));
-        K.scale = c->scale; K.flags = 0; K.nsub = c->nsub; K.key = c->key;
+        K.scale = c->scale; K.flags = 0; K.nsub = (uint8_t)n; K.key = c->key;
         K.sub[idx].chordroot = L.chordroot; K.sub[idx].scaleroot = L.scaleroot;
         K.sub[idx].chord = L.chord; K.sub[idx].levels = L.levels; K.sub[idx].scale = L.scale;
         uint8_t base = 0;
@@ -796,19 +804,20 @@ static int st_play_parts(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, m
     int rep = (flags >> 1) & 1, seek = (flags >> 2) & 1, second = (flags >> 3) & 1, remute = (flags >> 4) & 1;
     int chordseek = seek;
     mtime_t lastt = start;
-    static stychase C;
+    stychase *C = &S->chase;
     int idx = 0;
     for (const dms_partref *pr = S->pattern->prefs; pr; pr = pr->next, idx++) {
         S->mflag[idx] = 0;
         mtime_t stop = end;
-        memset(&C, 0, sizeof(C));
+        memset(C, 0, sizeof(*C));
         const dms_part *part = pr->part;
+        if (!part) continue;
         const uint8_t *ts = part->ts[1] ? part->ts : st_ts(S);
-        int32_t plen = sty_beat(ts) * part->measures * ts[0];
+        int32_t plen = st_len(ts, part->measures);
         if (rep) {
             if (remute) { st_mute_update(pf, S, pr->pch, start, off); S->cursor[idx] = NULL; }
             if (seek) S->partoff[idx] = 0;
-            if (plen) while (!(start < pstart + S->partoff[idx] + plen)) S->partoff[idx] += plen;
+            if (plen) while (!(start < (int64_t)pstart + S->partoff[idx] + plen)) S->partoff[idx] += plen;
             if (S->partoff[idx] + plen + pstart < end) { *again = 1; stop = S->partoff[idx] + plen + pstart; }
         }
         if (second) {
@@ -825,7 +834,7 @@ static int st_play_parts(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, m
                 if (stop <= t) break;
                 if (rep && seek && t < start) {
                     uint32_t vbit = st_varbits(S, pr, idx);
-                    if (ev->type == EV_CURVE && (ev->var & vbit)) chase_add(&C, ev, t);
+                    if (ev->type == EV_CURVE && (ev->var & vbit)) chase_add(C, ev, t);
                 } else if (start <= t) {
                     if (t < lastt) { st_chord(pf, S, t, off, seek, 0); lastt = t; }
                     else if (S->nextchordt <= t || S->nextchordt == 0) { st_chord(pf, S, t, off, chordseek, 0); chordseek = 0; lastt = t; }
@@ -839,7 +848,7 @@ static int st_play_parts(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, m
         S->cursor[idx] = ev;
         if (rep && seek) {
             mtime_t po = S->partoff[idx];
-            chase_flush(pf, &C, S, ts, po + pstart, off, pr, idx, start - po - pstart);
+            chase_flush(pf, C, S, ts, po + pstart, off, pr, idx, start - po - pstart);
         }
     }
     return DM_OK;
@@ -1120,14 +1129,17 @@ static int st_set_pattern(stystate *S, dms_pattern *p, mtime_t t)
     S->patt = t;
     int n = pat_nparts(p);
     if (S->pattern != p) {
+        /* (made first: out of memory, the state keeps its pattern and the arrays that go with it) */
+        uint8_t *mflag = calloc(n ? n : 1, 1), *var = malloc(n ? n : 1);
+        mtime_t *partoff = calloc(n ? n : 1, sizeof(*partoff));
+        const dms_event **cursor = calloc(n ? n : 1, sizeof(*cursor));
+        uint32_t *partpch = calloc(n ? n : 1, sizeof(*partpch)), *norep = calloc(n ? n : 1, sizeof(*norep));
+        if (!mflag || !partoff || !cursor || !partpch || !var || !norep) {
+            free(mflag); free(partoff); free(cursor); free(partpch); free(var); free(norep);
+            return DM_E_OUTOFMEMORY;
+        }
         free(S->mflag); free(S->partoff); free(S->cursor); free(S->partpch); free(S->var); free(S->norep);
-        S->mflag = calloc(n ? n : 1, 1);
-        S->partoff = calloc(n ? n : 1, sizeof(*S->partoff));
-        S->cursor = calloc(n ? n : 1, sizeof(*S->cursor));
-        S->partpch = calloc(n ? n : 1, sizeof(*S->partpch));
-        S->var = malloc(n ? n : 1);
-        S->norep = calloc(n ? n : 1, sizeof(*S->norep));
-        if (!S->mflag || !S->partoff || !S->cursor || !S->partpch || !S->var || !S->norep) { S->nparts = 0; return DM_E_OUTOFMEMORY; }
+        S->mflag = mflag; S->partoff = partoff; S->cursor = cursor; S->partpch = partpch; S->var = var; S->norep = norep;
         int i = 0;
         for (const dms_partref *r = p->prefs; r; r = r->next) S->partpch[i++] = r->pch;
         int keep = (p->flags & 1) && S->ti && S->ti->pvar && S->ti->pnorep;
@@ -1679,7 +1691,7 @@ static int st_pattern_play(dm_perf *pf, stystate *S, mtime_t start, mtime_t end,
     if (S->tsenabled && S->ti->notify && !clock && mb < end) mb = st_mbnotify(pf, S, mb, end, off, tflags);
     uint8_t again = 0;
     const uint8_t *ts = st_ts(S);
-    int32_t plen = sty_beat(ts) * S->pattern->measures * ts[0];
+    int32_t plen = st_len(ts, S->pattern->measures);
     if ((floop || fstart) && plen) S->pstart = start - start % plen;
     mtime_t pe = S->pstart + plen, stop = pe <= end ? pe : end;
     uint32_t f = (fstart || floop || fseek) ? 6 : 2;
