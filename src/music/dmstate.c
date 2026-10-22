@@ -95,6 +95,7 @@ static void ss_shutdown(dm_segstate *ss)
 /* CloseDown: every state leaves the performance now */
 void dm_perf_end_states(dm_perf *pf)
 {
+    direct_end_all(pf);                 /* (reAL: the tracks the application plays itself, too) */
     for (int k = 0; k < NLISTS; k++)
         while (pf->lists[k]) { dm_segstate *s = pf->lists[k]; pf->lists[k] = s->lnext; s->lnext = NULL; ss_shutdown(s); }
 }

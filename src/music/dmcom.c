@@ -114,6 +114,7 @@ struct rm_perf {
     IDispatch *autod;                       /* its automation (dmscript's, aggregated: made on first QueryInterface) */
     struct rm_global { struct rm_global *next; GUID g; DWORD size; BYTE *data; } *globals;   /* +0x104 */
     CRITICAL_SECTION gcs;
+    struct rm_perf *pnext;                  /* reAL: the performances with a host (s_perfs) */
 };
 
 typedef struct {
@@ -145,7 +146,10 @@ static char *guidstr(const GUID *g, char b[64]) { return (char *)rl_guid_str(g, 
 static BOOL read_stream(IStream *s, BYTE **data, DWORD *size) { return rm_read_form(s, data, size); }
 
 /* ------------------------------------------------------------------ the master clock */
-static rm_perf *s_clockperf;
+/* the performances with a host, oldest first (under the engine lock): the master clock is the oldest one's, and
+ * after it is gone the next one's (never earlier than a time it gave) */
+static rm_perf *s_perfs;
+static REFERENCE_TIME s_cklast;
 static HRESULT WINAPI ck_qi(IReferenceClock *i, REFIID riid, void **out)
 {
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IReferenceClock)) { *out = i; IReferenceClock_AddRef(i); return S_OK; }
@@ -162,9 +166,14 @@ static ULONG WINAPI ck_release(IReferenceClock *i)
 static HRESULT WINAPI ck_gettime(IReferenceClock *i, REFERENCE_TIME *t)
 {
     if (!t) return E_POINTER;
-    rm_perf *p = s_clockperf;
-    if (p && p->host) { dm_host_lock(p->host); *t = dm_host_clock(p->host); dm_host_unlock(p->host); }
-    else { LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f); *t = (REFERENCE_TIME)((double)c.QuadPart * 1e7 / (double)f.QuadPart); }
+    dm_engine_lock();
+    REFERENCE_TIME x;
+    if (s_perfs) x = dm_host_clock(s_perfs->host);
+    else { LARGE_INTEGER c, f; QueryPerformanceCounter(&c); QueryPerformanceFrequency(&f); x = (REFERENCE_TIME)((double)c.QuadPart * 1e7 / (double)f.QuadPart); }
+    if (x < s_cklast) x = s_cklast;
+    s_cklast = x;
+    dm_engine_unlock();
+    *t = x;
     return S_OK;
 }
 static HRESULT WINAPI ck_advise(IReferenceClock *i, REFERENCE_TIME a, REFERENCE_TIME b, HEVENT e, DWORD_PTR *c) { return rm_notimpl(__func__); }
@@ -258,19 +267,37 @@ static ULONG WINAPI col_release(IDirectMusicCollection *i)
     if (!r) { dls_release(col(i)->c); free(col(i)); }   /* (a file's collection stays in the process-wide cache) */
     return r;
 }
+/* reAL: the engine collection with a reference (dls_release), read under the engine lock: a Load on another thread
+ * replaces it and lets go of the old one */
+static dm_collection *col_hold(rm_collection *o)
+{
+    dm_engine_lock();
+    dm_collection *c = o->c;
+    dls_addref(c);
+    dm_engine_unlock();
+    return c;
+}
 static HRESULT WINAPI col_getinst(IDirectMusicCollection *i, DWORD patch, IDirectMusicInstrument **out)
 {
     if (out) *out = NULL;
-    return !col(i)->c || dls_find(col(i)->c, patch) < 0 ? DMUS_E_NOT_FOUND : E_NOTIMPL;
+    dm_collection *c = col_hold(col(i));
+    HRESULT hr = !c || dls_find(c, patch) < 0 ? DMUS_E_NOT_FOUND : E_NOTIMPL;
+    dls_release(c);
+    return hr;
 }
 static HRESULT WINAPI col_enum(IDirectMusicCollection *i, DWORD n, DWORD *patch, LPWSTR name, DWORD len)
 {
     const char *nm;
     uint32_t p;
-    if (!col(i)->c || dls_enum(col(i)->c, (int)n, &p, &nm) < 0) return S_FALSE;
-    if (patch) *patch = p;
-    if (name && len) MultiByteToWideChar(CP_ACP, 0, nm, -1, name, (int)len);
-    return S_OK;
+    dm_collection *c = col_hold(col(i));
+    HRESULT hr = S_FALSE;
+    if (c && dls_enum(c, (int)n, &p, &nm) >= 0) {
+        if (patch) *patch = p;
+        if (name && len) MultiByteToWideChar(CP_ACP, 0, nm, -1, name, (int)len);
+        hr = S_OK;
+    }
+    dls_release(c);
+    return hr;
 }
 static IDirectMusicCollectionVtbl col_vtbl = { col_qi, col_addref, col_release, col_getinst, col_enum };
 static rm_collection *col_of(IUnknown *u)
@@ -398,8 +425,10 @@ static HRESULT WINAPI colp_load(IPersistStream *i, IStream *st)
         c = dls_load_owned(b, n, 0);
         if (!c) return DMUS_E_NOTADLSCOL;
     }
+    dm_engine_lock();                   /* (col_hold reads o->c under it) */
     dm_collection *old = o->c;           /* (bands and downloads made from it keep their own references) */
     o->c = c;
+    dm_engine_unlock();
     dls_release(old);
     o->desc.dwValidData |= DMUS_OBJ_LOADED;
     return S_OK;
@@ -425,7 +454,6 @@ static rm_collection *new_collection(dm_collection *c)
 
 /* ------------------------------------------------------------------ segments */
 static IDirectMusicSegment8Vtbl seg_vtbl;
-static dm_host *any_host(void);
 static rm_segment *sgm(IDirectMusicSegment8 *i) { return impl_from(i, rm_segment, IDirectMusicSegment8_iface); }
 static rm_segment *unsafe_segment(IUnknown *u)
 {
@@ -462,23 +490,25 @@ static ULONG WINAPI seg_release(IDirectMusicSegment8 *i)
     LOG_CALL("music: Segment::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
         /* under the lock: the engine thread reads the wrapper (and its graph) and counts the segment under it */
-        dm_host *h = any_host();
-        if (h) dm_host_lock(h);
+        dm_engine_lock();
         if (s->seg && s->seg->wrapper == s) s->seg->wrapper = NULL;
         dm_segment_release(s->seg);
-        if (h) dm_host_unlock(h);
+        dm_engine_unlock();
         if (s->graph) IDirectMusicGraph_Release(s->graph);
         rm_auto_free(s->autod);
         free(s);
     }
     return r;
 }
-static HRESULT WINAPI seg_getlength(IDirectMusicSegment8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; *t = sgm(i)->seg ? sgm(i)->seg->length : 0; return S_OK; }
-static HRESULT WINAPI seg_setlength(IDirectMusicSegment8 *i, MUSIC_TIME t) { if (t <= 0) return E_INVALIDARG; if (sgm(i)->seg) sgm(i)->seg->length = t; return S_OK; }
-static HRESULT WINAPI seg_getrepeats(IDirectMusicSegment8 *i, DWORD *r) { if (!r) return E_POINTER; *r = sgm(i)->seg ? sgm(i)->seg->repeats : 0; return S_OK; }
-static HRESULT WINAPI seg_setrepeats(IDirectMusicSegment8 *i, DWORD r) { if (sgm(i)->seg) sgm(i)->seg->repeats = r; return S_OK; }
-static HRESULT WINAPI seg_getres(IDirectMusicSegment8 *i, DWORD *r) { if (!r) return E_POINTER; *r = sgm(i)->seg ? sgm(i)->seg->resolution : 0; return S_OK; }
-static HRESULT WINAPI seg_setres(IDirectMusicSegment8 *i, DWORD r) { if (sgm(i)->seg) sgm(i)->seg->resolution = r; return S_OK; }
+/* reAL: the engine segment read with the engine lock held: a Load on another thread replaces (and may free) it */
+#define SEG_GET(i, field, out) do { dm_engine_lock(); dm_segment *g_ = sgm(i)->seg; (out) = g_ ? g_->field : 0; dm_engine_unlock(); } while (0)
+#define SEG_SET(i, field, v) do { dm_engine_lock(); dm_segment *g_ = sgm(i)->seg; if (g_) g_->field = (v); dm_engine_unlock(); } while (0)
+static HRESULT WINAPI seg_getlength(IDirectMusicSegment8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; SEG_GET(i, length, *t); return S_OK; }
+static HRESULT WINAPI seg_setlength(IDirectMusicSegment8 *i, MUSIC_TIME t) { if (t <= 0) return E_INVALIDARG; SEG_SET(i, length, t); return S_OK; }
+static HRESULT WINAPI seg_getrepeats(IDirectMusicSegment8 *i, DWORD *r) { if (!r) return E_POINTER; SEG_GET(i, repeats, *r); return S_OK; }
+static HRESULT WINAPI seg_setrepeats(IDirectMusicSegment8 *i, DWORD r) { SEG_SET(i, repeats, r); return S_OK; }
+static HRESULT WINAPI seg_getres(IDirectMusicSegment8 *i, DWORD *r) { if (!r) return E_POINTER; SEG_GET(i, resolution, *r); return S_OK; }
+static HRESULT WINAPI seg_setres(IDirectMusicSegment8 *i, DWORD r) { SEG_SET(i, resolution, r); return S_OK; }
 static HRESULT WINAPI seg_gettrack(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, IDirectMusicTrack **t);
 static HRESULT WINAPI seg_gettrackgroup(IDirectMusicSegment8 *i, IDirectMusicTrack *t, DWORD *g);
 static HRESULT WINAPI seg_inserttrack(IDirectMusicSegment8 *i, IDirectMusicTrack *t, DWORD g);
@@ -489,11 +519,10 @@ static HRESULT WINAPI seg_getgraph(IDirectMusicSegment8 *i, IDirectMusicGraph **
 {
     if (IsBadWritePtr(g, sizeof(*g))) return E_POINTER;
     rm_segment *s = sgm(i);
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     IDirectMusicGraph *x = s->graph;
     if (x) { *g = x; IDirectMusicGraph_AddRef(x); }
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return x ? S_OK : DMUS_E_NOT_FOUND;
 }
 static HRESULT WINAPI seg_setgraph(IDirectMusicSegment8 *i, IDirectMusicGraph *g)
@@ -501,25 +530,22 @@ static HRESULT WINAPI seg_setgraph(IDirectMusicSegment8 *i, IDirectMusicGraph *g
     if (g && (IsBadReadPtr(g, 4) || IsBadReadPtr(*(void **)g, 4) || IsBadCodePtr(**(FARPROC **)g))) return E_POINTER;
     rm_segment *s = sgm(i);
     if (g) IDirectMusicGraph_AddRef(g);
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     IDirectMusicGraph *o = s->graph;
     s->graph = g;
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (o) IDirectMusicGraph_Release(o);
     return S_OK;
 }
-/* the segment's notification types are read by the performance thread: changed under the performance lock */
-static rm_perf *g_lastperf;
+/* the segment's notification types are read by the performance thread: changed under the engine lock */
 static HRESULT seg_notif(IDirectMusicSegment8 *i, REFGUID g, int add)
 {
     rm_segment *s = sgm(i);
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
     if (!s->seg) return S_OK;
-    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     int hr = add ? dm_segment_add_notification(s->seg, (const dm_guid *)g, 0) : dm_segment_remove_notification(s->seg, (const dm_guid *)g, 0);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 static HRESULT WINAPI seg_addnotif(IDirectMusicSegment8 *i, REFGUID g) { return seg_notif(i, g, 1); }
@@ -583,49 +609,55 @@ static int prm_takes_target(int prm)
     return prm == PRM_DOWNLOAD || prm == PRM_UNLOAD || prm == PRM_DOWNLOAD_AP || prm == PRM_UNLOAD_AP;
 }
 static rm_collection *col_of(IUnknown *u);
-static struct dms_style *style_engine_of(void *p);     /* dmcomsty.c */
-static dm_band *band_engine_of(void *p);
+static struct dms_style *style_hold_of(void *p);       /* dmcomsty.c: with a reference */
+void dms_style_release(struct dms_style *s);            /* (dmsty.h) */
+static dm_band *band_hold_of(void *p);
 static struct dmc_chordmap *chordmap_engine_of(void *p);     /* dmcomcmp.c */
 static void prm_out(int prm, int hr, void *p);
 static rm_perf *perf_from_unknown(IUnknown *u);
 static rm_path *unsafe_path(IUnknown *u);
 
-/* the engine data a SetParam passes: a performance / audiopath for the download parameters (the host to lock comes
- * from it), a collection for ConnectToDLSCollection; *h = the host to lock (the last performance created when the
- * parameter names none) */
-static HRESULT prm_data(int prm, void *p, dm_dltarget *dt, void **data, dm_host **h)
+/* the engine data a SetParam passes: a performance / audiopath for the download parameters, a collection for
+ * ConnectToDLSCollection, a style, chord map or band (used under the engine lock); the collection, style and band
+ * with a reference: prm_drop once the engine took its own (a Load on another thread may replace them) */
+static HRESULT prm_data(int prm, void *p, dm_dltarget *dt, void **data)
 {
     *data = p;
-    *h = g_lastperf ? g_lastperf->host : NULL;
     if (prm_takes_target(prm)) {
         if (!p) return E_POINTER;
         rm_perf *pf = perf_from_unknown(p);
         if (!pf || !pf->host) return E_NOINTERFACE;
         rm_path *a = unsafe_path(p);
         dt->pf = dm_host_perf(pf->host); dt->ap = a ? a->ap : NULL;
-        *data = dt; *h = pf->host;
+        *data = dt;
     } else if (prm == PRM_CONNECTDLS) {
         if (!p) return E_POINTER;
         rm_collection *c = col_of(p);
-        if (!c || !c->c) return E_NOINTERFACE;
-        *data = c->c;
+        if (!c || !(*data = col_hold(c))) return E_NOINTERFACE;
     } else if (prm == PRM_STYLE) {
         if (!p) return E_POINTER;
-        if (!(*data = style_engine_of(p))) return E_NOINTERFACE;
+        if (!(*data = style_hold_of(p))) return E_NOINTERFACE;
     } else if (prm == PRM_CHORDMAP) {
         if (!p) return E_POINTER;
         if (!(*data = chordmap_engine_of(p))) return E_NOINTERFACE;
     } else if (prm == PRM_IBAND) {
         if (!p) return E_POINTER;
-        if (!(*data = band_engine_of(p))) return E_NOINTERFACE;
+        if (!(*data = band_hold_of(p))) return E_NOINTERFACE;
     } else if (prm == PRM_BANDPARAM) {
         if (!p || IsBadReadPtr(p, 8)) return E_POINTER;
         const DMUS_BAND_PARAM *bp = p;
-        if (!(dt->bp.band = band_engine_of(bp->pBand))) return E_NOINTERFACE;
+        if (!(dt->bp.band = band_hold_of(bp->pBand))) return E_NOINTERFACE;
         dt->bp.physical = bp->mtTimePhysical;
         *data = &dt->bp;
     }
     return S_OK;
+}
+static void prm_drop(int prm, dm_dltarget *dt, void *data)
+{
+    if (prm == PRM_CONNECTDLS) dls_release(data);
+    else if (prm == PRM_STYLE) dms_style_release(data);
+    else if (prm == PRM_IBAND) dm_band_release(data);
+    else if (prm == PRM_BANDPARAM) dm_band_release(dt->bp.band);
 }
 
 static HRESULT WINAPI seg_getparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *p)
@@ -635,11 +667,10 @@ static HRESULT WINAPI seg_getparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb,
     if (!sgm(i)->seg) return DMUS_E_TRACK_NOT_FOUND;
     int prm = prm_of(g);
     if ((prm == PRM_TEMPO || prm == PRM_TIMESIG) && !p) return E_POINTER;
-    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
     mtime_t next = nx ? *nx : 0;      /* untouched when no track answers */
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     int hr = dm_segment_getparam(sgm(i)->seg, prm, gb, n, t, nx ? &next : NULL, p);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     prm_out(prm, hr, p);
     if (nx) *nx = next;
     LOG_CALL("music: Segment::GetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, hr);
@@ -651,12 +682,13 @@ static HRESULT WINAPI seg_setparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb,
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
     if (!sgm(i)->seg) return DMUS_E_TRACK_NOT_FOUND;
     int prm = prm_of(g);
-    dm_dltarget dt; void *data; dm_host *h;
-    HRESULT hr = prm_data(prm, p, &dt, &data, &h);
+    dm_dltarget dt; void *data;
+    HRESULT hr = prm_data(prm, p, &dt, &data);
     if (FAILED(hr)) return hr;
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     hr = dm_segment_setparam(sgm(i)->seg, prm, gb, n, t, data);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
+    prm_drop(prm, &dt, data);
     if (prm == PRM_OTHER) LOG_INFO("music: Segment::SetParam(%s) -> %08x (not supported)", guidstr(g, b), (unsigned)hr);
     else LOG_CALL("music: Segment::SetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, (unsigned)hr);
     return hr;
@@ -664,25 +696,31 @@ static HRESULT WINAPI seg_setparam(IDirectMusicSegment8 *i, REFGUID g, DWORD gb,
 static HRESULT WINAPI seg_clone(IDirectMusicSegment8 *i, MUSIC_TIME a, MUSIC_TIME b, IDirectMusicSegment **o);
 static HRESULT WINAPI seg_setstart(IDirectMusicSegment8 *i, MUSIC_TIME t)
 {
+    HRESULT hr = S_OK;
+    dm_engine_lock();
     dm_segment *s = sgm(i)->seg;
-    if (!s) return E_FAIL;
-    if (t < 0 || t >= s->length) return DMUS_E_OUT_OF_RANGE;
-    s->playstart = t;
-    return S_OK;
+    if (!s) hr = E_FAIL;
+    else if (t < 0 || t >= s->length) hr = DMUS_E_OUT_OF_RANGE;
+    else s->playstart = t;
+    dm_engine_unlock();
+    return hr;
 }
-static HRESULT WINAPI seg_getstart(IDirectMusicSegment8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; *t = sgm(i)->seg ? sgm(i)->seg->playstart : 0; return S_OK; }
+static HRESULT WINAPI seg_getstart(IDirectMusicSegment8 *i, MUSIC_TIME *t) { if (!t) return E_POINTER; SEG_GET(i, playstart, *t); return S_OK; }
 static HRESULT WINAPI seg_setloop(IDirectMusicSegment8 *i, MUSIC_TIME a, MUSIC_TIME b)
 {
+    HRESULT hr = S_OK;
+    dm_engine_lock();
     dm_segment *s = sgm(i)->seg;
-    if (!s) return E_FAIL;
-    if ((a || b) && (a < 0 || b > s->length || a >= b)) return DMUS_E_OUT_OF_RANGE;
-    s->loopstart = a; s->loopend = b;
-    return S_OK;
+    if (!s) hr = E_FAIL;
+    else if ((a || b) && (a < 0 || b > s->length || a >= b)) hr = DMUS_E_OUT_OF_RANGE;
+    else { s->loopstart = a; s->loopend = b; }
+    dm_engine_unlock();
+    return hr;
 }
 static HRESULT WINAPI seg_getloop(IDirectMusicSegment8 *i, MUSIC_TIME *a, MUSIC_TIME *b)
 {
     if (!a || !b) return E_POINTER;
-    *a = sgm(i)->seg ? sgm(i)->seg->loopstart : 0; *b = sgm(i)->seg ? sgm(i)->seg->loopend : 0;
+    SEG_GET(i, loopstart, *a); SEG_GET(i, loopend, *b);
     return S_OK;
 }
 static HRESULT WINAPI seg_setpch(IDirectMusicSegment8 *i, DWORD n, DWORD *p)
@@ -691,20 +729,18 @@ static HRESULT WINAPI seg_setpch(IDirectMusicSegment8 *i, DWORD n, DWORD *p)
     if (!p) return E_INVALIDARG;
     if (IsBadReadPtr(p, n * sizeof(DWORD))) return E_POINTER;
     if (!sgm(i)->seg) return S_OK;
-    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     HRESULT hr = dm_segment_add_pchannels(sgm(i)->seg, (const uint32_t *)p, n);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 static HRESULT WINAPI seg_settrackcfg(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, DWORD on, DWORD off)
 {
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
     if (!sgm(i)->seg) return DMUS_E_TRACK_NOT_FOUND;
-    dm_host *h = g_lastperf ? g_lastperf->host : NULL;
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     HRESULT hr = dm_segment_set_trackconfig(sgm(i)->seg, (const dm_guid *)g, gb, n, on, off);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 static HRESULT WINAPI seg_getapconfig(IDirectMusicSegment8 *i, IUnknown **c) { if (c) *c = NULL; return DMUS_E_NO_AUDIOPATH_CONFIG; }
@@ -716,10 +752,9 @@ HRESULT rm_segment_recompose(IUnknown *u)
 {
     rm_segment *s = unsafe_segment(u);
     if (!s || !s->seg) return E_INVALIDARG;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     int r = dmc_recompose(s->seg, dm_app_rand_state(), 1);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return r;
 }
 static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirectMusicSegment *a, IDirectMusicSegment *b, IDirectMusicSegment **c)
@@ -730,13 +765,12 @@ static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirect
     rm_segment *s = sgm(i), *fa = a ? unsafe_segment((IUnknown *)a) : NULL, *fb = b ? unsafe_segment((IUnknown *)b) : NULL;
     if ((a && !fa) || (b && !fb)) return rm_notimpl("Segment::Compose from or to a segment not made by reDM");
     if (!s->seg) return DMUS_E_NOT_INIT;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     int hr = DM_OK;
     dm_segment *g = s->seg;
     if (c) { g = dm_segment_clone(s->seg, 0, s->seg->length, &hr); if (!g) hr = E_OUTOFMEMORY; }
     if (g) hr = dmc_segment_compose_ex(g, t, fa ? fa->seg : NULL, fb ? fb->seg : NULL);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (c && g) {
         rm_segment *o = new_segment(g);
         if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
@@ -910,14 +944,13 @@ static HRESULT WINAPI sgp_load(IPersistStream *i, IStream *st)
     free(cont);
     if (!g) return DMUS_E_UNSUPPORTED_STREAM;
     if (gr && FAILED(ghr)) { IDirectMusicGraph_Release(gr); dm_segment_release(g); return ghr; }
-    dm_host *h = any_host();                /* (the old segment may be playing: its count and wrapper under the lock) */
-    if (h) dm_host_lock(h);
+    dm_engine_lock();                       /* (the old segment may be playing: its count and wrapper under the lock) */
     if (s->seg) { if (s->seg->wrapper == s) s->seg->wrapper = NULL; dm_segment_release(s->seg); }
     s->seg = g;
     g->wrapper = s;
     IDirectMusicGraph *og = NULL;
     if (gr) { og = s->graph; s->graph = gr; }
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (og) IDirectMusicGraph_Release(og);
     s->desc.dwValidData |= DMUS_OBJ_LOADED;
     return g->partial ? DMUS_S_PARTIALLOAD : S_OK;
@@ -1035,10 +1068,14 @@ static HRESULT WINAPI wvp_load(IPersistStream *i, IStream *st)
     dm_wave *w = dm_wave_load(b, n);
     free(b);
     if (!w) return E_INVALIDARG;
-    if (o->w) { if (o->w->wrapper == o) o->w->wrapper = NULL; dm_wave_release(o->w); }
+    dm_engine_lock();                   /* (loader_getwave reads o->w under it) */
+    dm_wave *old = o->w;
+    if (old && old->wrapper == o) old->wrapper = NULL;
     o->w = w;
     w->wrapper = o;
     wave_desc(o);
+    dm_engine_unlock();
+    dm_wave_release(old);
     return S_OK;
 }
 static HRESULT WINAPI wvp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }
@@ -1113,7 +1150,6 @@ static IDirectMusicTrack8Vtbl trk_vtbl;
 static IPersistStreamVtbl trp_vtbl;
 static IDirectMusicPatternTrackVtbl ptk_vtbl;
 static rm_track *trk(IDirectMusicTrack8 *i) { return impl_from(i, rm_track, IDirectMusicTrack8_iface); }
-static dm_host *any_host(void) { return g_lastperf ? g_lastperf->host : NULL; }
 
 /* the COM object of a track (one per track, made on demand) */
 static IDirectMusicTrack8 *track_object(dm_track *t)
@@ -1161,11 +1197,10 @@ static ULONG WINAPI trk_release(IDirectMusicTrack8 *i)
     rm_track *r = trk(i);
     LONG n = InterlockedDecrement(&r->ref);
     if (!n) {
-        dm_host *h = any_host();
-        if (h) dm_host_lock(h);
+        dm_engine_lock();
         if (r->t->wrapper == r) r->t->wrapper = NULL;
         dm_track_release(r->t);
-        if (h) dm_host_unlock(h);
+        dm_engine_unlock();
         free(r);
     }
     return n;
@@ -1183,17 +1218,24 @@ static HRESULT WINAPI trk_initplay(IDirectMusicTrack8 *i, IDirectMusicSegmentSta
     dm_track *t = trk(i)->t;
     if (!d || IsBadWritePtr(d, sizeof(*d))) return E_POINTER;
     *d = NULL;
+    dm_engine_lock();
     int ok = dm_track_can_play(t);
+    dm_engine_unlock();
     if (ok == DM_E_FAIL) *d = &s_nostate;
     if (ok < 0) return ok;
     rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
     rm_perf *pf = p ? perf_from_unknown((IUnknown *)p) : NULL;
     if (!st || !st->ss || !pf || !pf->host) return rm_notimpl("Track::InitPlay (a state or performance not made by reDM)");
     dm_host_lock(pf->host);
+    if ((ok = dm_track_can_play(t)) < 0) {          /* (again: a Load on another thread may have replaced the data) */
+        dm_host_unlock(pf->host);
+        if (ok == DM_E_FAIL) *d = &s_nostate;
+        return ok;
+    }
     int ihr;
     void *x = dm_track_direct_init(dm_host_perf(pf->host), st->ss, t, f, id, &ihr);
     if (x && (t->kind == TRK_CHORDMAP || t->kind == TRK_SIGNPOST || t->kind == TRK_MUTE || t->kind == TRK_MARKER)) {
-        dm_track_direct_end(dm_host_perf(pf->host), x);
+        dm_track_direct_end(x);
         x = NULL;
     } else if (!x) { dm_host_unlock(pf->host); return E_OUTOFMEMORY; }
     dm_host_unlock(pf->host);
@@ -1205,10 +1247,9 @@ static HRESULT WINAPI trk_initplay(IDirectMusicTrack8 *i, IDirectMusicSegmentSta
 static HRESULT WINAPI trk_endplay(IDirectMusicTrack8 *i, void *d)
 {
     if (!d || d == &s_nostate) return S_OK;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
-    dm_track_direct_end(h ? dm_host_perf(h) : NULL, d);
-    if (h) dm_host_unlock(h);
+    dm_engine_lock();
+    dm_track_direct_end(d);             /* (on the performance it started on) */
+    dm_engine_unlock();
     return S_OK;
 }
 static HRESULT trk_play_any(IDirectMusicTrack8 *i, void *d, int64_t a, int64_t b, int64_t o, DWORD f, IDirectMusicPerformance *p,
@@ -1232,11 +1273,10 @@ static HRESULT WINAPI trk_getparam(IDirectMusicTrack8 *i, REFGUID g, MUSIC_TIME 
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
     int prm = prm_of(g);
     mtime_t next = nx ? *nx : 0;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     HRESULT hr = dm_track_getparam(trk(i)->t, prm, t, nx ? &next : NULL, p);
     prm_out(prm, hr, p);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (nx) *nx = next;
     return hr;
 }
@@ -1244,45 +1284,46 @@ static HRESULT WINAPI trk_setparam(IDirectMusicTrack8 *i, REFGUID g, MUSIC_TIME 
 {
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
     int prm = prm_of(g);
-    dm_dltarget dt; void *data; dm_host *h;
-    HRESULT hr = prm_data(prm, p, &dt, &data, &h);
+    dm_dltarget dt; void *data;
+    HRESULT hr = prm_data(prm, p, &dt, &data);
     if (FAILED(hr)) return hr;
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     hr = dm_track_setparam(trk(i)->t, prm, t, data);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
+    prm_drop(prm, &dt, data);
     return hr;
 }
 static HRESULT WINAPI trk_isparam(IDirectMusicTrack8 *i, REFGUID g)
 {
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
-    return dm_track_isparam(trk(i)->t, prm_of(g));
+    dm_engine_lock();                   /* (a Load on another thread may replace the track's data) */
+    HRESULT hr = dm_track_isparam(trk(i)->t, prm_of(g));
+    dm_engine_unlock();
+    return hr;
 }
 static HRESULT WINAPI trk_addnotif(IDirectMusicTrack8 *i, REFGUID g)
 {
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     HRESULT hr = dm_track_add_notification(trk(i)->t, (const dm_guid *)g);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 static HRESULT WINAPI trk_remnotif(IDirectMusicTrack8 *i, REFGUID g)
 {
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     HRESULT hr = dm_track_remove_notification(trk(i)->t, (const dm_guid *)g);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 static HRESULT WINAPI trk_clone(IDirectMusicTrack8 *i, MUSIC_TIME a, MUSIC_TIME b, IDirectMusicTrack **o)
 {
     if (!o || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
     int hr;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     dm_track *c = dm_track_clone(trk(i)->t, a, b, &hr);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (!c) return hr;
     *o = (IDirectMusicTrack *)track_object(c);
     dm_track_release(c);
@@ -1324,11 +1365,10 @@ static HRESULT WINAPI trk_join(IDirectMusicTrack8 *i, IDirectMusicTrack *t, MUSI
     rm_track *r = unsafe_track((IUnknown *)t);
     rm_segment *g = c ? unsafe_segment(c) : NULL;
     if (!r || (c && !g)) return rm_notimpl("Track::Join (a track or segment not made by reDM)");
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     dm_track *res = NULL;
     int hr = dm_track_join(me, r->t, j, g ? g->seg : NULL, id, o ? &res : NULL);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (o) {
         *o = NULL;
         if (res) { *o = (IDirectMusicTrack *)track_object(res); dm_track_release(res); if (!*o) return E_OUTOFMEMORY; }
@@ -1413,10 +1453,9 @@ static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s)
         void *d = NULL;
         hr = dm_track_parse_chunk(t, b, n, &cb, &d);
         if (d) {
-            dm_host *h = any_host();
-            if (h) dm_host_lock(h);
+            dm_engine_lock();
             dm_track_set_data(t, d);
-            if (h) dm_host_unlock(h);
+            dm_engine_unlock();
         }
     }
     free(b);
@@ -1428,7 +1467,9 @@ static HRESULT WINAPI trp_save(IPersistStream *i, IStream *s, BOOL c)
     dm_track *t = trp(i)->t;
     if (t->kind != TRK_SIGNPOST) return rm_notimpl(__func__);
     size_t n;
+    dm_engine_lock();
     uint8_t *b = dmc_sptrack_save(t->data, &n);
+    dm_engine_unlock();
     if (!b) return E_OUTOFMEMORY;
     ULONG w = 0;
     HRESULT hr = IStream_Write(s, b, (ULONG)n, &w);
@@ -1442,13 +1483,12 @@ static IPersistStreamVtbl trp_vtbl = { trp_qi, trp_addref, trp_release, trp_getc
 static HRESULT WINAPI seg_gettrack(IDirectMusicSegment8 *i, REFGUID g, DWORD gb, DWORD n, IDirectMusicTrack **t)
 {
     if (!t || IsBadWritePtr(t, sizeof(*t))) return E_POINTER;
-    dm_segment *s = sgm(i)->seg;
-    if (!s || !g) return DMUS_E_NOT_FOUND;
+    if (!g) return DMUS_E_NOT_FOUND;
     HRESULT hr = DMUS_E_NOT_FOUND;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
+    dm_segment *s = sgm(i)->seg;
     static const GUID null_guid;
-    for (int k = 0; k < s->ntracks; k++) {
+    for (int k = 0; s && k < s->ntracks; k++) {
         dm_segtrack *e = &s->tracks[k];
         if (!(e->group & gb) || !(IsEqualGUID(g, &null_guid) || !memcmp(g, &e->t->clsid, sizeof(GUID)))) continue;
         if (n--) continue;
@@ -1456,7 +1496,7 @@ static HRESULT WINAPI seg_gettrack(IDirectMusicSegment8 *i, REFGUID g, DWORD gb,
         hr = *t ? S_OK : E_OUTOFMEMORY;
         break;
     }
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 /* 773119c5 GetTrackGroup */
@@ -1464,10 +1504,13 @@ static HRESULT WINAPI seg_gettrackgroup(IDirectMusicSegment8 *i, IDirectMusicTra
 {
     if (!t || !g || IsBadWritePtr(g, sizeof(*g))) return E_POINTER;
     rm_track *r = unsafe_track((IUnknown *)t);
+    if (!r) return DMUS_E_NOT_FOUND;
+    HRESULT hr = DMUS_E_NOT_FOUND;
+    dm_engine_lock();
     dm_segment *s = sgm(i)->seg;
-    if (!r || !s) return DMUS_E_NOT_FOUND;
-    for (int k = 0; k < s->ntracks; k++) if (s->tracks[k].t == r->t) { *g = s->tracks[k].group; return S_OK; }
-    return DMUS_E_NOT_FOUND;
+    for (int k = 0; s && k < s->ntracks; k++) if (s->tracks[k].t == r->t) { *g = s->tracks[k].group; hr = S_OK; break; }
+    dm_engine_unlock();
+    return hr;
 }
 /* 773131cb / 77311b2c InsertTrack: config DMUS_TRACKCONFIG_DEFAULT, position and priority 0, in track order; the track
  * takes the segment's notification types.  Only reDM's own tracks can go in. */
@@ -1477,26 +1520,24 @@ static HRESULT WINAPI seg_inserttrack(IDirectMusicSegment8 *i, IDirectMusicTrack
     if (!g) return E_INVALIDARG;
     rm_track *r = unsafe_track((IUnknown *)t);
     if (!r) return rm_notimpl("Segment::InsertTrack (a track not made by reDM)");
+    dm_engine_lock();
     dm_segment *s = sgm(i)->seg;
-    if (!s) return DMUS_E_NOT_INIT;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    if (!s) { dm_engine_unlock(); return DMUS_E_NOT_INIT; }
     dm_track_addref(r->t);
-    dm_segment_insert_track(s, r->t, 0, g, 0x38, 0);
-    if (h) dm_host_unlock(h);
-    return S_OK;
+    int ok = dm_segment_insert_track(s, r->t, 0, g, 0x38, 0);
+    dm_engine_unlock();
+    return ok ? S_OK : E_OUTOFMEMORY;
 }
 /* 77311c54 RemoveTrack: S_FALSE when the track is not in the segment */
 static HRESULT WINAPI seg_removetrack(IDirectMusicSegment8 *i, IDirectMusicTrack *t)
 {
     if (!t || IsBadReadPtr(t, sizeof(void *))) return E_POINTER;
     rm_track *r = unsafe_track((IUnknown *)t);
-    dm_segment *s = sgm(i)->seg;
-    if (!r || !s) return S_FALSE;
+    if (!r) return S_FALSE;
     HRESULT hr = S_FALSE;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
-    for (int k = 0; k < s->ntracks; k++)
+    dm_engine_lock();
+    dm_segment *s = sgm(i)->seg;
+    for (int k = 0; s && k < s->ntracks; k++)
         if (s->tracks[k].t == r->t) {
             dm_track *x = s->tracks[k].t;
             memmove(s->tracks + k, s->tracks + k + 1, (s->ntracks - k - 1) * sizeof(*s->tracks));
@@ -1505,24 +1546,24 @@ static HRESULT WINAPI seg_removetrack(IDirectMusicSegment8 *i, IDirectMusicTrack
             hr = S_OK;
             break;
         }
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 /* 77313a27 Clone */
 static HRESULT WINAPI seg_clone(IDirectMusicSegment8 *i, MUSIC_TIME a, MUSIC_TIME b, IDirectMusicSegment **o)
 {
     if (!o || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
+    int hr = E_FAIL;
+    dm_engine_lock();
     dm_segment *s = sgm(i)->seg;
-    if (!s) { *o = NULL; return E_FAIL; }
-    int hr;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
-    dm_segment *c = dm_segment_clone(s, a, b, &hr);
-    if (h) dm_host_unlock(h);
+    dm_segment *c = s ? dm_segment_clone(s, a, b, &hr) : NULL;
+    IDirectMusicGraph *gr = c ? sgm(i)->graph : NULL;
+    if (gr) IDirectMusicGraph_AddRef(gr);       /* (the application's graph object: AddRef only, no call into it) */
+    dm_engine_unlock();
     if (!c) { *o = NULL; return hr; }
     rm_segment *n = new_segment(c);
-    if (!n) { dm_segment_release(c); *o = NULL; return E_OUTOFMEMORY; }
-    if ((n->graph = sgm(i)->graph)) IDirectMusicGraph_AddRef(n->graph);     /* 77313acd: the same graph */
+    if (!n) { if (gr) IDirectMusicGraph_Release(gr); dm_engine_lock(); dm_segment_release(c); dm_engine_unlock(); *o = NULL; return E_OUTOFMEMORY; }
+    n->graph = gr;                              /* 77313acd: the same graph */
     *o = (IDirectMusicSegment *)&n->IDirectMusicSegment8_iface;
     return hr;
 }
@@ -1576,7 +1617,13 @@ static ULONG WINAPI st_release(IDirectMusicSegmentState8 *i)
     }
     return r;
 }
-static HRESULT WINAPI st_getrepeats(IDirectMusicSegmentState8 *i, DWORD *r) { if (!r) return E_POINTER; *r = sst(i)->seg && sst(i)->seg->seg ? sst(i)->seg->seg->repeats : 0; return S_OK; }
+static HRESULT WINAPI st_getrepeats(IDirectMusicSegmentState8 *i, DWORD *r)
+{
+    if (!r) return E_POINTER;
+    *r = 0;
+    if (sst(i)->seg) SEG_GET(&sst(i)->seg->IDirectMusicSegment8_iface, repeats, *r);
+    return S_OK;
+}
 static HRESULT WINAPI st_getsegment(IDirectMusicSegmentState8 *i, IDirectMusicSegment **s)
 {
     if (!s) return E_POINTER;
@@ -2157,6 +2204,21 @@ static void pf_closedown(rm_perf *p)
         dm_host_unlock(p->host);
     }
 }
+static void pf_teardown(rm_perf *p)
+{
+    dm_engine_lock();
+    for (rm_perf **q = &s_perfs; *q; q = &(*q)->pnext) if (*q == p) { *q = p->pnext; break; }
+    dm_engine_unlock();
+    rm_port_detach(p->port);
+    rm_port_release(p->port);
+    dm_host_free(p->host);
+    if (p->dm) IDirectMusic8_Release(p->dm);
+    rm_auto_free(p->autod);
+    while (p->globals) { struct rm_global *e = p->globals; p->globals = e->next; free(e->data); free(e); }
+    DeleteCriticalSection(&p->gcs);
+    free(p);
+}
+static DWORD WINAPI pf_reaper(LPVOID p) { pf_teardown(p); return 0; }
 static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
 {
     rm_perf *p = prf(i);
@@ -2165,16 +2227,16 @@ static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
     if (!r) {
         p->ref = 1;     /* guard against re-entry from children */
         pf_closedown(p);
-        if (s_clockperf == p) s_clockperf = NULL;
-        if (g_lastperf == p) g_lastperf = NULL;
-        rm_port_detach(p->port);
-        rm_port_release(p->port);
-        dm_host_free(p->host);
-        if (p->dm) IDirectMusic8_Release(p->dm);
-        rm_auto_free(p->autod);
-        while (p->globals) { struct rm_global *e = p->globals; p->globals = e->next; free(e->data); free(e); }
-        DeleteCriticalSection(&p->gcs);
-        free(p);
+        /* reAL: the last reference let go of on one of the performance's own threads (a segment state's release the
+         * engine deferred until its lock was let go): that thread cannot wait for itself to end, and it is still
+         * inside the engine (an application tool's turn), so a thread of its own does the rest */
+        if (p->host && dm_host_own_thread(p->host)) {
+            HANDLE t = CreateThread(NULL, 0, pf_reaper, p, 0, NULL);
+            if (t) CloseHandle(t);
+            else LOG_INFO("music: performance %p released on its own thread, no thread to free it; not freed", (void *)p);
+            return 0;
+        }
+        pf_teardown(p);
     }
     return r;
 }
@@ -2188,9 +2250,10 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     if (!p->host) return E_OUTOFMEMORY;
     p->port = rm_port_new(p->host);
     p->revparams.fInGain = 0; p->revparams.fReverbMix = 0; p->revparams.fReverbTime = 1000; p->revparams.fHighFreqRTRatio = 0.001f;
-    if (!s_clockperf) s_clockperf = p;
-    g_lastperf = p;
     dm_host_lock(p->host);
+    rm_perf **q = &s_perfs;
+    while (*q) q = &(*q)->pnext;
+    *q = p;
     dm_perf_set_toolops(dm_host_perf(p->host), &s_toolops, p);
     for (struct rm_global *e = p->globals; e; e = e->next)        /* (set before the performance was) */
         if (IsEqualGUID(&e->g, &G_PerfMasterGrooveLevel) && e->size >= 1) dm_perf_set_groove(dm_host_perf(p->host), *(char *)e->data);
@@ -2745,10 +2808,9 @@ static ULONG WINAPI sct_release(IDirectMusicTool *i)
     rm_scripttool *x = sct(i);
     LONG n = InterlockedDecrement(&x->ref);
     if (!n) {
-        dm_host *h = any_host();
-        if (h) dm_host_lock(h);
+        dm_engine_lock();
         dm_track_release(x->t);
-        if (h) dm_host_unlock(h);
+        dm_engine_unlock();
         free(x);
     }
     return n;
@@ -3085,12 +3147,13 @@ static HRESULT WINAPI pf_setparam(IDirectMusicPerformance8 *i, REFGUID g, DWORD 
     if (!g || IsBadReadPtr(g, sizeof(GUID))) return E_POINTER;
     if (!p->host) return DMUS_E_NO_MASTER_CLOCK;
     int prm = prm_of(g);
-    dm_dltarget dt; void *data; dm_host *h;
-    HRESULT hr = prm_data(prm, pp, &dt, &data, &h);
+    dm_dltarget dt; void *data;
+    HRESULT hr = prm_data(prm, pp, &dt, &data);
     if (FAILED(hr)) return hr;
     dm_host_lock(p->host);
     hr = dm_perf_setparam(dm_host_perf(p->host), prm, gb, n, t, data);
     dm_host_unlock(p->host);
+    prm_drop(prm, &dt, data);
     LOG_CALL("music: Performance::SetParam(%s, %lx, %lx, %ld) -> %08x", guidstr(g, b), (unsigned long)gb, (unsigned long)n, (long)t, (unsigned)hr);
     return hr;
 }
@@ -3256,6 +3319,8 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     dm_host_lock(p->host);
     dm_perf *pf = dm_host_perf(p->host);
     int hr = dm_perf_play(pf, g->seg, flags, start, a ? a->ap : NULL, &ss);
+    char name[64];
+    snprintf(name, sizeof(name), "%s", g->seg->name);     /* (a Load on another thread may replace the segment) */
     if (hr >= 0 && from) {
         rm_segment *fg = unsafe_segment(from);
         rm_state *fs = unsafe_state(from);
@@ -3264,7 +3329,7 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
         if (fg || fs) dm_perf_stop(pf, fg ? fg->seg : NULL, fs ? fs->ss : NULL, t, 0);
     }
     dm_host_unlock(p->host);
-    LOG_CALL("music: PlaySegment(%s, flags %lx, %lld) -> %08x", g->seg->name, (unsigned long)flags, (long long)start, hr);
+    LOG_CALL("music: PlaySegment(%s, flags %lx, %lld) -> %08x", name, (unsigned long)flags, (long long)start, hr);
     if (hr < 0) return hr;
     rm_state *n = calloc(1, sizeof(*n));   /* (made before the lock, put in under it: a tool may make one meanwhile) */
     dm_host_lock(p->host);
@@ -3606,15 +3671,13 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
         return NULL;
     }
     rm_collection *c = col_of((IUnknown *)o);
-    dm_collection *r = c ? c->c : NULL;
-    dls_addref(r);                         /* the caller's reference: the object may go with this Release */
+    dm_collection *r = c ? col_hold(c) : NULL;     /* the caller's reference: the object may go with this Release */
     IDirectMusicCollection_Release(o);
     return r;
 }
 
 #include "dmcomsty.c"
 #include "dmcomcmp.c"
-static struct dms_style *style_engine_of(void *p) { rm_style *s = style_of(p); return s ? s->s : NULL; }
 
 /* ------------------------------------------------------------------ IDirectMusicPatternTrack (774019c8) */
 static rm_track *ptk(IDirectMusicPatternTrack *i) { return impl_from(i, rm_track, IDirectMusicPatternTrack_iface); }
@@ -3626,13 +3689,13 @@ static BOOL bad_iface(void *p) { return IsBadReadPtr(p, 4) || IsBadReadPtr(*(voi
 static HRESULT WINAPI ptk_createsegment(IDirectMusicPatternTrack *i, IDirectMusicStyle *style, IDirectMusicSegment **out)
 {
     if (bad_iface(style) || IsBadWritePtr(out, sizeof(*out))) return E_POINTER;
-    struct dms_style *st = style_engine_of(style);
+    struct dms_style *st = style_hold_of(style);
     if (!st) return E_NOINTERFACE;      /* (dmstyle's private style interface) */
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     dm_segment *g = NULL;
     HRESULT hr = dms_patterntrack_create_segment(ptk(i)->t, st, &g);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
+    dms_style_release(st);
     if (FAILED(hr)) return hr;
     rm_segment *n = new_segment(g);
     if (!n) { dm_segment_release(g); return E_OUTOFMEMORY; }
@@ -3644,10 +3707,9 @@ static HRESULT WINAPI ptk_setvariation(IDirectMusicPatternTrack *i, IDirectMusic
 {
     if (ss && bad_iface(ss)) return E_POINTER;
     rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     HRESULT hr = dms_patterntrack_set_variation(ptk(i)->t, st ? st->ss : NULL, flags, part);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     return hr;
 }
 /* 77413c30: the style's pattern (0) or motif (1) of that name (DMUS_E_NOT_FOUND without one) */
@@ -3655,11 +3717,10 @@ static HRESULT WINAPI ptk_setpatternbyname(IDirectMusicPatternTrack *i, IDirectM
                                            IDirectMusicStyle *style, DWORD type, DWORD *length)
 {
     if ((ss && bad_iface(ss)) || IsBadReadPtr(name, 4) || bad_iface(style) || IsBadWritePtr(length, 4)) return E_POINTER;
-    struct dms_style *sty = style_engine_of(style);
+    struct dms_style *sty = style_hold_of(style);
     if (!sty) return E_NOINTERFACE;
     rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     const dms_pattern *p = NULL;
     dms_pattern **list = type == 0 ? sty->patterns : type == 1 ? sty->motifs : NULL;
     int n = type == 0 ? sty->npatterns : type == 1 ? sty->nmotifs : 0;
@@ -3670,16 +3731,17 @@ static HRESULT WINAPI ptk_setpatternbyname(IDirectMusicPatternTrack *i, IDirectM
         hr = dms_patterntrack_set_pattern(ptk(i)->t, st ? st->ss : NULL, p, &len);
         if (SUCCEEDED(hr) || hr != (int32_t)0x88781162) *length = (DWORD)len;
     }
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
+    dms_style_release(sty);
     return hr;
 }
 static IDirectMusicPatternTrackVtbl ptk_vtbl = { ptk_qi, ptk_addref, ptk_release, ptk_createsegment, ptk_setvariation, ptk_setpatternbyname };
-static dm_band *band_engine_of(void *p)
+static dm_band *band_hold_of(void *p)        /* (ours only: no call into the object) */
 {
     if (!p || IsBadReadPtr(p, sizeof(void *))) return NULL;
     void *vt = *(void **)p;
     rm_band *b = vt == &bnd_vtbl ? bnd(p) : vt == &bno_vtbl ? bno(p) : vt == &bnp_vtbl ? bnp(p) : NULL;
-    return b ? b->b : NULL;
+    return b ? band_hold(b) : NULL;
 }
 static void prm_out(int prm, int hr, void *p)
 {
@@ -3703,8 +3765,10 @@ static dm_wave *loader_getwave(void *ctx, const dm_guid *g, const char *file, co
         return NULL;
     }
     rm_wave *w = o->lpVtbl == &wvo_vtbl ? wvo(o) : NULL;
+    dm_engine_lock();                   /* (a Load on another thread may replace it) */
     dm_wave *r = w ? w->w : NULL;
     dm_wave_addref(r);
+    dm_engine_unlock();
     IDirectMusicObject_Release(o);
     return r;
 }
@@ -3719,11 +3783,10 @@ static dm_segment *loader_getseg(void *ctx, const dm_guid *g, const char *file, 
         return NULL;
     }
     rm_segment *r = o->lpVtbl == &seg_vtbl ? sgm(o) : NULL;
+    dm_engine_lock();                       /* (the engine thread counts it too; a Load may replace it) */
     dm_segment *x = r ? r->seg : NULL;
-    dm_host *h = any_host();                /* (the engine thread counts it too) */
-    if (h) dm_host_lock(h);
     if (x) x->refs++;
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     IDirectMusicSegment8_Release(o);
     return x;
 }
@@ -3743,9 +3806,8 @@ static void *loader_getscript(void *ctx, const dm_guid *g, const char *file, con
 }
 static void resort_hook(int enter)
 {
-    static __thread dm_host *t_h;       /* (the host locked by the matching enter) */
-    if (enter) { t_h = any_host(); if (t_h) dm_host_lock(t_h); }
-    else if (t_h) { dm_host *h = t_h; t_h = NULL; dm_host_unlock(h); }
+    if (enter) dm_engine_lock();
+    else dm_engine_unlock();
 }
 /* (a script track's scripts: let go of once the performance's lock is, as a script's last release can call the loader) */
 static void unk_ref(void *u, int add) { if (add) IUnknown_AddRef((IUnknown *)u); else dm_host_release_later(u); }
@@ -3758,9 +3820,7 @@ static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char
         LOG_INFO("music: style track: style %s not found", file ? file : name ? name : "(by guid)");
         return NULL;
     }
-    rm_style *s = style_of(o);
-    dms_style *r = s ? s->s : NULL;
-    dms_style_addref(r);
+    dms_style *r = style_hold_of(o);
     IDirectMusicStyle8_Release(o);
     return r;
 }

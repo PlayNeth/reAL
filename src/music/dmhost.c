@@ -12,12 +12,35 @@
 #include "../real.h"
 #include "dmhost.h"
 
-/* ------------------------------------------------------------------ the performance lock, as each thread holds it
- * reAL's lock order: whoever holds a performance's lock never calls into the loader, a script or an application
- * object that may (the loader takes a performance's lock inside a Load).  COM objects the engine lets go of while
- * the lock is held are released once this thread's outermost hold ends (dm_host_release_later). */
+/* ------------------------------------------------------------------ the engine lock, as each thread holds it
+ * One lock for every performance: segments, tracks, styles and bands are shared between performances (any of them
+ * may play a segment another plays), so the lock that guards them while an engine thread reads them is the same for
+ * all.  (A lock per performance left an application's edit to a segment unguarded against every performance but one,
+ * and the COM objects had to guess which.)  dm_host_lock(h) takes it whatever h is.
+ * reAL's lock order: whoever holds it never calls into the loader, a script or an application object that may (the
+ * loader takes it inside a Load).  COM objects the engine lets go of while it is held are released once this thread's
+ * outermost hold ends (dm_host_release_later). */
+static CRITICAL_SECTION s_lock;
+static INIT_ONCE s_lock_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK lock_init(PINIT_ONCE o, PVOID p, PVOID *c)
+{
+    (void)o; (void)p; (void)c;
+    InitializeCriticalSection(&s_lock);
+    return TRUE;
+}
 static __thread int t_held;
 static __thread struct deferred { struct deferred *next; IUnknown *u; } *t_deferred;
+/* reAL: nodes of each thread's own for when there is no memory (a release made with the lock held could call the
+ * loader or a script: the lock order's breach); set up at the thread's first hold, so that nothing is allocated for
+ * them when memory is short (a __thread object can be, on its first use) */
+#define SPARE 256           /* (the most waiting at once in tests/multiperf.c: 55) */
+static __thread struct deferred t_spare[SPARE], *t_sparefree;
+static __thread int t_spareinit;
+static void spare_init(void)
+{
+    for (int i = 0; i < SPARE; i++) { t_spare[i].next = t_sparefree; t_sparefree = &t_spare[i]; }
+    t_spareinit = 1;
+}
 static void host_enter(dm_host *h);
 static void host_leave(dm_host *h);
 int dm_host_held(void) { return t_held > 0; }
@@ -25,8 +48,14 @@ void dm_host_release_later(void *unk)
 {
     IUnknown *u = unk;
     if (!u) return;
-    struct deferred *d = t_held > 0 ? malloc(sizeof(*d)) : NULL;
-    if (!d) { IUnknown_Release(u); return; }      /* (not held, or out of memory: now) */
+    if (t_held <= 0) { IUnknown_Release(u); return; }      /* (not held: now) */
+    struct deferred *d = malloc(sizeof(*d));
+    if (!d && (d = t_sparefree)) t_sparefree = d->next;
+    if (!d) {           /* (no memory and the spares all in use: now, against the lock order rather than leak it) */
+        LOG_INFO("music: out of memory: a COM object released with the engine lock held");
+        IUnknown_Release(u);
+        return;
+    }
     d->u = u; d->next = t_deferred; t_deferred = d;
 }
 static void drain_deferred(void)
@@ -35,7 +64,8 @@ static void drain_deferred(void)
         struct deferred *d = t_deferred;
         t_deferred = d->next;
         IUnknown *u = d->u;
-        free(d);
+        if ((uintptr_t)d - (uintptr_t)t_spare < sizeof(t_spare)) { d->next = t_sparefree; t_sparefree = d; }  /* (a spare) */
+        else free(d);
         IUnknown_Release(u);
     }
 }
@@ -70,7 +100,6 @@ typedef struct {
 } hbuf;
 
 struct dm_host {
-    CRITICAL_SECTION lock;
     dm_perf *pf;
     msynth *syn;
     dls_port *dls;
@@ -90,6 +119,7 @@ struct dm_host {
     DWORD lastcur;
     /* threads */
     HANDLE th[3], ev[2], quit;
+    DWORD tid[3];
     volatile LONG stop;
     int noreverb;
     FILE *dump;                 /* REDM_DUMP=file: raw 16-bit stereo of the dry + wet output (debugging) */
@@ -477,7 +507,6 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
 {
     dm_host *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
-    InitializeCriticalSection(&h->lock);
     h->rate = rate ? rate : 22050;
     h->bufframes = h->rate * BUF_MS / 1000;
     QueryPerformanceFrequency(&h->qpf);
@@ -519,7 +548,9 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     dm_set_clone_fix(fixes);
     dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign,
                       port_wave_download, port_wave_unload, port_voice_alloc, port_voice_play, port_voice_stop, port_voice_free };
+    host_enter(h);                      /* (the ports alive are the engine's, under its lock) */
     dm_perf_add_port(h->pf, &po, h);
+    host_leave(h);
     /* start both buffers in the same mixer period so they stay sample-aligned */
     EnterCriticalSection(&h->dev->lock);
     IDirectSoundBuffer8_Play(&h->dry->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
@@ -531,15 +562,21 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     host_enter(h);
     sink_pass(h);
     host_leave(h);
-    h->th[0] = CreateThread(NULL, 0, transport_thread, h, 0, NULL);
-    h->th[1] = CreateThread(NULL, 0, realtime_thread, h, 0, NULL);
-    h->th[2] = CreateThread(NULL, 0, sink_thread, h, 0, NULL);
+    h->th[0] = CreateThread(NULL, 0, transport_thread, h, 0, &h->tid[0]);
+    h->th[1] = CreateThread(NULL, 0, realtime_thread, h, 0, &h->tid[1]);
+    h->th[2] = CreateThread(NULL, 0, sink_thread, h, 0, &h->tid[2]);
     SetThreadPriority(h->th[1], THREAD_PRIORITY_TIME_CRITICAL);
     SetThreadPriority(h->th[2], THREAD_PRIORITY_HIGHEST);
     LOG_INFO("music: host %p, synth %u Hz, %u voices", (void *)h, h->rate, voices);
     return h;
 }
 
+int dm_host_own_thread(dm_host *h)
+{
+    DWORD me = GetCurrentThreadId();
+    for (int i = 0; h && i < 3; i++) if (h->th[i] && h->tid[i] == me) return 1;
+    return 0;
+}
 void dm_host_free(dm_host *h)
 {
     if (!h) return;
@@ -556,6 +593,9 @@ void dm_host_free(dm_host *h)
     }
     for (int i = 0; i < 2; i++) if (h->ev[i]) CloseHandle(h->ev[i]);
     if (h->quit) CloseHandle(h->quit);
+    /* under the engine lock: the states, tracks and collections that go with the engine are shared with the other
+     * performances (their threads and the application's calls) */
+    dm_engine_lock();
     for (int k = 2; k < MAXHB; k++) if (h->hb[k].b) {
         rl_fxchain_free(h->hb[k].fx);
         IDirectSoundBuffer8_Release(&h->hb[k].b->IDirectSoundBuffer8_iface);
@@ -568,19 +608,27 @@ void dm_host_free(dm_host *h)
     dls_port_free(h->dls);
     msynth_free(h->syn);
     wavesrev_free(h->rev);
+    dm_engine_unlock();
     if (h->dev) rl_device_release(h->dev);
     if (h->dump) fclose(h->dump);
-    DeleteCriticalSection(&h->lock);
     free(h);
 }
 
-static void host_enter(dm_host *h) { EnterCriticalSection(&h->lock); t_held++; }
-static void host_leave(dm_host *h)
+void dm_engine_lock(void)
+{
+    if (!t_spareinit) spare_init();
+    InitOnceExecuteOnce(&s_lock_once, lock_init, NULL, NULL);
+    EnterCriticalSection(&s_lock);
+    t_held++;
+}
+void dm_engine_unlock(void)
 {
     t_held--;
-    LeaveCriticalSection(&h->lock);
+    LeaveCriticalSection(&s_lock);
     if (!t_held && t_deferred) drain_deferred();
 }
+static void host_enter(dm_host *h) { (void)h; dm_engine_lock(); }
+static void host_leave(dm_host *h) { (void)h; dm_engine_unlock(); }
 void dm_host_lock(dm_host *h) { host_enter(h); }
 void dm_host_unlock(dm_host *h) { host_leave(h); }
 dm_perf *dm_host_perf(dm_host *h) { return h->pf; }

@@ -88,6 +88,8 @@ static void chordmap_clear(dmc_chordmap *m)
         free(s);
     }
     m->signposts = NULL;
+    for (int i = 0; i < m->nsubs; i++) free(m->subs[i]);    /* (reAL: no chord of the map names them now) */
+    free(m->subs); m->subs = NULL; m->nsubs = 0;
 }
 /* (atomic: the application's Release and the playing thread's recomposing share chord maps) */
 void dmc_chordmap_addref(dmc_chordmap *m) { if (m) __sync_add_and_fetch(&m->refs, 1); }
@@ -317,8 +319,13 @@ static int32_t chordmap_parse(dmc_chordmap *m, rd r)
                 s->chordroot = b[12]; s->scaleroot = b[13]; s->cflags = u16(b + 14); s->levels = u32(b + 16);
                 v[n++] = s;
             }
-            if (hr < 0) { free(v); break; }
-            if (left != 0) { free(v); hr = E_FAIL_; break; }
+            if (hr >= 0 && left != 0) hr = E_FAIL_;
+            /* (reAL: the table's subchords belong to the map from here, freed with its contents; a failed table's are
+             * named by no chord) */
+            dmc_sub **all = hr >= 0 && n ? realloc(m->subs, (m->nsubs + n) * sizeof(*all)) : NULL;
+            if (hr >= 0 && n && !all) hr = E_OUTOFMEMORY_;
+            if (hr < 0) { for (int i = 0; i < n; i++) free(v[i]); free(v); break; }
+            if (n) { m->subs = all; memcpy(all + m->nsubs, v, n * sizeof(*all)); m->nsubs += n; }
             free(tab.v);
             tab.v = v; tab.n = n;
             hr = 0;

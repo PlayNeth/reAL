@@ -60,6 +60,8 @@ typedef struct dmc_chordmap {
     dmc_entry *entries;                     /* +0xb8 newest first */
     dmc_signpost *signposts;                /* +0xbc in file order */
     void *wrapper;                          /* the COM object (weak) */
+    dmc_sub **subs; int nsubs;              /* reAL: every subchord loaded, freed with the map's contents (dmcompos
+                                             * never frees them: each reload and the map's end left them behind) */
 } dmc_chordmap;
 
 dmc_chordmap *dmc_chordmap_new(void);

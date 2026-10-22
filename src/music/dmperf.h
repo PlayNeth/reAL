@@ -153,7 +153,8 @@ int dm_track_isparam(const dm_track *t, int prm);
 void *dm_track_direct_init(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t segflags, uint32_t id, int *hr);
 int dm_track_direct_play(dm_perf *pf, dm_segstate *ss, void *d, dm_track *t, int64_t start, int64_t end, int64_t off,
                          uint32_t flags, int clock);
-void dm_track_direct_end(dm_perf *pf, void *d);
+/* EndPlay: on the performance InitPlay was given (the state is ended already if that one closed down) */
+void dm_track_direct_end(void *d);
 int dm_track_getparam(const dm_track *t, int prm, mtime_t mt, mtime_t *next, void *data);
 int dm_track_setparam(dm_track *t, int prm, mtime_t mt, void *data);
 int dm_segment_getparam(dm_segment *s, int prm, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);

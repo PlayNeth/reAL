@@ -526,6 +526,13 @@ static int build_ranges(const uint32_t *bits, uint32_t *out)
     return n;
 }
 
+/* reAL: the records of ports gone (their performance freed, and the download with it) let go of */
+static void dlrec_prune(dm_inst *in)
+{
+    for (dm_dlrec **pr = &in->dl; *pr; )
+        if (!port_alive((*pr)->port)) { dm_dlrec *r = *pr; *pr = r->next; free(r); }
+        else pr = &(*pr)->next;
+}
 static int inst_download(dm_perf *pf, dm_inst *in, int mode)
 {
     uint32_t pi, group, chan;
@@ -535,9 +542,10 @@ static int inst_download(dm_perf *pf, dm_inst *in, int mode)
     if (mode != 0 && mode != 4 && in->pch == 9) in->patch |= 0x80000000u;
     if (in->notinfile) return DM_OK;    /* default instruments of a MIDI file are not downloaded */
     if (pi >= (uint32_t)pf->nports) return DMUS_E_NOT_INIT;
-    for (dm_dlrec *r = in->dl; r; r = r->next) if (r->port == (int)pi) { r->refs++; return DM_OK; }
-    if (!in->coll) return DM_OK;
     port *po = &pf->ports[pi];
+    dlrec_prune(in);
+    for (dm_dlrec *r = in->dl; r; r = r->next) if (r->port == po->id) { r->refs++; return DM_OK; }
+    if (!in->coll) return DM_OK;
     if (!po->ops.download) return DM_OK;
     uint32_t ranges[256];
     int nr = (in->flags & 0x10) ? build_ranges(in->ranges, ranges) : 0;
@@ -550,16 +558,17 @@ static int inst_download(dm_perf *pf, dm_inst *in, int mode)
     if (!h) return hr == DMUS_E_NOT_FOUND ? (int32_t)0x88781114 : hr < 0 ? hr : DM_E_FAIL;
     dm_dlrec *r = calloc(1, sizeof(*r));
     if (!r) { po->ops.unload(po->ctx, h); return DM_E_OUTOFMEMORY; }
-    r->dl = h; r->port = (int)pi; r->refs = 1; r->next = in->dl; in->dl = r;
+    r->dl = h; r->port = po->id; r->refs = 1; r->next = in->dl; in->dl = r;
     return DM_OK;
 }
 
 static void inst_unload(dm_perf *pf, dm_inst *in)
 {
     uint32_t pi, group, chan;
-    if (map_pch(pf, in->pch, &pi, &group, &chan, NULL) < 0) return;
+    if (map_pch(pf, in->pch, &pi, &group, &chan, NULL) < 0 || pi >= (uint32_t)pf->nports) return;
+    dlrec_prune(in);
     for (dm_dlrec **pr = &in->dl; *pr; pr = &(*pr)->next)
-        if ((*pr)->port == (int)pi) {
+        if ((*pr)->port == pf->ports[pi].id) {
             dm_dlrec *r = *pr;
             if (--r->refs > 0) return;
             *pr = r->next;
@@ -1160,7 +1169,10 @@ static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, m
 
 /* ------------------------------------------------------------------ a track played by the application itself
  * (IDirectMusicTrack::InitPlay / Play / PlayEx / EndPlay on a state of its choosing): the track's state as a segment
- * state keeps it, for a track the state's segment does not have (no group: every bit) */
+ * state keeps it, for a track the state's segment does not have (no group: every bit).
+ * reAL: the state is on its performance's list and holds the segment state (a Load of the track moves the state to
+ * the new data with both); when the performance closes down, the state ends there and lets go of both, so an EndPlay
+ * after that only frees it. */
 void *dm_track_direct_init(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t segflags, uint32_t id, int *hr)
 {
     *hr = DM_OK;
@@ -1168,17 +1180,35 @@ void *dm_track_direct_init(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t s
     if (!e) return NULL;
     e->t = t; dm_track_addref(t);
     e->vid = id; e->group = 0xffffffff; e->cfg = 0x38;
+    if (ss) ss->refs++;
+    e->dnext = pf->direct; pf->direct = e;
     pf->apprand = 1;                    /* (all on the application's thread: its rand()) */
     if (t->kind == TRK_WAVE) { track_link(pf, ss, e, segflags); *hr = wt_initplay(pf, ss, e); }
     else track_initplay(pf, ss, e, segflags);
     pf->apprand = 0;
     return e;
 }
+/* the state ended on its performance and off the list; the segment state let go of */
+static void direct_end_state(dm_perf *pf, sstrack *e)
+{
+    for (sstrack **p = &pf->direct; *p; p = &(*p)->dnext) if (*p == e) { *p = e->dnext; break; }
+    e->dnext = NULL;
+    pf->apprand = 1;
+    track_endplay(pf, e);
+    pf->apprand = 0;
+    if (e->ss) ss_unref(e->ss);
+    e->ss = NULL; e->pf = NULL;
+}
+static void direct_end_all(dm_perf *pf)
+{
+    while (pf->direct) direct_end_state(pf, pf->direct);
+}
 int dm_track_direct_play(dm_perf *pf, dm_segstate *ss, void *d, dm_track *t, int64_t start, int64_t end, int64_t off,
                          uint32_t flags, int clock)
 {
     sstrack tmp = { .t = t, .vid = 0, .group = 0xffffffff, .cfg = 0x38 };
     sstrack *e = d ? d : &tmp;
+    if (d && !e->pf) return DM_OK;      /* (ended: its performance closed down) */
     dm_segstate *was = pf->ssplaying;
     pf->ssplaying = ss;
     pf->inplay = 1;
@@ -1191,13 +1221,11 @@ int dm_track_direct_play(dm_perf *pf, dm_segstate *ss, void *d, dm_track *t, int
     pf->ssplaying = was;
     return r;
 }
-void dm_track_direct_end(dm_perf *pf, void *d)
+void dm_track_direct_end(void *d)
 {
     sstrack *e = d;
     if (!e) return;
-    if (pf) pf->apprand = 1;
-    track_endplay(pf, e);
-    if (pf) pf->apprand = 0;
+    if (e->pf) direct_end_state(e->pf, e);
     dm_track_release(e->t);
     free(e);
 }

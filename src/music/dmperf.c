@@ -33,6 +33,7 @@ typedef struct pchblock { struct pchblock *next; uint32_t base; pchentry e[16]; 
 typedef struct { rtime_t rt; uint32_t group; uint32_t len; uint8_t d[4]; } bufev;
 typedef struct {
     dm_portops ops; void *ctx;
+    uint32_t id;            /* reAL: unique in the process (a band's downloads are kept per port: dm_dlrec) */
     rtime_t lastpacked;     /* +0x00 */
     int dirty;              /* +0x14 */
     bufev ev[BUF_BYTES / 24 + 1]; int nev; uint32_t used;
@@ -52,6 +53,7 @@ typedef struct sstrack {
     struct dm_segstate *ss;
     uint32_t segflags;
     int linked, reseek;
+    struct sstrack *dnext;  /* reAL: a track the application plays itself: the performance's list (dm_perf.direct) */
 } sstrack;
 
 struct dm_segstate {
@@ -117,6 +119,7 @@ struct dm_perf {
     int played, stopped, tempochanged;          /* +0x360 +0x364 +0x368 */
     uint32_t dxver;                             /* +0x370 */
     dm_segstate *ssplaying; uint32_t cfgplaying;   /* +0x374 +0x378 */
+    sstrack *direct;                            /* reAL: the tracks the application plays itself (InitPlay) */
     int autodl;
     dm_audiopath *paths, *defpath;
     uint32_t nextpch;                           /* PChannels allocated so far (any) */
@@ -2033,6 +2036,7 @@ static void drop_musicstopped(dm_perf *pf)
     }
 }
 
+static int port_alive(uint32_t id);
 #include "dmtrack.c"
 #include "dmstate.c"
 
@@ -2210,12 +2214,26 @@ dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx)
     return pf;
 }
 
+/* reAL: the ports of the performances alive (under the lock that guards the engine): a band instrument's download
+ * record for a port that is gone is let go of when met (its download went with that port) */
+static uint32_t *s_live_ports; static int s_nlive_ports;
+static uint32_t s_next_port_id;
+static int port_alive(uint32_t id)
+{
+    for (int i = 0; i < s_nlive_ports; i++) if (s_live_ports[i] == id) return 1;
+    return 0;
+}
 int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx)
 {
     if (pf->nports >= 8) return DM_E_OUTOFMEMORY;
+    uint32_t *l = realloc(s_live_ports, (s_nlive_ports + 1) * sizeof(*l));
+    if (!l) return DM_E_OUTOFMEMORY;
+    s_live_ports = l;
     port *po = &pf->ports[pf->nports];
     memset(po, 0, sizeof(*po));
     po->ops = *ops; po->ctx = ctx;
+    po->id = ++s_next_port_id;
+    s_live_ports[s_nlive_ports++] = po->id;
     return pf->nports++;
 }
 
@@ -2258,6 +2276,12 @@ static void free_queue(dm_perf *pf, dm_queue *q)
 void dm_perf_free(dm_perf *pf)
 {
     if (!pf) return;
+    direct_end_all(pf);
+    for (int k = 0; k < pf->nports; k++)
+        for (int i = 0; i < s_nlive_ports; i++)
+            if (s_live_ports[i] == pf->ports[k].id) { s_live_ports[i] = s_live_ports[--s_nlive_ports]; break; }
+    /* reAL: the wave downloads never unloaded, and their waves' references (the port's side goes with its host) */
+    while (pf->wdls) { wdl *d = pf->wdls; pf->wdls = d->next; dm_wave_release(d->wave); free(d); }
     /* the states still playing go, whatever holds them; held while the messages naming them go first (a
      * notification's state reference) */
     int nss = 0;

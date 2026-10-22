@@ -39,7 +39,9 @@ static ULONG WINAPI cmp_release(IDirectMusicChordMap *i)
     rm_chordmap *o = cmp(i);
     LONG r = InterlockedDecrement(&o->ref);
     if (!r) {
+        dm_engine_lock();               /* (chordmap_iface reads the wrapper under it) */
         if (o->m && o->m->wrapper == o) o->m->wrapper = NULL;
+        dm_engine_unlock();
         dmc_chordmap_release(o->m);
         free(o);
     }
@@ -136,7 +138,9 @@ static HRESULT WINAPI cms_load(IPersistStream *i, IStream *st)
     BYTE *b; DWORD n;
     if (!st) return E_INVALIDARG;
     if (!read_stream(st, &b, &n)) return DMUS_E_CHUNKNOTFOUND;
+    dm_engine_lock();                   /* (loaded in place: a playing chord map track reads it) */
     HRESULT hr = chordmap_load_data(o->m, b, n);
+    dm_engine_unlock();
     free(b);
     return hr;
 }
@@ -154,7 +158,9 @@ static rm_chordmap *new_chordmap(dmc_chordmap *m)
     o->ref = 1;
     o->m = m ? m : dmc_chordmap_new();
     if (!o->m) { free(o); return NULL; }
+    dm_engine_lock();
     if (!o->m->wrapper) o->m->wrapper = o;
+    dm_engine_unlock();
     return o;
 }
 /* the chord map behind an interface (ours only) */
@@ -172,9 +178,13 @@ static dmc_chordmap *chordmap_engine_of(void *p) { rm_chordmap *o = chordmap_of(
 static IDirectMusicChordMap *chordmap_iface(dmc_chordmap *m)
 {
     if (!m) return NULL;
+    /* (not one whose last Release is under way on another thread: a new wrapper then; under the engine lock, which
+     * that Release takes to clear the wrapper before the object goes) */
+    dm_engine_lock();
     rm_chordmap *o = m->wrapper;
-    /* (not one whose last Release is under way on another thread: a new wrapper then) */
-    if (o && ref_if_alive(&o->ref)) { dmc_chordmap_release(m); return &o->IDirectMusicChordMap_iface; }
+    int alive = o && ref_if_alive(&o->ref);
+    dm_engine_unlock();
+    if (alive) { dmc_chordmap_release(m); return &o->IDirectMusicChordMap_iface; }
     o = new_chordmap(m);
     if (!o) { dmc_chordmap_release(m); return NULL; }
     return &o->IDirectMusicChordMap_iface;
@@ -223,7 +233,7 @@ static ULONG WINAPI cpo_release(IDirectMusicComposer *i)
 }
 static rm_segment *new_segment(dm_segment *g);
 static rm_segment *unsafe_segment(IUnknown *u);
-static struct dms_style *style_engine_of(void *p);
+static struct dms_style *style_hold_of(void *p);
 /* 772821f3 / 77287974 (flags 3): a new segment from the template */
 static HRESULT WINAPI cpo_fromtemplate(IDirectMusicComposer *i, IDirectMusicStyle *style, IDirectMusicSegment *tmpl,
                                        WORD activity, IDirectMusicChordMap *cm, IDirectMusicSegment **out)
@@ -233,14 +243,15 @@ static HRESULT WINAPI cpo_fromtemplate(IDirectMusicComposer *i, IDirectMusicStyl
         return E_POINTER;
     rm_segment *t = unsafe_segment((IUnknown *)tmpl);
     if (!t || !t->seg) return E_INVALIDARG;
-    struct dms_style *sx = style ? style_engine_of(style) : NULL;
     dmc_chordmap *mx = cm ? chordmap_engine_of(cm) : NULL;
-    if ((style && !sx) || (cm && !mx)) return rm_notimpl("Composer: a style or chord map not made by reDM");
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    if (cm && !mx) return rm_notimpl("Composer: a style or chord map not made by reDM");
+    struct dms_style *sx = style ? style_hold_of(style) : NULL;
+    if (style && !sx) return rm_notimpl("Composer: a style or chord map not made by reDM");
+    dm_engine_lock();
     int hr;
     dm_segment *g = dmc_compose_template(t->seg, sx, mx, activity, &hr);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
+    dms_style_release(sx);
     LOG_CALL("music: Composer::ComposeSegmentFromTemplate -> %08x", hr);
     if (!g) return hr < 0 ? hr : E_FAIL;
     rm_segment *o = new_segment(g);
@@ -255,9 +266,8 @@ static HRESULT WINAPI cpo_fromshape(IDirectMusicComposer *i, IDirectMusicStyle *
                                     BOOL end, IDirectMusicChordMap *cm, IDirectMusicSegment **out)
 {
     if (IsBadWritePtr(s, 4) || IsBadWritePtr(cm, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
-    struct dms_style *sx = style_engine_of(s);
     dmc_chordmap *mx = chordmap_engine_of(cm);
-    if (!sx || !mx) return rm_notimpl("Composer: a style or chord map not made by reDM");
+    if (!mx || !style_of(s)) return rm_notimpl("Composer: a style or chord map not made by reDM");
     IDirectMusicStyle8 *s8 = (IDirectMusicStyle8 *)s;
     DWORD mn, len;
     int introlen = 1, fill = 1, brk = 1, endlen = 1;
@@ -274,11 +284,13 @@ static HRESULT WINAPI cpo_fromshape(IDirectMusicComposer *i, IDirectMusicStyle *
         if (endlen <= 0) endlen = 1;
         if (m <= endlen) { m = endlen; if (intro) m = endlen + introlen; }
     }
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    struct dms_style *sx = style_hold_of(s);
+    if (!sx) return rm_notimpl("Composer: a style or chord map not made by reDM");
+    dm_engine_lock();
     int r;
     dm_segment *g = dmc_segment_from_shape(sx, mx, (unsigned)m, shape, act, intro, end, introlen, fill, brk, endlen, &r);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
+    dms_style_release(sx);
     LOG_CALL("music: Composer::ComposeSegmentFromShape(%u measures, shape %u, activity %u, intro %d, end %d) -> %08x",
              n, shape, act, intro, end, r);
     if (!g) return r < 0 ? r : E_FAIL;
@@ -328,11 +340,10 @@ static HRESULT WINAPI cpo_transition(IDirectMusicComposer *i, IDirectMusicSegmen
     if (!to && !isend && (fl & 0x1000)) return E_INVALIDARG;
     rm_segment *fo = from ? unsafe_segment((IUnknown *)from) : NULL, *tob = to ? unsafe_segment((IUnknown *)to) : NULL;
     if ((from && !fo) || (to && !tob)) return rm_notimpl("Composer::ComposeTransition (a segment not made by reDM)");
-    dm_segment *fs = fo ? fo->seg : NULL, *ts = tob ? tob->seg : NULL;
     dmc_chordmap *mx = NULL;
     if (cm && !(mx = chordmap_engine_of(cm))) return rm_notimpl("Composer::ComposeTransition (a chord map not made by reDM)");
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
+    dm_segment *fs = fo ? fo->seg : NULL, *ts = tob ? tob->seg : NULL;     /* (under the lock: a Load may replace them) */
     dms_style *fst = NULL;
     if (fs && dm_segment_getparam(fs, PRM_STYLE, 0xffffffff, 0, t, NULL, &fst) < 0) fst = NULL;
     int owncm = 0;
@@ -360,7 +371,7 @@ static HRESULT WINAPI cpo_transition(IDirectMusicComposer *i, IDirectMusicSegmen
     if (!tks || dm_segment_getparam(tks, PRM_CHORD, 0xffffffff, DM_SEG_ANYTRACK, 0, NULL, &tk) < 0) key_default(&tk);
     int side = 0, hr;
     dm_segment *g = dmc_compose_transition(fst, NULL, tp, &cp, &fk, &tk, ts, cmd, fl, mx, &side, &hr);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     if (fst) dms_style_release(fst);
     if (owncm) dmc_chordmap_release(mx);
     LOG_CALL("music: Composer::ComposeTransition(%ld, command %u, flags %lx) -> %08x", (long)t, cmd, (unsigned long)fl, hr);
@@ -422,8 +433,10 @@ static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPe
     dmc_chordmap *mx = cm ? chordmap_engine_of(cm) : NULL;
     int owncm = 0;
     if (!cm) {
+        dm_engine_lock();
         if (!isend && tob && tob->seg) mx = seg_chordmap_at(tob->seg, 0);
         if (!mx && fo && fo->seg) mx = seg_chordmap_at(fo->seg, 0);
+        dm_engine_unlock();
         owncm = mx != NULL;
     }
     DMUS_COMMAND_PARAM_2 c2;
@@ -434,7 +447,7 @@ static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPe
     if (FAILED(IDirectMusicPerformance8_GetParam(pf, &GUID_ChordParam, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, (DMUS_CHORD_KEY *)&fk))) key_m7(&fk);
     IDirectMusicSegment *tks = (((fl & 0x1000) || isintro) && to) ? to : fromseg;
     if (!tks || FAILED(IDirectMusicSegment_GetParam(tks, &GUID_ChordParam, 0xffffffff, DMUS_SEG_ANYTRACK, 0, NULL, (DMUS_CHORD_KEY *)&tk))) key_default(&tk);
-    struct dms_style *sx = style ? style_engine_of(style) : NULL;
+    struct dms_style *sx = style ? style_hold_of(style) : NULL;
     if (!sx || (fl & 0x400)) {
         hr = cpo_transition(i, st ? fromseg : NULL, to, st ? mt - start : 0, cmd, fl, cm, trans);
     } else {
@@ -447,11 +460,11 @@ static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPe
         if (SUCCEEDED(IDirectMusicPerformance8_GetParam(pf, &GUID_BandParam, 0xffffffff, DMUS_SEG_ANYTRACK, mt, NULL, &bp))) band = bp.pBand;
         dmc_cmdparam cp = { c2.mtTime, c2.bCommand, c2.bGrooveLevel, c2.bGrooveRange, c2.bRepeatMode };
         int side = 0, r;
-        dm_host *h = any_host();
-        if (h) dm_host_lock(h);
-        dm_segment *g = dmc_compose_transition(sx, band ? band_engine_of(band) : NULL, tp, &cp, &fk, &tk, tob ? tob->seg : NULL,
-                                               cmd, fl, mx, &side, &r);
-        if (h) dm_host_unlock(h);
+        dm_band *bx = band ? band_hold_of(band) : NULL;
+        dm_engine_lock();
+        dm_segment *g = dmc_compose_transition(sx, bx, tp, &cp, &fk, &tk, tob ? tob->seg : NULL, cmd, fl, mx, &side, &r);
+        dm_engine_unlock();
+        dm_band_release(bx);
         if (band) IDirectMusicBand_Release(band);
         *trans = NULL;
         hr = r;
@@ -465,6 +478,7 @@ static HRESULT WINAPI cpo_autotransition(IDirectMusicComposer *i, IDirectMusicPe
             }
         }
     }
+    dms_style_release(sx);
     if (SUCCEEDED(hr)) {
         if (*trans && to) {
             DMUS_COMMAND_PARAM_2 nx;
@@ -497,11 +511,10 @@ static HRESULT WINAPI cpo_templatefromshape(IDirectMusicComposer *i, WORD n, WOR
                                             IDirectMusicSegment **out)
 {
     if (IsBadWritePtr(out, 4)) return E_POINTER;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     int r;
     dm_segment *g = dmc_template_from_shape(n, shape, intro, end, 1, 1, 1, endlen, &r);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     LOG_CALL("music: Composer::ComposeTemplateFromShape(%u measures, shape %u, intro %d, end %d, end length %u) -> %08x",
              n, shape, intro, end, endlen, r);
     if (!g) return r;
@@ -519,10 +532,9 @@ static HRESULT WINAPI cpo_changechordmap(IDirectMusicComposer *i, IDirectMusicSe
     dmc_chordmap *mx = chordmap_engine_of(cm);
     if (!t || !mx) return rm_notimpl("Composer::ChangeChordMap (a segment or chord map not made by reDM)");
     if (!t->seg) return DMUS_E_NOT_FOUND;
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
+    dm_engine_lock();
     int r = dmc_change_chordmap(t->seg, trackscale, mx);
-    if (h) dm_host_unlock(h);
+    dm_engine_unlock();
     LOG_CALL("music: Composer::ChangeChordMap(track scale %d) -> %08x", trackscale, r);
     return r;
 }

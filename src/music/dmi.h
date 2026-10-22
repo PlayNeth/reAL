@@ -206,7 +206,8 @@ typedef struct { mtime_t mt; uint8_t bpm, beat; uint16_t grids; } dm_tsitem;
 typedef struct { dm_tsitem *items; int n; int active, setbyparam; } dm_tstrack;
 
 /* band instrument (dmband INST) */
-typedef struct dm_dlrec { struct dm_dlrec *next; void *dl; int port; int refs; } dm_dlrec;
+/* an instrument's download to a port (dmband keys these on the port object: each performance's is its own) */
+typedef struct dm_dlrec { struct dm_dlrec *next; void *dl; uint32_t port; int refs; } dm_dlrec;
 typedef struct {
     uint32_t patch, assign, priority;
     uint8_t pan, vol; int16_t transpose;
@@ -430,7 +431,8 @@ dm_segment *dm_band_segment(dm_band *b);
 dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn getcoll, void *ctx);
 int dm_is_midi(const void *data, size_t size);
 /* dmseg.c internals the MIDI importer builds on */
-/* a new track object of the kind with its data (one reference); add / drop references */
+/* a new track object of the kind with its data (one reference; the track owns the data, and frees it when there is
+ * no memory for the track); add / drop references */
 dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data);
 void dm_track_addref(dm_track *t);
 void dm_track_release(dm_track *t);
@@ -453,7 +455,8 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
 int dm_track_join(dm_track *t, const dm_track *other, mtime_t mtjoin, dm_segment *ctx, uint32_t group, dm_track **result);
 void dm_set_clone_fix(int on);
 /* insert in segment track order (position, then sysex before band before the rest); takes over one reference */
-void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority);
+/* takes the caller's reference; 0 when there was no memory (the track was released) */
+int dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority);
 void dm_segment_release(dm_segment *s);
 
 #endif

@@ -489,16 +489,17 @@ static int track_before(const dm_segtrack *n, const dm_segtrack *e)
 
 void (*dm_track_replace_hook)(dm_track *t, int after);
 
+static void free_track(dm_track *t);
+/* the new track owns `data`: when there is no memory for the track, the data is freed (the caller never frees it) */
 dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data)
 {
     dm_track *t = calloc(1, sizeof(*t));
-    if (!t) return NULL;
+    if (!t) { dm_track tmp = { .kind = kind, .data = data }; free_track(&tmp); return NULL; }
     t->refs = 1; t->kind = kind; t->data = data;
     if (clsid) t->clsid = *clsid;
     return t;
 }
 void dm_track_addref(dm_track *t) { if (t) __sync_add_and_fetch(&t->refs, 1); }
-static void free_track(dm_track *t);
 void dm_track_release(dm_track *t)
 {
     if (t && __sync_sub_and_fetch(&t->refs, 1) <= 0) { free_track(t); free(t); }
@@ -541,19 +542,20 @@ static void track_init(dm_segment *s, dm_segtrack *e)
 }
 
 /* in segment track order (77311b2c / 773112d8) */
-void dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority)
+int dm_segment_insert_track(dm_segment *s, dm_track *t, uint32_t position, uint32_t group, uint32_t config, uint32_t priority)
 {
     dm_segtrack e = { t, position, group, config, priority };
     int i = 0;
     while (i < s->ntracks && !track_before(&e, &s->tracks[i])) i++;
     dm_segtrack *n = realloc(s->tracks, (s->ntracks + 1) * sizeof(*s->tracks));
-    if (!n) { dm_track_release(t); return; }
+    if (!n) { dm_track_release(t); return 0; }
     s->tracks = n;
     memmove(s->tracks + i + 1, s->tracks + i, (s->ntracks - i) * sizeof(*s->tracks));
     s->tracks[i] = e;
     s->ntracks++;
     track_init(s, &s->tracks[i]);
     for (int k = 0; k < s->nntypes; k++) dm_track_add_notification(t, &s->ntypes[k].g);
+    return 1;
 }
 
 
@@ -1169,9 +1171,7 @@ dm_track *dm_track_create(const dm_guid *clsid)
     case TRK_SCRIPT: { dm_scripttrack *y = calloc(1, sizeof(*y)); if (y) y->gen = 1; d = y; break; }
     }
     if (!d) return NULL;
-    dm_track *t = dm_track_new(kind, clsid, d);
-    if (!t) { dm_track tmp = { .kind = kind, .data = d }; free_track(&tmp); }
-    return t;
+    return dm_track_new(kind, clsid, d);
 }
 /* whether a track can start playing: a style or pattern track without a style cannot (E_POINTER), nor a motif track
  * without its motif (E_FAIL) */
@@ -1327,7 +1327,7 @@ dm_segment *dms_motif_segment(dms_style *st, dms_pattern *p)
         if (!((a || b) && (a < 0 || b > s->length || a >= b))) { s->loopstart = a; s->loopend = b; }
     }
     dm_track *o = dm_track_new(TRK_MOTIF, &CLSID_MotifTrack, T);
-    if (!o) { dms_styletrack_free(T); dm_segment_release(s); return NULL; }
+    if (!o) { dm_segment_release(s); return NULL; }
     dm_segment_insert_track(s, o, 0, 1, 0x38, 0);
     if (p->band) {
         dm_bandtrack *bt = calloc(1, sizeof(*bt));
@@ -1337,7 +1337,6 @@ dm_segment *dms_motif_segment(dms_style *st, dms_pattern *p)
             band_add(bt, p->band);
             dm_track *b = dm_track_new(TRK_BAND, &CLSID_BandTrack, bt);
             if (b) dm_segment_insert_track(s, b, 0, 1, 0x38, 0);
-            else { dm_track tmp = { .kind = TRK_BAND, .data = bt }; free_track(&tmp); }
         }
     }
     return s;
@@ -1353,7 +1352,7 @@ dm_segment *dm_band_segment(dm_band *b)
     t->autodl = 0; t->lockautodl = 1;
     if (b) { dm_band_addref(b); band_add(t, b); }
     dm_track *o = dm_track_new(TRK_BAND, &CLSID_BandTrack, t);
-    if (!o) { dm_track tmp = { .kind = TRK_BAND, .data = t }; free_track(&tmp); free(s); return NULL; }
+    if (!o) { free(s); return NULL; }
     dm_segment_insert_track(s, o, 0, 1, 0x38, 0);
     return s;
 }
@@ -1388,6 +1387,7 @@ dm_segment *dm_segment_from_wave(dm_wave *w)
 
 static void free_track(dm_track *t)
 {
+    if (!t->data) return;
     switch (t->kind) {
     case TRK_SEQ: {
         dm_seqtrack *q = t->data;
@@ -1757,7 +1757,7 @@ dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr)
     if (!d && t->kind != TRK_OTHER) { *hr = DM_E_OUTOFMEMORY; return NULL; }
     dm_track *c = dm_track_new(t->kind, &t->clsid, d);
     if (c && (t->kind == TRK_CHORD || t->kind == TRK_COMMAND || t->kind == TRK_STYLE || t->kind == TRK_MOTIF || t->kind == TRK_PATTERN)) c->notify = t->notify;    /* (copied by their Clone) */
-    if (!c) { dm_track tmp = { .kind = t->kind, .data = d }; free_track(&tmp); *hr = DM_E_OUTOFMEMORY; }
+    if (!c) *hr = DM_E_OUTOFMEMORY;
     return c;
 }
 

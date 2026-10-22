@@ -36,6 +36,16 @@ static HRESULT WINAPI bnd_qi(IDirectMusicBand *i, REFIID riid, void **out)
     return S_OK;
 }
 static ULONG WINAPI bnd_addref(IDirectMusicBand *i) { return InterlockedIncrement(&bnd(i)->ref); }
+/* reAL: the engine band with a reference (dm_band_release), read under the engine lock: a Load on another thread
+ * replaces it and lets go of the old one */
+static dm_band *band_hold(rm_band *o)
+{
+    dm_engine_lock();
+    dm_band *b = o->b;
+    dm_band_addref(b);
+    dm_engine_unlock();
+    return b;
+}
 static ULONG WINAPI bnd_release(IDirectMusicBand *i)
 {
     rm_band *b = bnd(i);
@@ -49,7 +59,9 @@ static HRESULT WINAPI bnd_createsegment(IDirectMusicBand *i, IDirectMusicSegment
     rm_band *b = bnd(i);
     if (IsBadWritePtr(out, sizeof(*out))) return E_POINTER;
     *out = NULL;
-    dm_segment *g = dm_band_segment(b->b);
+    dm_band *x = band_hold(b);
+    dm_segment *g = dm_band_segment(x);
+    dm_band_release(x);
     if (!g) return E_OUTOFMEMORY;
     rm_segment *s = new_segment(g);
     if (!s) { dm_segment_release(g); return E_OUTOFMEMORY; }
@@ -62,14 +74,16 @@ static HRESULT WINAPI bnd_createsegment(IDirectMusicBand *i, IDirectMusicSegment
 static HRESULT band_dl(rm_band *b, IUnknown *target, int unload)
 {
     if (!target) return E_POINTER;
-    dm_dltarget dt; void *data; dm_host *h;
-    HRESULT hr = prm_data(unload ? PRM_UNLOAD_AP : PRM_DOWNLOAD_AP, target, &dt, &data, &h);
+    dm_dltarget dt; void *data;
+    HRESULT hr = prm_data(unload ? PRM_UNLOAD_AP : PRM_DOWNLOAD_AP, target, &dt, &data);
     if (FAILED(hr)) return hr;
-    if (!b->b) return S_OK;
-    if (h) dm_host_lock(h);
-    if (unload) dm_band_unload_from(dt.pf, b->b);
-    else hr = dm_band_download_to(dt.pf, b->b);
-    if (h) dm_host_unlock(h);
+    dm_band *x = band_hold(b);
+    if (!x) return S_OK;
+    dm_engine_lock();
+    if (unload) dm_band_unload_from(dt.pf, x);
+    else hr = dm_band_download_to(dt.pf, x);
+    dm_engine_unlock();
+    dm_band_release(x);
     return hr;
 }
 static HRESULT WINAPI bnd_download(IDirectMusicBand *i, IDirectMusicPerformance *p) { return band_dl(bnd(i), (IUnknown *)p, 0); }
@@ -120,9 +134,12 @@ static HRESULT WINAPI bnp_load(IPersistStream *i, IStream *st)
     if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "DMBD", 4)) x = dm_band_load(b + 12, n - 12, loader_getcoll, rm_stream_loader(st));
     free(b);
     if (!x) return DMUS_E_UNSUPPORTED_STREAM;
-    dm_band_release(o->b);
+    dm_engine_lock();                   /* (another thread may be reading o->b: band_hold) */
+    dm_band *old = o->b;
     o->b = x;
     band_desc(o);
+    dm_engine_unlock();
+    dm_band_release(old);
     return S_OK;
 }
 static HRESULT WINAPI bnp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }
@@ -146,16 +163,23 @@ static rm_band *new_band(dm_band *x)
 }
 
 /* ------------------------------------------------------------------ styles */
+/* reAL: what a Load replaces as a whole (the engine style, its band objects, the chord maps), with a count: a
+ * method holds the state it read (under the engine lock) while it uses it, a Load on another thread puts a new one in
+ * place and the old one goes with its last holder */
+typedef struct sty_state {
+    LONG refs;
+    dms_style *s;
+    struct rm_band **bands; int nbands; /* +0x78 (the style's order) */
+    struct rm_band *defband;            /* +0x7c */
+    IDirectMusicChordMap **cmaps; int ncmaps;   /* +0x84 (newest first) */
+    IDirectMusicChordMap *defcmap;      /* +0x88 (the list's reference) */
+} sty_state;
 typedef struct rm_style {
     IDirectMusicStyle8 IDirectMusicStyle8_iface;
     IDirectMusicObject IDirectMusicObject_iface;
     IPersistStream IPersistStream_iface;
     LONG ref;
-    dms_style *s;
-    rm_band **bands; int nbands;        /* +0x78 (the style's order) */
-    rm_band *defband;                   /* +0x7c */
-    IDirectMusicChordMap **cmaps; int ncmaps;   /* +0x84 (newest first) */
-    IDirectMusicChordMap *defcmap;      /* +0x88 (the list's reference) */
+    sty_state *st;                      /* NULL until loaded */
     DMUS_OBJECTDESC desc;
 } rm_style;
 static rm_style *sty(IDirectMusicStyle8 *i) { return impl_from(i, rm_style, IDirectMusicStyle8_iface); }
@@ -164,6 +188,29 @@ static rm_style *stp(IPersistStream *i) { return impl_from(i, rm_style, IPersist
 static IDirectMusicStyle8Vtbl sty_vtbl;
 static IDirectMusicObjectVtbl sto_vtbl;
 static IPersistStreamVtbl stp_vtbl;
+
+static const sty_state s_nostate_sty;   /* (what an unloaded style's methods see) */
+/* the state, held (sty_unhold); never NULL */
+static sty_state *sty_hold(rm_style *o)
+{
+    dm_engine_lock();
+    sty_state *x = o->st;
+    if (x) InterlockedIncrement(&x->refs);
+    dm_engine_unlock();
+    return x ? x : (sty_state *)&s_nostate_sty;
+}
+/* (not with the engine lock held: the band and chord map objects may go) */
+static void sty_unhold(sty_state *x)
+{
+    if (x == &s_nostate_sty || InterlockedDecrement(&x->refs)) return;
+    for (int k = 0; k < x->nbands; k++) bnd_release(&x->bands[k]->IDirectMusicBand_iface);
+    free(x->bands);
+    if (x->defband) bnd_release(&x->defband->IDirectMusicBand_iface);
+    dms_style_release(x->s);
+    for (int k = 0; k < x->ncmaps; k++) IDirectMusicChordMap_Release(x->cmaps[k]);
+    free(x->cmaps);
+    free(x);
+}
 
 static HRESULT WINAPI sty_qi(IDirectMusicStyle8 *i, REFIID riid, void **out)
 {
@@ -178,23 +225,19 @@ static HRESULT WINAPI sty_qi(IDirectMusicStyle8 *i, REFIID riid, void **out)
     return S_OK;
 }
 static ULONG WINAPI sty_addref(IDirectMusicStyle8 *i) { return InterlockedIncrement(&sty(i)->ref); }
-static void style_drop(rm_style *s)
-{
-    for (int k = 0; k < s->nbands; k++) bnd_release(&s->bands[k]->IDirectMusicBand_iface);
-    free(s->bands); s->bands = NULL; s->nbands = 0;
-    if (s->defband) bnd_release(&s->defband->IDirectMusicBand_iface);
-    s->defband = NULL;
-    if (s->s) { if (s->s->wrapper == s) s->s->wrapper = NULL; dms_style_release(s->s); }
-    s->s = NULL;
-    for (int k = 0; k < s->ncmaps; k++) IDirectMusicChordMap_Release(s->cmaps[k]);
-    free(s->cmaps); s->cmaps = NULL; s->ncmaps = 0;
-    s->defcmap = NULL;
-}
 static ULONG WINAPI sty_release(IDirectMusicStyle8 *i)
 {
     rm_style *s = sty(i);
     LONG r = InterlockedDecrement(&s->ref);
-    if (!r) { style_drop(s); free(s); }
+    if (!r) {
+        dm_engine_lock();
+        sty_state *x = s->st;
+        s->st = NULL;
+        if (x && x->s && x->s->wrapper == s) x->s->wrapper = NULL;
+        dm_engine_unlock();
+        if (x) sty_unhold(x);
+        free(s);
+    }
     return r;
 }
 static int name_eq(const WCHAR *a, const uint16_t *b)
@@ -214,64 +257,83 @@ static void name_out(WCHAR *o, const uint16_t *n)
 /* 774083a1: the band of that name (not found: S_FALSE) */
 static HRESULT WINAPI sty_getband(IDirectMusicStyle8 *i, WCHAR *name, IDirectMusicBand **out)
 {
-    rm_style *s = sty(i);
     if (IsBadReadPtr(name, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
-    for (int k = 0; k < s->nbands; k++) {
-        rm_band *b = s->bands[k];
-        if (!(b->desc.dwValidData & DMUS_OBJ_NAME)) return E_FAIL;
-        if (name_eq(name, b->b->name)) { bnd_addref(&b->IDirectMusicBand_iface); *out = &b->IDirectMusicBand_iface; return S_OK; }
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    for (int k = 0; k < x->nbands; k++) {
+        rm_band *b = x->bands[k];
+        if (!(b->desc.dwValidData & DMUS_OBJ_NAME)) { hr = E_FAIL; break; }
+        dm_band *e = band_hold(b);
+        int eq = e && name_eq(name, e->name);
+        dm_band_release(e);
+        if (eq) { bnd_addref(&b->IDirectMusicBand_iface); *out = &b->IDirectMusicBand_iface; hr = S_OK; break; }
     }
-    return S_FALSE;
+    sty_unhold(x);
+    return hr;
 }
 /* 774084d2: the name of the index-th band */
 static HRESULT WINAPI sty_enumband(IDirectMusicStyle8 *i, DWORD n, WCHAR *name)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(name, 0x104)) return E_POINTER;
-    if (n >= (DWORD)s->nbands) return S_FALSE;
-    rm_band *b = s->bands[n];
-    if (b->desc.dwValidData & DMUS_OBJ_NAME) name_out(name, b->b->name);
-    return S_OK;
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    if (n < (DWORD)x->nbands) {
+        rm_band *b = x->bands[n];
+        if (b->desc.dwValidData & DMUS_OBJ_NAME) {
+            dm_band *e = band_hold(b);
+            if (e) name_out(name, e->name);
+            dm_band_release(e);
+        }
+        hr = S_OK;
+    }
+    sty_unhold(x);
+    return hr;
 }
 /* 77406dc2 */
 static HRESULT WINAPI sty_getdefaultband(IDirectMusicStyle8 *i, IDirectMusicBand **out)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(out, 4)) return E_POINTER;
-    if (!s->defband) return S_FALSE;
-    bnd_addref(&s->defband->IDirectMusicBand_iface);
-    *out = &s->defband->IDirectMusicBand_iface;
-    return S_OK;
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    if (x->defband) {
+        bnd_addref(&x->defband->IDirectMusicBand_iface);
+        *out = &x->defband->IDirectMusicBand_iface;
+        hr = S_OK;
+    }
+    sty_unhold(x);
+    return hr;
 }
 /* 774080f2: the index-th motif's name (DMUS_S_STRING_TRUNCATED past 0x103 characters) */
 static HRESULT WINAPI sty_enummotif(IDirectMusicStyle8 *i, DWORD n, WCHAR *name)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(name, 0x104)) return E_POINTER;
-    if (!s->s || n >= (DWORD)s->s->nmotifs) return S_FALSE;
-    name_out(name, s->s->motifs[n]->name);
-    return S_OK;
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    if (x->s && n < (DWORD)x->s->nmotifs) { name_out(name, x->s->motifs[n]->name); hr = S_OK; }
+    sty_unhold(x);
+    return hr;
 }
 /* 77409919: a segment playing the motif of that name (not found: S_FALSE) */
 static HRESULT WINAPI sty_getmotif(IDirectMusicStyle8 *i, WCHAR *name, IDirectMusicSegment **out)
 {
-    rm_style *s = sty(i);
     if (IsBadReadPtr(name, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
-    if (!s->s) return S_FALSE;
-    for (int k = 0; k < s->s->nmotifs; k++) {
-        if (!name_eq(name, s->s->motifs[k]->name)) continue;
-        dm_host *h = any_host();
-        if (h) dm_host_lock(h);
-        dm_segment *g = dms_motif_segment(s->s, s->s->motifs[k]);
-        if (h) dm_host_unlock(h);
-        if (!g) return E_OUTOFMEMORY;
+    sty_state *x = sty_hold(sty(i));
+    dms_style *s = x->s;
+    HRESULT hr = S_FALSE;
+    for (int k = 0; s && k < s->nmotifs; k++) {
+        if (!name_eq(name, s->motifs[k]->name)) continue;
+        dm_engine_lock();
+        dm_segment *g = dms_motif_segment(s, s->motifs[k]);
+        dm_engine_unlock();
+        if (!g) { hr = E_OUTOFMEMORY; break; }
         rm_segment *o = new_segment(g);
-        if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
-        HRESULT hr = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)out);
+        if (!o) { dm_segment_release(g); hr = E_OUTOFMEMORY; break; }
+        hr = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)out);
         seg_release(&o->IDirectMusicSegment8_iface);
-        return hr;
+        break;
     }
-    return S_FALSE;
+    sty_unhold(x);
+    return hr;
 }
 /* a chord map's descriptor name (FALSE when it has none or the calls fail; *hr their result) */
 static BOOL cmap_name(IDirectMusicChordMap *m, WCHAR *out, HRESULT *hr)
@@ -292,46 +354,51 @@ static BOOL cmap_name(IDirectMusicChordMap *m, WCHAR *out, HRESULT *hr)
 /* 77406d8a */
 static HRESULT WINAPI sty_getdefaultchordmap(IDirectMusicStyle8 *i, IDirectMusicChordMap **out)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(out, 4)) return E_POINTER;
-    if (!s->defcmap) return S_FALSE;
-    *out = s->defcmap;
-    IDirectMusicChordMap_AddRef(s->defcmap);
-    return S_OK;
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    if (x->defcmap) { *out = x->defcmap; IDirectMusicChordMap_AddRef(x->defcmap); hr = S_OK; }
+    sty_unhold(x);
+    return hr;
 }
 /* 774082a0: the index-th chord map's name (no name: DMUS_E_TYPE_UNSUPPORTED; past 0x103 characters cut, with
  * DMUS_S_STRING_TRUNCATED) */
 static HRESULT WINAPI sty_enumchordmap(IDirectMusicStyle8 *i, DWORD n, WCHAR *name)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(name, 0x104 * sizeof(WCHAR) / 2)) return E_POINTER;
-    if (n >= (DWORD)s->ncmaps) return S_FALSE;
-    WCHAR w[DMUS_MAX_NAME];
-    HRESULT hr;
-    if (!cmap_name(s->cmaps[n], w, &hr)) return hr == E_FAIL ? DMUS_E_TYPE_UNSUPPORTED : hr;
-    lstrcpyW(name, w);
-    return S_OK;
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    if (n < (DWORD)x->ncmaps) {
+        WCHAR w[DMUS_MAX_NAME];
+        if (!cmap_name(x->cmaps[n], w, &hr)) { if (hr == E_FAIL) hr = DMUS_E_TYPE_UNSUPPORTED; }
+        else { lstrcpyW(name, w); hr = S_OK; }
+    }
+    sty_unhold(x);
+    return hr;
 }
 /* 77408176: the chord map of that name (case-insensitive; not found: S_FALSE; one without a name: E_FAIL) */
 static HRESULT WINAPI sty_getchordmap(IDirectMusicStyle8 *i, WCHAR *name, IDirectMusicChordMap **out)
 {
-    rm_style *s = sty(i);
     if (IsBadReadPtr(name, 4) || IsBadWritePtr(out, 4)) return E_POINTER;
-    for (int k = 0; k < s->ncmaps; k++) {
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    for (int k = 0; k < x->ncmaps; k++) {
         WCHAR w[DMUS_MAX_NAME];
-        HRESULT hr;
-        if (!cmap_name(s->cmaps[k], w, &hr)) return hr;
+        if (!cmap_name(x->cmaps[k], w, &hr)) break;
+        hr = S_FALSE;
         if (lstrcmpiW(w, name)) continue;
-        IDirectMusicChordMap_AddRef(s->cmaps[k]);
-        *out = s->cmaps[k];
-        return S_OK;
+        IDirectMusicChordMap_AddRef(x->cmaps[k]);
+        *out = x->cmaps[k];
+        hr = S_OK;
+        break;
     }
-    return S_FALSE;
+    sty_unhold(x);
+    return hr;
 }
 /* 7740af13 / 7740a17d / 7740a031: the style's 'prrf' list: each named reference's chord map from the loader, put
  * first unless one with its name (the map's own) is there already; the first reference's is the default */
 DMG(RM_IID_IDirectMusicChordMap_, 0xd2ac28be, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
-static void style_add_cmap(rm_style *o, IDirectMusicChordMap *m, const WCHAR *refname, int first)
+static void style_add_cmap(sty_state *o, IDirectMusicChordMap *m, const WCHAR *refname, int first)
 {
     for (int k = 0; k < o->ncmaps; k++) {
         WCHAR w[DMUS_MAX_NAME];
@@ -347,7 +414,7 @@ static void style_add_cmap(rm_style *o, IDirectMusicChordMap *m, const WCHAR *re
     o->ncmaps++;
     if (first) o->defcmap = m;
 }
-static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, IDirectMusicLoader8 *l)
+static void style_load_cmaps(sty_state *o, const BYTE *b, DWORD n, IDirectMusicLoader8 *l)
 {
     if (!l || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "DMST", 4)) return;
     DWORD end = 8 + *(const DWORD *)(b + 4);
@@ -409,22 +476,23 @@ static void style_load_cmaps(rm_style *o, const BYTE *b, DWORD n, IDirectMusicLo
 /* 77406df7 */
 static HRESULT WINAPI sty_gettimesig(IDirectMusicStyle8 *i, DMUS_TIMESIGNATURE *ts)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(ts, 4)) return E_POINTER;
-    const uint8_t *t = s->s ? s->s->ts : (const uint8_t *)"\0\0\0\0";
+    sty_state *x = sty_hold(sty(i));
+    const uint8_t *t = x->s ? x->s->ts : (const uint8_t *)"\0\0\0\0";
     ts->mtTime = 0; ts->wGridsPerBeat = (WORD)(t[2] | t[3] << 8); ts->bBeatsPerMeasure = t[0]; ts->bBeat = t[1];
+    sty_unhold(x);
     return S_OK;
 }
 /* 774085da: the shortest and longest pattern of an embellishment (groove level for DMUS_EMBELLISHT_NORMAL);
  * S_FALSE when there is none */
 static HRESULT WINAPI sty_getemblength(IDirectMusicStyle8 *i, DWORD type, DWORD level, DWORD *mn, DWORD *mx)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(mn, 4) || IsBadWritePtr(mx, 4)) return E_POINTER;
     *mx = 0; *mn = 0;
-    if (!s->s || !s->s->npatterns) return S_FALSE;
-    for (int k = 0; k < s->s->npatterns; k++) {
-        const dms_pattern *p = s->s->patterns[k];
+    sty_state *x = sty_hold(sty(i));
+    const dms_style *s = x->s;
+    for (int k = 0; s && k < s->npatterns; k++) {
+        const dms_pattern *p = s->patterns[k];
         int ok;
         switch (type) {
         case 0: ok = p->embellish == 0 && p->groovelo <= (uint8_t)level && (uint8_t)level <= p->groovehi; break;
@@ -438,26 +506,29 @@ static HRESULT WINAPI sty_getemblength(IDirectMusicStyle8 *i, DWORD type, DWORD 
         if (*mx < p->measures) *mx = p->measures;
         if (p->measures < *mn || *mn == 0) *mn = p->measures;
     }
+    sty_unhold(x);
     return *mn && *mx ? S_OK : S_FALSE;
 }
 /* 77406e31 */
 static HRESULT WINAPI sty_gettempo(IDirectMusicStyle8 *i, double *t)
 {
-    rm_style *s = sty(i);
     if (IsBadWritePtr(t, 4)) return E_POINTER;
-    *t = s->s ? s->s->tempo : 0;
+    sty_state *x = sty_hold(sty(i));
+    *t = x->s ? x->s->tempo : 0;
+    sty_unhold(x);
     return S_OK;
 }
 /* 774099d9: patterns (0) or motifs (1) */
 static HRESULT WINAPI sty_enumpattern(IDirectMusicStyle8 *i, DWORD n, DWORD type, WCHAR *name)
 {
-    rm_style *s = sty(i);
     if (type == 1) return sty_enummotif(i, n, name);
     if (type) return E_INVALIDARG;
     if (IsBadWritePtr(name, 0x104)) return E_POINTER;
-    if (!s->s || n >= (DWORD)s->s->npatterns) return S_FALSE;
-    name_out(name, s->s->patterns[n]->name);
-    return S_OK;
+    sty_state *x = sty_hold(sty(i));
+    HRESULT hr = S_FALSE;
+    if (x->s && n < (DWORD)x->s->npatterns) { name_out(name, x->s->patterns[n]->name); hr = S_OK; }
+    sty_unhold(x);
+    return hr;
 }
 static IDirectMusicStyle8Vtbl sty_vtbl = { sty_qi, sty_addref, sty_release, sty_getband, sty_enumband, sty_getdefaultband,
     sty_enummotif, sty_getmotif, sty_getdefaultchordmap, sty_enumchordmap, sty_getchordmap, sty_gettimesig,
@@ -486,25 +557,39 @@ static HRESULT WINAPI sto_setdesc(IDirectMusicObject *i, LPDMUS_OBJECTDESC d)
 static HRESULT WINAPI sto_parse(IDirectMusicObject *i, LPSTREAM s, LPDMUS_OBJECTDESC d) { return rm_desc_parse(s, d, mmioFOURCC('D','M','S','T'), &RM_CLSID_DirectMusicStyle); }
 static IDirectMusicObjectVtbl sto_vtbl = { sto_qi, sto_addref, sto_release, sto_getdesc, sto_setdesc, sto_parse };
 
-/* the band objects of a loaded style, the descriptor */
-static void style_take(rm_style *o, dms_style *x)
+/* a loaded style's state: the engine style (the caller's reference handed over) and its band objects */
+static sty_state *style_state(dms_style *x)
 {
-    style_drop(o);
-    o->s = x;
-    x->wrapper = o;
-    o->bands = calloc(x->nbands ? x->nbands : 1, sizeof(*o->bands));
-    for (int k = 0; o->bands && k < x->nbands; k++) {
+    sty_state *n = calloc(1, sizeof(*n));
+    if (!n) { dms_style_release(x); return NULL; }
+    n->refs = 1;
+    n->s = x;
+    n->bands = calloc(x->nbands ? x->nbands : 1, sizeof(*n->bands));
+    for (int k = 0; n->bands && k < x->nbands; k++) {
         rm_band *b = new_band(x->bands[k]);
         if (!b) continue;
-        o->bands[o->nbands++] = b;
-        if (x->bands[k] == x->defband && !o->defband) { o->defband = b; bnd_addref(&b->IDirectMusicBand_iface); }
+        n->bands[n->nbands++] = b;
+        if (x->bands[k] == x->defband && !n->defband) { n->defband = b; bnd_addref(&b->IDirectMusicBand_iface); }
     }
+    return n;
+}
+/* the state put in place (the old one let go of once its holders are done), the descriptor from the style */
+static void style_put(rm_style *o, sty_state *n)
+{
+    dms_style *x = n->s;
+    dm_engine_lock();
+    sty_state *old = o->st;
+    if (old && old->s && old->s->wrapper == o) old->s->wrapper = NULL;
+    o->st = n;
+    x->wrapper = o;
     o->desc.dwValidData |= DMUS_OBJ_LOADED;
     if (x->hasguid) { memcpy(&o->desc.guidObject, &x->guid, sizeof(GUID)); o->desc.dwValidData |= DMUS_OBJ_OBJECT; }
     if (x->name[0]) { memcpy(o->desc.wszName, x->name, sizeof(x->name)); o->desc.dwValidData |= DMUS_OBJ_NAME; }
     if (x->category[0]) { memcpy(o->desc.wszCategory, x->category, sizeof(x->category)); o->desc.dwValidData |= DMUS_OBJ_CATEGORY; }
     o->desc.vVersion.dwVersionMS = x->vers[0]; o->desc.vVersion.dwVersionLS = x->vers[1];
     o->desc.dwValidData |= DMUS_OBJ_VERSION;
+    dm_engine_unlock();
+    if (old) sty_unhold(old);
 }
 static HRESULT WINAPI stp_qi(IPersistStream *i, REFIID r, void **o) { return sty_qi(&stp(i)->IDirectMusicStyle8_iface, r, o); }
 static ULONG WINAPI stp_addref(IPersistStream *i) { return sty_addref(&stp(i)->IDirectMusicStyle8_iface); }
@@ -530,19 +615,22 @@ static HRESULT WINAPI stp_load(IPersistStream *i, IStream *st)
     IDirectMusicLoader8 *l = rm_stream_loader(st);
     dms_style *x = style_from_data(b, n, l, &hr);
     if (!x) { free(b); return FAILED(hr) ? hr : E_FAIL; }
-    style_take(o, x);
-    style_load_cmaps(o, b, n, l);
+    sty_state *s = style_state(x);
+    if (!s) { free(b); return E_OUTOFMEMORY; }
+    style_load_cmaps(s, b, n, l);       /* (the loader's calls: before the state is in place, no lock held) */
     free(b);
+    style_put(o, s);
     return S_OK;
 }
 static HRESULT WINAPI stp_save(IPersistStream *i, IStream *s, BOOL c) { return rm_notimpl(__func__); }
 static HRESULT WINAPI stp_getsize(IPersistStream *i, ULARGE_INTEGER *s) { return rm_notimpl(__func__); }
 static IPersistStreamVtbl stp_vtbl = { stp_qi, stp_addref, stp_release, stp_getclass, stp_isdirty, stp_load, stp_save, stp_getsize };
 
+/* a style object for an engine style (the caller's reference handed over; none: an empty one) */
 static rm_style *new_style(dms_style *x)
 {
     rm_style *o = calloc(1, sizeof(*o));
-    if (!o) return NULL;
+    if (!o) { dms_style_release(x); return NULL; }
     o->IDirectMusicStyle8_iface.lpVtbl = &sty_vtbl;
     o->IDirectMusicObject_iface.lpVtbl = &sto_vtbl;
     o->IPersistStream_iface.lpVtbl = &stp_vtbl;
@@ -550,10 +638,12 @@ static rm_style *new_style(dms_style *x)
     o->desc.dwSize = sizeof(o->desc);
     o->desc.dwValidData = DMUS_OBJ_CLASS;       /* (dmstyle's constructor leaves DMUS_OBJ_OBJECT and the GUID uninitialised) */
     o->desc.guidClass = RM_CLSID_DirectMusicStyle;
-    if (x) style_take(o, x);
+    sty_state *s = x ? style_state(x) : NULL;
+    if (x && !s) { free(o); return NULL; }
+    if (s) style_put(o, s);
     return o;
 }
-/* the style behind an interface (ours only) */
+/* the style behind an interface (ours only: no call into the object) */
 static rm_style *style_of(void *p)
 {
     if (!p || IsBadReadPtr(p, sizeof(void *))) return NULL;
@@ -563,15 +653,28 @@ static rm_style *style_of(void *p)
     if (vt == &stp_vtbl) return stp(p);
     return NULL;
 }
+/* the engine style behind an interface, with a reference (dms_style_release) */
+static struct dms_style *style_hold_of(void *p)
+{
+    rm_style *o = style_of(p);
+    if (!o) return NULL;
+    dm_engine_lock();
+    dms_style *s = o->st ? o->st->s : NULL;
+    dms_style_addref(s);
+    dm_engine_unlock();
+    return s;
+}
 /* the interface for an engine style (its wrapper, made when it has none); the engine's reference handed over */
 static IDirectMusicStyle8 *style_iface(dms_style *x)
 {
     if (!x) return NULL;
+    /* (not one whose last Release is under way on another thread: a new wrapper then; under the engine lock, which
+     * that Release takes to clear the wrapper before the object goes) */
+    dm_engine_lock();
     rm_style *o = x->wrapper;
-    /* (not one whose last Release is under way on another thread: a new wrapper then) */
-    if (o && ref_if_alive(&o->ref)) { dms_style_release(x); return &o->IDirectMusicStyle8_iface; }
-    o = new_style(NULL);
-    if (!o) { dms_style_release(x); return NULL; }
-    style_take(o, x);
-    return &o->IDirectMusicStyle8_iface;
+    int alive = o && ref_if_alive(&o->ref);
+    dm_engine_unlock();
+    if (alive) { dms_style_release(x); return &o->IDirectMusicStyle8_iface; }
+    o = new_style(x);
+    return o ? &o->IDirectMusicStyle8_iface : NULL;
 }

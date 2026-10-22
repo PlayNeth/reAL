@@ -21,7 +21,7 @@ struct rm_port {
     IDirectMusicPortDownload IDirectMusicPortDownload_iface;
     IKsControl IKsControl_iface;
     LONG ref;
-    dm_host *host;                      /* NULL once the performance closed down */
+    dm_host *host;                      /* NULL once the performance closed down (under the engine lock) */
     DWORD groups;                       /* SetNumChannelGroups beyond what the PChannels use */
 };
 
@@ -55,12 +55,23 @@ static ULONG port_release(rm_port *p)
     return r;
 }
 
+/* the host, with the engine lock held (port_drop lets it go), or NULL (not held) once the performance is gone: the
+ * performance frees its host only after rm_port_detach, which takes the lock, so a host seen under it stays */
+static dm_host *port_hold(rm_port *p)
+{
+    dm_engine_lock();
+    if (p->host) return p->host;
+    dm_engine_unlock();
+    return NULL;
+}
+static void port_drop(void) { dm_engine_unlock(); }
+
 static DWORD port_groups(rm_port *p)
 {
-    if (!p->host) return p->groups;
-    dm_host_lock(p->host);
-    DWORD g = dm_perf_port_groups(dm_host_perf(p->host));
-    dm_host_unlock(p->host);
+    dm_host *h = port_hold(p);
+    if (!h) return p->groups;
+    DWORD g = dm_perf_port_groups(dm_host_perf(h));
+    port_drop();
     return g > p->groups ? g : p->groups;
 }
 
@@ -72,11 +83,37 @@ static HRESULT WINAPI dp_PlayBuffer(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b)
 {
     rm_port *p = pt(i);
     if (!b) return E_POINTER;
-    if (!p->host) return DMUS_E_NOT_INIT;
-    /* the buffer's events, played now (reDM hands out no buffers of its own; an application's works) */
+    dm_host *h = port_hold(p);
+    if (!h) return DMUS_E_NOT_INIT;
+    port_drop();
+    /* the buffer's events, played now (reDM hands out no buffers of its own; an application's works).  Read first:
+     * the buffer is the application's object, not called with the engine lock held. */
     IDirectMusicBuffer_ResetReadPtr(b);
     REFERENCE_TIME t; DWORD g, len; BYTE *d;
-    while (IDirectMusicBuffer_GetNextEvent(b, &t, &g, &len, &d) == S_OK) dm_host_midi(p->host, d, len);
+    BYTE *ev = NULL;
+    size_t n = 0, cap = 0;
+    while (IDirectMusicBuffer_GetNextEvent(b, &t, &g, &len, &d) == S_OK) {
+        if (!len || !d) continue;
+        if (n + sizeof(DWORD) + len > cap) {
+            size_t c = cap ? cap * 2 : 256;
+            while (c < n + sizeof(DWORD) + len) c *= 2;
+            BYTE *x = realloc(ev, c);
+            if (!x) { free(ev); return E_OUTOFMEMORY; }
+            ev = x; cap = c;
+        }
+        memcpy(ev + n, &len, sizeof(DWORD)); memcpy(ev + n + sizeof(DWORD), d, len);
+        n += sizeof(DWORD) + len;
+    }
+    if ((h = port_hold(p))) {
+        for (size_t k = 0; k < n; ) {
+            DWORD l;
+            memcpy(&l, ev + k, sizeof(DWORD));
+            dm_host_midi(h, ev + k + sizeof(DWORD), l);
+            k += sizeof(DWORD) + l;
+        }
+        port_drop();
+    }
+    free(ev);
     return S_OK;
 }
 static HRESULT WINAPI dp_SetReadNotificationHandle(IDirectMusicPort *i, HANDLE e) { return E_NOTIMPL; }
@@ -105,7 +142,8 @@ static HRESULT WINAPI dp_GetRunningStats(IDirectMusicPort *i, LPDMUS_SYNTHSTATS 
     s->dwValidStats = 0x1f;
     msynth_stats st;
     memset(&st, 0, sizeof(st));
-    if (pt(i)->host) dm_host_stats(pt(i)->host, &st);
+    dm_host *h = port_hold(pt(i));
+    if (h) { dm_host_stats(h, &st); port_drop(); }
     s->dwVoices = st.voices;
     s->dwTotalCPU = st.cpu * 10;
     s->dwCPUPerVoice = (st.voices ? st.cpu / st.voices : 0) * 10;
@@ -152,9 +190,12 @@ static HRESULT WINAPI dp_Activate(IDirectMusicPort *i, WINBOOL on) { return S_OK
 static HRESULT priority(rm_port *p, DWORD g, DWORD c, DWORD *prio, int set)
 {
     if (!g || g > port_groups(p) || c > 15) return E_INVALIDARG;
-    if (!p->host) return DMUS_E_NOT_INIT;
+    dm_host *h = port_hold(p);
+    if (!h) return DMUS_E_NOT_INIT;
     uint32_t v = set ? *prio : 0;
-    if (dm_host_priority(p->host, g, c, &v, set) < 0) return E_INVALIDARG;
+    int r = dm_host_priority(h, g, c, &v, set);
+    port_drop();
+    if (r < 0) return E_INVALIDARG;
     if (!set) *prio = v;
     return S_OK;
 }
@@ -170,7 +211,9 @@ static HRESULT WINAPI dp_GetFormat(IDirectMusicPort *i, LPWAVEFORMATEX wf, LPDWO
 {
     rm_port *p = pt(i);
     if (!size) return E_POINTER;
-    DWORD rate = p->host ? dm_host_rate(p->host) : 22050;
+    dm_host *h = port_hold(p);
+    DWORD rate = 22050;
+    if (h) { rate = dm_host_rate(h); port_drop(); }
     if (wf) {
         if (*size < sizeof(WAVEFORMATEX)) return E_INVALIDARG;
         WAVEFORMATEX f = { WAVE_FORMAT_PCM, 1, rate, rate * 2, 2, 16, 0 };
@@ -219,12 +262,14 @@ static HRESULT WINAPI dk_KsProperty(IKsControl *i, PKSPROPERTY prop, ULONG plen,
     if (prop->Flags & KSPROPERTY_TYPE_SET) {
         if (IsEqualGUID(s, &GUID_DMUS_PROP_Volume)) {
             if (!data || dlen < 4) return E_INVALIDARG;
-            if (p->host) dm_host_set_volume(p->host, *(LONG *)data);
+            dm_host *h = port_hold(p);
+            if (h) { dm_host_set_volume(h, *(LONG *)data); port_drop(); }
             return S_OK;
         }
         if (IsEqualGUID(s, &GUID_DMUS_PROP_Effects)) {
             if (!data || dlen < 4) return E_INVALIDARG;
-            if (p->host) dm_host_set_reverb(p->host, (*(DWORD *)data & DMUS_EFFECT_REVERB) != 0);
+            dm_host *h = port_hold(p);
+            if (h) { dm_host_set_reverb(h, (*(DWORD *)data & DMUS_EFFECT_REVERB) != 0); port_drop(); }
             return S_OK;
         }
         return E_UNKNOWN_PROPERTY;
@@ -234,7 +279,11 @@ static HRESULT WINAPI dk_KsProperty(IKsControl *i, PKSPROPERTY prop, ULONG plen,
         IsEqualGUID(s, &GUID_DMUS_PROP_XG_Hardware) || IsEqualGUID(s, &GUID_DMUS_PROP_Effects)) v = 0;
     else if (IsEqualGUID(s, &GUID_DMUS_PROP_DLS1) || IsEqualGUID(s, &GUID_DMUS_PROP_DLS2)) v = 1;
     else if (IsEqualGUID(s, &GUID_DMUS_PROP_SampleMemorySize)) v = 0x7fffffff;
-    else if (IsEqualGUID(s, &GUID_DMUS_PROP_SamplePlaybackRate)) v = p->host ? dm_host_rate(p->host) : 22050;
+    else if (IsEqualGUID(s, &GUID_DMUS_PROP_SamplePlaybackRate)) {
+        dm_host *h = port_hold(p);
+        v = 22050;
+        if (h) { v = dm_host_rate(h); port_drop(); }
+    }
     else if (IsEqualGUID(s, &GUID_DMUS_PROP_Volume)) return E_GET_UNSUPPORTED;
     else return E_UNKNOWN_PROPERTY;
     if (!data || dlen < 4) return E_INVALIDARG;
@@ -278,9 +327,10 @@ static HRESULT WINAPI sc_GetTime(IReferenceClock *i, REFERENCE_TIME *t)
 {
     rm_sink *s = sc(i);
     if (!t) return E_POINTER;
-    dm_host *h = s->port->host;
+    dm_host *h = port_hold(s->port);
     if (!h) return E_FAIL;
     *t = s->latency ? dm_host_latency(h) : dm_host_clock(h);
+    port_drop();
     return S_OK;
 }
 static HRESULT WINAPI sc_AdviseTime(IReferenceClock *i, REFERENCE_TIME b, REFERENCE_TIME o, HEVENT e, DWORD_PTR *c) { return E_NOTIMPL; }
@@ -325,7 +375,13 @@ rm_port *rm_port_new(dm_host *h)
     p->host = h;
     return p;
 }
-void rm_port_detach(rm_port *p) { if (p) p->host = NULL; }
+void rm_port_detach(rm_port *p)
+{
+    if (!p) return;
+    dm_engine_lock();
+    p->host = NULL;
+    dm_engine_unlock();
+}
 void rm_port_release(rm_port *p) { if (p) port_release(p); }
 HRESULT rm_port_query(rm_port *p, REFIID riid, void **out) { return port_qi(p, riid, out); }
 HRESULT rm_port_sink(rm_port *p, REFIID riid, void **out) { return sink_new(p, 0, riid, out); }

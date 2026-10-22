@@ -335,12 +335,13 @@ static uint8_t *build_instrument(const dm_collection *c, const dls_instr *in, ui
  * collection's address can come back as another one); while it has downloads it holds a reference to the collection,
  * and once the last is unloaded it lets go and keeps only the ids dmusic reserved for it */
 typedef struct { uint32_t serial; dm_collection *c; uint32_t base; int nwaves; void **wh; int *wref; int ninst; } portcoll;
-typedef struct { uint32_t serial; void *h; int *waves; int nwaves; } dlinst;
+typedef struct dlinst { uint32_t serial; void *h; int *waves; int nwaves; struct dlinst *next, *prev; } dlinst;
 
 struct dls_port {
     dls_sink sink; void *ctx;
     uint32_t nextid;
     portcoll *pc; int npc;
+    dlinst *live;                       /* reAL: the downloads not unloaded (freed with the port) */
 };
 
 dls_port *dls_port_new(const dls_sink *sink, void *ctx)
@@ -353,6 +354,8 @@ dls_port *dls_port_new(const dls_sink *sink, void *ctx)
 void dls_port_free(dls_port *p)
 {
     if (!p) return;
+    /* (reAL: downloads still out go with the port; their synth goes with it, so nothing is unloaded) */
+    for (dlinst *d = p->live, *n; d; d = n) { n = d->next; free(d->waves); free(d); }
     for (int i = 0; i < p->npc; i++) { free(p->pc[i].wh); free(p->pc[i].wref); dls_release(p->pc[i].c); }
     free(p->pc); free(p);
 }
@@ -415,6 +418,7 @@ void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpa
         return NULL;
     }
     d->serial = c->serial;
+    d->next = p->live; if (p->live) p->live->prev = d; p->live = d;
     q->ninst++;
     for (int i = 0; i < c->nwaves; i++) wavid[i] = q->base + i;
     /* waves first, in region list order (reverse file order), each once */
@@ -465,5 +469,7 @@ void dls_port_unload(dls_port *p, void *handle)
         }
         if (--q->ninst == 0) port_letgo(q);
     }
+    if (d->prev) d->prev->next = d->next; else if (p->live == d) p->live = d->next;
+    if (d->next) d->next->prev = d->prev;
     free(d->waves); free(d);
 }

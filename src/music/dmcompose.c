@@ -837,7 +837,6 @@ dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordma
             free(b);
             dm_track *t = ct ? dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct) : NULL;
             if (t) dm_segment_insert_track(out, t, 0, group, 0x38, 0);
-            else if (ct) dms_chordtrack_free(ct);
         }
         if (out && !ownstyle) {
             for (dm_segtrack *t; (t = seg_track(out, TRK_STYLE, 0xffffffff, 0)); ) seg_remove(out, t);
@@ -847,7 +846,7 @@ dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordma
             if (t) {
                 dm_track_setparam(t, PRM_STYLE, 0, style);
                 dm_segment_insert_track(out, t, 0, low, 0x38, 0);
-            } else free(T);
+            }
         }
         if (out && !owncm) {
             for (dm_segtrack *t; (t = seg_track(out, TRK_CHORDMAP, 0xffffffff, 0)); ) seg_remove(out, t);
@@ -873,7 +872,7 @@ dm_segment *dmc_compose_template(dm_segment *tmpl, dms_style *style, dmc_chordma
                 dm_bandparam bp = { -64, style->defband };
                 dm_track_setparam(t, PRM_BANDPARAM, 0, &bp);
                 dm_segment_insert_track(out, t, 0, group, 0x38, 0);
-            } else free(T);
+            }
         }
         if (out) {
             out->repeats = tmpl->repeats;
@@ -911,7 +910,7 @@ static dm_track *signpost_compose(dm_segment *seg, dm_track *spt, uint32_t group
     int32_t h = DM_E_OUTOFMEMORY;
     dms_chordtrack *ct = b ? dms_chordtrack_load(b, n, &h) : NULL;
     free(b);
-    if (ct && !(out = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct))) dms_chordtrack_free(ct);
+    if (ct) out = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct);
     *hr = out ? h : DM_E_OUTOFMEMORY;
     clist_free(chords);
     composer_free(&cp);
@@ -1323,7 +1322,6 @@ static dm_track *t_cmdtrack(const cmdsp *list, int32_t mlen)
     dms_cmdtrack *T = b.p ? dms_cmdtrack_load(b.p, b.n, &h) : NULL;
     free(b.p);
     dm_track *t = T ? dm_track_new(TRK_COMMAND, &CLSID_CommandTrack_, T) : NULL;
-    if (T && !t) dms_cmdtrack_free(T);
     return t;
 }
 static dm_track *t_sptrack(const cmdsp *list, int32_t mlen)
@@ -1339,7 +1337,6 @@ static dm_track *t_sptrack(const cmdsp *list, int32_t mlen)
     dmc_sptrack *T = b.p ? dmc_sptrack_load(b.p, b.n, &h) : NULL;
     free(b.p);
     dm_track *t = T ? dm_track_new(TRK_SIGNPOST, &CLSID_SignPostTrack_, T) : NULL;
-    if (T && !t) dmc_sptrack_free(T);
     return t;
 }
 static dm_segment *new_seg(void)                         /* CoCreateInstance(CLSID_DirectMusicSegment) */
@@ -1446,7 +1443,6 @@ static dm_track *marker_track(const dms_style *st, const cmdsp *c, int *hr)
         *hr = DM_E_FAIL;
         dm_markertrack *E = calloc(1, sizeof(*E));
         dm_track *tr = E ? dm_track_new(TRK_MARKER, &CLSID_MarkerTrack_, E) : NULL;
-        if (E && !tr) free(E);
         return tr;
     }
     uint32_t sz = (uint32_t)b.n - 8;
@@ -1455,7 +1451,6 @@ static dm_track *marker_track(const dms_style *st, const cmdsp *c, int *hr)
     dm_markertrack *T = dm_markertrack_load(b.p, b.n, &h);
     free(b.p);
     dm_track *tr = T ? dm_track_new(TRK_MARKER, &CLSID_MarkerTrack_, T) : NULL;
-    if (T && !tr) dm_markertrack_free(T);
     *hr = tr ? DM_OK : DM_E_OUTOFMEMORY;
     return tr;
 }
@@ -1477,7 +1472,7 @@ static dm_segment *build_segment(const cmdsp *cmds, const cnode *chords, dms_sty
         int32_t h;
         dms_chordtrack *ct = b ? dms_chordtrack_load(b, len, &h) : NULL;
         free(b);
-        if (ct && !(chordt = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct))) dms_chordtrack_free(ct);
+        if (ct) chordt = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, ct);
     }
     cmdt = t_cmdtrack(cmds, mlen);
     if (align && cmds) {
@@ -1487,10 +1482,10 @@ static dm_segment *build_segment(const cmdsp *cmds, const cnode *chords, dms_sty
     dm_track *stt = NULL, *cmt = NULL, *tt = NULL, *bt = NULL;
     dm_style_srand();                   /* (the new style track's constructor) */
     dms_styletrack *ST = calloc(1, sizeof(*ST));
-    if (ST && !(stt = dm_track_new(TRK_STYLE, &CLSID_StyleTrack_, ST))) free(ST);
+    if (ST) stt = dm_track_new(TRK_STYLE, &CLSID_StyleTrack_, ST);
     if (stt) dm_track_setparam(stt, PRM_STYLE, 0, style);
     dmc_cmtrack *CT = calloc(1, sizeof(*CT));
-    if (CT && !(cmt = dm_track_new(TRK_CHORDMAP, &CLSID_ChordMapTrack_, CT))) free(CT);
+    if (CT) cmt = dm_track_new(TRK_CHORDMAP, &CLSID_ChordMapTrack_, CT);
     if (cmt && cm) dmc_cmtrack_setparam(cmt->data, 0, cm);
     dm_tempotrack *TT = calloc(1, sizeof(*TT));
     if (TT && (TT->items = calloc(1, sizeof(*TT->items)))) {
@@ -1498,7 +1493,7 @@ static dm_segment *build_segment(const cmdsp *cmds, const cnode *chords, dms_sty
         if ((tt = dm_track_new(TRK_TEMPO, &CLSID_TempoTrack_, TT))) dm_segment_insert_track(s, tt, 0, 1, 0x38, 0);
     } else free(TT);
     dm_bandtrack *BT = calloc(1, sizeof(*BT));
-    if (BT && !(bt = dm_track_new(TRK_BAND, &CLSID_BandTrack_, BT))) free(BT);
+    if (BT) bt = dm_track_new(TRK_BAND, &CLSID_BandTrack_, BT);
     int r = DM_E_OUTOFMEMORY;
     if (bt) {
         dm_bandparam bp = { -64, band ? band : style->defband };
@@ -1993,8 +1988,8 @@ int dmc_recompose(dm_segment *seg, uint32_t *rnd, int app)
             dm_track *t = ct ? ct->t : NULL;
             if (!t) {
                 dms_chordtrack *E = calloc(1, sizeof(*E));
-                if (E && (t = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, E))) dm_segment_insert_track(seg, t, 0, group, 0x38, 0);
-                else free(E);
+                if (E && (t = dm_track_new(TRK_CHORD, &CLSID_ChordTrack_, E)) && !dm_segment_insert_track(seg, t, 0, group, 0x38, 0))
+                    t = NULL;           /* (released by the insert) */
             }
             size_t len;
             uint8_t ts[2] = { style->ts[0], style->ts[1] };
