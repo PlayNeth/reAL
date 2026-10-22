@@ -47,6 +47,39 @@ static void ss_destroy(dm_segstate *ss)
 
 static void ss_unref(dm_segstate *ss) { if (--ss->refs <= 0) ss_destroy(ss); }
 
+/* a track's Load replacing its data (dm_track_replace_hook, under the lock that guards the states): before, every
+ * state playing the track ends its state on the old data; after, starts a new one on the new data that seeks to where
+ * the state is on its next play.  A script track's Init can let the lock go (its engine may call back), so those run
+ * once the list walk is over, each with its segment state held. */
+static void track_replace(dm_track *t, int after)
+{
+    if (!after) {
+        for (sstrack *e = t->users; e; e = e->unext) track_endplay_state(e->pf, e);
+        return;
+    }
+    struct held { dm_segstate *ss; dm_perf *pf; uint32_t vid; } *held = NULL;
+    int n = 0, nheld = 0;
+    if (t->kind == TRK_SCRIPT) {
+        for (sstrack *e = t->users; e; e = e->unext) n++;
+        held = n ? malloc(n * sizeof(*held)) : NULL;
+    }
+    for (sstrack *e = t->users; e; e = e->unext) {
+        track_initplay_state(e->pf, e->ss, e, e->segflags, 1);
+        e->reseek = 1;
+        if (held && e->pf && e->pf->tops.script_init && e->ss) {
+            held[nheld].ss = e->ss; held[nheld].pf = e->pf; held[nheld].vid = e->vid;
+            e->ss->refs++;
+            nheld++;
+        }
+    }
+    for (int i = 0; i < nheld; i++) {
+        dm_perf *pf = held[i].pf;
+        if (held[i].ss->tr) pf->tops.script_init(pf->tctx, held[i].ss, t, held[i].vid);   /* (not if it ended meanwhile) */
+        ss_unref(held[i].ss);
+    }
+    free(held);
+}
+
 /* 77316457: a finished state leaves the performance: its tracks, segment and audiopath go now (a later Stop on it,
  * or anything else, finds nothing to do); the application's reference keeps the empty object */
 static void ss_shutdown(dm_segstate *ss)

@@ -1762,7 +1762,16 @@ static const IDirectMusicObjectVtbl so_vtbl = { so_qi, so_addref, so_release, so
 static HRESULT WINAPI sz_qi(IUnknown *i, REFIID r, void **o) { return sc_qi(&szo(i)->IDirectMusicScript_iface, r, o); }
 static ULONG WINAPI sz_addref(IUnknown *i) { return sc_addref(&szo(i)->IDirectMusicScript_iface); }
 static ULONG WINAPI sz_release(IUnknown *i) { return sc_release(&szo(i)->IDirectMusicScript_iface); }
-static void WINAPI sz_zombie(IUnknown *i) { rm_script *s = szo(i); s->zombie = TRUE; script_reset(s); }
+/* (the loader zombies a script once its own lock is let go, so this can wait for a routine running on another thread
+ * to end before the script's engine goes) */
+static void WINAPI sz_zombie(IUnknown *i)
+{
+    rm_script *s = szo(i);
+    s->zombie = TRUE;
+    EnterCriticalSection(&s->cs);
+    script_reset(s);
+    LeaveCriticalSection(&s->cs);
+}
 static const struct { void *qi, *ar, *rl, *zb; } sz_vtbl = { sz_qi, sz_addref, sz_release, sz_zombie };
 
 /* ---------------------------------------------------------------- IPersistStream: Load (00408ffe) */
@@ -1991,12 +2000,14 @@ static HRESULT script_error_pmsg(IDirectMusicPerformance *perf, IUnknown *state,
     return hr;
 }
 
-/* whether a script's Init would run its engine on the scripts' thread (an OLE engine not started yet): the track's
- * caller lets the performance go meanwhile, as the script's code may call it */
+/* whether a script's Init would do work (a script not started yet: an OLE engine runs on the scripts' thread, and
+ * any script loads and downloads what it references with its LOADALL / DOWNLOADALL flags): the track's caller lets
+ * the performance go meanwhile, as that calls the loader and the performance (reAL's lock order: nothing calls the
+ * loader with a performance's lock held) */
 BOOL rm_script_init_blocks(IUnknown *script)
 {
     rm_script *s = script_of(script);
-    return s && !s->zombie && s->mgr && s->mgr->ole && !s->perf;
+    return s && !s->zombie && s->mgr && !s->perf;
 }
 
 /* 0040fb32: a script's Init for a state starting the track; a script error as a message when the track was asked */

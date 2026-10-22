@@ -4,6 +4,7 @@
 #include "dmi.h"
 #include "dmsty.h"
 #include "dmcomp.h"
+#include "dmdls.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -190,6 +191,7 @@ static void load_instrument(dm_band *b, rd r, dm_getcoll_fn getcoll, void *ctx)
             for (int i = 0; i < 4; i++) in.ranges[i] = u32(buf + 8 + 4 * i);
             in.pch = u32(buf + 24); in.flags = u32(buf + 28); in.pan = buf[32]; in.vol = buf[33];
             in.transpose = (int16_t)u16(buf + 34); in.priority = u32(buf + 36); in.pbrange = (int16_t)u16(buf + 40);
+            dls_release(in.coll);       /* (a reference before the header: the header's instrument has none) */
             in.coll = NULL;
         } else if (id == FCC('L','I','S','T') && type == FCC('D','M','R','F') && getcoll) {
             dm_guid g; int hasg = 0;
@@ -199,13 +201,16 @@ static void load_instrument(dm_band *b, rd r, dm_getcoll_fn getcoll, void *ctx)
                 if (sid == FCC('g','u','i','d') && s.e - s.p >= 16) { get_guid(&g, s.p); hasg = 1; }
                 else if (sid == FCC('f','i','l','e')) wcs_to_utf8(file, sizeof(file), s);
             }
+            dls_release(in.coll);       /* (getcoll gives a reference, which the instrument keeps) */
             in.coll = getcoll(ctx, hasg ? &g : NULL, file[0] ? file : NULL);
             have_ref = 1;
         }
     }
     if (!have_ref && !in.coll && (in.flags & 0x700) && getcoll) in.coll = getcoll(ctx, NULL, NULL);
     /* the instrument list is built by prepending: reverse file order */
-    b->inst = realloc(b->inst, (b->ninst + 1) * sizeof(*b->inst));
+    dm_inst *ni = realloc(b->inst, (b->ninst + 1) * sizeof(*b->inst));
+    if (!ni) { dls_release(in.coll); return; }
+    b->inst = ni;
     memmove(b->inst + 1, b->inst, b->ninst * sizeof(*b->inst));
     b->inst[0] = in;
     b->ninst++;
@@ -250,7 +255,10 @@ void dm_band_release(dm_band *b)
 {
     if (!b) return;
     if (__sync_sub_and_fetch(&b->refs, 1) >= 0) return;
-    for (int k = 0; k < b->ninst; k++) for (dm_dlrec *r = b->inst[k].dl, *n; r; r = n) { n = r->next; free(r); }
+    for (int k = 0; k < b->ninst; k++) {
+        for (dm_dlrec *r = b->inst[k].dl, *n; r; r = n) { n = r->next; free(r); }
+        dls_release(b->inst[k].coll);
+    }
     free(b->inst); free(b);
 }
 
@@ -478,6 +486,8 @@ static int track_before(const dm_segtrack *n, const dm_segtrack *e)
     }
     return 0;
 }
+
+void (*dm_track_replace_hook)(dm_track *t, int after);
 
 dm_track *dm_track_new(int kind, const dm_guid *clsid, void *data)
 {
@@ -1177,6 +1187,16 @@ int dm_track_can_play(const dm_track *t)
  * let go of once the new data is there */
 int dm_track_load_chunk(dm_track *t, const uint8_t *p, size_t n, const dm_loadcb *cb)
 {
+    void *d = NULL;
+    int hr = dm_track_parse_chunk(t, p, n, cb, &d);
+    if (d) dm_track_set_data(t, d);
+    return hr;
+}
+/* the parse alone (no lock needed: what it reads of shared objects is counted atomically, and a style's events
+ * are sorted again under dms_resort_hook); *out = the new data, or NULL with the error */
+int dm_track_parse_chunk(const dm_track *t, const uint8_t *p, size_t n, const dm_loadcb *cb, void **out)
+{
+    *out = NULL;
     if (n < 8) return DMUS_E_CHUNKNOTFOUND_;
     uint32_t id = u32(p), size = u32(p + 4), type = 0;
     rd c = { p + 8, p + 8 + (size < n - 8 ? size : n - 8) };
@@ -1217,9 +1237,18 @@ int dm_track_load_chunk(dm_track *t, const uint8_t *p, size_t n, const dm_loadcb
     default: return DM_E_FAIL;
     }
     if (!d) return hr < 0 ? hr : DMUS_E_CHUNKNOTFOUND_;
+    *out = d;
+    return hr;
+}
+/* the new data in place of the old (under the lock the states playing the track are guarded by): those states end on
+ * the old data and start again on the new (dmime's tracks re-seek when their validate count changes); freeing the
+ * old data under them was a use-after-free */
+void dm_track_set_data(dm_track *t, void *d)
+{
+    if (dm_track_replace_hook) dm_track_replace_hook(t, 0);
     if (t->data) free_track(t);
     t->data = d;
-    return hr;
+    if (dm_track_replace_hook) dm_track_replace_hook(t, 1);
 }
 
 /* a segment as CoCreateInstance makes it (dmime's CSegment constructor): no tracks, a length of 1 */
@@ -1549,6 +1578,7 @@ static void inst_copy(dm_inst *d, const dm_inst *s)
     memset(d, 0, sizeof(*d));
     d->patch = s->patch; d->assign = s->assign; d->pan = s->pan; d->vol = s->vol; d->transpose = s->transpose;
     d->pch = s->pch; d->flags = s->flags; memcpy(d->ranges, s->ranges, sizeof(d->ranges)); d->coll = s->coll;
+    dls_addref(d->coll);
     if (g_clonefix) { d->priority = s->priority; d->pbrange = s->pbrange; d->notinfile = s->notinfile; d->smf = s->smf; d->sendpatch = s->sendpatch; }
 }
 dm_band *dm_band_copy(const dm_band *b);

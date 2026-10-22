@@ -19,6 +19,9 @@ void dm_host_unlock(dm_host *h);
 dm_perf *dm_host_perf(dm_host *h);        /* call only with the lock held */
 void dm_host_set_volume(dm_host *h, int32_t mb);
 rtime_t dm_host_clock(dm_host *h);
+/* whether this thread holds a performance's lock; a COM object released once it no longer does (now if it does not) */
+int  dm_host_held(void);
+void dm_host_release_later(void *unk);
 uint32_t dm_host_rate(dm_host *h);
 
 /* plain MIDI input (the winmm MIDI device): a message (short, or sysex starting with 0xf0) played now */
@@ -53,6 +56,7 @@ rtime_t dm_host_latency(dm_host *h);       /* the latency clock: the time of the
 int dm_host_reverb_set(dm_host *h, float ingain, float mix, float time, float hfratio);
 
 /* the process-wide collection cache (the loader's) */
+/* a collection file through the process-wide cache; the caller gets a reference (dls_release) */
 dm_collection *dm_collection_from_file(const char *path, int gm);
 const char *dm_gm_dls_path(void);          /* gm.dls: reAL.ini [Music] GMDLS, else the system's */
 

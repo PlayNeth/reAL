@@ -38,7 +38,7 @@ typedef struct {
     bufev ev[BUF_BYTES / 24 + 1]; int nev; uint32_t used;
 } port;
 
-typedef struct {
+typedef struct sstrack {
     dm_track *t;
     void *state;
     int notok;              /* +0x20 */
@@ -46,6 +46,12 @@ typedef struct {
     uint32_t group;         /* +0x28 */
     uint32_t cfg;           /* +0x34 */
     uint32_t rtbits;        /* +0x38 */
+    /* reAL: the track's list of states playing it (so a Load of the track can move them to its new data) */
+    struct sstrack *unext;
+    struct dm_perf *pf;
+    struct dm_segstate *ss;
+    uint32_t segflags;
+    int linked, reseek;
 } sstrack;
 
 struct dm_segstate {
@@ -2200,6 +2206,7 @@ dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx)
     pf->notif_min = 20000000;
     pf->rtbase = clock_now(pf);
     pf->horizon = pf->rtbase;
+    dm_track_replace_hook = track_replace;
     return pf;
 }
 

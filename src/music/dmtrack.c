@@ -655,10 +655,10 @@ static int bandtrack_setparam(dm_bandtrack *T, int prm, mtime_t mt, void *data)
         for (int i = 0; i < T->nbands; i++)
             for (int k = 0; k < T->bands[i]->ninst; k++) {
                 dm_inst *in = &T->bands[i]->inst[k];
-                if (!in->coll) { in->coll = c; continue; }
+                if (!in->coll) { dls_addref(c); in->coll = c; continue; }
                 int mode = T->bands[i]->mode;
                 if (mode != 0 && mode != 4 && in->pch == 9) in->patch |= 0x80000000u;
-                if (dls_find(c, in->patch) >= 0) in->coll = c;
+                if (dls_find(c, in->patch) >= 0) { dls_addref(c); dls_release(in->coll); in->coll = c; }
             }
         return DM_OK;
     }
@@ -778,7 +778,31 @@ int dm_segment_download(dm_perf *pf, dm_segment *seg) { return dm_segment_downlo
 int dm_segment_unload(dm_perf *pf, dm_segment *seg) { return dm_segment_unload_ap(pf, seg, NULL); }
 
 /* ------------------------------------------------------------------ dispatch */
+/* a state's entry joins (or leaves) its track's list of states playing it */
+static void track_link(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags)
+{
+    e->pf = pf; e->ss = ss; e->segflags = flags;
+    if (e->linked) return;
+    e->unext = e->t->users;
+    e->t->users = e;
+    e->linked = 1;
+}
+static void track_unlink(sstrack *e)
+{
+    if (!e->linked) return;
+    for (sstrack **p = (sstrack **)&e->t->users; *p; p = &(*p)->unext)
+        if (*p == e) { *p = e->unext; break; }
+    e->unext = NULL;
+    e->linked = 0;
+}
+
+static void track_initplay_state(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags, int noscript);
 static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags)
+{
+    track_link(pf, ss, e, flags);
+    track_initplay_state(pf, ss, e, flags, 0);
+}
+static void track_initplay_state(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags, int noscript)
 {
     switch (e->t->kind) {
     case TRK_SEQ: {
@@ -837,7 +861,7 @@ static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t fl
         evstate *S = calloc(1, sizeof(*S));
         if (!S) break;
         e->state = S;
-        if (pf->tops.script_init) pf->tops.script_init(pf->tctx, ss, e->t, e->vid);
+        if (!noscript && pf->tops.script_init) pf->tops.script_init(pf->tctx, ss, e->t, e->vid);
         break;
     }
     case TRK_PARAMCTL: {                    /* 77322dc4 */
@@ -1097,7 +1121,13 @@ static void paramctl_endplay(dm_perf *pf, sstrack *e)
     e->state = NULL;
 }
 
+static void track_endplay_state(dm_perf *pf, sstrack *e);
 static void track_endplay(dm_perf *pf, sstrack *e)
+{
+    track_unlink(e);
+    track_endplay_state(pf, e);
+}
+static void track_endplay_state(dm_perf *pf, sstrack *e)
 {
     if (e->t->kind == TRK_PARAMCTL) { paramctl_endplay(pf, e); return; }
     if (e->t->kind == TRK_WAVE) { wt_endplay(pf, e); return; }
@@ -1110,6 +1140,7 @@ static void track_endplay(dm_perf *pf, sstrack *e)
 
 static int track_play(dm_perf *pf, dm_segstate *ss, sstrack *e, mtime_t start, mtime_t end, mtime_t off, uint32_t flags)
 {
+    if (e->reseek) { e->reseek = 0; flags |= TF_SEEK | TF_START; }   /* (started again on the track's new data) */
     switch (e->t->kind) {
     case TRK_SEQ: return seq_play(pf, ss, e, start, end, off, flags);
     case TRK_TEMPO: return tempo_play(pf, ss, e, start, end, off, flags);
@@ -1138,7 +1169,7 @@ void *dm_track_direct_init(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t s
     e->t = t; dm_track_addref(t);
     e->vid = id; e->group = 0xffffffff; e->cfg = 0x38;
     pf->apprand = 1;                    /* (all on the application's thread: its rand()) */
-    if (t->kind == TRK_WAVE) *hr = wt_initplay(pf, ss, e);
+    if (t->kind == TRK_WAVE) { track_link(pf, ss, e, segflags); *hr = wt_initplay(pf, ss, e); }
     else track_initplay(pf, ss, e, segflags);
     pf->apprand = 0;
     return e;

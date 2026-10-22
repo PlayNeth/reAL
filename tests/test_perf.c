@@ -47,14 +47,15 @@ static char g_dir[1024];
 static struct { char name[256]; dm_collection *c; } g_colls[64];
 static dm_collection *load_coll(const char *path, int gm)
 {
-    for (int k = 0; k < 64; k++) if (g_colls[k].c && !strcmp(g_colls[k].name, path)) return g_colls[k].c;
+    /* (getcoll gives the caller a reference; the cache keeps the first) */
+    for (int k = 0; k < 64; k++) if (g_colls[k].c && !strcmp(g_colls[k].name, path)) { dls_addref(g_colls[k].c); return g_colls[k].c; }
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     void *b = malloc(n);
     dm_collection *c = fread(b, 1, n, f) == (size_t)n ? dls_load(b, n, gm) : NULL;
     fclose(f); free(b);
-    for (int k = 0; k < 64; k++) if (!g_colls[k].c) { snprintf(g_colls[k].name, 256, "%s", path); g_colls[k].c = c; break; }
+    for (int k = 0; k < 64; k++) if (!g_colls[k].c) { snprintf(g_colls[k].name, 256, "%s", path); g_colls[k].c = c; dls_addref(c); break; }
     return c;
 }
 static dm_collection *getcoll(void *ctx, const dm_guid *g, const char *file)
@@ -156,6 +157,37 @@ static void randhook(int app, int v, void *caller)
 {
     (void)caller;
     fprintf(g_randlog, "R %s %lld %d\n", app ? "app" : "tr", (long long)g_now, v);
+}
+
+/* TP_RELOAD: each track of the segment loaded again from its own chunk in the file (as IPersistStream::Load on the
+ * track while the segment plays) */
+static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+static int reload_tracks(dm_segment *seg, const uint8_t *b, size_t n, const dm_loadcb *cb)
+{
+    int done = 0, seen[64] = { 0 };
+    for (size_t i = 12; i + 12 <= n; i++) {
+        if (memcmp(b + i, "RIFF", 4) || memcmp(b + i + 8, "DMTK", 4)) continue;
+        size_t end = i + 8 + rd32(b + i + 4); if (end > n) end = n;
+        const uint8_t *cls = NULL;
+        for (size_t p = i + 12; p + 8 <= end; ) {
+            uint32_t sz = rd32(b + p + 4);
+            if (sz > end - p - 8) break;
+            if (!memcmp(b + p, "trkh", 4) && sz >= 16) cls = b + p + 8;
+            else if (memcmp(b + p, "trkx", 4) && memcmp(b + p, "guid", 4) && memcmp(b + p, "vers", 4) &&
+                     !(!memcmp(b + p, "LIST", 4) && sz >= 4 && !memcmp(b + p + 8, "UNFO", 4)) && cls) {
+                for (int t = 0; t < seg->ntracks && t < 64; t++) {
+                    if (seen[t] || memcmp(&seg->tracks[t].t->clsid, cls, 16)) continue;
+                    seen[t] = 1;      /* (the first track of that class not reloaded yet) */
+                    if (dm_track_load_chunk(seg->tracks[t].t, b + p, 8 + sz, cb) >= 0) done++;
+                    break;
+                }
+                break;
+            }
+            p += 8 + sz + (sz & 1);
+        }
+        i = end - 1;
+    }
+    return done;
 }
 
 int main(int argc, char **argv)
@@ -261,6 +293,10 @@ int main(int argc, char **argv)
             if (phase == 0 && t) g_now += 10000;
             if (phase == 1) {
                 drain_notifications(pf);
+                if (getenv("TP_RELOAD") && t == atoi(getenv("TP_RELOAD"))) {
+                    dm_loadcb cbr = { gc, getwave, getstyle, NULL };
+                    fprintf(stderr, "reloaded %d tracks\n", reload_tracks(seg, buf, sz, &cbr));
+                }
                 if (t == stop_ms) {      /* as MC2: Stop(segment, state), StopEx(segment), StopEx(state) */
                     dm_perf_stop(pf, seg, ss, 0, 0); dm_perf_stop(pf, seg, NULL, 0, 0); dm_perf_stop(pf, NULL, ss, 0, 0);
                 }

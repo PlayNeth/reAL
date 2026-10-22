@@ -6,7 +6,10 @@
 
 dm_collection *dls_load(const void *data, size_t size, int gm);   /* gm: the default GM set (instrument flag) */
 dm_collection *dls_load_owned(void *data, size_t size, int gm);   /* takes over a malloc'd buffer */
-void dls_free(dm_collection *c);
+/* collections are reference counted: dls_load gives the first reference; whoever keeps the pointer (a COM
+ * wrapper, a band instrument, a port's download) holds one */
+void dls_addref(dm_collection *c);
+void dls_release(dm_collection *c);
 int dls_count(const dm_collection *c);
 int dls_enum(const dm_collection *c, int i, uint32_t *patch, const char **name);
 int dls_find(const dm_collection *c, uint32_t patch);              /* instrument index or -1 */

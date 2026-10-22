@@ -58,7 +58,8 @@ static dm_collection *getcoll(void *ctx, const dm_guid *g, const char *file)
     size_t i;
     for (i = 0; file[i] && i < 255; i++) lower[i] = (char)tolower((unsigned char)file[i]);
     lower[i] = 0;
-    for (int k = 0; k < 64; k++) if (g_colls[k].c && !strcmp(g_colls[k].name, lower)) return g_colls[k].c;
+    /* (getcoll gives the caller a reference; the cache keeps the first) */
+    for (int k = 0; k < 64; k++) if (g_colls[k].c && !strcmp(g_colls[k].name, lower)) { dls_addref(g_colls[k].c); return g_colls[k].c; }
     char path[1024];
     snprintf(path, sizeof(path), "%s/%s", g_dir, lower);
     long n;
@@ -66,7 +67,7 @@ static dm_collection *getcoll(void *ctx, const dm_guid *g, const char *file)
     if (!b) { fprintf(stderr, "missing %s\n", path); return NULL; }
     dm_collection *c = dls_load(b, n, 0);
     free(b);
-    for (int k = 0; k < 64; k++) if (!g_colls[k].c) { strcpy(g_colls[k].name, lower); g_colls[k].c = c; break; }
+    for (int k = 0; k < 64; k++) if (!g_colls[k].c) { strcpy(g_colls[k].name, lower); g_colls[k].c = c; dls_addref(c); break; }
     return c;
 }
 

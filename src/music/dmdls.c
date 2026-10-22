@@ -38,6 +38,8 @@ typedef struct {
 typedef struct { uint32_t off; const uint8_t *fmt; uint32_t fmtlen; const uint8_t *data; uint32_t len; } dls_wave;
 
 struct dm_collection {
+    volatile long refs;                 /* references (dls_addref / dls_release) */
+    uint32_t serial;                    /* unique per collection: what a port's per-collection state is keyed on */
     uint8_t *data;
     dls_instr *ins; int nins;
     uint32_t *cues; int ncues;
@@ -134,16 +136,21 @@ dm_collection *dls_load(const void *data, size_t size, int gm)
     return dls_load_owned(copy, size, gm);
 }
 
+static void coll_destroy(dm_collection *c);
+
 /* as dls_load, taking over a malloc'd buffer (freed with the collection, or now on failure) */
 dm_collection *dls_load_owned(void *data, size_t size, int gm)
 {
+    static volatile long s_serial;
     dm_collection *col = calloc(1, sizeof(*col));
     if (!col) { free(data); return NULL; }
+    col->refs = 1;
+    col->serial = (uint32_t)__sync_add_and_fetch(&s_serial, 1);
     col->data = data;
     col->gm = gm;
     rd f = { col->data, col->data + size }, r;
     uint32_t id, t;
-    if (!next_chunk(&f, &id, &r, &t) || id != FCC('R','I','F','F') || t != FCC('D','L','S',' ')) { dls_free(col); return NULL; }
+    if (!next_chunk(&f, &id, &r, &t) || id != FCC('R','I','F','F') || t != FCC('D','L','S',' ')) { coll_destroy(col); return NULL; }
     rd c;
     while (next_chunk(&r, &id, &c, &t)) {
         if (id == FCC('L','I','S','T') && t == FCC('l','i','n','s')) {
@@ -182,7 +189,7 @@ dm_collection *dls_load_owned(void *data, size_t size, int gm)
     return col;
 }
 
-void dls_free(dm_collection *c)
+static void coll_destroy(dm_collection *c)
 {
     if (!c) return;
     for (int i = 0; i < c->nins; i++) {
@@ -190,6 +197,12 @@ void dls_free(dm_collection *c)
         free(c->ins[i].rgn); free(c->ins[i].arts);
     }
     free(c->ins); free(c->cues); free(c->waves); free(c->data); free(c);
+}
+
+void dls_addref(dm_collection *c) { if (c) __sync_add_and_fetch(&c->refs, 1); }
+void dls_release(dm_collection *c)
+{
+    if (c && __sync_sub_and_fetch(&c->refs, 1) == 0) coll_destroy(c);
 }
 
 int dls_count(const dm_collection *c) { return c->nins; }
@@ -318,8 +331,11 @@ static uint8_t *build_instrument(const dm_collection *c, const dls_instr *in, ui
 }
 
 /* ------------------------------------------------------------------ per port state */
-typedef struct { const dm_collection *c; uint32_t base; void **wh; int *wref; } portcoll;
-typedef struct { const dm_collection *c; void *h; int *waves; int nwaves; } dlinst;
+/* a collection's ids and wave downloads on a port.  Keyed on the collection's serial, not its address (a freed
+ * collection's address can come back as another one); while it has downloads it holds a reference to the collection,
+ * and once the last is unloaded it lets go and keeps only the ids dmusic reserved for it */
+typedef struct { uint32_t serial; dm_collection *c; uint32_t base; int nwaves; void **wh; int *wref; int ninst; } portcoll;
+typedef struct { uint32_t serial; void *h; int *waves; int nwaves; } dlinst;
 
 struct dls_port {
     dls_sink sink; void *ctx;
@@ -337,21 +353,48 @@ dls_port *dls_port_new(const dls_sink *sink, void *ctx)
 void dls_port_free(dls_port *p)
 {
     if (!p) return;
-    for (int i = 0; i < p->npc; i++) { free(p->pc[i].wh); free(p->pc[i].wref); }
+    for (int i = 0; i < p->npc; i++) { free(p->pc[i].wh); free(p->pc[i].wref); dls_release(p->pc[i].c); }
     free(p->pc); free(p);
 }
 
-static portcoll *port_coll(dls_port *p, const dm_collection *c)
+static portcoll *port_find(dls_port *p, uint32_t serial)
 {
-    for (int i = 0; i < p->npc; i++) if (p->pc[i].c == c) return &p->pc[i];
-    p->pc = realloc(p->pc, (p->npc + 1) * sizeof(*p->pc));
-    portcoll *q = &p->pc[p->npc++];
-    q->c = c;
-    q->base = p->nextid + c->nins;      /* dmusic reserves an id per instrument, then one per wave */
-    p->nextid += c->nins + c->nwaves;
-    q->wh = calloc(c->nwaves + 1, sizeof(void *));
-    q->wref = calloc(c->nwaves + 1, sizeof(int));
+    for (int i = 0; i < p->npc; i++) if (p->pc[i].serial == serial) return &p->pc[i];
+    return NULL;
+}
+
+/* the collection's state for a download (made on its first; the reference and wave tables taken again if it had let
+ * go of them); NULL out of memory */
+static portcoll *port_coll(dls_port *p, dm_collection *c)
+{
+    portcoll *q = port_find(p, c->serial);
+    if (!q) {
+        portcoll *n = realloc(p->pc, (p->npc + 1) * sizeof(*p->pc));
+        if (!n) return NULL;
+        p->pc = n;
+        q = &p->pc[p->npc++];
+        memset(q, 0, sizeof(*q));
+        q->serial = c->serial;
+        q->base = p->nextid + c->nins;  /* dmusic reserves an id per instrument, then one per wave */
+        q->nwaves = c->nwaves;
+        p->nextid += c->nins + c->nwaves;
+    }
+    if (!q->wh) {
+        q->wh = calloc(c->nwaves + 1, sizeof(void *));
+        q->wref = calloc(c->nwaves + 1, sizeof(int));
+        if (!q->wh || !q->wref) { free(q->wh); free(q->wref); q->wh = NULL; q->wref = NULL; return NULL; }
+    }
+    if (!q->c) { dls_addref(c); q->c = c; }
     return q;
+}
+
+/* no downloads left: the collection may go (its wave tables are all zero now) */
+static void port_letgo(portcoll *q)
+{
+    free(q->wh); free(q->wref);
+    q->wh = NULL; q->wref = NULL;
+    dls_release(q->c);
+    q->c = NULL;
 }
 
 void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpatch, uint32_t newpatch,
@@ -361,10 +404,18 @@ void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpa
     if (ii < 0) { *hr = DMUS_E_NOT_FOUND; return NULL; }
     const dls_instr *in = &c->ins[ii];
     portcoll *q = port_coll(p, c);
-    dlinst *d = calloc(1, sizeof(*d));
-    d->c = c;
-    d->waves = malloc((in->nrgn + 1) * sizeof(int));
-    uint32_t *wavid = malloc((c->nwaves + 1) * sizeof(uint32_t));
+    dlinst *d = q ? calloc(1, sizeof(*d)) : NULL;
+    uint32_t *wavid = d ? malloc((c->nwaves + 1) * sizeof(uint32_t)) : NULL;
+    if (d) d->waves = malloc((in->nrgn + 1) * sizeof(int));
+    if (!d || !wavid || !d->waves) {
+        if (d) { free(d->waves); free(d); }
+        free(wavid);
+        if (q && !q->ninst) port_letgo(q);
+        *hr = (int32_t)0x8007000E;      /* E_OUTOFMEMORY */
+        return NULL;
+    }
+    d->serial = c->serial;
+    q->ninst++;
     for (int i = 0; i < c->nwaves; i++) wavid[i] = q->base + i;
     /* waves first, in region list order (reverse file order), each once */
     for (int k = in->nrgn - 1; k >= 0; k--) {
@@ -406,10 +457,13 @@ void dls_port_unload(dls_port *p, void *handle)
     dlinst *d = handle;
     if (!d) return;
     if (d->h) p->sink.unload(p->ctx, d->h);
-    portcoll *q = port_coll(p, d->c);
-    for (int j = 0; j < d->nwaves; j++) {
-        int wi = d->waves[j];
-        if (--q->wref[wi] == 0 && q->wh[wi]) { p->sink.unload(p->ctx, q->wh[wi]); q->wh[wi] = NULL; }
+    portcoll *q = port_find(p, d->serial);
+    if (q) {
+        for (int j = 0; j < d->nwaves; j++) {
+            int wi = d->waves[j];
+            if (--q->wref[wi] == 0 && q->wh[wi]) { p->sink.unload(p->ctx, q->wh[wi]); q->wh[wi] = NULL; }
+        }
+        if (--q->ninst == 0) port_letgo(q);
     }
     free(d->waves); free(d);
 }

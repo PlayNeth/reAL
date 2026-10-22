@@ -146,6 +146,8 @@ struct dms_style {
 
 /* a style file's 'DMST' form (the data after the form type) */
 dms_style *dms_style_load(const uint8_t *p, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr);
+/* the host's lock around a shared style's events sorted again by a Load (enter 1, then 0); NULL: none */
+extern void (*dms_resort_hook)(int enter);
 void dms_style_addref(dms_style *s);
 void dms_style_release(dms_style *s);
 /* the style track's Load sorts every part's events again (77412645: the sort is not stable) */

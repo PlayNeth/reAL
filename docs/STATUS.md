@@ -146,6 +146,24 @@ Doppler, and WASAPI output.
   flag, so every item is released). A segment's embedded container is loaded through the loader while the
   segment loads and let go of afterwards (dmime 77313c61).
 - A let-go-of entry stays in its class while it has a place to load from or a name (dmloader's 0xc14 mask).
+- Locks (reAL's own rules, as reDM has one performance lock where dmime has several):
+  - The loader calls nothing with its lock held except the Load in GetObject, as dmloader does. Releases and
+    Zombies of objects it lets go of wait until its lock is let go. GetDescriptor in ReleaseObject and the
+    dynamic-reference methods is asked before the lock is taken.
+  - Nothing calls the loader, or waits for a thread that may, while holding a performance's lock:
+    - track and segment Loads parse without it and take it only to put the new data in place, or to sort a
+      shared style again;
+    - a script's first Init runs with it let go;
+    - COM objects the engine releases under it (script track scripts, messages' tools, graphs and user objects,
+      effects' IMediaParams, audiopaths) are released once this thread's outermost hold ends
+      (`dm_host_release_later`).
+  - A script's Zombie takes the script's lock, so it waits for a routine running on another thread.
+- A track loaded again while it plays: the states playing it end their state on the old data and start a new
+  one on the new data, which seeks to where they are (dmime's tracks re-seek when their validate count changes).
+  Before, the old data was freed under them.
+- Collections are reference counted (dls_addref / dls_release). Holders are the COM object, each band
+  instrument and each port download (a port's per-collection state is keyed on a serial, not the address).
+  Collections loaded from a stream are freed with their last holder; files stay in the process-wide cache.
 - `tests/comcmp.sh trktest.exe container` and `loader` (`cases.py container` and `tracks`) match: partial loads,
   descriptors and flags of every item, lookups by GUID, name, alias and file, NOLOADS, embedded containers,
   ReleaseObject of a container from the cache, ScanDirectory, SetObject, a disabled cache, EnumObject of all types.
@@ -349,6 +367,13 @@ Smaller items still open:
   It gives 255 identical lines.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and
   the reAL prefix `/tmp/real/sp/realprefix` (`REAL_PREFIX`).
+- `build/lockstress.exe <seconds> <segments...> [script.spt]` (Wine) runs four threads on one loader and one
+  performance: loads, plays, garbage collection and cache clears, and script calls. A watchdog reports a
+  deadlock. `build/lockorder.exe` forces two of those meetings: a Load paused inside the loader's lock against
+  a play, or against a segment's last release (`release`); and a VBScript routine against a script's teardown
+  (`vbs`).
+- `TP_RELOAD=<ms>` makes `test_perf` load every track of the playing segment again from its own chunk.
+  Build it with `-fsanitize=address` to check the reload path.
 - `tools/dmgt` drives Microsoft's dmime/dmsynth offline and logs what reaches the port.
   `tests/test_perf.c` does the same for reAL's engine.
   - Switches: `DMGT_SMF`/`TP_SMF`, `DMGT_CLONE`/`TP_CLONE`, `DMGT_WAVE`, `DMGT_APATH`, `DMGT_BUSES` and others.

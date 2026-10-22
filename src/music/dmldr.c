@@ -228,8 +228,53 @@ struct loader {
     BOOL hasdir;
     CRITICAL_SECTION cs;
     lentry *root, *parent, *garbage;    /* +0x244 the loader itself, +0x248 the object loading, +0x24c let go */
+    /* reAL: objects to let go of (or zombie) once the lock is: nothing is called with the lock held but the Load in
+     * GetObject (as dmloader does), so whatever a Release or Zombie does (a script's teardown, a container's
+     * ReleaseObject, the performance's lock) cannot wait on a thread waiting for this loader */
+    int depth;                          /* this lock's holds (by its owner) */
+    struct ltrash { struct ltrash *next; IUnknown *u; BOOL zombie; } *trash, **trash_tail;
 };
 static loader *ldo(IDirectMusicLoader8 *i) { return CONTAINING_RECORD(i, loader, IDirectMusicLoader8_iface); }
+
+static void ldr_lock(loader *L) { EnterCriticalSection(&L->cs); L->depth++; }
+static void trash_run(struct ltrash *t)
+{
+    while (t) {
+        struct ltrash *n = t->next;
+        if (t->zombie) {                /* IDirectMusicObjectP::Zombie (77385086) */
+            IUnknown *z = NULL;
+            if (SUCCEEDED(IUnknown_QueryInterface(t->u, &G_IidObjectP, (void **)&z)) && z) {
+                ((void (WINAPI *)(IUnknown *))((void **)z->lpVtbl)[3])(z);
+                IUnknown_Release(z);
+            }
+        }
+        IUnknown_Release(t->u);
+        free(t);
+        t = n;
+    }
+}
+static void ldr_unlock(loader *L)
+{
+    struct ltrash *t = NULL;
+    if (--L->depth == 0 && L->trash) { t = L->trash; L->trash = NULL; L->trash_tail = &L->trash; }
+    LeaveCriticalSection(&L->cs);
+    trash_run(t);
+}
+/* an object reference let go of (zombied first) once the lock is (now without a loader, or out of memory) */
+static void ldr_drop(loader *L, void *obj, BOOL zombie)
+{
+    if (!obj) return;
+    struct ltrash *t = L ? malloc(sizeof(*t)) : NULL;
+    if (!t) {
+        struct ltrash *x = malloc(sizeof(*x));
+        if (x) { x->next = NULL; x->u = obj; x->zombie = zombie; trash_run(x); }
+        else IUnknown_Release((IUnknown *)obj);
+        return;
+    }
+    t->next = NULL; t->u = obj; t->zombie = zombie;
+    if (!L->trash_tail) L->trash_tail = &L->trash;
+    *L->trash_tail = t; L->trash_tail = &t->next;
+}
 static loader *ldp(void *i) { return CONTAINING_RECORD(i, loader, p_vtbl); }
 static void ldr_addref_p(loader *L);
 static void ldr_release_p(loader *L);
@@ -240,10 +285,10 @@ static lentry *entry_new(lclass *c)
     if (e) { ld_init(&e->d); e->cls = c; }
     return e;
 }
-static void entry_free(lentry *e)               /* 7738452e */
+static void entry_free(loader *L, lentry *e)    /* 7738452e */
 {
     if (!e) return;
-    if (e->obj) IDirectMusicObject_Release(e->obj);
+    ldr_drop(L, e->obj, FALSE);
     if (e->kids) { free(e->kids->a); free(e->kids); }
     ld_free(&e->d);
     free(e);
@@ -350,7 +395,7 @@ static void class_remove(lclass *c, lentry *which)
         lentry *e = *pp;
         if (e == which || (!which && !(e->d.valid & FINDABLE))) {
             *pp = e->next;
-            entry_free(e);
+            entry_free(c->ld, e);
             if (which) break;
         } else pp = &e->next;
     }
@@ -358,7 +403,7 @@ static void class_remove(lclass *c, lentry *which)
 }
 static void class_free(lclass *c)               /* 7738514e */
 {
-    while (c->list) { lentry *e = c->list; c->list = e->next; entry_free(e); }
+    while (c->list) { lentry *e = c->list; c->list = e->next; entry_free(NULL, e); }
     ld_free(&c->d);
     free(c);
 }
@@ -794,18 +839,19 @@ static HRESULT entry_load(lentry *e)
     HRESULT hr = create_object(&e->d.cls, &obj);
     if (FAILED(hr)) return hr;
     lstream *s = NULL;
-    if (FAILED(hr = entry_stream(e, &s))) { IDirectMusicObject_Release(obj); return hr; }
+    loader *L = e->cls ? e->cls->ld : NULL;
+    if (FAILED(hr = entry_stream(e, &s))) { ldr_drop(L, obj, FALSE); return hr; }
     IPersistStream *ps = NULL;
     if (FAILED(hr = IDirectMusicObject_QueryInterface(obj, &IID_IPersistStream, (void **)&ps))) {
-        ls_release(&s->IStream_iface); IDirectMusicObject_Release(obj);
+        ls_release(&s->IStream_iface); ldr_drop(L, obj, FALSE);
         return hr;
     }
-    if (e->obj) IDirectMusicObject_Release(e->obj);
+    ldr_drop(L, e->obj, FALSE);
     e->obj = obj;
     HRESULT lhr = IPersistStream_Load(ps, &s->IStream_iface);
     IPersistStream_Release(ps);
     if (FAILED(lhr)) {
-        IDirectMusicObject_Release(e->obj); e->obj = NULL;
+        ldr_drop(L, e->obj, FALSE); e->obj = NULL;
         ls_release(&s->IStream_iface);
         return lhr;
     }
@@ -856,7 +902,7 @@ static void ldr_retire(loader *L, lentry *e)
     e->next = L->garbage; L->garbage = e;
     entry_drop_kid(L->root, e);
     if (!IsEqualGUID(&e->d.cls, &G_ClsScript) && !gc_cyclic(e)) {
-        if (e->obj) IDirectMusicObject_Release(e->obj);
+        ldr_drop(L, e->obj, FALSE);
         e->obj = NULL;
     }
 }
@@ -879,22 +925,17 @@ static HRESULT entry_replace(lentry *e)
 }
 /* 77385086: the list's unmarked kept entries zombied and deleted (`scripts`: only scripts'), the marks of the
  * others cleared (not with `scripts`) */
-static void gc_sweep(lentry **list, BOOL scripts)
+static void gc_sweep(loader *L, lentry **list, BOOL scripts)
 {
     lentry **pp = list;
     while (*pp) {
         lentry *e = *pp;
         if ((!scripts || IsEqualGUID(&e->d.cls, &G_ClsScript)) && (e->flags & EF_GC)) {
             if (!(e->flags & EF_MARK)) {
-                if (e->obj) {
-                    IUnknown *z = NULL;
-                    if (SUCCEEDED(IDirectMusicObject_QueryInterface(e->obj, &G_IidObjectP, (void **)&z)) && z) {
-                        ((HRESULT (WINAPI *)(IUnknown *))((void **)z->lpVtbl)[3])(z);
-                        IUnknown_Release(z);
-                    }
-                }
+                ldr_drop(L, e->obj, TRUE);      /* zombied, then let go of (once the lock is) */
+                e->obj = NULL;
                 *pp = e->next;
-                entry_free(e);
+                entry_free(L, e);
                 continue;
             }
             if (!scripts) e->flags &= ~EF_MARK;
@@ -912,7 +953,7 @@ static void class_clear(lclass *c)
         ld_drop_stream(&e->d);
         if (e->obj) {
             if (!(e->flags & EF_GC)) {
-                IDirectMusicObject_Release(e->obj); e->obj = NULL;
+                ldr_drop(L, e->obj, FALSE); e->obj = NULL;
                 e->d.valid &= ~DMUS_OBJ_LOADED;
             } else if (SUCCEEDED(entry_replace(e))) ldr_retire(L, e);
             if (ld_noloc(&e->d)) class_remove(c, NULL);
@@ -930,8 +971,8 @@ static void class_clear(lclass *c)
 static void ldr_destroy(loader *L)              /* 77382d51 */
 {
     while (L->classes) { lclass *c = L->classes; L->classes = c->next; class_free(c); }
-    while (L->garbage) { lentry *e = L->garbage; L->garbage = e->next; entry_free(e); }
-    entry_free(L->root);
+    while (L->garbage) { lentry *e = L->garbage; L->garbage = e->next; entry_free(NULL, e); }
+    entry_free(NULL, L->root);
     DeleteCriticalSection(&L->cs);
     free(L);
 }
@@ -978,7 +1019,7 @@ static HRESULT WINAPI ldr_getobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *des
         HRESULT hr = IStream_Clone(st, &desc->pStream);
         if (FAILED(hr)) return hr;
     }
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     ldesc D;
     ld_init(&D);
     ld_from_desc(&D, desc, st);
@@ -1010,17 +1051,17 @@ static HRESULT WINAPI ldr_getobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *des
     }
     if (gc) hr = entry_add_kid(L->parent, e);
     if (FAILED(hr)) {
-        IDirectMusicObject_Release(obj); obj = NULL;
+        ldr_drop(L, obj, FALSE); obj = NULL;
 fail:
         class_remove(c, e);
         if (D.valid & DMUS_OBJ_URL) hr = E_LDR_FORMATNOTSUPPORTED;
         goto done;
     }
     hr = IDirectMusicObject_QueryInterface(obj, iid, out);
-    IDirectMusicObject_Release(obj);
+    ldr_drop(L, obj, FALSE);
 done:
     if (hr == E_FAIL) hr = E_LDR_FAILEDCREATE;
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     ld_free(&D);
     return FAILED(hr) ? hr : hload;
 }
@@ -1037,7 +1078,7 @@ static HRESULT WINAPI ldr_setobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *des
         if (FAILED(hr)) return hr;
     }
     if (desc->dwValidData & DMUS_OBJ_FULLPATH) desc->dwValidData |= DMUS_OBJ_FILENAME;
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     ldesc D;
     ld_init(&D);
     ld_from_desc(&D, desc, st);
@@ -1055,7 +1096,7 @@ static HRESULT WINAPI ldr_setobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *des
         IStream_Release(desc->pStream);
         desc->pStream = st;
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     ld_free(&D);
     return hr;
 }
@@ -1071,7 +1112,7 @@ static HRESULT WINAPI ldr_setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *pat
     if (!n || dir[n - 1] != L'\\') wcscat(dir, L"\\");
     DWORD a = GetFileAttributesW(dir);
     if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) return E_LDR_BADPATH;
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     HRESULT hr = S_OK;
     lclass *cs[2] = { NULL, NULL };
     if (IsEqualGUID(cls, &G_AllTypes)) {
@@ -1079,7 +1120,7 @@ static HRESULT WINAPI ldr_setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *pat
             ld_set_file(&c->d, dir); c->d.valid |= DMUS_OBJ_FULLPATH;      /* 773849cc */
             if (clear) for (lentry **pp = &c->list; *pp; ) {
                 lentry *e = *pp;
-                if (!e->obj && !IsEqualGUID(&e->d.obj, &G_DefaultGM)) { *pp = e->next; entry_free(e); }
+                if (!e->obj && !IsEqualGUID(&e->d.obj, &G_DefaultGM)) { *pp = e->next; entry_free(L, e); }
                 else pp = &e->next;
             }
             c->ecur = NULL;
@@ -1095,14 +1136,14 @@ static HRESULT WINAPI ldr_setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *pat
             ld_set_file(&c->d, dir); c->d.valid |= DMUS_OBJ_FULLPATH;
             if (clear) for (lentry **pp = &c->list; *pp; ) {
                 lentry *e = *pp;
-                if (!e->obj && !IsEqualGUID(&e->d.obj, &G_DefaultGM)) { *pp = e->next; entry_free(e); }
+                if (!e->obj && !IsEqualGUID(&e->d.obj, &G_DefaultGM)) { *pp = e->next; entry_free(L, e); }
                 else pp = &e->next;
             }
             c->ecur = NULL;
         }
         ld_free(&D);
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     return hr;
 }
 /* 77384bfc: the class's directory searched for *.ext; each file described (again only if it changed and is not
@@ -1125,7 +1166,7 @@ static HRESULT class_scan(lclass *c, const WCHAR *ext)
         lentry *e = *pp;
         const WCHAR *dot = e->d.file ? wcschr(e->d.file, L'.') : NULL;
         if (!IsEqualGUID(&e->d.obj, &G_DefaultGM) && !e->obj && dot && dot[1] && ext && !_wcsicmp(ext, dot + 1)) {
-            *pp = e->next; entry_free(e);
+            *pp = e->next; entry_free(c->ld, e);
         } else pp = &e->next;
     }
     c->ecur = NULL;
@@ -1184,10 +1225,10 @@ static HRESULT WINAPI ldr_scandir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *ex
 {
     loader *L = ldo(i);
     if ((ext && IsBadReadPtr(ext, 2)) || (cachefile && IsBadReadPtr(cachefile, 2))) return S_OK;
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     for (lclass *c = L->classes; c; c = c->next)
         for (lentry *e = c->list; e; e = e->next) e->flags = (e->flags & ~0xdu) | 2;     /* 773839c2 */
-    if (IsEqualGUID(cls, &G_AllTypes)) { LeaveCriticalSection(&L->cs); return S_OK; }
+    if (IsEqualGUID(cls, &G_AllTypes)) { ldr_unlock(L); return S_OK; }
     ldesc D;
     ld_init(&D);
     D.cls = *cls; D.valid = DMUS_OBJ_CLASS;
@@ -1195,32 +1236,33 @@ static HRESULT WINAPI ldr_scandir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *ex
     HRESULT hr = S_OK;
     ldr_class(L, &D, &c, TRUE);
     if (c) hr = class_scan(c, ext ? ext : L"");
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     ld_free(&D);
     if (cachefile) LOG_INFO("music: Loader::ScanDirectory: the cache file is not written");
     return hr;
 }
-/* 77382443: an object's entry (S_FALSE if the entry its descriptor finds holds another) */
-static HRESULT ldr_entry_of(loader *L, IDirectMusicObject *obj, lentry **out)
+/* 77382443: an object's entry (S_FALSE if the entry its descriptor finds holds another), in two steps: the object's
+ * descriptor asked for before the loader's lock is taken (it is the object's code), the entry found with it held */
+static HRESULT ldr_desc_of(IDirectMusicObject *obj, ldesc *D)
 {
-    *out = NULL;
+    ld_init(D);
     DMUS_OBJECTDESC d;
     memset(&d, 0, sizeof(d));
     d.dwSize = sizeof(d);
     HRESULT hr = IDirectMusicObject_GetDescriptor(obj, &d);
-    if (FAILED(hr)) return hr;
-    ldesc D;
-    ld_init(&D);
-    ld_from_desc(&D, &d, NULL);
-    EnterCriticalSection(&L->cs);
+    if (SUCCEEDED(hr)) ld_from_desc(D, &d, NULL);
+    return hr;
+}
+static HRESULT ldr_entry_find(loader *L, const ldesc *D, IDirectMusicObject *obj, lentry **out)
+{
+    *out = NULL;
     lclass *c = NULL;
     lentry *e = NULL;
-    if (SUCCEEDED(hr = ldr_class(L, &D, &c, FALSE)) && SUCCEEDED(hr = class_find(c, &D, &e, NULL, obj))) {
+    HRESULT hr;
+    if (SUCCEEDED(hr = ldr_class(L, D, &c, FALSE)) && SUCCEEDED(hr = class_find(c, D, &e, NULL, obj))) {
         if (e->obj == obj) { *out = e; hr = S_OK; }
         else hr = S_FALSE;
     }
-    LeaveCriticalSection(&L->cs);
-    ld_free(&D);
     return hr;
 }
 /* 77382510 */
@@ -1235,15 +1277,15 @@ static HRESULT WINAPI ldr_cacheobj(IDirectMusicLoader8 *i, IDirectMusicObject *o
     ldesc D;
     ld_init(&D);
     ld_from_desc(&D, &d, NULL);
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     lclass *c = NULL;
     lentry *e = NULL;
     HRESULT hr;
     if (SUCCEEDED(hr = ldr_class(L, &D, &c, FALSE)) && SUCCEEDED(hr = class_find(c, &D, &e, NULL, NULL))) {
-        if (e->obj && e->obj != obj) { IDirectMusicObject_Release(e->obj); e->obj = NULL; }
+        if (e->obj && e->obj != obj) { ldr_drop(L, e->obj, FALSE); e->obj = NULL; }
         if (e->obj != obj) { e->obj = obj; e->d.valid |= DMUS_OBJ_LOADED; IDirectMusicObject_AddRef(obj); }
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     ld_free(&D);
     return hr;
 }
@@ -1252,9 +1294,12 @@ static HRESULT WINAPI ldr_releaseobj(IDirectMusicLoader8 *i, IDirectMusicObject 
 {
     loader *L = ldo(i);
     if (!obj || IsBadReadPtr(obj, 4) || IsBadReadPtr(*(void **)obj, 4)) return E_POINTER;
-    EnterCriticalSection(&L->cs);
+    ldesc D;
+    HRESULT hr = ldr_desc_of(obj, &D);
+    if (FAILED(hr)) { ld_free(&D); return hr; }
+    ldr_lock(L);
     lentry *e = NULL;
-    HRESULT hr = ldr_entry_of(L, obj, &e);
+    hr = ldr_entry_find(L, &D, obj, &e);
     if (hr == S_OK && e) {
         lclass *c = e->cls;
         ld_drop_stream(&e->d);
@@ -1264,14 +1309,15 @@ static HRESULT WINAPI ldr_releaseobj(IDirectMusicLoader8 *i, IDirectMusicObject 
         } else if (SUCCEEDED(hr = entry_replace(e))) ldr_retire(L, e);
         if (ld_noloc(&e->d)) class_remove(c, NULL);
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
+    ld_free(&D);
     return hr;
 }
 /* 77382642 */
 static HRESULT WINAPI ldr_clearcache(IDirectMusicLoader8 *i, REFGUID cls)
 {
     loader *L = ldo(i);
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     if (IsEqualGUID(cls, &G_AllTypes)) for (lclass *c = L->classes; c; c = c->next) class_clear(c);
     else {
         ldesc D;
@@ -1281,7 +1327,7 @@ static HRESULT WINAPI ldr_clearcache(IDirectMusicLoader8 *i, REFGUID cls)
         if (SUCCEEDED(ldr_class(L, &D, &c, FALSE)) && c) class_clear(c);
         ld_free(&D);
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     return S_OK;
 }
 /* 77382710 */
@@ -1289,7 +1335,7 @@ static HRESULT WINAPI ldr_enablecache(IDirectMusicLoader8 *i, REFGUID cls, BOOL 
 {
     loader *L = ldo(i);
     BOOL same = FALSE;
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     if (IsEqualGUID(cls, &G_AllTypes)) {
         for (lclass *c = L->classes; c; c = c->next) {
             if (!on) class_clear(c);
@@ -1308,7 +1354,7 @@ static HRESULT WINAPI ldr_enablecache(IDirectMusicLoader8 *i, REFGUID cls, BOOL 
         }
         ld_free(&D);
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     return same ? S_FALSE : S_OK;
 }
 /* 773827c9 / 77384452 */
@@ -1319,7 +1365,7 @@ static HRESULT WINAPI ldr_enum(IDirectMusicLoader8 *i, REFGUID cls, DWORD idx, D
     ldesc D, t;
     ld_init(&D); ld_init(&t);
     D.cls = *cls; D.valid = DMUS_OBJ_CLASS;
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     lclass *c = NULL;
     HRESULT hr = ldr_class(L, &D, &c, TRUE);
     if (SUCCEEDED(hr)) {
@@ -1329,7 +1375,7 @@ static HRESULT WINAPI ldr_enum(IDirectMusicLoader8 *i, REFGUID cls, DWORD idx, D
         else { ld_copy(&t, &c->ecur->d); hr = S_OK; }
         if (hr == S_OK) ld_to_desc(&t, desc);
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     ld_free(&D); ld_free(&t);
     return hr;
 }
@@ -1337,15 +1383,15 @@ static HRESULT WINAPI ldr_enum(IDirectMusicLoader8 *i, REFGUID cls, DWORD idx, D
 static void WINAPI ldr_gc(IDirectMusicLoader8 *i)
 {
     loader *L = ldo(i);
-    EnterCriticalSection(&L->cs);
+    ldr_lock(L);
     if (L->root) {
         gc_walk(L->root, NULL, TRUE);
-        gc_sweep(&L->garbage, TRUE);
-        for (lclass *c = L->classes; c; c = c->next) { gc_sweep(&c->list, FALSE); c->ecur = NULL; }
-        gc_sweep(&L->garbage, FALSE);
+        gc_sweep(L, &L->garbage, TRUE);
+        for (lclass *c = L->classes; c; c = c->next) { gc_sweep(L, &c->list, FALSE); c->ecur = NULL; }
+        gc_sweep(L, &L->garbage, FALSE);
         L->root->flags &= ~EF_MARK;
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
 }
 /* 77382898 */
 static HRESULT WINAPI ldr_releasebyunk(IDirectMusicLoader8 *i, IUnknown *u)
@@ -1387,9 +1433,13 @@ static HRESULT WINAPI lp_getdyn(void *i, IDirectMusicObject *src, DMUS_OBJECTDES
 {
     loader *L = ldp(i);
     if (!src || IsBadReadPtr(src, 4)) return E_POINTER;
-    EnterCriticalSection(&L->cs);
+    ldesc D;
+    HRESULT hr = ldr_desc_of(src, &D);
+    if (FAILED(hr)) { ld_free(&D); return hr; }
+    ldr_lock(L);
     lentry *e = NULL;
-    HRESULT hr = ldr_entry_of(L, src, &e);
+    hr = ldr_entry_find(L, &D, src, &e);
+    ld_free(&D);
     if (SUCCEEDED(hr)) {
         if (!e) hr = E_LDR_OBJECTNOTFOUND;
         else {
@@ -1399,29 +1449,38 @@ static HRESULT WINAPI lp_getdyn(void *i, IDirectMusicObject *src, DMUS_OBJECTDES
             L->parent = saved;
         }
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
     return hr;
 }
 static HRESULT WINAPI lp_reportdyn(void *i, IDirectMusicObject *src, IUnknown *obj)    /* 773829a1 */
 {
     loader *L = ldp(i);
     if (!src || IsBadReadPtr(src, 4) || !obj || IsBadReadPtr(obj, 4)) return E_POINTER;
-    EnterCriticalSection(&L->cs);
+    /* (the objects asked first, the entries found with the lock held) */
+    ldesc SD, OD;
+    ld_init(&OD);
+    HRESULT hr = ldr_desc_of(src, &SD), ohr = E_FAIL;
+    IDirectMusicObject *o = NULL;
+    if (SUCCEEDED(hr)) {
+        ohr = IUnknown_QueryInterface(obj, &G_IidObject, (void **)&o);
+        if (SUCCEEDED(ohr)) { ld_free(&OD); ohr = ldr_desc_of(o, &OD); }
+    }
+    ldr_lock(L);
     lentry *se = NULL, *oe = NULL;
-    HRESULT hr = ldr_entry_of(L, src, &se);
+    if (SUCCEEDED(hr)) hr = ldr_entry_find(L, &SD, src, &se);
     if (hr == S_FALSE) hr = E_LDR_OBJECTNOTFOUND;
     if (SUCCEEDED(hr)) {
-        IDirectMusicObject *o = NULL;
-        hr = IUnknown_QueryInterface(obj, &G_IidObject, (void **)&o);
-        if (FAILED(hr)) { if (hr == E_NOINTERFACE) hr = S_OK; }
+        if (!o) { hr = ohr == E_NOINTERFACE ? S_OK : ohr; }
+        else if (FAILED(ohr)) hr = ohr;
         else {
-            hr = ldr_entry_of(L, o, &oe);
+            hr = ldr_entry_find(L, &OD, o, &oe);
             if (hr == S_FALSE) hr = E_LDR_OBJECTNOTFOUND;
             if (SUCCEEDED(hr)) hr = entry_add_kid(se, oe);
-            IDirectMusicObject_Release(o);
         }
     }
-    LeaveCriticalSection(&L->cs);
+    ldr_unlock(L);
+    if (o) IDirectMusicObject_Release(o);
+    ld_free(&SD); ld_free(&OD);
     return hr;
 }
 static ULONG WINAPI lp_addrefp(void *i) { loader *L = ldp(i); ldr_addref_p(L); return L->pref; }
@@ -1440,6 +1499,7 @@ HRESULT rm_loader_create(REFIID riid, void **out)
     L->ref = 1;
     L->defcache = TRUE;
     InitializeCriticalSection(&L->cs);
+    L->trash_tail = &L->trash;
     const char *gm = dm_gm_dls_path();
     if (gm && gm[0]) {
         DMUS_OBJECTDESC d;
@@ -1453,7 +1513,7 @@ HRESULT rm_loader_create(REFIID riid, void **out)
     }
     L->root = entry_new(NULL);
     if (L->root && SUCCEEDED(entry_gc(L->root))) L->parent = L->root;
-    else { entry_free(L->root); L->root = NULL; }
+    else { entry_free(NULL, L->root); L->root = NULL; }
     HRESULT hr = ldr_qi(&L->IDirectMusicLoader8_iface, riid, out);
     ldr_release(&L->IDirectMusicLoader8_iface);
     return hr;

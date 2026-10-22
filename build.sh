@@ -102,6 +102,9 @@ $CC -O1 -Wno-format -o build/cmapcom.exe tests/cmapcom.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/comptest.exe tests/comptest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/trktest.exe tests/trktest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/scrtest.exe tests/scrtest.c -lole32 -loleaut32 -luuid -ldxguid
+# reDM's locks from several threads (tests/lockstress.c) and two of their meetings forced (tests/lockorder.c)
+$CC -O1 -o build/lockstress.exe tests/lockstress.c -ldsound -lole32 -luuid -ldxguid -lshlwapi
+$CC -O1 -o build/lockorder.exe tests/lockorder.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -shared -o build/fxprobe.dll tests/fxprobe.c tests/fxprobe.def -lole32 -luuid -ladvapi32
 rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound

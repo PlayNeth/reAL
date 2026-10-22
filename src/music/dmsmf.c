@@ -16,6 +16,7 @@
  * Fixed here: the original keeps its parser state (running status, the time signature switch) across loads, so a
  * second MIDI file loaded in a process lost its time signatures; and its SysEx chunk could drop the last messages. */
 #include "dmi.h"
+#include "dmdls.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -658,6 +659,7 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
             }
             in->pch = p->status & 0xf;
             in->coll = gm;
+            dls_addref(gm);
             in->notinfile = p->notinfile;
             /* sorted by time, a new band before others at its time (7720271c) */
             int i = 0;
@@ -666,6 +668,7 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
             bt->bands[i] = b;
             bt->nbands++;
         }
+        dls_release(gm);                /* (each band instrument took its own reference) */
         modeitem def = { -1, 1, NULL };
         for (modeitem *m = s->modes ? s->modes : &def; bt && m; m = m->next)
             for (int i = 0; i < bt->nbands; i++)

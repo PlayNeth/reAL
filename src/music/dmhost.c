@@ -11,6 +11,34 @@
  * QueryPerformanceCounter between cursor reads; the latency clock is the time of the next sample to be written. */
 #include "../real.h"
 #include "dmhost.h"
+
+/* ------------------------------------------------------------------ the performance lock, as each thread holds it
+ * reAL's lock order: whoever holds a performance's lock never calls into the loader, a script or an application
+ * object that may (the loader takes a performance's lock inside a Load).  COM objects the engine lets go of while
+ * the lock is held are released once this thread's outermost hold ends (dm_host_release_later). */
+static __thread int t_held;
+static __thread struct deferred { struct deferred *next; IUnknown *u; } *t_deferred;
+static void host_enter(dm_host *h);
+static void host_leave(dm_host *h);
+int dm_host_held(void) { return t_held > 0; }
+void dm_host_release_later(void *unk)
+{
+    IUnknown *u = unk;
+    if (!u) return;
+    struct deferred *d = t_held > 0 ? malloc(sizeof(*d)) : NULL;
+    if (!d) { IUnknown_Release(u); return; }      /* (not held, or out of memory: now) */
+    d->u = u; d->next = t_deferred; t_deferred = d;
+}
+static void drain_deferred(void)
+{
+    while (t_deferred && !t_held) {
+        struct deferred *d = t_deferred;
+        t_deferred = d->next;
+        IUnknown *u = d->u;
+        free(d);
+        IUnknown_Release(u);
+    }
+}
 #include "msynth.h"
 #include "wavesrev.h"
 #include "sf2dls.h"
@@ -393,9 +421,9 @@ static DWORD WINAPI sink_thread(LPVOID p)
     dm_host *h = p;
     timeBeginPeriod(1);
     while (!h->stop) {
-        EnterCriticalSection(&h->lock);
+        host_enter(h);
         sink_pass(h);
-        LeaveCriticalSection(&h->lock);
+        host_leave(h);
         WaitForSingleObject(h->quit, 5);
     }
     timeEndPeriod(1);
@@ -408,10 +436,10 @@ static DWORD WINAPI transport_thread(LPVOID p)
     _controlfp(_PC_53, _MCW_PC);    /* dmime's threads run the tempo arithmetic at 53-bit precision */
     HANDLE w[2] = { h->quit, h->ev[DM_THREAD_TRANSPORT] };
     while (!h->stop) {
-        EnterCriticalSection(&h->lock);
+        host_enter(h);
         uint32_t ms = dm_perf_transport(h->pf);
         dm_perf_run_app_tools(h->pf);       /* application tools run here, with the lock let go around each */
-        LeaveCriticalSection(&h->lock);
+        host_leave(h);
         WaitForMultipleObjects(2, w, FALSE, ms);
     }
     return 0;
@@ -424,10 +452,10 @@ static DWORD WINAPI realtime_thread(LPVOID p)
     HANDLE w[2] = { h->quit, h->ev[DM_THREAD_REALTIME] };
     timeBeginPeriod(1);
     while (!h->stop) {
-        EnterCriticalSection(&h->lock);
+        host_enter(h);
         uint32_t ms = dm_perf_realtime(h->pf);
         dm_perf_run_app_tools(h->pf);
-        LeaveCriticalSection(&h->lock);
+        host_leave(h);
         WaitForMultipleObjects(2, w, FALSE, ms);
     }
     timeEndPeriod(1);
@@ -500,9 +528,9 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->quit = CreateEventA(NULL, TRUE, FALSE, NULL);
     h->ev[0] = CreateEventA(NULL, FALSE, FALSE, NULL);
     h->ev[1] = CreateEventA(NULL, FALSE, FALSE, NULL);
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     sink_pass(h);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     h->th[0] = CreateThread(NULL, 0, transport_thread, h, 0, NULL);
     h->th[1] = CreateThread(NULL, 0, realtime_thread, h, 0, NULL);
     h->th[2] = CreateThread(NULL, 0, sink_thread, h, 0, NULL);
@@ -546,47 +574,54 @@ void dm_host_free(dm_host *h)
     free(h);
 }
 
-void dm_host_lock(dm_host *h) { EnterCriticalSection(&h->lock); }
-void dm_host_unlock(dm_host *h) { LeaveCriticalSection(&h->lock); }
+static void host_enter(dm_host *h) { EnterCriticalSection(&h->lock); t_held++; }
+static void host_leave(dm_host *h)
+{
+    t_held--;
+    LeaveCriticalSection(&h->lock);
+    if (!t_held && t_deferred) drain_deferred();
+}
+void dm_host_lock(dm_host *h) { host_enter(h); }
+void dm_host_unlock(dm_host *h) { host_leave(h); }
 dm_perf *dm_host_perf(dm_host *h) { return h->pf; }
 uint32_t dm_host_rate(dm_host *h) { return h->rate; }
 rtime_t dm_host_clock(dm_host *h)      /* under the lock: an application's clock read races the sink otherwise */
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     rtime_t t = host_clock(h);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return t;
 }
 void dm_host_set_volume(dm_host *h, int32_t mb)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     msynth_set_gain(h->syn, mb);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
 }
 
 /* a MIDI message played as soon as possible: stamped at the play position plus the sink's lead, so messages keep
  * their relative timing (no quantising to sink passes); never before what has been rendered already */
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     int64_t t = (host_clock(h) - h->rt0) * h->rate / 10000000 + (int64_t)h->rate * AHEAD_MS / 1000;
     if (t < h->written) t = h->written;
     msynth_midi(h->syn, t, msg, len, 1);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
 }
 
 /* every instrument of a collection, as a GM synth has them (the Microsoft GS Wavetable synth loads all of gm.dls) */
 int dm_host_download_all(dm_host *h, dm_collection *c)
 {
     int n = 0;
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     for (int i = 0; i < dls_count(c); i++) {
         uint32_t patch;
         int hr;
         if (dls_enum(c, i, &patch, NULL) < 0) continue;
         if (dls_port_download(h->dls, c, patch, 0, 0, NULL, 0, &hr)) n++;
     }
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return n;
 }
 
@@ -598,7 +633,7 @@ static const GUID DS3DALG_NO_VIRTUALIZATION_ = { 0xc241333f, 0x1c1b, 0x11d2, { 0
 int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t buses[4], uint32_t *nbuses)
 {
     *nidx = 0; *nbuses = 0;
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     int r = -1;
     if (type == 1) {        /* DMUS_APATH_SHARED_STEREOPLUSREVERB */
         h->hb[0].refs++; h->hb[1].refs++;
@@ -636,13 +671,13 @@ int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t
             }
         }
     }
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return r;
 }
 
 void dm_host_path_close(dm_host *h, const int *idx, int nidx)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     for (int i = 0; i < nidx; i++) {
         hbuf *x = &h->hb[idx[i]];
         if (--x->refs > 0 || idx[i] < 2) continue;
@@ -653,7 +688,7 @@ void dm_host_path_close(dm_host *h, const int *idx, int nidx)
         IDirectSoundBuffer8_Stop(&b->IDirectSoundBuffer8_iface);
         IDirectSoundBuffer8_Release(&b->IDirectSoundBuffer8_iface);
     }
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
 }
 
 /* ------------------------------------------------------------------ configured buffers
@@ -685,20 +720,20 @@ HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
 {
     *idx = -1;
     if (d->nch < 1 || d->nch > 2) return E_INVALIDARG;
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     int k;
     for (k = 2; k < MAXHB && h->hb[k].b; k++) ;
-    if (k == MAXHB) { LeaveCriticalSection(&h->lock); return E_OUTOFMEMORY; }
+    if (k == MAXHB) { host_leave(h); return E_OUTOFMEMORY; }
     WAVEFORMATEX wf = { WAVE_FORMAT_PCM, (WORD)d->nch, h->rate, h->rate * 2 * d->nch, (WORD)(2 * d->nch), 16, 0 };
     HRESULT hr = S_OK;
     rl_fxchain *fx = NULL;
     if (d->nfx) {
         fx = rl_fxchain_from_config(&wf, d->nfx, d->fx, &s_sendops, h, &hr);
-        if (!fx) { LeaveCriticalSection(&h->lock); return hr; }
+        if (!fx) { host_leave(h); return hr; }
     }
     rl_buffer *b = make_buffer_ex(h, d->nch, d->flags & (DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN |
                                   DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS | DSBCAPS_MUTE3DATMAXDISTANCE), d->alg);
-    if (!b) { rl_fxchain_free(fx); LeaveCriticalSection(&h->lock); return E_OUTOFMEMORY; }
+    if (!b) { rl_fxchain_free(fx); host_leave(h); return E_OUTOFMEMORY; }
     rl_buffer_set_sink(b, d->caps);
     hbuf *x = &h->hb[k];
     memset(x, 0, sizeof(*x));
@@ -722,65 +757,65 @@ HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
     IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
     IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
     *idx = k;
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return S_OK;
 }
 /* IDirectSoundConnect::GetSoundBufferBusIDs: the buffer's buses (0 for a mix-in) */
 DWORD dm_host_buffer_buses(dm_host *h, int idx, uint32_t *out, DWORD max)
 {
     DWORD n = 0;
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     if (idx >= 0 && idx < MAXHB && h->hb[idx].b) {
         hbuf *x = &h->hb[idx];
         int nb = x->kind == HB_CFG ? x->nbus : x->kind == HB_REVERB ? 1 : x->nch;
         for (int c = 0; c < nb && n < max; c++) out[n++] = x->bus[c];
     }
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return n;
 }
 int dm_host_buffer_inuse(dm_host *h, int idx)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     int r = idx >= 0 && idx < MAXHB && h->hb[idx].b && h->hb[idx].refs > (idx < 2 ? 1 : 0);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return r;
 }
 void dm_host_buffer_addref(dm_host *h, int idx)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     if (idx >= 0 && idx < MAXHB && h->hb[idx].b) h->hb[idx].refs++;
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
 }
 /* DMUS_PATH_BUFFER_DMO on a configured buffer: its effects (IDirectSoundBuffer8::GetObjectInPath) */
 HRESULT dm_host_buffer_dmo(dm_host *h, int idx, REFGUID g, DWORD n, REFIID iid, void **out)
 {
     *out = NULL;
     HRESULT hr = DSERR_OBJECTNOTFOUND;
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     if (idx >= 0 && idx < MAXHB && h->hb[idx].b && h->hb[idx].fx) hr = rl_fxchain_get_object(h->hb[idx].fx, g, n, iid, out);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return hr;
 }
 
 /* the port's side (dmport.c): channel priorities, the latency clock */
 int dm_host_priority(dm_host *h, uint32_t g, uint32_t c, uint32_t *prio, int set)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     int r = set ? msynth_set_priority(h->syn, g, c, *prio) : msynth_get_priority(h->syn, g, c, prio);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return r;
 }
 void dm_host_stats(dm_host *h, msynth_stats *st)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     msynth_get_stats(h->syn, st);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
 }
 rtime_t dm_host_latency(dm_host *h)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     rtime_t t = h->rt0 + h->written * 10000000 / h->rate;
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return t;
 }
 
@@ -796,7 +831,7 @@ HRESULT dm_host_buffer_query(dm_host *h, int idx, REFIID iid, void **out)
 HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out)
 {
     *out = NULL;
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     if (!h->primary) {
         DSBUFFERDESC d;
         memset(&d, 0, sizeof(d));
@@ -804,7 +839,7 @@ HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out)
         d.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME;
         rl_buffer_create(h->dev, NULL, &d, &h->primary);
     }
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     if (!h->primary) return DMUS_E_NOT_FOUND;
     return IDirectSoundBuffer8_QueryInterface(&h->primary->IDirectSoundBuffer8_iface, iid, out);
 }
@@ -812,17 +847,17 @@ HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out)
 /* the shared reverb (DMUS_PATH_BUFFER_DMO on the reverb buffer): IDirectSoundFXWavesReverb parameters */
 int dm_host_reverb_set(dm_host *h, float ingain, float mix, float time, float hfratio)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     int r = wavesrev_set(h->rev, ingain, mix, time, hfratio);
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
     return r;
 }
 
 void dm_host_set_reverb(dm_host *h, int on)
 {
-    EnterCriticalSection(&h->lock);
+    host_enter(h);
     h->noreverb = !on;
-    LeaveCriticalSection(&h->lock);
+    host_leave(h);
 }
 
 /* ------------------------------------------------------------------ collections */
@@ -841,7 +876,7 @@ dm_collection *dm_collection_from_file(const char *path, int gm)
     CharLowerA(full);
     EnterCriticalSection(&s_ccs);
     for (int i = 0; i < 128; i++)
-        if (s_coll[i].c && !strcmp(s_coll[i].path, full)) { LeaveCriticalSection(&s_ccs); return s_coll[i].c; }
+        if (s_coll[i].c && !strcmp(s_coll[i].path, full)) { dls_addref(s_coll[i].c); LeaveCriticalSection(&s_ccs); return s_coll[i].c; }
     dm_collection *c = NULL;
     HANDLE f = open_file(full);
     DWORD err = f == INVALID_HANDLE_VALUE ? GetLastError() : 0;
@@ -867,7 +902,8 @@ dm_collection *dm_collection_from_file(const char *path, int gm)
         CloseHandle(f);
     }
     if (c) {
-        for (int i = 0; i < 128; i++) if (!s_coll[i].c) { lstrcpynA(s_coll[i].path, full, MAX_PATH); s_coll[i].c = c; break; }
+        /* the cache keeps its reference for the process (the caller gets a second); a full cache leaves it to the caller */
+        for (int i = 0; i < 128; i++) if (!s_coll[i].c) { lstrcpynA(s_coll[i].path, full, MAX_PATH); s_coll[i].c = c; dls_addref(c); break; }
         LOG_INFO("music: collection %s (%d instruments)", full, dls_count(c));
     } else if (parsed) LOG_INFO("music: %s is not a DLS collection reAL can read", full);
     else LOG_INFO("music: cannot open collection %s (error %lu)", full, (unsigned long)err);

@@ -346,7 +346,10 @@ typedef struct dm_track {
     void *data;
     int notify;             /* AddNotificationType accepted (time signature track: GUID_NOTIFICATION_MEASUREANDBEAT) */
     void *wrapper;          /* the COM object (weak) */
+    void *users;            /* the performance's states playing it (dmperf.c's sstrack list) */
 } dm_track;
+/* called around a track's data being replaced by its Load (after = 0 before, 1 after); set by the performance */
+extern void (*dm_track_replace_hook)(dm_track *t, int after);
 /* a segment's entry for a track (dmime's track list item): the segment's own group, config, position, priority */
 typedef struct dm_segtrack {
     dm_track *t;
@@ -437,6 +440,9 @@ int dm_track_class_kind(const dm_guid *clsid);
 dm_track *dm_track_create(const dm_guid *clsid);
 int dm_track_can_play(const dm_track *t);
 int dm_track_load_chunk(dm_track *t, const uint8_t *p, size_t n, const dm_loadcb *cb);
+/* the same in two steps: the parse (without the performance's lock: it calls the loader), then the swap (with it) */
+int dm_track_parse_chunk(const dm_track *t, const uint8_t *p, size_t n, const dm_loadcb *cb, void **out);
+void dm_track_set_data(dm_track *t, void *d);
 /* Clone: a track's data in [start, end) moved to 0 (77..: per kind); a segment's tracks cloned (77313a27).
  * dm_set_clone_fix: keep what the original's clones lose (wave item ranges, a band carried over without a later band) */
 dm_track *dm_track_clone(const dm_track *t, mtime_t start, mtime_t end, int *hr);

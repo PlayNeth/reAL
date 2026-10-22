@@ -568,7 +568,8 @@ const uint8_t *dms_part_ts(const dms_part *pt, const dms_style *s, const dms_pat
     return p ? dms_pattern_ts(p, s) : g_ts44;
 }
 
-void dms_style_addref(dms_style *s) { if (s) s->refs++; }
+/* (counted atomically: a style is shared, and a Load parses without the performance's lock) */
+void dms_style_addref(dms_style *s) { if (s) __sync_add_and_fetch(&s->refs, 1); }
 static void part_release(dms_part *p)
 {
     if (!p || --p->refs > 0) return;
@@ -621,7 +622,7 @@ dms_pattern *dms_pattern_copy(const dms_pattern *P)
 void dms_pattern_release(dms_pattern *p) { pattern_release(p); }
 void dms_style_release(dms_style *s)
 {
-    if (!s || --s->refs > 0) return;
+    if (!s || __sync_sub_and_fetch(&s->refs, 1) > 0) return;
     for (int i = 0; i < s->nparts; i++) part_release(s->parts[i]);
     for (int i = 0; i < s->npatterns; i++) pattern_release(s->patterns[i]);
     for (int i = 0; i < s->nmotifs; i++) pattern_release(s->motifs[i]);
@@ -1018,6 +1019,8 @@ static void wstr_utf8(char *out, size_t max, rd c)
     out[k] = 0;
 }
 
+void (*dms_resort_hook)(int enter);
+
 /* 774123a0: a 'DMRF' list: the loader's style (then every part's events sorted again, 774087cf) */
 static dms_style *load_styleref(rd r, dms_getstyle_fn get, void *ctx, int32_t *hr)
 {
@@ -1031,7 +1034,10 @@ static dms_style *load_styleref(rd r, dms_getstyle_fn get, void *ctx, int32_t *h
     }
     dms_style *s = get ? get(ctx, hasg ? &g : NULL, file[0] ? file : NULL, name[0] ? name : NULL) : NULL;
     if (!s) { *hr = DMUS_E_NOT_FOUND_; return NULL; }
+    /* (the style may be playing: the host sorts it under the lock its states are guarded by) */
+    if (dms_resort_hook) dms_resort_hook(1);
     dms_style_resort(s);
+    if (dms_resort_hook) dms_resort_hook(0);
     *hr = 0;
     return s;
 }

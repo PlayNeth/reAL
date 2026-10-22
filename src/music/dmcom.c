@@ -255,7 +255,7 @@ static ULONG WINAPI col_release(IDirectMusicCollection *i)
 {
     LONG r = InterlockedDecrement(&col(i)->ref);
     LOG_CALL("music: Collection::Release(%p) -> %ld", (void *)i, (long)r);
-    if (!r) free(col(i));       /* the collection data stays in the process-wide cache */
+    if (!r) { dls_release(col(i)->c); free(col(i)); }   /* (a file's collection stays in the process-wide cache) */
     return r;
 }
 static HRESULT WINAPI col_getinst(IDirectMusicCollection *i, DWORD patch, IDirectMusicInstrument **out)
@@ -398,7 +398,9 @@ static HRESULT WINAPI colp_load(IPersistStream *i, IStream *st)
         c = dls_load_owned(b, n, 0);
         if (!c) return DMUS_E_NOTADLSCOL;
     }
+    dm_collection *old = o->c;           /* (bands and downloads made from it keep their own references) */
     o->c = c;
+    dls_release(old);
     o->desc.dwValidData |= DMUS_OBJ_LOADED;
     return S_OK;
 }
@@ -813,12 +815,9 @@ static dm_segment *segment_from_data(const BYTE *b, DWORD n, IDirectMusicLoader8
         return g;
     }
     dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg, loader_getscript };
-    /* under the lock, like a track's Load: the segment's style tracks re-sort shared styles that may be playing */
-    dm_host *h = any_host();
-    if (h) dm_host_lock(h);
-    dm_segment *g = dm_segment_load_cb(b, n, &cb);
-    if (h) dm_host_unlock(h);
-    return g;
+    /* (without the performance's lock: the loader is called; the style tracks sort a shared style again under it,
+     * through dms_resort_hook) */
+    return dm_segment_load_cb(b, n, &cb);
 }
 static rm_segment *sgp(IPersistStream *i) { return impl_from(i, rm_segment, IPersistStream_iface); }
 static HRESULT WINAPI sgp_qi(IPersistStream *i, REFIID r, void **o) { return seg_qi(&sgp(i)->IDirectMusicSegment8_iface, r, o); }
@@ -1409,10 +1408,16 @@ static HRESULT WINAPI trp_load(IPersistStream *i, IStream *s)
     }
     if (SUCCEEDED(hr)) {
         dm_loadcb cb = { loader_getcoll, loader_getwave, loader_getstyle, l, loader_getcmap, loader_getseg, loader_getscript };
-        dm_host *h = any_host();
-        if (h) dm_host_lock(h);
-        hr = dm_track_load_chunk(t, b, n, &cb);
-        if (h) dm_host_unlock(h);
+        /* parsed without the performance's lock (the loader is called), put in place with it (states playing the
+         * track move to the new data) */
+        void *d = NULL;
+        hr = dm_track_parse_chunk(t, b, n, &cb, &d);
+        if (d) {
+            dm_host *h = any_host();
+            if (h) dm_host_lock(h);
+            dm_track_set_data(t, d);
+            if (h) dm_host_unlock(h);
+        }
     }
     free(b);
     return hr;
@@ -2301,9 +2306,11 @@ static HRESULT WINAPI pf_allocpmsg(IDirectMusicPerformance8 *i, ULONG cb, DMUS_P
  * performance alive): pft_addref / pfg_addref */
 static void pmsg_drop_ifaces(DMUS_PMSG *m)
 {
-    if (m->pTool) IDirectMusicTool_Release(m->pTool);
-    if (m->pGraph) IDirectMusicGraph_Release(m->pGraph);
-    if (m->punkUser) IUnknown_Release(m->punkUser);
+    /* (on the engine's threads this runs under the performance's lock: the objects go once it is let go, as an
+     * application tool or a script event's script may call the loader or wait for the scripts' thread) */
+    dm_host_release_later(m->pTool);
+    dm_host_release_later(m->pGraph);
+    dm_host_release_later(m->punkUser);
     m->pTool = NULL; m->pGraph = NULL; m->punkUser = NULL;
 }
 
@@ -2613,9 +2620,9 @@ static int tops_stamp(void *ctx, void *graph, int owner, void *obj, dm_pmsg *e)
     if (hr == S_OK) {
         IDirectMusicGraph *g = owner_graph(p, owner, obj);
         if (m->pGraph != g) {
-            if (m->pGraph) IDirectMusicGraph_Release(m->pGraph);
+            dm_host_release_later(m->pGraph);
             m->pGraph = g;
-        } else if (g) IDirectMusicGraph_Release(g);
+        } else dm_host_release_later(g);
         e->flags = m->dwFlags;
     }
     return hr;
@@ -2623,8 +2630,8 @@ static int tops_stamp(void *ctx, void *graph, int owner, void *obj, dm_pmsg *e)
 static void tops_unstamp(void *ctx, dm_pmsg *e)
 {
     DMUS_PMSG *m = e->ext;
-    if (m->pGraph) { IDirectMusicGraph_Release(m->pGraph); m->pGraph = NULL; }
-    if (m->pTool) { IDirectMusicTool_Release(m->pTool); m->pTool = NULL; }
+    dm_host_release_later(m->pGraph); m->pGraph = NULL;
+    dm_host_release_later(m->pTool); m->pTool = NULL;
 }
 /* 77309396: ProcessPMsg, called with the engine let go (the tool may call back into the performance) */
 static int tops_process(void *ctx, dm_pmsg *e)
@@ -2637,7 +2644,7 @@ static int tops_process(void *ctx, dm_pmsg *e)
     dm_host_unlock(p->host);
     HRESULT hr = IDirectMusicTool_ProcessPMsg(t, (IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, m);
     dm_host_lock(p->host);
-    IDirectMusicTool_Release(t);
+    dm_host_release_later(t);
     if (hr == DMUS_S_REQUEUE && pmsg_hdr(m)) pm_from_com_loose(p, m, e);
     return hr;
 }
@@ -2671,7 +2678,7 @@ static void *tops_state_graph(void *ctx, dm_segstate *ss)
     if (sg) rm_graph_clone(sg, &c);             /* 77311d79: through the graph's private Clone */
     return c;
 }
-static void tops_graph_release(void *ctx, void *g) { IDirectMusicGraph_Release((IDirectMusicGraph *)g); }
+static void tops_graph_release(void *ctx, void *g) { dm_host_release_later(g); }    /* (its tools are the application's) */
 /* the parameter control track's objects: IMediaParams (by its vtable: GetParam, SetParam, AddEnvelope,
  * FlushEnvelope, SetTimeFormat) */
 static const GUID RM_IID_IMediaParams = { 0x6d6cbb61, 0xa223, 0x44aa, { 0x84, 0x2f, 0xa2, 0xf0, 0x67, 0x50, 0xbe, 0x6e } };
@@ -2697,11 +2704,11 @@ static void *tops_mp_get(void *ctx, dm_segstate *ss, uint32_t pch, uint32_t stag
     void *mp = NULL;
     HRESULT hr = IDirectMusicSegmentState8_GetObjectInPath((IDirectMusicSegmentState8 *)u, pch, stage, buffer,
                                                            (REFGUID)obj, index, &RM_IID_IMediaParams, &mp);
-    IUnknown_Release(u);
+    dm_host_release_later(u);
     if (FAILED(hr) || !mp) return NULL;
     GUID g;
     memcpy(&g, fmt, sizeof(g));
-    if (FAILED(MPV(mp)->SetTimeFormat(mp, g, fmtdata))) { MPV(mp)->Release(mp); return NULL; }
+    if (FAILED(MPV(mp)->SetTimeFormat(mp, g, fmtdata))) { dm_host_release_later(mp); return NULL; }
     return mp;
 }
 static int tops_mp_add(void *ctx, void *mp, uint32_t param, int64_t start, int64_t end, float v0, float v1,
@@ -2718,9 +2725,9 @@ static int tops_mp_flush(void *ctx, void *mp, uint32_t param, int64_t start, int
 static void tops_state_end(void *ctx, dm_segstate *ss)
 {
     rm_state *s = *dm_segstate_wrapper(ss);
-    if (s && s->path) { IDirectMusicAudioPath *a = s->path; s->path = NULL; IDirectMusicAudioPath_Release(a); }
+    if (s && s->path) { IDirectMusicAudioPath *a = s->path; s->path = NULL; dm_host_release_later(a); }
 }
-static void tops_mp_release(void *ctx, void *mp) { MPV(mp)->Release(mp); }
+static void tops_mp_release(void *ctx, void *mp) { dm_host_release_later(mp); }    /* (an effect's IMediaParams) */
 /* the script track's tool (dmscript's, part of the track: the track's references; 0040f8c2): ProcessPMsg calls an
  * event's routine, the other methods are not for a graph */
 typedef struct { IDirectMusicTool IDirectMusicTool_iface; LONG ref; dm_track *t; } rm_scripttool;
@@ -2773,10 +2780,10 @@ static void tops_script_init(void *ctx, dm_segstate *ss, dm_track *t, uint32_t v
         if (let) dm_host_unlock(p->host);
         rm_script_track_init(sc, (IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, st, vid, T->errnotify);
         if (let) dm_host_lock(p->host);
-        IUnknown_Release(sc);
+        dm_host_release_later(sc);
         if (T != t->data) break;        /* (the track loaded again meanwhile) */
     }
-    if (st) IUnknown_Release(st);
+    dm_host_release_later(st);
 }
 /* 0040fbe9: an event's message to the track's tool */
 static void tops_script_event(void *ctx, dm_segstate *ss, dm_track *t, const dm_scriptev *e, mtime_t off, uint32_t vid)
@@ -2791,7 +2798,7 @@ static void tops_script_event(void *ctx, dm_segstate *ss, dm_track *t, const dm_
     IUnknown *st = state_object(p, ss);
     rm_script_track_event((IDirectMusicPerformance *)&p->IDirectMusicPerformance8_iface, st, &x->IDirectMusicTool_iface,
                           e->script, e->routine, e->flags, (MUSIC_TIME)(e->physical + off), vid);
-    if (st) IUnknown_Release(st);
+    dm_host_release_later(st);
     sct_release(&x->IDirectMusicTool_iface);
 }
 static const dm_toolops s_toolops = { tops_stamp, tops_unstamp, tops_process, tops_flush, tops_clone_ext, tops_free_ext,
@@ -3599,7 +3606,8 @@ static dm_collection *loader_getcoll(void *ctx, const dm_guid *g, const char *fi
         return NULL;
     }
     rm_collection *c = col_of((IUnknown *)o);
-    dm_collection *r = c ? c->c : NULL;    /* (collections stay in the process-wide cache) */
+    dm_collection *r = c ? c->c : NULL;
+    dls_addref(r);                         /* the caller's reference: the object may go with this Release */
     IDirectMusicCollection_Release(o);
     return r;
 }
@@ -3733,7 +3741,14 @@ static void *loader_getscript(void *ctx, const dm_guid *g, const char *file, con
     }
     return o;
 }
-static void unk_ref(void *u, int add) { if (add) IUnknown_AddRef((IUnknown *)u); else IUnknown_Release((IUnknown *)u); }
+static void resort_hook(int enter)
+{
+    static __thread dm_host *t_h;       /* (the host locked by the matching enter) */
+    if (enter) { t_h = any_host(); if (t_h) dm_host_lock(t_h); }
+    else if (t_h) { dm_host *h = t_h; t_h = NULL; dm_host_unlock(h); }
+}
+/* (a script track's scripts: let go of once the performance's lock is, as a script's last release can call the loader) */
+static void unk_ref(void *u, int add) { if (add) IUnknown_AddRef((IUnknown *)u); else dm_host_release_later(u); }
 
 /* a style track's reference (774123a0: the loader's GetObject of a style); the engine style with a reference */
 static struct dms_style *loader_getstyle(void *ctx, const dm_guid *g, const char *file, const char *name)
@@ -3775,6 +3790,7 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
     test_hooks();
     dm_wave_set_decoder(acm_decode);
     dm_unk_ref = unk_ref;
+    dms_resort_hook = resort_hook;
     if (IsEqualCLSID(clsid, &RM_CLSID_DirectSoundWave)) {
         rm_wave *o = new_wave(NULL);
         if (!o) return E_OUTOFMEMORY;
