@@ -274,7 +274,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         rl_music_hook(0);
         rl_midi_hook(0);
     } else if (reason == DLL_PROCESS_DETACH) {
-        rl_log_flush();
+        rl_log_shutdown(reserved != NULL);
     }
     return TRUE;
 }

@@ -110,6 +110,8 @@ rm -f build/fxprobe.lib build/fxprobe.pdb
 $CC -O1 -o build/miditest.exe tests/miditest.c -lwinmm -ldsound
 $CC -O1 -o build/dsreload.exe tests/dsreload.c -lole32 -luuid -ldxguid
 $CC -O1 -o build/alblock.exe tests/alblock.c -lole32 -luuid
+# a game freeing and loading dsound.dll per sound setting, an exception after each unload (Need for Speed III)
+$CC -O1 -o build/unloadtest.exe tests/unloadtest.c
 $CC -O1 -o build/mc2sim.exe tests/mc2sim.c -lole32 -luuid -ldxguid -ldsound
 rm -f build/mc2sim.lib build/mc2sim.pdb
 

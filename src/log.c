@@ -17,7 +17,7 @@ void rl_log_init(void)
          * instead of truncating the first one's log */
         char name[64];
         snprintf(name, sizeof(name), "Local\\reAL.log.%lu", (unsigned long)GetCurrentProcessId());
-        HANDLE m = CreateMutexA(NULL, FALSE, name);
+        HANDLE m = CreateMutexA(NULL, FALSE, name);    /* (kept open: a load after a FreeLibrary appends too) */
         int second = m && GetLastError() == ERROR_ALREADY_EXISTS;
         s_log = fopen(g_cfg.log_file, second ? "a" : "w");
         /* buffered: the 3D and call logs run to thousands of lines a second, often from inside the device lock, and a
@@ -121,7 +121,25 @@ static LONG CALLBACK crash_handler(EXCEPTION_POINTERS *ep)
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+static PVOID s_veh;
+
 void rl_crash_logger(void)
 {
-    AddVectoredExceptionHandler(0, crash_handler);
+    if (!s_veh) s_veh = AddVectoredExceptionHandler(0, crash_handler);
+}
+
+/* the DLL going away.  The exception handler is the process's, not the DLL's: left registered after a FreeLibrary
+ * (Need for Speed III loads and frees dsound.dll for each of its menu screens), the next exception anywhere in the
+ * game - one it handles itself included - calls into unmapped memory and kills it, with nothing logged.  A
+ * FreeLibrary also closes the log (the next load appends to it, see rl_log_init); at process exit only a flush
+ * without the lock, which a thread already gone may have held. */
+void rl_log_shutdown(int process_exit)
+{
+    if (s_veh) { RemoveVectoredExceptionHandler(s_veh); s_veh = NULL; }
+    if (!s_inited || !s_log) return;
+    if (process_exit) { fflush(s_log); return; }
+    EnterCriticalSection(&s_log_cs);
+    fclose(s_log);
+    s_log = NULL;
+    LeaveCriticalSection(&s_log_cs);
 }

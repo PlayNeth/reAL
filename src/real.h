@@ -56,6 +56,7 @@ void rl_config_load(void);
 void rl_log_init(void);
 void rl_log_flush(void);
 void rl_crash_logger(void);
+void rl_log_shutdown(int process_exit);    /* DLL_PROCESS_DETACH: the crash handler removed, the log closed */
 void *rl_hotpatch(void *fn, void *repl, const char *name);   /* returns a pointer that runs the original */
 void rl_midi_hook(int can_load);
 void rl_log(int level, const char *fmt, ...);

@@ -676,6 +676,17 @@ HRESULT rl_device_acquire(rl_device **out)
     s_dev = dev;
     *out = dev;
     LeaveCriticalSection(&s_dev_cs);
+    /* the device runs a thread in this module, and a game can free dsound.dll while it still holds a buffer that keeps
+     * the device (Need for Speed III frees and loads it for each sound setting in its menu, keeping one buffer each
+     * time): the thread then runs on in unmapped code, or in the next load's copy, and the game crashes.  So once a
+     * device has run, reAL stays loaded (as it does for its DirectMusic and MIDI hooks); a FreeLibrary only drops a
+     * count, and the next load gets this copy and its device back. */
+    static LONG s_pinned;
+    if (!InterlockedExchange(&s_pinned, 1)) {
+        HMODULE pin;
+        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_device_acquire, &pin))
+            LOG_INFO("cannot pin reAL in memory (%lu)", GetLastError());
+    }
     return DS_OK;
 }
 
