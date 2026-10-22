@@ -34,5 +34,8 @@ uint32_t  rl_cmss3_latency(const rl_cmss3 *c);
 /* run n frames: in L/R, out[b] for each speaker bit b (index = bit number, NULL to skip; written, not
  * added).  Bits the upmixer does not produce are zero-filled. */
 void      rl_cmss3_process(rl_cmss3 *c, const float *l, const float *r, float *const out[12], uint32_t n);
+/* n frames of silence skipped (the caller knows the upmixer has had silence long enough that its output is its
+ * input dither): the block timing moves on, nothing else runs */
+void      rl_cmss3_skip(rl_cmss3 *c, uint32_t n);
 
 #endif

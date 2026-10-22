@@ -816,6 +816,34 @@ static void block(rl_cmss3 *c)
     }
 }
 
+/* n frames of a silent stretch skipped: the block boundaries and the output FIFO move as rl_cmss3_process would
+ * move them, the frames collected are silence, and a block completing puts silence in the FIFO (process would put
+ * its 1e-8 dither's response there); the analysis and filter states hold.  Nothing is written out. */
+void rl_cmss3_skip(rl_cmss3 *c, uint32_t n)
+{
+    while (n) {
+        unsigned take = c->bs - c->incount;
+        if (take > n)
+            take = n;
+        memset(c->inr[0] + c->incount, 0, take * sizeof(float));
+        memset(c->inr[1] + c->incount, 0, take * sizeof(float));
+        c->incount += take;
+        c->outpos = (c->outpos + take) % c->outlen;
+        if (c->incount == c->bs) {
+            for (int o = 0; o < O_N; o++) {
+                float *q = c->outq[o];
+                unsigned p = c->outpos;
+                for (unsigned i = 0; i < c->bs; i++) {
+                    q[p] = 0.0f;
+                    if (++p == c->outlen) p = 0;
+                }
+            }
+            c->incount = 0;
+        }
+        n -= take;
+    }
+}
+
 void rl_cmss3_process(rl_cmss3 *c, const float *l, const float *r, float *const out_[12], uint32_t n)
 {
     static const float dith[8] = { -1, -1, 1, -1, 1, 1, 1, -1 };

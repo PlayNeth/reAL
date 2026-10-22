@@ -298,6 +298,9 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
 
 void rl_voice_jump(rl_voice *v, uint64_t newpos)
 {
+    /* (the frames before the jump are not on the way to the new position: nothing to replay; the crossfade the
+     * jump starts is mixed, the voice not idle, so the filter follows the signal again while still unheard) */
+    if (v->idle) v->idle_frames = 0;
     if (v->playing && v->xfade_left == 0) {
         v->xfade_pos = v->pos;
         v->xfade_left = RL_XFADE_PENDING;
@@ -320,6 +323,8 @@ void rl_voice_start(rl_voice *v)
         if (v->cmss) rl_cmss3_reset(v->cmss);
         if (v->cmss_virt) rl_virt_reset(v->cmss_virt);
         if (v->hrtf) rl_hrtf_voice_restart(v->hrtf);
+        v->idle = 0;
+        v->quiet = 0;
     }
     v->playing = 1;
 }
@@ -347,6 +352,103 @@ static uint32_t render_src(const rl_voice *v, const sinc_tab *kt, uint64_t *ppos
     return i;
 }
 
+/* ---- voices nobody can hear ----
+ * A voice whose gains are all exactly 0, current and target (volume DSBVOLUME_MIN, a 3D source muted at its maximum
+ * distance, an EAX path at -10000 mB), and whose effect sends are all 0 adds nothing to any bus.  Its position
+ * moves on as mixing would move it - the same loop wraps, the same end of a one-shot, the same notifications - but
+ * no sample is read or filtered.  Not during a crossfade after a jump (at most ~5 ms): the direct HF filter, which a
+ * mix runs whatever the gains, then has the crossfaded signal to follow, which resume_filter does not replay.
+ * (mono: only gain[0] reaches the output, the HRTF path.) */
+int rl_mix_no_idle;
+
+static int voice_inaudible(const rl_voice *v, float *const *sends, int mono)
+{
+    if (rl_mix_no_idle || v->xfade_left) return 0;
+    if (v->gain[0] != 0.0f || v->cur_gain[0] != 0.0f) return 0;
+    if (!mono && (v->gain[1] != 0.0f || v->cur_gain[1] != 0.0f)) return 0;
+    for (int k = 0; k < RL_SENDS; k++)          /* (as the mixer counts a send active) */
+        if (sends && sends[k] && (v->cur_send[k] > 0.0f || v->send_gain[k] > 0.0f)) return 0;
+    return 1;
+}
+
+/* the position after `frames` output frames, as render_src moves it; returns 1 if a one-shot reaches its end (the
+ * caller then rewinds and stops it as the mixer does), *played = the frames played before it stops */
+static int voice_advance(rl_voice *v, uint64_t step, uint64_t end, uint32_t frames, uint32_t *wraps, uint32_t *played)
+{
+    *played = frames;
+    if (!v->looping) {
+        /* render_src renders frames until the one whose next position is at or past the end (that one included) */
+        uint64_t need = v->pos >= end ? 1 : step ? (end - v->pos + step - 1) / step : UINT64_MAX;
+        if (need <= frames) { *played = (uint32_t)need; return 1; }
+        v->pos += step * frames;
+        return 0;
+    }
+    /* frame by frame: pos += step, then end subtracted while pos >= end - the same as one division */
+    uint64_t p = v->pos + step * frames;
+    if (p >= end) { *wraps += (uint32_t)(p / end); p %= end; }
+    v->pos = p;
+    return 0;
+}
+
+/* an inaudible voice's mix: the position, then what a mix does at the end of a block (no crossfade is running:
+ * voice_inaudible) */
+static int mix_idle(rl_voice *v, uint64_t step, uint64_t end, uint32_t frames, uint32_t p0, rl_signal_fn signal)
+{
+    uint32_t wraps = 0, played;
+    if (!v->idle) v->idle_frames = 0;
+    v->idle = 1;
+    int stopped = voice_advance(v, step, end, frames, &wraps, &played);
+    v->idle_frames = v->idle_frames > 0x7fffffffu - played ? 0x7fffffffu : v->idle_frames + played;
+    if (stopped) {
+        v->pos = 0;                             /* DirectSound rewinds a finished buffer to 0 */
+        v->playing = 0;
+        fire_range(v, p0, v->size, 0, signal);
+        rl_fire_stop(v, signal);
+    } else {
+        rl_fire_notifies(v, p0, rl_voice_play_bytes(v), wraps, signal);
+    }
+    return stopped;
+}
+
+/* back from idle: the direct path's HF filter did not run while the voice was idle, but a mix runs it on what the
+ * voice plays whatever its gains (the sends' filters run only while their send is on, and every send of an idle
+ * voice is off, so they hold in a mix too).  Its state is replayed over the frames it missed, from where it
+ * stopped: exactly what the mix would hold when the voice was idle for at most the replay's length, else within
+ * (1 - a)^length of it (the filter forgets exponentially).  The replay is as long as the filter needs to forget to
+ * 1e-7 of its start, at most RESUME_MAX frames, and reads the frames back from the position now at the step of now
+ * (a rate or Doppler change while idle makes it approximate; a jump while idle leaves nothing to replay: see
+ * rl_voice_jump). */
+#define RESUME_MAX 4096
+static uint32_t resume_len(float a)
+{
+    if (!(a < 1.0f) || !(a > 0.0f)) return 0;
+    double w = log(1e-7) / log(1.0 - (double)a);
+    return w >= RESUME_MAX ? RESUME_MAX : (uint32_t)w + 1;
+}
+static void resume_filter(const rl_voice *v, const sinc_tab *kt, uint64_t step, uint64_t end, uint32_t nframes, float la,
+                          float *z0, float *z1)
+{
+    uint32_t k = resume_len(la);
+    if (k > v->idle_frames) k = v->idle_frames;
+    if (!k || !step) return;
+    /* the position k frames back (the positions the idle frames passed, wrapped as the mix wraps them) */
+    uint64_t back = step * k, p;
+    if (v->looping) p = (v->pos + (back / end + 1) * end - back) % end;
+    else {
+        if (back > v->pos) { k = (uint32_t)(v->pos / step); back = step * k; }
+        p = v->pos - back;
+    }
+    for (uint32_t i = 0; i < k; i++) {
+        float l, r;
+        if (kt) read_sinc(v, kt, p, nframes, &l, &r);
+        else read_at(v, p, nframes, &l, &r);
+        *z0 += la * (l - *z0);
+        *z1 += la * (r - *z1);
+        p += step;
+        if (p >= end && v->looping) while (p >= end) p -= end;
+    }
+}
+
 /* a gain ramped from g by d per frame for the first `ramp` frames of the voice's block (i0 = this chunk's
  * start), then held at t: the same sequence the per-frame loop produced */
 static inline void gain_run(float *gv, float g, float d, float t, uint32_t ramp, uint32_t i0, uint32_t n, float *out_g)
@@ -368,6 +470,12 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
         ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
         : ((uint64_t)v->rate << 32) / out_rate;
     const uint32_t p0 = rl_voice_play_bytes(v);
+    if (voice_inaudible(v, sends, mono != NULL)) {
+        if (mono) v->cur_gain[1] = v->gain[1];  /* (not heard on this path; where a mix would have ramped it) */
+        return mix_idle(v, step, end, frames, p0, signal);
+    }
+    const int resume = v->idle;         /* (back from idle: see resume_filter) */
+    v->idle = 0;
 
     /* interpolator: exact copy when the rates match (the phase never changes), else linear or sinc */
     int use_sinc = v->interp == RL_INTERP_SINC && !(step == (1ull << 32) && (uint32_t)v->pos == 0 &&
@@ -396,6 +504,7 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
     }
     const float la = v->lp_a > 0.0f && v->lp_a < 1.0f ? v->lp_a : 1.0f;
     float z0 = v->lp_z[0], z1 = v->lp_z[1];
+    if (resume) resume_filter(v, kt, step, end, nframes, la, &z0, &z1);
 
     /* declick a position jump: crossfade from the old position over ~5 ms */
     if (v->xfade_left == RL_XFADE_PENDING) v->xfade_left = out_rate / 200 ? out_rate / 200 : 1;
@@ -484,13 +593,15 @@ int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, 
     int stopped = 0;
     for (uint32_t done = 0; done < frames; ) {
         uint32_t n = frames - done > 512 ? 512 : frames - done;
-        memset(mono, 0, n * sizeof(float));
+        int silent = 1;                 /* (nothing rendered: an idle voice, or one that has stopped) */
         if (!stopped && v->playing) {
             float *sub[RL_SENDS];
             for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
+            memset(mono, 0, n * sizeof(float));
             stopped = mix_inner(v, NULL, 2, mono, sends ? sub : NULL, n, out_rate, signal);
+            silent = v->idle;
         }
-        rl_hrtf_render(v->hrtf, v->hrtf_set, mono, out + done * 2, n);
+        rl_hrtf_render(v->hrtf, v->hrtf_set, silent ? NULL : mono, out + done * 2, n);
         done += n;
     }
     return stopped;
@@ -568,6 +679,14 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
         ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
         : ((uint64_t)v->rate << 32) / out_rate;
     const uint32_t p0 = rl_voice_play_bytes(v);
+    /* (gain[0] is the level of every channel here.  A source whose LFE goes through the bass limiter is never idle:
+     * the limiter follows the source whatever its level, and an envelope held while idle would limit the bass wrongly
+     * once it is heard again) */
+    if (!(v->mc_lfe >= 0 && v->mc_lfe < v->channels && v->mc_lfe < RL_MAXOUT) && voice_inaudible(v, sends, 1)) {
+        v->cur_gain[1] = v->cur_gain[0];
+        return mix_idle(v, step, end, frames, p0, signal);
+    }
+    v->idle = 0;
     int use_sinc = v->interp == RL_INTERP_SINC && !(step == (1ull << 32) && (uint32_t)v->pos == 0 &&
                                                    (!v->xfade_left || (uint32_t)v->xfade_pos == 0));
     const sinc_tab *kt = use_sinc ? sinc_for_step(step) : NULL;
@@ -664,14 +783,23 @@ static int mix_cmss(rl_voice *v, float *out, uint32_t nout, float *const *sends,
     float pair[ROUTE_CHUNK * 2], l[ROUTE_CHUNK], r[ROUTE_CHUNK], bit[12][ROUTE_CHUNK], tmp[ROUTE_CHUNK * 2];
     uint32_t m = rl_cmss3_mask(v->cmss), done = 0;
     int stopped = 0;
+    /* a voice silent for a second: the upmixer's and the virtualizer's tails are long gone (what is left is ALchemy's
+     * 1e-8 input dither, -160 dB), so they are not run until it plays again: the upmixer keeps its block timing
+     * (rl_cmss3_skip), the rest of their state holds */
+    const uint32_t tail = out_rate ? out_rate : 48000;
     while (done < frames) {
         uint32_t n = frames - done > ROUTE_CHUNK ? ROUTE_CHUNK : frames - done;
+        int silent = 1;                 /* (nothing rendered: idle, or stopped) */
         memset(pair, 0, n * 2 * sizeof(float));
         if (!stopped && v->playing) {
             float *sub[RL_SENDS];
             for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
             stopped = mix_inner(v, pair, 2, NULL, sends ? sub : NULL, n, out_rate, signal);
+            silent = v->idle;
         }
+        if (!silent) v->quiet = 0;
+        else if (v->quiet >= tail) { rl_cmss3_skip(v->cmss, n); done += n; continue; }
+        else v->quiet += n;
         for (uint32_t i = 0; i < n; i++) { l[i] = pair[2 * i]; r[i] = pair[2 * i + 1]; }
         float *o[12];
         for (int b = 0; b < 12; b++) o[b] = (m >> b) & 1 ? bit[b] : NULL;
@@ -725,7 +853,7 @@ int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, 
     uint32_t left = ramp;
     while (done < frames) {
         uint32_t n = frames - done > ROUTE_CHUNK ? ROUTE_CHUNK : frames - done;
-        memset(pair, 0, n * 2 * sizeof(float));
+        int src_silent = 1;             /* (the voice rendered nothing: idle, or stopped) */
         if (!stopped && v->playing) {
             float *sub[RL_SENDS];
             for (int k = 0; k < RL_SENDS; k++) sub[k] = sends && sends[k] ? sends[k] + done : NULL;
@@ -733,13 +861,24 @@ int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, 
                 memset(mono, 0, n * sizeof(float));
                 stopped = mix_inner(v, NULL, 2, mono, sends ? sub : NULL, n, out_rate, signal);
             } else {
+                memset(pair, 0, n * 2 * sizeof(float));
                 stopped = mix_inner(v, pair, 2, NULL, sends ? sub : NULL, n, out_rate, signal);
-                for (uint32_t i = 0; i < n; i++) mono[i] = 0.5f * (pair[2 * i] + pair[2 * i + 1]);
             }
-        } else {
-            memset(mono, 0, n * sizeof(float));
+            src_silent = v->idle;
         }
-        if (hrtf) rl_hrtf_render(v->hrtf, v->hrtf_set, mono, pair, n);
+        /* the pair is the HRTF's output (its tail may outlast the voice's sound), the mono sum the voice's own */
+        int out_silent = src_silent;
+        if (hrtf) {
+            memset(pair, 0, n * 2 * sizeof(float));
+            out_silent = rl_hrtf_render(v->hrtf, v->hrtf_set, src_silent ? NULL : mono, pair, n);
+        }
+        if (out_silent && !left) { done += n; continue; }  /* all zero, the weights not moving: nothing to add */
+        if (src_silent) {                                  /* (buffers the voice did not write) */
+            memset(mono, 0, n * sizeof(float));
+            if (!hrtf) memset(pair, 0, n * 2 * sizeof(float));
+        } else if (!hrtf) {
+            for (uint32_t i = 0; i < n; i++) mono[i] = 0.5f * (pair[2 * i] + pair[2 * i + 1]);
+        }
         for (uint32_t i = 0; i < n; i++) {
             if (left) {
                 for (int k = 0; k < 3; k++) for (uint32_t c = 0; c < no; c++) w[k][c] += dw[k][c];

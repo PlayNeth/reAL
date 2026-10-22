@@ -117,6 +117,9 @@ rm -f build/mc2sim.lib build/mc2sim.pdb
 if command -v cc >/dev/null 2>&1; then
     cc -O1 -g -std=gnu11 -Wall -o build/test_mixcore tests/test_mixcore.c src/mixcore.c src/speakers.c src/cmss3.c src/virt.c src/spatial.c src/reverb.c src/alrv.c src/alrv_params.c src/eax.c src/eax4fx.c src/hrtf.c -lm
     ./build/test_mixcore
+    # inaudible voices skipped against the same voices mixed in full
+    cc -O1 -g -std=gnu11 -Wall -o build/test_idle tests/test_idle.c src/mixcore.c src/speakers.c src/cmss3.c src/virt.c src/hrtf.c -lm
+    ./build/test_idle
     cc -O1 -g -std=gnu11 -Wall -o build/test_speakers tests/test_speakers.c src/speakers.c -lm
     ./build/test_speakers tests/gt/speakers_gt.txt
     cc -O1 -g -std=gnu11 -Wall -o build/test_cmss3 tests/test_cmss3.c src/cmss3.c -lm

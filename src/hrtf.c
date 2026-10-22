@@ -107,12 +107,14 @@ void rl_hrtf_lookup(const rl_hrtf_set *s, float az, float el, rl_hrtf_filter *ou
 void rl_hrtf_voice_reset(rl_hrtf_voice *v)
 {
     memset(v, 0, sizeof(*v));
+    v->quiet = RL_HRTF_HIST;
 }
 
 void rl_hrtf_voice_restart(rl_hrtf_voice *v)
 {
     memset(v->hist, 0, sizeof(v->hist));
     v->w = 0;
+    v->quiet = RL_HRTF_HIST;
     if (v->have_cur) { v->cur = v->target; v->dirty = 0; }
 }
 
@@ -145,9 +147,22 @@ static inline void conv(const rl_hrtf_voice *v, const rl_hrtf_filter *f, uint32_
     *r = acc[1];
 }
 
-void rl_hrtf_render(rl_hrtf_voice *v, const rl_hrtf_set *s, const float *in, float *out, uint32_t frames)
+int rl_hrtf_render(rl_hrtf_voice *v, const rl_hrtf_set *s, const float *in, float *out, uint32_t frames)
 {
     const uint32_t mask = RL_HRTF_HIST - 1, taps = s->taps;
+    /* silence on a history of silence: every window the convolution reads is zero, so the output is exactly zero;
+     * only what the block would have moved moves (the write position, a pending crossfade, which ends within a
+     * block) */
+    if (v->quiet >= RL_HRTF_HIST) {
+        uint32_t k = in ? 0 : frames;
+        if (in) while (k < frames && in[k] == 0.0f) k++;
+        if (k == frames) {
+            v->w += frames;
+            if (v->dirty && frames) { v->cur = v->target; v->dirty = 0; }
+            return 1;
+        }
+    }
+    uint32_t q = v->quiet;
     /* crossfade from cur to target across this block (at most ~5 ms) */
     uint32_t xf = 0;
     if (v->dirty) {
@@ -156,8 +171,10 @@ void rl_hrtf_render(rl_hrtf_voice *v, const rl_hrtf_set *s, const float *in, flo
         if (xf < 1) xf = 1;
     }
     for (uint32_t n = 0; n < frames; n++) {
-        v->hist[v->w & mask] = in[n];
-        v->hist[(v->w & mask) + RL_HRTF_HIST] = in[n];
+        const float x = in ? in[n] : 0.0f;
+        v->hist[v->w & mask] = x;
+        v->hist[(v->w & mask) + RL_HRTF_HIST] = x;
+        q = x == 0.0f ? (q < RL_HRTF_HIST ? q + 1 : q) : 0;
         float l, r;
         conv(v, &v->cur, taps, v->w, &l, &r);
         if (n < xf) {
@@ -171,4 +188,6 @@ void rl_hrtf_render(rl_hrtf_voice *v, const rl_hrtf_set *s, const float *in, flo
         out[n * 2 + 1] += r;
         v->w++;
     }
+    v->quiet = q;
+    return 0;
 }

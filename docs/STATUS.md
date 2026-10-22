@@ -17,6 +17,23 @@ Ground rules carried through the project:
 **DirectSound side:** 2D/3D output, HRTF, EAX 1–4 (including ALchemy's reverb and the 11 EAX4 effects),
 Doppler, and WASAPI output.
 
+**Inaudible voices** (`src/mixcore.c`):
+- A voice is idle when its gains and every effect send are exactly 0, current and target, and no crossfade is
+  running. That covers DSBVOLUME_MIN, a 3D source muted at maximum distance, and an EAX path at -10000 mB.
+- An idle voice only moves its position. Loop wraps, the end of a one-shot and notifications are the same as a
+  full mix; no samples are read.
+- HRTF: once its history is all silence it is skipped; its output is exactly zero then.
+- CMSS-3D and its virtualizer stop after a second of silence. The upmixer keeps its block timing
+  (`rl_cmss3_skip`).
+- Sources whose LFE goes through the bass limiter are never idle: the limiter follows the source at any level.
+- On resume, the EAX direct-path HF filter, which a full mix runs at any gain, is replayed over the frames it
+  missed.
+- `tests/test_idle.c` mixes random voices both ways. The output is bit-identical except:
+  - the HF filter replay (within 1e-6), unless the position jumped while the voice was idle;
+  - CMSS after a second of silence (its analysis state is held).
+- Cost: 64 sinc voices with 32 muted went from about 9% to 5.5% of one core; a muted voice now costs almost
+  nothing.
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections

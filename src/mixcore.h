@@ -77,6 +77,13 @@ typedef struct rl_voice {
     /* notifications (sorted not required) */
     const rl_notify *notifies;
     uint32_t n_notifies;
+
+    /* a voice nobody can hear (its gains and sends all exactly 0) only moves its position (owned by the mixer):
+     * idle = the last mix did that; quiet = frames since it last played anything (CMSS and its virtualizer stop
+     * once their tails are long gone) */
+    int      idle;
+    uint32_t idle_frames;   /* frames idle since it went idle (or since a jump while idle) */
+    uint32_t quiet;
 } rl_voice;
 
 typedef void (*rl_signal_fn)(void *event);
@@ -93,6 +100,8 @@ int rl_voice_mix(rl_voice *v, float *out, float *const *sends, uint32_t frames, 
 
 /* Build the resampler's tables ahead of time (else the mixer builds them on first use, holding the lock). */
 void rl_mix_prepare(void);
+/* tests: 1 mixes inaudible voices in full (as before reAL skipped them), to compare against */
+extern int rl_mix_no_idle;
 
 /* Start playing (snaps smoothed gains to target if the voice was stopped). */
 void rl_voice_start(rl_voice *v);
