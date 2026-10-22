@@ -1813,20 +1813,56 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     return DS_OK;
 }
 
+/* the owner's last release: its buffers stop for good, like real DirectSound's, and the ones the game still holds
+ * move to the graveyard device (rl_device_grave), letting go of this one: a buffer kept by the game must not keep the
+ * device, its thread and its state alive (Need for Speed III releases DirectSound for each sound setting in its menu
+ * and keeps one buffer each time; with the device kept, the next DirectSound got the old one's EAX and 3D state).
+ * The primary buffer goes too if the game holds it beyond the owner's reference. */
 void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
 {
-    int n = 0, playing = 0;
+    int n = 0, playing = 0, moved = 0;
+    rl_device *grave = rl_device_grave();
+    rl_buffer *gone = NULL;             /* (linked through next_playing, unused once out of the play list) */
     EnterCriticalSection(&dev->lock);
-    for (rl_buffer *b = dev->all; b; b = b->next_all) {
+    for (rl_buffer *b = dev->all, *next; b; b = next) {
+        next = b->next_all;
         if (b->owner != owner) continue;
         b->owner = NULL;
-        if (b->is_primary) continue;      /* released by the owner itself */
-        b->dead = TRUE;
-        if (b->voice.playing) playing++;
-        b->voice.playing = 0;
+        if (b->is_primary) {
+            if (b->ref <= 1) continue;  /* only the owner's reference: released by the owner itself */
+        } else {
+            b->dead = TRUE;
+            if (b->voice.playing) playing++;
+            b->voice.playing = 0;
+            n++;
+        }
         if (b->in_play_list) rl_device_stop_voice(dev, b);
-        n++;
+        if (!grave) continue;
+        list_remove_all(dev, b);
+        if (!b->is_primary) {
+            dev->n_buffers--;
+            if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers--;
+        }
+        b->next_playing = gone;
+        gone = b;
     }
     LeaveCriticalSection(&dev->lock);
+    while (gone) {
+        rl_buffer *b = gone;
+        gone = b->next_playing;
+        b->next_playing = NULL;
+        EnterCriticalSection(&grave->lock);
+        list_add_all(grave, b);
+        if (!b->is_primary) {
+            grave->n_buffers++;
+            if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) grave->n_hw_buffers++;
+        }
+        rl_device_addref(grave);
+        b->dev = grave;
+        LeaveCriticalSection(&grave->lock);
+        rl_device_release(dev);         /* (the owner still holds the device: not the last reference) */
+        moved++;
+    }
     if (n) LOG_CALL("DirectSound released with %d buffer(s) still referenced by the game (%d playing): stopped", n, playing);
+    if (moved) LOG_CALL("  %d buffer(s) moved off the device", moved);
 }

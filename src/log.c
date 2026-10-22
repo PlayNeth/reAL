@@ -129,15 +129,19 @@ void rl_crash_logger(void)
 }
 
 /* the DLL going away.  The exception handler is the process's, not the DLL's: left registered after a FreeLibrary
- * (Need for Speed III loads and frees dsound.dll for each of its menu screens), the next exception anywhere in the
- * game - one it handles itself included - calls into unmapped memory and kills it, with nothing logged.  A
- * FreeLibrary also closes the log (the next load appends to it, see rl_log_init); at process exit only a flush
- * without the lock, which a thread already gone may have held. */
+ * (Need for Speed III frees and loads dsound.dll for each sound setting in its menu), the next exception anywhere in
+ * the game - one it handles itself included - calls into unmapped memory and kills it, with nothing logged.  A
+ * FreeLibrary also closes the log (the next load appends to it, see rl_log_init).  At process exit the other threads
+ * are already gone and one may have died holding the log's lock, or the C runtime's lock on the file inside fprintf
+ * (every write is under the log's lock): the last lines are flushed only if the lock is free, so exit cannot hang. */
 void rl_log_shutdown(int process_exit)
 {
     if (s_veh) { RemoveVectoredExceptionHandler(s_veh); s_veh = NULL; }
     if (!s_inited || !s_log) return;
-    if (process_exit) { fflush(s_log); return; }
+    if (process_exit) {
+        if (TryEnterCriticalSection(&s_log_cs)) { fflush(s_log); LeaveCriticalSection(&s_log_cs); }
+        return;
+    }
     EnterCriticalSection(&s_log_cs);
     fclose(s_log);
     s_log = NULL;

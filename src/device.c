@@ -690,8 +690,47 @@ HRESULT rl_device_acquire(rl_device **out)
     return DS_OK;
 }
 
+/* buffers a game still holds after their DirectSound object went (rl_buffers_orphan) move here: a device with no
+ * thread and no output, never freed, whose state their methods may still read and write.  The real device then has
+ * nothing left keeping it, so it shuts down with its last DirectSound object as it would without them, and the next
+ * DirectSound gets a fresh one. */
+static rl_device *s_grave;
+static INIT_ONCE s_grave_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK grave_init(PINIT_ONCE o, PVOID p, PVOID *c)
+{
+    (void)o; (void)p; (void)c;
+    rl_device *g = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*g));
+    if (!g) return TRUE;
+    InitializeCriticalSection(&g->lock);
+    g->ref = 1;                                 /* (its own: never reaches 0) */
+    rl_listener_defaults(&g->listener);
+    g->listener_pending = g->listener;
+    rl_layout_init(&g->layout, 0x3);
+    g->dev_layout = g->layout;
+    g->out_rate = 48000;
+    g->out_channels = 2;
+    g->primary_fmt.wFormatTag = WAVE_FORMAT_PCM;
+    g->primary_fmt.nChannels = 2;
+    g->primary_fmt.nSamplesPerSec = 22050;
+    g->primary_fmt.wBitsPerSample = 8;
+    g->primary_fmt.nBlockAlign = 2;
+    g->primary_fmt.nAvgBytesPerSec = 44100;
+    g->speaker_config = 4;
+    eax2l_reset(&g->eax2l);
+    eax3l_reset(&g->eax3l);
+    alrv_props_default(&g->eax_props);
+    s_grave = g;
+    return TRUE;
+}
+rl_device *rl_device_grave(void)
+{
+    InitOnceExecuteOnce(&s_grave_once, grave_init, NULL, NULL);
+    return s_grave;
+}
+
 void rl_device_release(rl_device *dev)
 {
+    if (dev && dev == s_grave) { InterlockedDecrement(&dev->ref); return; }
     EnterCriticalSection(&s_dev_cs);
     if (InterlockedDecrement(&dev->ref)) { LeaveCriticalSection(&s_dev_cs); return; }
     s_dev = NULL;
