@@ -30,6 +30,10 @@ case "$CC" in
     *zig*) LDFLAGS="" ;;                 # lld honours the .def names as-is
     *)     LDFLAGS="-Wl,--kill-at -static -s" ;;
 esac
+# the commit built, in the log's first line (so a report's log says which build it came from)
+REAL_BUILD=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+git diff --quiet HEAD 2>/dev/null || REAL_BUILD="$REAL_BUILD+"
+CFLAGS="$CFLAGS -DREAL_BUILD=\"$REAL_BUILD\""
 mkdir -p build/obj
 OBJS=""
 for f in $EXACT_SRCS; do
