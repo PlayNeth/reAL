@@ -1676,7 +1676,17 @@ static HRESULT WINAPI st_settrackcfg(IDirectMusicSegmentState8 *i, REFGUID g, DW
  * state's audiopath */
 static IDirectMusicGraph *perf_graph(rm_perf *p);
 static IDirectMusicTrack8 *track_object(dm_track *t);
+static HRESULT st_getobj_do(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o);
 static HRESULT WINAPI st_getobj(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
+{
+    HRESULT hr = st_getobj_do(i, pch, stage, buf, g, n, iid, o);
+    char b1[64], b2[64];
+    LOG_CALL("music: SegmentState::GetObjectInPath(pch %lx, stage %lx, buffer %lu, %s, %lu, %s) -> %08lx", (unsigned long)pch,
+             (unsigned long)stage, (unsigned long)buf, g && !IsBadReadPtr(g, sizeof(GUID)) ? guidstr(g, b1) : "(null)",
+             (unsigned long)n, iid && !IsBadReadPtr(iid, sizeof(GUID)) ? guidstr(iid, b2) : "(null)", (unsigned long)hr);
+    return hr;
+}
+static HRESULT st_getobj_do(IDirectMusicSegmentState8 *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
 {
     rm_state *s = sst(i);
     if (!o || IsBadWritePtr(o, sizeof(*o))) return E_POINTER;
@@ -2016,7 +2026,17 @@ static HRESULT cfg_getobj(rm_path *a, DWORD pch, DWORD stage, DWORD buf, REFGUID
     dm_host_unlock(a->perf->host);
     return hr;
 }
+static HRESULT ap_getobj_do(IDirectMusicAudioPath *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o);
 static HRESULT WINAPI ap_getobj(IDirectMusicAudioPath *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
+{
+    HRESULT hr = ap_getobj_do(i, pch, stage, buf, g, n, iid, o);
+    char b1[64], b2[64];
+    LOG_CALL("music: AudioPath::GetObjectInPath(pch %lx, stage %lx, buffer %lu, %s, %lu, %s) -> %08lx", (unsigned long)pch,
+             (unsigned long)stage, (unsigned long)buf, g && !IsBadReadPtr(g, sizeof(GUID)) ? guidstr(g, b1) : "(null)",
+             (unsigned long)n, iid && !IsBadReadPtr(iid, sizeof(GUID)) ? guidstr(iid, b2) : "(null)", (unsigned long)hr);
+    return hr;
+}
+static HRESULT ap_getobj_do(IDirectMusicAudioPath *i, DWORD pch, DWORD stage, DWORD buf, REFGUID g, DWORD n, REFGUID iid, void **o)
 {
     rm_path *a = apt(i);
     if (!o) return E_POINTER;

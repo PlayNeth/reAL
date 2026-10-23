@@ -1008,7 +1008,7 @@ static ULONG WINAPI ldr_release(IDirectMusicLoader8 *i)         /* 77383069 */
     return r;
 }
 /* 77381e5c */
-static HRESULT WINAPI ldr_getobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *desc, REFIID iid, void **out)
+static HRESULT getobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *desc, REFIID iid, void **out)
 {
     loader *L = ldo(i);
     if (!desc || IsBadReadPtr(desc, sizeof(*desc)) || IsBadWritePtr(out, 4)) return E_POINTER;
@@ -1065,6 +1065,25 @@ done:
     ld_free(&D);
     return FAILED(hr) ? hr : hload;
 }
+/* the call logged (log=2): what was asked for and what came of it, as a load that fails is often what a game
+ * trips over later (the names bounded: an application's need not end in a NUL) */
+static HRESULT WINAPI ldr_getobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *desc, REFIID iid, void **out)
+{
+    HRESULT hr = getobject(i, desc, iid, out);
+    if (g_cfg.log_level >= 2 && desc && !IsBadReadPtr(desc, sizeof(*desc))) {
+        char cls[64], obj[64];
+        DWORD v = desc->dwValidData;
+        LOG_CALL("music: Loader::GetObject(class %s, valid %lx%s%s%s%.260ls%s%s%.64ls%s%s, memory %lu) -> %08lx",
+                 v & DMUS_OBJ_CLASS ? rl_guid_str(&desc->guidClass, cls) : "-", (unsigned long)v,
+                 v & DMUS_OBJ_OBJECT ? ", object " : "", v & DMUS_OBJ_OBJECT ? rl_guid_str(&desc->guidObject, obj) : "",
+                 v & DMUS_OBJ_FILENAME ? ", file '" : "", v & DMUS_OBJ_FILENAME ? desc->wszFileName : L"",
+                 v & DMUS_OBJ_FILENAME ? "'" : "",
+                 v & DMUS_OBJ_NAME ? ", name '" : "", v & DMUS_OBJ_NAME ? desc->wszName : L"", v & DMUS_OBJ_NAME ? "'" : "",
+                 v & DMUS_OBJ_STREAM ? ", stream" : "",
+                 (unsigned long)(v & DMUS_OBJ_MEMORY ? desc->llMemLength : 0), (unsigned long)hr);
+    }
+    return hr;
+}
 /* 773820f9 */
 static HRESULT WINAPI ldr_setobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *desc)
 {
@@ -1101,7 +1120,16 @@ static HRESULT WINAPI ldr_setobject(IDirectMusicLoader8 *i, DMUS_OBJECTDESC *des
     return hr;
 }
 /* 77382274 */
+static HRESULT setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *path, BOOL clear);
 static HRESULT WINAPI ldr_setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *path, BOOL clear)
+{
+    HRESULT hr = setdir(i, cls, path, clear);
+    char b[64];
+    LOG_CALL("music: Loader::SetSearchDirectory(%s, '%.260ls', clear %d) -> %08lx", cls && !IsBadReadPtr(cls, sizeof(GUID)) ?
+             rl_guid_str(cls, b) : "(null)", path && !IsBadReadPtr(path, 2) ? path : L"(null)", clear, (unsigned long)hr);
+    return hr;
+}
+static HRESULT setdir(IDirectMusicLoader8 *i, REFGUID cls, WCHAR *path, BOOL clear)
 {
     loader *L = ldo(i);
     if (path && IsBadReadPtr(path, 2)) return E_LDR_BADPATH;
