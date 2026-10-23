@@ -188,7 +188,7 @@ void rl_config_load(void)
     }
 
     rl_log_init();
-    LOG_INFO("reAL " REAL_VERSION " loaded into %s", exe);
+    LOG_INFO("reAL " REAL_VERSION " (built " __DATE__ " " __TIME__ ") loaded into %s", exe);
     for (int i = 0; i < n; i++) LOG_INFO("  config: %s", s_loaded[i]);
     LOG_INFO("  enabled=%d latency=%dms maxvoicecount=%d disabledirectmusic=%d hrtf=%s resampler=%s log=%d",
              g_cfg.enabled, g_cfg.latency_ms, g_cfg.max_voices, g_cfg.disable_dmusic,
