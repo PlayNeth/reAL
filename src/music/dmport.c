@@ -67,6 +67,7 @@ struct rm_port {
     LONG ref;
     dm_host *host;                      /* NULL once the performance closed down (under the engine lock) */
     DWORD groups;                       /* SetNumChannelGroups beyond what the PChannels use; a CreatePort'ed one's all */
+    DWORD sgroups;                      /* a CreatePort'ed one's synth: the groups it plays (dwChannelGroups, 2 unasked) */
     BOOL own;                           /* IDirectMusic::CreatePort's: a synth of its own (the host), freed with it */
     volatile LONG active;               /* Activate */
     WORD chans;                         /* GetFormat's channels */
@@ -199,12 +200,14 @@ static HRESULT WINAPI dp_PlayBuffer(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b)
         n += sizeof(e) + e.len;
     }
     if (mb) mbuf_unlock(mb);
+    DWORD groups = port_groups(p);      /* (a group beyond the synth's plays nothing, as on dmusic's; 0 is all of them) */
+    if (p->own && p->sgroups > groups) groups = p->sgroups;
     dm_host *h = port_hold(p);
     if (h) {
         for (size_t k = 0; k < n; ) {
             evh e;
             memcpy(&e, ev + k, sizeof(e));
-            dm_host_midi_at(h, e.t, e.g, ev + k + sizeof(e), e.len);
+            if (e.g <= groups) dm_host_midi_at(h, e.t, e.g, ev + k + sizeof(e), e.len);
             k += sizeof(e) + e.len;
         }
         port_drop();
@@ -950,6 +953,7 @@ HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort *
     p->own = TRUE;
     p->active = FALSE;
     p->groups = groups;
+    p->sgroups = pp.dwChannelGroups;
     p->chans = (WORD)pp.dwAudioChannels;
     *out = &p->IDirectMusicPort_iface;
     LOG_INFO("music: IDirectMusic::CreatePort: %lu Hz, %lu voices, %lu channel groups, %s -> %08lx", (unsigned long)pp.dwSampleRate,

@@ -409,8 +409,7 @@ Smaller items still open:
 - Track InitPlay/Play called directly by an application (returns E_NOTIMPL).
 - Segment::InitPlay and the DirectSound effects' DMO ProcessInput / ProcessOutput (E_NOTIMPL; games use the effects
   through SetFX).
-- A CreatePort'ed port asking for one audio channel reports a mono format but renders stereo, and a port's synth
-  plays channel groups beyond the ones it was made with (Microsoft's would not).
+- A CreatePort'ed port asking for one audio channel reports a mono format but renders stereo.
 
 ## Testing
 
