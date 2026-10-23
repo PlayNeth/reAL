@@ -634,6 +634,12 @@ void dm_host_unlock(dm_host *h) { host_leave(h); }
 dm_perf *dm_host_perf(dm_host *h) { return h->pf; }
 uint32_t dm_host_rate(dm_host *h) { return h->rate; }
 uint32_t dm_host_reserve_dlids(dm_host *h, uint32_t n) { return dls_port_reserve(h->dls, n); }
+void *dm_host_ins_download(dm_host *h, dm_collection *c, uint32_t patch, uint32_t newpatch, const uint32_t *ranges,
+                           int nranges, int *hr)
+{
+    return port_download(h, c, patch, newpatch != patch, newpatch, ranges, nranges, hr);
+}
+void dm_host_ins_unload(dm_host *h, void *handle) { port_unload(h, handle); }
 int dm_host_raw_download(dm_host *h, const void *buf, uint32_t size, void **handle) { return msynth_download(h->syn, buf, size, handle); }
 void dm_host_raw_unload(dm_host *h, void *handle) { sink_ul(h, handle); }
 rtime_t dm_host_clock(dm_host *h)      /* under the lock: an application's clock read races the sink otherwise */

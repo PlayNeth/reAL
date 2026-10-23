@@ -2,7 +2,8 @@
  * as an application meets them through an audiopath's port and sink stages and Performance::PChannelInfo.  The port
  * is the performance's one synth port ("Microsoft Synthesizer", dmusic's CDirectMusicSynthPort); what it reports is
  * what tests/porttest.c finds on Windows.  The performance's own downloads go through it, not the port; an application
- * can download its own buffers through IDirectMusicPortDownload (Pro Evolution Soccer 6 does). */
+ * can download its own buffers through IDirectMusicPortDownload (Pro Evolution Soccer 6 does), and a collection's
+ * instruments one at a time through DownloadInstrument (the DirectX 6/7 way). */
 #include "../real.h"
 #include "dmport.h"
 #include <dmusicc.h>
@@ -40,7 +41,22 @@ struct rm_port {
     dm_host *host;                      /* NULL once the performance closed down (under the engine lock) */
     DWORD groups;                       /* SetNumChannelGroups beyond what the PChannels use */
     rm_dlrec *dls;                      /* the application's downloads (under the engine lock) */
+    struct rm_dlins *ins;               /* its DownloadInstrument downloads, each a reference (engine lock) */
 };
+
+/* a DownloadInstrument download (dmusic's CDownloadedInstrument): an IUnknown the application unloads with
+ * UnloadInstrument.  Downloading the same instrument object with the same patch and no key ranges again hands out
+ * the same object and counts it; UnloadInstrument answers S_FALSE until the last. */
+typedef struct rm_dlins {
+    IDirectMusicDownloadedInstrument IDirectMusicDownloadedInstrument_iface;
+    LONG ref;
+    struct rm_dlins *next;
+    void *handle;                       /* the synth's (dls_port_download); NULL once gone */
+    LONG serial;                        /* the instrument object's */
+    DWORD patch;
+    int ranged;
+    DWORD count;
+} rm_dlins;
 
 typedef struct {
     IUnknown IUnknown_iface;
@@ -71,10 +87,15 @@ static void dlrecs_free(rm_dlrec *r)
 {
     while (r) { rm_dlrec *n = r->next; dlbuf_release(r->buf); free(r); r = n; }
 }
+static ULONG dlins_release(rm_dlins *o);
+static void dlins_free_list(rm_dlins *o)
+{
+    while (o) { rm_dlins *n = o->next; o->handle = NULL; dlins_release(o); o = n; }
+}
 static ULONG port_release(rm_port *p)
 {
     LONG r = InterlockedDecrement(&p->ref);
-    if (!r) { dlrecs_free(p->dls); free(p); }
+    if (!r) { dlrecs_free(p->dls); dlins_free_list(p->ins); free(p); }
     return r;
 }
 
@@ -141,14 +162,108 @@ static HRESULT WINAPI dp_PlayBuffer(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b)
 }
 static HRESULT WINAPI dp_SetReadNotificationHandle(IDirectMusicPort *i, HANDLE e) { return E_NOTIMPL; }
 static HRESULT WINAPI dp_Read(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b) { return b ? E_NOTIMPL : E_POINTER; }
+/* ------------------------------------------------------------------ IDirectMusicDownloadedInstrument */
+static IDirectMusicDownloadedInstrumentVtbl di_vtbl;
+static rm_dlins *dli(IDirectMusicDownloadedInstrument *i) { return impl_from(i, rm_dlins, IDirectMusicDownloadedInstrument_iface); }
+static HRESULT WINAPI di_QueryInterface(IDirectMusicDownloadedInstrument *i, REFIID riid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (!IsEqualIID(riid, &IID_IUnknown) && !IsEqualIID(riid, &IID_IDirectMusicDownloadedInstrument)) { *out = NULL; return E_NOINTERFACE; }
+    InterlockedIncrement(&dli(i)->ref);
+    *out = i;
+    return S_OK;
+}
+static ULONG dlins_release(rm_dlins *o)
+{
+    LONG r = InterlockedDecrement(&o->ref);
+    if (!r) free(o);
+    return r;
+}
+static ULONG WINAPI di_AddRef(IDirectMusicDownloadedInstrument *i) { return InterlockedIncrement(&dli(i)->ref); }
+static ULONG WINAPI di_Release(IDirectMusicDownloadedInstrument *i) { return dlins_release(dli(i)); }
+static IDirectMusicDownloadedInstrumentVtbl di_vtbl = { di_QueryInterface, di_AddRef, di_Release };
+static rm_dlins *dlins_of(IDirectMusicDownloadedInstrument *i)
+{
+    return i && !IsBadReadPtr(i, sizeof(void *)) && i->lpVtbl == &di_vtbl ? dli(i) : NULL;
+}
+
+/* as dmusic: NULL arguments (ranges NULL with a count included) are E_POINTER; an instrument without an
+ * articulation is refused with 0x88781129, as Microsoft's synth refuses it */
 static HRESULT WINAPI dp_DownloadInstrument(IDirectMusicPort *i, IDirectMusicInstrument *in, IDirectMusicDownloadedInstrument **d,
                                             DMUS_NOTERANGE *r, DWORD n)
 {
-    if (!in || !d) return E_POINTER;
-    LOG_INFO("music: Port::DownloadInstrument not implemented (the performance's DownloadInstrument is)");
-    return E_NOTIMPL;
+    rm_port *p = pt(i);
+    if (!in || !d || IsBadWritePtr(d, sizeof(*d)) || (n && (!r || IsBadReadPtr(r, n * sizeof(*r))))) return E_POINTER;
+    *d = NULL;
+    dm_collection *c;
+    uint32_t orig, patch;
+    LONG serial;
+    if (!rm_instrument_get(in, &c, &orig, &patch, &serial)) return E_INVALIDARG;
+    uint32_t *rg = n ? malloc(n * 2 * sizeof(uint32_t)) : NULL;    /* (the application's, read before the lock) */
+    rm_dlins *o = calloc(1, sizeof(*o));
+    if (!o || (n && !rg)) { free(rg); free(o); dls_release(c); return E_OUTOFMEMORY; }
+    for (DWORD k = 0; k < n; k++) { rg[2 * k] = r[k].dwLowNote; rg[2 * k + 1] = r[k].dwHighNote; }
+    HRESULT hr = S_OK;
+    dm_host *h = port_hold(p);
+    if (!h) hr = DMUS_E_NOT_INIT;
+    else {
+        rm_dlins *x = NULL;
+        if (!n) for (x = p->ins; x && (x->ranged || x->serial != serial || x->patch != patch); x = x->next) ;
+        if (x) {
+            x->count++;
+            InterlockedIncrement(&x->ref);
+            *d = &x->IDirectMusicDownloadedInstrument_iface;
+        } else {
+            int e = 0;
+            o->handle = dm_host_ins_download(h, c, orig, patch, rg, (int)n, &e);
+            if (!o->handle) hr = e < 0 ? (HRESULT)e : E_FAIL;
+            else {
+                o->IDirectMusicDownloadedInstrument_iface.lpVtbl = &di_vtbl;
+                o->ref = 2;             /* the port's and the caller's */
+                o->serial = serial; o->patch = patch; o->ranged = n != 0; o->count = 1;
+                o->next = p->ins;
+                p->ins = o;
+                *d = &o->IDirectMusicDownloadedInstrument_iface;
+                o = NULL;
+            }
+        }
+        port_drop();
+    }
+    free(o); free(rg);
+    dls_release(c);
+    LOG_CALL("music: Port::DownloadInstrument(patch %06lx as %06lx, %lu ranges) -> %08lx %p", (unsigned long)orig,
+             (unsigned long)patch, (unsigned long)n, (unsigned long)hr, (void *)*d);
+    return hr;
 }
-static HRESULT WINAPI dp_UnloadInstrument(IDirectMusicPort *i, IDirectMusicDownloadedInstrument *d) { return d ? E_NOTIMPL : E_POINTER; }
+/* S_FALSE while it was downloaded more often than unloaded, 0x88781120 (DMUS_E_NOT_DOWNLOADED_TO_PORT) once unloaded */
+static HRESULT WINAPI dp_UnloadInstrument(IDirectMusicPort *i, IDirectMusicDownloadedInstrument *d)
+{
+    rm_port *p = pt(i);
+    if (!d) return E_POINTER;
+    rm_dlins *o = dlins_of(d);
+    if (!o) return E_INVALIDARG;
+    HRESULT hr = DMUS_E_NOT_DOWNLOADED_TO_PORT;
+    rm_dlins *gone = NULL;
+    dm_host *h = port_hold(p);
+    if (h) {
+        rm_dlins **pp = &p->ins;
+        while (*pp && *pp != o) pp = &(*pp)->next;
+        if (*pp) {
+            if (--o->count) hr = S_FALSE;
+            else {
+                *pp = o->next;
+                dm_host_ins_unload(h, o->handle);
+                o->handle = NULL;
+                gone = o;
+                hr = S_OK;
+            }
+        }
+        port_drop();
+    }
+    if (gone) dlins_release(gone);
+    LOG_CALL("music: Port::UnloadInstrument(%p) -> %08lx", (void *)d, (unsigned long)hr);
+    return hr;
+}
 static HRESULT sink_new(rm_port *p, int latency, REFIID riid, void **out);
 static HRESULT WINAPI dp_GetLatencyClock(IDirectMusicPort *i, IReferenceClock **c)
 {
@@ -535,8 +650,11 @@ void rm_port_detach(rm_port *p)
     p->host = NULL;
     rm_dlrec *r = p->dls;               /* (the synth they were in goes with the host) */
     p->dls = NULL;
+    rm_dlins *in = p->ins;
+    p->ins = NULL;
     dm_engine_unlock();
     dlrecs_free(r);
+    dlins_free_list(in);
 }
 void rm_port_release(rm_port *p) { if (p) port_release(p); }
 HRESULT rm_port_query(rm_port *p, REFIID riid, void **out) { return port_qi(p, riid, out); }

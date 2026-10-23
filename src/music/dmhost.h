@@ -33,6 +33,11 @@ uint32_t dm_host_rate(dm_host *h);
 uint32_t dm_host_reserve_dlids(dm_host *h, uint32_t n);
 int dm_host_raw_download(dm_host *h, const void *buf, uint32_t size, void **handle);
 void dm_host_raw_unload(dm_host *h, void *handle);
+/* a collection's instrument (IDirectMusicPort::DownloadInstrument), with the engine lock held: patch is its patch in
+ * the collection, newpatch the one to download it as; ranges: pairs (low, high) of keys, or none.  NULL with *hr */
+void *dm_host_ins_download(dm_host *h, dm_collection *c, uint32_t patch, uint32_t newpatch, const uint32_t *ranges,
+                           int nranges, int *hr);
+void dm_host_ins_unload(dm_host *h, void *handle);
 
 /* plain MIDI input (the winmm MIDI device): a message (short, or sysex starting with 0xf0) played now */
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len);

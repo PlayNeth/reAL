@@ -124,6 +124,7 @@ typedef struct {
     LONG ref;
     dm_collection *c;
     DMUS_OBJECTDESC desc;
+    struct rm_instrument *ins;          /* its instrument objects (GetInstrument), not references (s_inslock) */
 } rm_collection;
 
 typedef struct {
@@ -277,13 +278,108 @@ static dm_collection *col_hold(rm_collection *o)
     dm_engine_unlock();
     return c;
 }
+/* ------------------------------------------------------------------ instruments (Collection::GetInstrument) */
+/* dmusic's CInstrument: the collection's instrument and a patch the application may change (SetPatch takes any
+ * value).  The collection hands out one object per instrument while it lives; the object holds the collection. */
+typedef struct rm_instrument {
+    IDirectMusicInstrument IDirectMusicInstrument_iface;
+    LONG ref;
+    struct rm_instrument *next;         /* on its collection's list (s_inslock) */
+    rm_collection *owner;               /* a reference */
+    dm_collection *c;                   /* a reference: the collection as it was loaded then */
+    DWORD orig;                         /* its patch in the collection */
+    volatile LONG patch;                /* the one it downloads as */
+    LONG serial;                        /* tells it from a later object at the same address */
+} rm_instrument;
+static SRWLOCK s_inslock = SRWLOCK_INIT;
+static LONG s_insserial;
+static IDirectMusicInstrumentVtbl ins_vtbl;
+static rm_instrument *ins(IDirectMusicInstrument *i) { return impl_from(i, rm_instrument, IDirectMusicInstrument_iface); }
+static HRESULT WINAPI ins_qi(IDirectMusicInstrument *i, REFIID riid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicInstrument)) *out = i;
+    else return rm_noiface(__func__, riid, out);
+    InterlockedIncrement(&ins(i)->ref);
+    return S_OK;
+}
+static ULONG WINAPI ins_addref(IDirectMusicInstrument *i) { return InterlockedIncrement(&ins(i)->ref); }
+static ULONG WINAPI ins_release(IDirectMusicInstrument *i)
+{
+    rm_instrument *o = ins(i);
+    AcquireSRWLockExclusive(&s_inslock);        /* (GetInstrument takes a reference under it) */
+    LONG r = InterlockedDecrement(&o->ref);
+    if (!r) {
+        rm_instrument **pp = &o->owner->ins;
+        while (*pp && *pp != o) pp = &(*pp)->next;
+        if (*pp) *pp = o->next;
+    }
+    ReleaseSRWLockExclusive(&s_inslock);
+    if (!r) {
+        dls_release(o->c);
+        col_release(&o->owner->IDirectMusicCollection_iface);
+        free(o);
+    }
+    return r;
+}
+static HRESULT WINAPI ins_getpatch(IDirectMusicInstrument *i, DWORD *patch)
+{
+    if (!patch) return E_POINTER;
+    *patch = (DWORD)ins(i)->patch;
+    return S_OK;
+}
+static HRESULT WINAPI ins_setpatch(IDirectMusicInstrument *i, DWORD patch)
+{
+    InterlockedExchange(&ins(i)->patch, (LONG)patch);
+    return S_OK;
+}
+static IDirectMusicInstrumentVtbl ins_vtbl = { ins_qi, ins_addref, ins_release, ins_getpatch, ins_setpatch };
+/* for the port's DownloadInstrument: one of ours, its collection (a reference: dls_release), the patch it has in it,
+ * the patch to download it as, and its serial */
+int rm_instrument_get(IDirectMusicInstrument *i, dm_collection **c, uint32_t *orig, uint32_t *patch, LONG *serial)
+{
+    if (!i || IsBadReadPtr(i, sizeof(void *)) || i->lpVtbl != &ins_vtbl) return 0;
+    rm_instrument *o = ins(i);
+    dls_addref(o->c);
+    *c = o->c;
+    *orig = o->orig;
+    *patch = (uint32_t)o->patch;
+    *serial = o->serial;
+    return 1;
+}
+
+/* 0x88781114 (DMUS_E_INVALIDPATCH) for a patch the collection lacks, as dmusic answers; asking again for one while
+ * its object lives hands out the same object */
 static HRESULT WINAPI col_getinst(IDirectMusicCollection *i, DWORD patch, IDirectMusicInstrument **out)
 {
-    if (out) *out = NULL;
-    dm_collection *c = col_hold(col(i));
-    HRESULT hr = !c || dls_find(c, patch) < 0 ? DMUS_E_NOT_FOUND : E_NOTIMPL;
+    rm_collection *cl = col(i);
+    if (!out || IsBadWritePtr(out, sizeof(*out))) return E_POINTER;
+    *out = NULL;
+    dm_collection *c = col_hold(cl);
+    if (!c || dls_find(c, patch) < 0) { dls_release(c); return DMUS_E_INVALIDPATCH; }
+    rm_instrument *o = calloc(1, sizeof(*o));
+    if (!o) { dls_release(c); return E_OUTOFMEMORY; }
+    AcquireSRWLockExclusive(&s_inslock);
+    for (rm_instrument *x = cl->ins; x; x = x->next)
+        if (x->orig == patch && x->c == c) { InterlockedIncrement(&x->ref); *out = &x->IDirectMusicInstrument_iface; break; }
+    if (!*out) {
+        o->IDirectMusicInstrument_iface.lpVtbl = &ins_vtbl;
+        o->ref = 1;
+        o->owner = cl;
+        InterlockedIncrement(&cl->ref);
+        o->c = c; c = NULL;
+        o->orig = patch;
+        o->patch = (LONG)patch;
+        o->serial = InterlockedIncrement(&s_insserial);
+        o->next = cl->ins;
+        cl->ins = o;
+        *out = &o->IDirectMusicInstrument_iface;
+        o = NULL;
+    }
+    ReleaseSRWLockExclusive(&s_inslock);
+    free(o);
     dls_release(c);
-    return hr;
+    return S_OK;
 }
 static HRESULT WINAPI col_enum(IDirectMusicCollection *i, DWORD n, DWORD *patch, LPWSTR name, DWORD len)
 {
@@ -3138,8 +3234,29 @@ static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirect
     if (c) *c = ch;
     return S_OK;
 }
+/* the port the PChannel plays through (E_INVALIDARG when it has none, nothing written), its DownloadInstrument, and
+ * the PChannel's group and MIDI channel as PChannelInfo gives them */
 static HRESULT WINAPI pf_downloadinst(IDirectMusicPerformance8 *i, IDirectMusicInstrument *in, DWORD pch, IDirectMusicDownloadedInstrument **d,
-                                      DMUS_NOTERANGE *r, DWORD n, IDirectMusicPort **port, DWORD *g, DWORD *c) { return rm_notimpl(__func__); }
+                                      DMUS_NOTERANGE *r, DWORD n, IDirectMusicPort **port, DWORD *g, DWORD *c)
+{
+    rm_perf *p = prf(i);
+    if (!in || !d || !port || !g || !c || IsBadWritePtr(d, sizeof(*d)) || IsBadWritePtr(port, sizeof(*port)) ||
+        IsBadWritePtr(g, sizeof(*g)) || IsBadWritePtr(c, sizeof(*c)))
+        return E_POINTER;
+    if (!p->host || !p->port) return DMUS_E_NOT_INIT;
+    int idx = 0, hr; uint32_t grp = 0, ch = 0;
+    PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch));
+    if (hr < 0) return E_INVALIDARG;
+    IDirectMusicPort *pt = NULL;
+    HRESULT h = rm_port_query(p->port, &IID_IDirectMusicPort, (void **)&pt);
+    if (FAILED(h)) return h;
+    h = IDirectMusicPort_DownloadInstrument(pt, in, d, r, n);
+    if (FAILED(h)) { IDirectMusicPort_Release(pt); return h; }
+    *port = pt;
+    *g = grp;
+    *c = ch;
+    return h;
+}
 static HRESULT WINAPI pf_invalidate(IDirectMusicPerformance8 *i, MUSIC_TIME t, DWORD f) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_invalidate(dm_host_perf(p->host), t, f)); return S_OK; }
 /* 77306acd / 773069c2: GetParam(Ex) through the playing segment states; 77306fbf: SetParam to the primary segment */
 static HRESULT pf_getparam_any(IDirectMusicPerformance8 *i, REFGUID g, DWORD id, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp)

@@ -214,6 +214,204 @@ static void download(IDirectMusicPort *p)
     IDirectMusicPortDownload_Release(dl);
 }
 
+/* DirectX 6/7 instrument downloads: Collection::GetInstrument, the instrument's patch, Port::DownloadInstrument /
+ * UnloadInstrument and Performance::DownloadInstrument (the voices a note gets show whether it went in) */
+static IDirectMusicCollection *load_coll(const char *file)
+{
+    IDirectMusicLoader8 *ld = NULL;
+    CoCreateInstance(&CLSID_DirectMusicLoader, NULL, CLSCTX_INPROC, &IID_IDirectMusicLoader8, (void **)&ld);
+    if (!ld) return NULL;
+    WCHAR dir[MAX_PATH], w[MAX_PATH];
+    GetCurrentDirectoryW(MAX_PATH, dir);
+    IDirectMusicLoader8_SetSearchDirectory(ld, &GUID_DirectMusicAllTypes, dir, FALSE);
+    MultiByteToWideChar(CP_ACP, 0, file, -1, w, MAX_PATH);
+    IDirectMusicCollection *c = NULL;
+    HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicCollection, &IID_IDirectMusicCollection, w, (void **)&c);
+    printf("  load %s %08lx\n", file, hr);
+    IDirectMusicLoader8_Release(ld);
+    return c;
+}
+static DWORD voices(IDirectMusicPort *p)
+{
+    DMUS_SYNTHSTATS st;
+    memset(&st, 0, sizeof(st));
+    st.dwSize = sizeof(st);
+    IDirectMusicPort_GetRunningStats(p, &st);
+    return st.dwVoices;
+}
+/* a note on the PChannel through the performance, and the voices it gets 200 ms later */
+static void note(DWORD pch, BYTE prog, IDirectMusicPort *p, const char *what)
+{
+    DMUS_PATCH_PMSG *pm = NULL;
+    if (SUCCEEDED(IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*pm), (DMUS_PMSG **)&pm))) {
+        pm->dwType = DMUS_PMSGT_PATCH; pm->dwFlags = DMUS_PMSGF_REFTIME; pm->dwPChannel = pch;
+        pm->byInstrument = prog; pm->byMSB = 0; pm->byLSB = 0;
+        IDirectMusicPerformance8_GetTime(perf, &pm->rtTime, NULL);
+        if (FAILED(IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)pm))) IDirectMusicPerformance8_FreePMsg(perf, (DMUS_PMSG *)pm);
+    }
+    DMUS_MIDI_PMSG *m = NULL;
+    if (SUCCEEDED(IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*m), (DMUS_PMSG **)&m))) {
+        m->dwType = DMUS_PMSGT_MIDI; m->dwFlags = DMUS_PMSGF_REFTIME; m->dwPChannel = pch;
+        m->bStatus = 0x90; m->bByte1 = 60; m->bByte2 = 100;
+        IDirectMusicPerformance8_GetTime(perf, &m->rtTime, NULL);
+        m->rtTime += 300000;
+        if (FAILED(IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)m))) IDirectMusicPerformance8_FreePMsg(perf, (DMUS_PMSG *)m);
+    }
+    DWORD most = 0;
+    for (int k = 0; k < 15; k++) { Sleep(100); DWORD v = voices(p); if (v > most) most = v; }
+    printf("  %s: %s\n", what, most ? "sounds" : "silent");
+    if (SUCCEEDED(IDirectMusicPerformance8_AllocPMsg(perf, sizeof(*m), (DMUS_PMSG **)&m))) {
+        m->dwType = DMUS_PMSGT_MIDI; m->dwFlags = DMUS_PMSGF_REFTIME; m->dwPChannel = pch;
+        m->bStatus = 0xb0; m->bByte1 = 120; m->bByte2 = 0;         /* all sound off */
+        IDirectMusicPerformance8_GetTime(perf, &m->rtTime, NULL);
+        if (FAILED(IDirectMusicPerformance8_SendPMsg(perf, (DMUS_PMSG *)m))) IDirectMusicPerformance8_FreePMsg(perf, (DMUS_PMSG *)m);
+    }
+    Sleep(300);
+}
+static void instruments(void)
+{
+    IDirectMusicCollection *c = load_coll("fe_hard.dls");
+    if (!c) return;
+    DWORD patch[4] = { 0 }, n = 0;
+    WCHAR wn[64];
+    for (DWORD k = 0; n < 4 && IDirectMusicCollection_EnumInstrument(c, k, &patch[n], wn, 64) == S_OK; k++) n++;
+    printf("  %lu patches, first %06lx\n", n, patch[0]);
+    IDirectMusicInstrument *ins = NULL, *x = NULL;
+    printf("  GetInstrument(0x7f7f7f) %08lx %s\n", IDirectMusicCollection_GetInstrument(c, 0x7f7f7f, &x), x ? "object" : "none");
+    if (x) IDirectMusicInstrument_Release(x), x = NULL;
+    HRESULT hr = IDirectMusicCollection_GetInstrument(c, patch[0], &ins);
+    printf("  GetInstrument(%06lx) %08lx %s\n", patch[0], hr, ins ? "object" : "none");
+    if (!ins) { IDirectMusicCollection_Release(c); return; }
+    hr = IDirectMusicCollection_GetInstrument(c, patch[0], &x);
+    printf("  GetInstrument again %08lx: %s\n", hr, x ? (x == ins ? "the same object" : "another object") : "none");
+    if (x) IDirectMusicInstrument_Release(x), x = NULL;
+    {
+        static const struct { const GUID *g; const char *n; } t[] = {
+            { &IID_IUnknown, "IUnknown" }, { &IID_IDirectMusicInstrument, "IDirectMusicInstrument" },
+            { &IID_IDirectMusicObject, "IDirectMusicObject" }, { &IID_IPersistStream, "IPersistStream" },
+            { &IID_IDirectMusicDownloadedInstrument, "IDirectMusicDownloadedInstrument" },
+        };
+        printf("  instrument interfaces:");
+        for (unsigned k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
+            IUnknown *o = NULL;
+            if (SUCCEEDED(IDirectMusicInstrument_QueryInterface(ins, t[k].g, (void **)&o))) { printf(" %s", t[k].n); IUnknown_Release(o); }
+        }
+        printf("\n");
+    }
+    DWORD pt = 0xdead;
+    printf("  GetPatch %08lx %06lx\n", IDirectMusicInstrument_GetPatch(ins, &pt), pt);
+    printf("  SetPatch(0x123456) %08lx\n", IDirectMusicInstrument_SetPatch(ins, 0x123456));
+    pt = 0xdead;
+    printf("  GetPatch %08lx %06lx\n", IDirectMusicInstrument_GetPatch(ins, &pt), pt);
+    printf("  SetPatch(0x80000005) %08lx\n", IDirectMusicInstrument_SetPatch(ins, 0x80000005));
+    printf("  SetPatch(0xff000000) %08lx\n", IDirectMusicInstrument_SetPatch(ins, 0xff000000));
+    pt = 0xdead;
+    printf("  GetPatch %08lx %06lx\n", IDirectMusicInstrument_GetPatch(ins, &pt), pt);
+    printf("  SetPatch(5) %08lx\n", IDirectMusicInstrument_SetPatch(ins, 5));      /* program 5, bank 0 */
+    /* the port */
+    IDirectMusicPort *p = NULL;
+    DWORD g = 0, ch = 0;
+    IDirectMusicPerformance8_PChannelInfo(perf, 0, &p, &g, &ch);
+    if (!p) { IDirectMusicInstrument_Release(ins); IDirectMusicCollection_Release(c); return; }
+    note(0, 5, p, "before any download");
+    IDirectMusicDownloadedInstrument *d = NULL, *d2 = NULL;
+    printf("  Port::DownloadInstrument(NULL, &d) %08lx\n", IDirectMusicPort_DownloadInstrument(p, NULL, &d, NULL, 0));
+    printf("  Port::DownloadInstrument(ins, NULL) %08lx\n", IDirectMusicPort_DownloadInstrument(p, ins, NULL, NULL, 0));
+    hr = IDirectMusicPort_DownloadInstrument(p, ins, &d, NULL, 0);
+    printf("  Port::DownloadInstrument %08lx %s\n", hr, d ? "object" : "none");
+    if (d) {
+        static const struct { const GUID *g; const char *n; } t[] = {
+            { &IID_IUnknown, "IUnknown" }, { &IID_IDirectMusicDownloadedInstrument, "IDirectMusicDownloadedInstrument" },
+            { &IID_IDirectMusicInstrument, "IDirectMusicInstrument" },
+        };
+        printf("  downloaded interfaces:");
+        for (unsigned k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
+            IUnknown *o = NULL;
+            if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)d, t[k].g, (void **)&o))) { printf(" %s", t[k].n); IUnknown_Release(o); }
+        }
+        printf("\n");
+    }
+    note(0, 5, p, "after the download");
+    hr = IDirectMusicPort_DownloadInstrument(p, ins, &d2, NULL, 0);
+    printf("  Port::DownloadInstrument again %08lx %s\n", hr, d2 ? (d2 == d ? "the same object" : "another object") : "none");
+    printf("  Port::UnloadInstrument(NULL) %08lx\n", IDirectMusicPort_UnloadInstrument(p, NULL));
+    if (d2) {
+        printf("  Port::UnloadInstrument(second) %08lx\n", IDirectMusicPort_UnloadInstrument(p, d2));
+        note(0, 5, p, "one of two unloaded");
+        IDirectMusicDownloadedInstrument_Release(d2), d2 = NULL;
+    }
+    if (d) {
+        printf("  Port::UnloadInstrument %08lx\n", IDirectMusicPort_UnloadInstrument(p, d));
+        printf("  Port::UnloadInstrument again %08lx\n", IDirectMusicPort_UnloadInstrument(p, d));
+        note(0, 5, p, "unloaded");
+        IDirectMusicDownloadedInstrument_Release(d), d = NULL;
+        Sleep(2000);
+        note(0, 5, p, "unloaded, 2 s later");
+        note(0, 6, p, "program 6, never downloaded");
+    }
+    /* what makes a download the same one: the instrument object, its patch, the ranges */
+    {
+        IDirectMusicDownloadedInstrument *a = NULL, *b = NULL, *e = NULL;
+        IDirectMusicInstrument *other = NULL;
+        IDirectMusicPort_DownloadInstrument(p, ins, &a, NULL, 0);
+        IDirectMusicInstrument_SetPatch(ins, 6);
+        hr = IDirectMusicPort_DownloadInstrument(p, ins, &b, NULL, 0);
+        printf("  after SetPatch(6): DownloadInstrument %08lx %s\n", hr, b ? (b == a ? "the same object" : "another object") : "none");
+        note(0, 6, p, "program 6");
+        IDirectMusicInstrument_SetPatch(ins, 5);
+        DMUS_NOTERANGE r2 = { 0, 127 };
+        hr = IDirectMusicPort_DownloadInstrument(p, ins, &e, &r2, 1);
+        printf("  with a range: DownloadInstrument %08lx %s\n", hr, e ? (e == a ? "the same object" : "another object") : "none");
+        if (n > 1 && SUCCEEDED(IDirectMusicCollection_GetInstrument(c, patch[1], &other)) && other) {
+            IDirectMusicDownloadedInstrument *o2 = NULL;
+            hr = IDirectMusicPort_DownloadInstrument(p, other, &o2, NULL, 0);
+            printf("  another instrument: DownloadInstrument %08lx %s\n", hr, o2 ? (o2 == a ? "the same object" : "another object") : "none");
+            if (o2) { printf("    UnloadInstrument %08lx\n", IDirectMusicPort_UnloadInstrument(p, o2)); IDirectMusicDownloadedInstrument_Release(o2); }
+            IDirectMusicInstrument_Release(other);
+        }
+        if (e) { printf("  UnloadInstrument(with a range) %08lx\n", IDirectMusicPort_UnloadInstrument(p, e)); IDirectMusicDownloadedInstrument_Release(e); }
+        if (b) { printf("  UnloadInstrument(after SetPatch) %08lx\n", IDirectMusicPort_UnloadInstrument(p, b)); IDirectMusicDownloadedInstrument_Release(b); }
+        if (a) { printf("  UnloadInstrument(first) %08lx\n", IDirectMusicPort_UnloadInstrument(p, a)); IDirectMusicDownloadedInstrument_Release(a); }
+        Sleep(2000);
+    }
+    /* note ranges: only keys 0-59 */
+    DMUS_NOTERANGE r = { 0, 59 };
+    hr = IDirectMusicPort_DownloadInstrument(p, ins, &d, &r, 1);
+    printf("  Port::DownloadInstrument(keys 0-59) %08lx\n", hr);
+    note(0, 5, p, "key 60 with keys 0-59 downloaded");
+    if (d) { IDirectMusicPort_UnloadInstrument(p, d); IDirectMusicDownloadedInstrument_Release(d); d = NULL; }
+    printf("  Port::DownloadInstrument(ranges NULL, 1) %08lx\n", IDirectMusicPort_DownloadInstrument(p, ins, &d, NULL, 1));
+    if (d) { IDirectMusicPort_UnloadInstrument(p, d); IDirectMusicDownloadedInstrument_Release(d); d = NULL; }
+    /* the performance's */
+    IDirectMusicPort *pp = NULL;
+    DWORD pg = 0xdead, pc = 0xdead;
+    hr = IDirectMusicPerformance8_DownloadInstrument(perf, ins, 2, &d, NULL, 0, &pp, &pg, &pc);
+    printf("  Performance::DownloadInstrument(PChannel 2) %08lx port %s group %lu channel %lu\n", hr,
+           pp ? (pp == p ? "the same" : "another") : "none", pg, pc);
+    if (pp) IDirectMusicPort_Release(pp), pp = NULL;
+    note(2, 5, p, "on PChannel 2");
+    if (d) { printf("  Port::UnloadInstrument %08lx\n", IDirectMusicPort_UnloadInstrument(p, d)); IDirectMusicDownloadedInstrument_Release(d); d = NULL; }
+    pg = pc = 0xdead;
+    hr = IDirectMusicPerformance8_DownloadInstrument(perf, ins, 5000, &d, NULL, 0, &pp, &pg, &pc);
+    printf("  Performance::DownloadInstrument(PChannel 5000) %08lx port %s group %lu channel %lu\n", hr, pp ? "yes" : "none", pg, pc);
+    if (pp) IDirectMusicPort_Release(pp), pp = NULL;
+    if (d) { IDirectMusicPort_UnloadInstrument(p, d); IDirectMusicDownloadedInstrument_Release(d); d = NULL; }
+    hr = IDirectMusicPerformance8_DownloadInstrument(perf, ins, 2, &d, NULL, 0, NULL, &pg, &pc);
+    printf("  Performance::DownloadInstrument(NULL port) %08lx\n", hr);
+    if (d) { IDirectMusicPort_UnloadInstrument(p, d); IDirectMusicDownloadedInstrument_Release(d); d = NULL; }
+    /* the instrument and collection let go of before the download is unloaded */
+    hr = IDirectMusicPort_DownloadInstrument(p, ins, &d, NULL, 0);
+    printf("  Port::DownloadInstrument %08lx\n", hr);
+    IDirectMusicInstrument_Release(ins); ins = NULL;
+    IDirectMusicCollection_Release(c); c = NULL;
+    note(0, 5, p, "instrument and collection released");
+    if (d) {
+        printf("  Port::UnloadInstrument %08lx\n", IDirectMusicPort_UnloadInstrument(p, d));
+        IDirectMusicDownloadedInstrument_Release(d), d = NULL;
+    }
+    IDirectMusicPort_Release(p);
+}
+
 static void get_port(IDirectMusicAudioPath *ap, const char *what)
 {
     IDirectMusicPort *p = NULL, *q = NULL;
@@ -267,6 +465,10 @@ int main(int argc, char **argv)
         hr = IDirectMusicPerformance8_PChannelInfo(perf, 0, &pi, &g, &c);
         printf("download: PChannelInfo(0) %08lx\n", hr);
         if (pi) { download(pi); IDirectMusicPort_Release(pi); }
+    }
+    if (!only || !strcmp(only, "inst")) {
+        printf("inst:\n");
+        instruments();
     }
     if (!only || !strcmp(only, "std")) {
         static const DWORD types[] = { DMUS_APATH_DYNAMIC_3D, DMUS_APATH_DYNAMIC_MONO, DMUS_APATH_DYNAMIC_STEREO };
