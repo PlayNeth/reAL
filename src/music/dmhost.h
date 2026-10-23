@@ -28,6 +28,11 @@ rtime_t dm_host_clock(dm_host *h);
 int  dm_host_held(void);
 void dm_host_release_later(void *unk);
 uint32_t dm_host_rate(dm_host *h);
+/* an application's own download buffers (IDirectMusicPortDownload), with the engine lock held: ids from the port's
+ * counter, a buffer handed to the synth (< 0 refused), and its unload */
+uint32_t dm_host_reserve_dlids(dm_host *h, uint32_t n);
+int dm_host_raw_download(dm_host *h, const void *buf, uint32_t size, void **handle);
+void dm_host_raw_unload(dm_host *h, void *handle);
 
 /* plain MIDI input (the winmm MIDI device): a message (short, or sysex starting with 0xf0) played now */
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len);

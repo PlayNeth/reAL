@@ -114,6 +114,106 @@ static void port_methods(IDirectMusicPort *p)
     }
 }
 
+/* IDirectMusicPortDownload as an application uses it to download its own instruments (Pro Evolution Soccer 6) */
+static IDirectMusicDownload *dlbuf(IDirectMusicPortDownload *dl, DWORD size, void **data, const char *what)
+{
+    IDirectMusicDownload *d = NULL;
+    HRESULT hr = IDirectMusicPortDownload_AllocateBuffer(dl, size, &d);
+    DWORD got = 0;
+    *data = NULL;
+    if (d) { HRESULT h2 = d->lpVtbl->GetBuffer(d, data, &got); printf("  AllocateBuffer(%lu) for %s %08lx, GetBuffer %08lx %lu bytes\n", size, what, hr, h2, got); }
+    else printf("  AllocateBuffer(%lu) for %s %08lx\n", size, what, hr);
+    return d;
+}
+static void download(IDirectMusicPort *p)
+{
+    IDirectMusicPortDownload *dl = NULL;
+    if (FAILED(IDirectMusicPort_QueryInterface(p, &IID_IDirectMusicPortDownload, (void **)&dl))) { printf("  no PortDownload\n"); return; }
+    IDirectMusicDownload *d = NULL;
+    void *v;
+    printf("  AllocateBuffer(0) %08lx\n", IDirectMusicPortDownload_AllocateBuffer(dl, 0, &d));
+    if (d) d->lpVtbl->Release(d), d = NULL;
+    printf("  AllocateBuffer(NULL) %08lx\n", IDirectMusicPortDownload_AllocateBuffer(dl, 16, NULL));
+    DWORD id0 = 0xdead, id1 = 0xdead, id2 = 0xdead;
+    printf("  GetDLId(0 ids) %08lx\n", IDirectMusicPortDownload_GetDLId(dl, &id0, 0));
+    HRESULT hr = IDirectMusicPortDownload_GetDLId(dl, &id1, 2);
+    HRESULT hr2 = IDirectMusicPortDownload_GetDLId(dl, &id2, 1);
+    printf("  GetDLId(2) %08lx, then GetDLId(1) %08lx: %ld apart\n", hr, hr2, (long)(id2 - id1));
+    printf("  GetBuffer(an id never used) %08lx\n", IDirectMusicPortDownload_GetBuffer(dl, id1, &d));
+    if (d) d->lpVtbl->Release(d), d = NULL;
+    printf("  Download(NULL) %08lx, Unload(NULL) %08lx\n", IDirectMusicPortDownload_Download(dl, NULL), IDirectMusicPortDownload_Unload(dl, NULL));
+    /* a wave: DMUS_DOWNLOADINFO, 2 offsets, DMUS_WAVE, DMUS_WAVEDATA (a 100 Hz square, 0.5 s at 22050 Hz) */
+    const DWORD frames = 11025, wsize = 16 + 8 + sizeof(DMUS_WAVE) + 4 + frames * 2;
+    IDirectMusicDownload *wd = dlbuf(dl, wsize, &v, "a wave");
+    if (!wd) { IDirectMusicPortDownload_Release(dl); return; }
+    BYTE *b = v;
+    DMUS_DOWNLOADINFO *info = (DMUS_DOWNLOADINFO *)b;
+    info->dwDLType = DMUS_DOWNLOADINFO_WAVE; info->dwDLId = id1; info->dwNumOffsetTableEntries = 2; info->cbSize = wsize;
+    ULONG *ofs = (ULONG *)(b + 16);
+    ofs[0] = 24; ofs[1] = 24 + sizeof(DMUS_WAVE);
+    DMUS_WAVE *w = (DMUS_WAVE *)(b + ofs[0]);
+    w->ulWaveDataIdx = 1;
+    WAVEFORMATEX f = { WAVE_FORMAT_PCM, 1, 22050, 44100, 2, 16, 0 };
+    w->WaveformatEx = f;
+    DMUS_WAVEDATA *wdat = (DMUS_WAVEDATA *)(b + ofs[1]);
+    wdat->cbSize = frames * 2;
+    short *smp = (short *)wdat->byData;
+    for (DWORD k = 0; k < frames; k++) smp[k] = (k / 110) & 1 ? 12000 : -12000;
+    printf("  Download(wave) %08lx\n", IDirectMusicPortDownload_Download(dl, wd));
+    printf("  Download(wave) again %08lx\n", IDirectMusicPortDownload_Download(dl, wd));
+    IDirectMusicDownload *same = NULL;
+    hr = IDirectMusicPortDownload_GetBuffer(dl, id1, &same);
+    printf("  GetBuffer(the wave's id) %08lx: %s\n", hr, same ? (same == wd ? "the same buffer" : "another") : "none");
+    if (same) same->lpVtbl->Release(same);
+    /* an instrument on that wave: DMUS_INSTRUMENT, one DMUS_REGION, then (in the second) DMUS_ARTICULATION + DMUS_ARTICPARAMS */
+    for (int art = 0; art < 2; art++) {
+        DWORD isize = 16 + 16 + sizeof(DMUS_INSTRUMENT) + sizeof(DMUS_REGION) + sizeof(DMUS_ARTICULATION) + sizeof(DMUS_ARTICPARAMS);
+        IDirectMusicDownload *id = dlbuf(dl, isize, &v, art ? "an instrument with an articulation" : "an instrument without");
+        if (!id) continue;
+        b = v;
+        info = (DMUS_DOWNLOADINFO *)b;
+        info->dwDLType = DMUS_DOWNLOADINFO_INSTRUMENT; info->dwDLId = id1 + 1 + art * 0; info->dwNumOffsetTableEntries = art ? 4 : 2; info->cbSize = isize;
+        if (art) info->dwDLId = id2;
+        ofs = (ULONG *)(b + 16);
+        ofs[0] = 32; ofs[1] = ofs[0] + sizeof(DMUS_INSTRUMENT); ofs[2] = ofs[1] + sizeof(DMUS_REGION); ofs[3] = ofs[2] + sizeof(DMUS_ARTICULATION);
+        DMUS_INSTRUMENT *in = (DMUS_INSTRUMENT *)(b + ofs[0]);
+        in->ulPatch = art ? 5 : 4; in->ulFirstRegionIdx = 1; in->ulGlobalArtIdx = art ? 2 : 0;
+        DMUS_REGION *r = (DMUS_REGION *)(b + ofs[1]);
+        r->RangeKey.usLow = 0; r->RangeKey.usHigh = 127; r->RangeVelocity.usLow = 0; r->RangeVelocity.usHigh = 127;
+        r->WaveLink.ulChannel = 1; r->WaveLink.ulTableIndex = id1;
+        r->WSMP.cbSize = sizeof(WSMPL); r->WSMP.usUnityNote = 60; r->WSMP.cSampleLoops = 1;
+        r->WLOOP[0].cbSize = sizeof(WLOOP); r->WLOOP[0].ulStart = 0; r->WLOOP[0].ulLength = frames;
+        if (art) {
+            DMUS_ARTICULATION *a = (DMUS_ARTICULATION *)(b + ofs[2]);
+            a->ulArt1Idx = 3;
+            DMUS_ARTICPARAMS *ap = (DMUS_ARTICPARAMS *)(b + ofs[3]);
+            ap->VolEG.tcAttack = 0x80000000; ap->VolEG.tcDecay = 0x80000000; ap->VolEG.ptSustain = 1000 << 16; ap->VolEG.tcRelease = 0x80000000;
+            ap->PitchEG.tcAttack = 0x80000000; ap->PitchEG.tcDecay = 0x80000000; ap->PitchEG.tcRelease = 0x80000000;
+        }
+        HRESULT h = IDirectMusicPortDownload_Download(dl, id);
+        printf("  Download(instrument%s) %08lx\n", art ? " with articulation" : "", h);
+        if (SUCCEEDED(h) && art) {
+            printf("  Unload(instrument) %08lx\n", IDirectMusicPortDownload_Unload(dl, id));
+        }
+        printf("  Unload(instrument) again %08lx\n", IDirectMusicPortDownload_Unload(dl, id));
+        id->lpVtbl->Release(id);
+    }
+    printf("  Unload(wave) %08lx, again %08lx\n", IDirectMusicPortDownload_Unload(dl, wd), IDirectMusicPortDownload_Unload(dl, wd));
+    printf("  GetBuffer(the wave's id) after %08lx\n", IDirectMusicPortDownload_GetBuffer(dl, id1, &d));
+    if (d) d->lpVtbl->Release(d), d = NULL;
+    wd->lpVtbl->Release(wd);
+    /* a buffer too small to be a download, and one of a type there is none of */
+    IDirectMusicDownload *bad = dlbuf(dl, 8, &v, "8 bytes");
+    if (bad) { printf("  Download(8 bytes) %08lx\n", IDirectMusicPortDownload_Download(dl, bad)); bad->lpVtbl->Release(bad); }
+    bad = dlbuf(dl, 64, &v, "type 99");
+    if (bad) {
+        DWORD *q = v; q[0] = 99; q[1] = id2 + 10; q[2] = 0; q[3] = 64;
+        printf("  Download(type 99) %08lx\n", IDirectMusicPortDownload_Download(dl, bad));
+        bad->lpVtbl->Release(bad);
+    }
+    IDirectMusicPortDownload_Release(dl);
+}
+
 static void get_port(IDirectMusicAudioPath *ap, const char *what)
 {
     IDirectMusicPort *p = NULL, *q = NULL;
@@ -160,6 +260,13 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "default")) {
         IDirectMusicPerformance8_GetDefaultAudioPath(perf, &ap);
         if (ap) { get_port(ap, "default path"); IDirectMusicAudioPath_Release(ap); ap = NULL; }
+    }
+    if (!only || !strcmp(only, "download")) {
+        IDirectMusicPort *pi = NULL;
+        DWORD g = 0, c = 0;
+        hr = IDirectMusicPerformance8_PChannelInfo(perf, 0, &pi, &g, &c);
+        printf("download: PChannelInfo(0) %08lx\n", hr);
+        if (pi) { download(pi); IDirectMusicPort_Release(pi); }
     }
     if (!only || !strcmp(only, "std")) {
         static const DWORD types[] = { DMUS_APATH_DYNAMIC_3D, DMUS_APATH_DYNAMIC_MONO, DMUS_APATH_DYNAMIC_STEREO };

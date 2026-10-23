@@ -1,7 +1,8 @@
 /* reDM: the synth port object (IDirectMusicPort, IDirectMusicPortDownload, IKsControl) and the sink object,
  * as an application meets them through an audiopath's port and sink stages and Performance::PChannelInfo.  The port
  * is the performance's one synth port ("Microsoft Synthesizer", dmusic's CDirectMusicSynthPort); what it reports is
- * what tests/porttest.c finds on Windows.  Downloads go through the performance, not the port. */
+ * what tests/porttest.c finds on Windows.  The performance's own downloads go through it, not the port; an application
+ * can download its own buffers through IDirectMusicPortDownload (Pro Evolution Soccer 6 does). */
 #include "../real.h"
 #include "dmport.h"
 #include <dmusicc.h>
@@ -16,6 +17,21 @@ const GUID RM_GUID_SynthPort = { 0x58c2b4d0, 0x46e7, 0x11d1, { 0x89, 0xac, 0x00,
 #define E_UNKNOWN_PROPERTY ((HRESULT)0x88781122)       /* DMUS_E_UNKNOWN_PROPERTY */
 #define E_GET_UNSUPPORTED  ((HRESULT)0x88781124)       /* DMUS_E_GET_UNSUPPORTED */
 
+/* a download buffer of the application's (IDirectMusicPortDownload::AllocateBuffer, dmusic's CDownloadBuffer) */
+typedef struct rm_dlbuf {
+    IDirectMusicDownload IDirectMusicDownload_iface;
+    LONG ref;
+    void *data;
+    DWORD size;
+} rm_dlbuf;
+/* one the port has downloaded: its synth download, by the id its DMUS_DOWNLOADINFO names */
+typedef struct rm_dlrec {
+    struct rm_dlrec *next;
+    rm_dlbuf *buf;                      /* a reference */
+    void *handle;
+    DWORD id;
+} rm_dlrec;
+
 struct rm_port {
     IDirectMusicPort IDirectMusicPort_iface;
     IDirectMusicPortDownload IDirectMusicPortDownload_iface;
@@ -23,6 +39,7 @@ struct rm_port {
     LONG ref;
     dm_host *host;                      /* NULL once the performance closed down (under the engine lock) */
     DWORD groups;                       /* SetNumChannelGroups beyond what the PChannels use */
+    rm_dlrec *dls;                      /* the application's downloads (under the engine lock) */
 };
 
 typedef struct {
@@ -48,10 +65,16 @@ static HRESULT port_qi(rm_port *p, REFIID riid, void **out)
     InterlockedIncrement(&p->ref);
     return S_OK;
 }
+static void dlbuf_release(rm_dlbuf *b);
+/* the application's downloads let go of (their synth goes with the performance, or has gone) */
+static void dlrecs_free(rm_dlrec *r)
+{
+    while (r) { rm_dlrec *n = r->next; dlbuf_release(r->buf); free(r); r = n; }
+}
 static ULONG port_release(rm_port *p)
 {
     LONG r = InterlockedDecrement(&p->ref);
-    if (!r) free(p);
+    if (!r) { dlrecs_free(p->dls); free(p); }
     return r;
 }
 
@@ -234,17 +257,147 @@ static IDirectMusicPortVtbl dp_vtbl = {
 static HRESULT WINAPI dd_QueryInterface(IDirectMusicPortDownload *i, REFIID riid, void **out) { return port_qi(pdl(i), riid, out); }
 static ULONG WINAPI dd_AddRef(IDirectMusicPortDownload *i) { return InterlockedIncrement(&pdl(i)->ref); }
 static ULONG WINAPI dd_Release(IDirectMusicPortDownload *i) { return port_release(pdl(i)); }
-static HRESULT WINAPI dd_GetBuffer(IDirectMusicPortDownload *i, DWORD id, IDirectMusicDownload **d) { if (d) *d = NULL; return E_NOTIMPL; }
-static HRESULT WINAPI dd_AllocateBuffer(IDirectMusicPortDownload *i, DWORD size, IDirectMusicDownload **d) { if (d) *d = NULL; return E_NOTIMPL; }
-static HRESULT WINAPI dd_GetDLId(IDirectMusicPortDownload *i, DWORD *id, DWORD n) { return E_NOTIMPL; }
+/* the buffers: memory the application fills with a DMUS_DOWNLOADINFO, its offset table and the data (IDirectMusicDownload::
+ * GetBuffer), then hands to Download */
+static IDirectMusicDownloadVtbl db_vtbl;
+static rm_dlbuf *dbuf(IDirectMusicDownload *i) { return CONTAINING_RECORD(i, rm_dlbuf, IDirectMusicDownload_iface); }
+static rm_dlbuf *dbuf_of(IDirectMusicDownload *i)
+{
+    return i && !IsBadReadPtr(i, sizeof(void *)) && i->lpVtbl == &db_vtbl ? dbuf(i) : NULL;
+}
+static ULONG WINAPI db_Release(IDirectMusicDownload *i);
+static void dlbuf_release(rm_dlbuf *b) { if (b) db_Release(&b->IDirectMusicDownload_iface); }
+static HRESULT WINAPI db_QueryInterface(IDirectMusicDownload *i, REFIID riid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicDownload)) {
+        *out = i;
+        InterlockedIncrement(&dbuf(i)->ref);
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI db_AddRef(IDirectMusicDownload *i) { return InterlockedIncrement(&dbuf(i)->ref); }
+static ULONG WINAPI db_Release(IDirectMusicDownload *i)
+{
+    rm_dlbuf *b = dbuf(i);
+    LONG r = InterlockedDecrement(&b->ref);
+    if (!r) { free(b->data); free(b); }
+    return r;
+}
+static HRESULT WINAPI db_GetBuffer(IDirectMusicDownload *i, void **data, DWORD *size)
+{
+    rm_dlbuf *b = dbuf(i);
+    if (!data || !size) return E_POINTER;
+    *data = b->data;
+    *size = b->size;
+    return S_OK;
+}
+static IDirectMusicDownloadVtbl db_vtbl = { db_QueryInterface, db_AddRef, db_Release, db_GetBuffer };
+
+/* the port's side (dmusic's CDirectMusicPortDownload): download ids from the port's counter, so they never meet the
+ * ones its own collections and waves take; a buffer goes to the synth as it is (the synth copies what it keeps) */
+static rm_dlrec **dlrec_find(rm_port *p, rm_dlbuf *b, DWORD id)
+{
+    rm_dlrec **r = &p->dls;
+    while (*r && (b ? (*r)->buf != b : (*r)->id != id)) r = &(*r)->next;
+    return r;
+}
+static HRESULT WINAPI dd_GetBuffer(IDirectMusicPortDownload *i, DWORD id, IDirectMusicDownload **d)
+{
+    rm_port *p = pdl(i);
+    if (!d || IsBadWritePtr(d, sizeof(*d))) return E_POINTER;
+    *d = NULL;
+    dm_host *h = port_hold(p);
+    if (!h) return DMUS_E_NOT_INIT;
+    rm_dlrec *r = *dlrec_find(p, NULL, id);
+    if (r) { InterlockedIncrement(&r->buf->ref); *d = &r->buf->IDirectMusicDownload_iface; }
+    port_drop();
+    return r ? S_OK : DMUS_E_NOT_DOWNLOADED_TO_PORT;
+}
+static HRESULT WINAPI dd_AllocateBuffer(IDirectMusicPortDownload *i, DWORD size, IDirectMusicDownload **d)
+{
+    if (!d || IsBadWritePtr(d, sizeof(*d))) return E_POINTER;
+    *d = NULL;
+    if (!size) return E_INVALIDARG;
+    rm_dlbuf *b = calloc(1, sizeof(*b));
+    if (b) b->data = calloc(1, size);
+    if (!b || !b->data) { free(b); return E_OUTOFMEMORY; }
+    b->IDirectMusicDownload_iface.lpVtbl = &db_vtbl;
+    b->ref = 1;
+    b->size = size;
+    *d = &b->IDirectMusicDownload_iface;
+    return S_OK;
+}
+static HRESULT WINAPI dd_GetDLId(IDirectMusicPortDownload *i, DWORD *id, DWORD n)
+{
+    rm_port *p = pdl(i);
+    if (!id || IsBadWritePtr(id, sizeof(*id))) return E_POINTER;
+    if (!n) return E_INVALIDARG;
+    dm_host *h = port_hold(p);
+    if (!h) return DMUS_E_NOT_INIT;
+    *id = dm_host_reserve_dlids(h, n);
+    port_drop();
+    return S_OK;
+}
 static HRESULT WINAPI dd_GetAppend(IDirectMusicPortDownload *i, DWORD *a)
 {
     if (!a) return E_POINTER;
     *a = 2;                             /* the synth's sample padding */
     return S_OK;
 }
-static HRESULT WINAPI dd_Download(IDirectMusicPortDownload *i, IDirectMusicDownload *d) { return E_NOTIMPL; }
-static HRESULT WINAPI dd_Unload(IDirectMusicPortDownload *i, IDirectMusicDownload *d) { return E_NOTIMPL; }
+/* as dmusic: a buffer too small for its header is E_POINTER, a type the synth has none of DMUS_E_UNKNOWNDOWNLOAD
+ * (0x8878112d), and an instrument with regions but no articulation is refused (0x88781129) as Microsoft's synth
+ * refuses it */
+static HRESULT WINAPI dd_Download(IDirectMusicPortDownload *i, IDirectMusicDownload *d)
+{
+    rm_port *p = pdl(i);
+    rm_dlbuf *b = dbuf_of(d);
+    if (!b || b->size < sizeof(DMUS_DOWNLOADINFO)) return E_POINTER;
+    const DWORD *info = b->data;        /* DMUS_DOWNLOADINFO: type, id, offset table entries, size */
+    DWORD type = info[0];
+    if (type < DMUS_DOWNLOADINFO_INSTRUMENT || type > DMUS_DOWNLOADINFO_ONESHOTWAVE) return (HRESULT)0x8878112d;
+    rm_dlrec *r = calloc(1, sizeof(*r));
+    if (!r) return E_OUTOFMEMORY;
+    dm_host *h = port_hold(p);
+    if (!h) { free(r); return DMUS_E_NOT_INIT; }
+    HRESULT hr = S_OK;
+    int got;
+    if (*dlrec_find(p, b, 0)) hr = DMUS_E_ALREADY_DOWNLOADED;
+    else if ((got = dm_host_raw_download(h, b->data, b->size, &r->handle)) < 0)
+        hr = type == DMUS_DOWNLOADINFO_INSTRUMENT || type == DMUS_DOWNLOADINFO_INSTRUMENT2 ? DMUS_E_BADINSTRUMENT : DMUS_E_BADWAVE;
+    else if (got == 1) {                /* (regions without an articulation) */
+        dm_host_raw_unload(h, r->handle);
+        hr = (HRESULT)0x88781129;
+    } else {
+        r->buf = b;
+        InterlockedIncrement(&b->ref);
+        r->id = info[1];
+        r->next = p->dls;
+        p->dls = r;
+        r = NULL;
+    }
+    port_drop();
+    free(r);
+    LOG_CALL("music: PortDownload::Download(type %lu, id %lu, %lu bytes) -> %08lx", (unsigned long)type,
+             (unsigned long)info[1], (unsigned long)b->size, (unsigned long)hr);
+    return hr;
+}
+/* (dmusic answers S_OK for a buffer it does not have downloaded, or has unloaded already) */
+static HRESULT WINAPI dd_Unload(IDirectMusicPortDownload *i, IDirectMusicDownload *d)
+{
+    rm_port *p = pdl(i);
+    rm_dlbuf *b = dbuf_of(d);
+    if (!b) return E_POINTER;
+    dm_host *h = port_hold(p);
+    if (!h) return DMUS_E_NOT_INIT;
+    rm_dlrec **pr = dlrec_find(p, b, 0), *r = *pr;
+    if (r) { *pr = r->next; dm_host_raw_unload(h, r->handle); }
+    port_drop();
+    if (r) { dlbuf_release(r->buf); free(r); }
+    return S_OK;
+}
 static IDirectMusicPortDownloadVtbl dd_vtbl = { dd_QueryInterface, dd_AddRef, dd_Release, dd_GetBuffer, dd_AllocateBuffer,
                                                 dd_GetDLId, dd_GetAppend, dd_Download, dd_Unload };
 
@@ -380,7 +533,10 @@ void rm_port_detach(rm_port *p)
     if (!p) return;
     dm_engine_lock();
     p->host = NULL;
+    rm_dlrec *r = p->dls;               /* (the synth they were in goes with the host) */
+    p->dls = NULL;
     dm_engine_unlock();
+    dlrecs_free(r);
 }
 void rm_port_release(rm_port *p) { if (p) port_release(p); }
 HRESULT rm_port_query(rm_port *p, REFIID riid, void **out) { return port_qi(p, riid, out); }

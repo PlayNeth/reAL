@@ -28,5 +28,7 @@ void dls_port_free(dls_port *p);
 void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpatch, uint32_t newpatch,
                         const uint32_t *ranges, int nranges, int *hr);
 void dls_port_unload(dls_port *p, void *handle);
+/* IDirectMusicPortDownload::GetDLId: n download ids from the port's counter, the one collections take theirs from */
+uint32_t dls_port_reserve(dls_port *p, uint32_t n);
 
 #endif

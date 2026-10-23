@@ -456,6 +456,13 @@ void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpa
     return d;
 }
 
+uint32_t dls_port_reserve(dls_port *p, uint32_t n)
+{
+    uint32_t base = p->nextid;
+    p->nextid += n;
+    return base;
+}
+
 void dls_port_unload(dls_port *p, void *handle)
 {
     dlinst *d = handle;

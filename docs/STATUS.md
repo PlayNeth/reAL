@@ -92,7 +92,14 @@ Doppler, and WASAPI output.
   (test_msynth) print them for an offline comparison; they match on both render paths.
 - The sink stage (0x5000): an object with IReferenceClock (the master clock; GetLatencyClock's gives the latency
   clock) and IKsControl. Microsoft's also answers its private IDirectSoundSynthSink, which reDM does not offer.
-- `tests/comcmp.sh porttest.exe` matches but for that interface (`COMCMP_DIR=/tmp/real/sp/port`).
+- IDirectMusicPortDownload for an application's own downloads (Pro Evolution Soccer 6 builds its instruments that
+  way): AllocateBuffer and the buffer object, GetDLId from the port's counter (the one its collections use),
+  Download straight to the synth, GetBuffer by id, Unload, with dmusic's results (E_POINTER for a buffer too small
+  for its header, DMUS_E_UNKNOWNDOWNLOAD for a type there is none of, an instrument without articulation refused,
+  Unload of a buffer not downloaded S_OK). It used to be stubbed with E_NOTIMPL, and the game crashed on the buffer
+  it never got.
+- `tests/comcmp.sh porttest.exe` matches but for that interface (`COMCMP_DIR=/tmp/real/sp/port`); its `download`
+  section matches in full.
 
 **DirectMusic: COM methods**
 - GetParam, SetParam and GetParamEx.
