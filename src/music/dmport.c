@@ -945,7 +945,7 @@ HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort *
     HRESULT hr = port_params(&pp, &groups);
     memcpy(params, &pp, params->dwSize < sizeof(pp) ? params->dwSize : sizeof(pp));
     DWORD sgroups = pp.dwChannelGroups < 64 ? 64 : pp.dwChannelGroups;
-    dm_host *h = dm_host_new(pp.dwSampleRate, pp.dwVoices, sgroups);
+    dm_host *h = dm_host_new_ex(pp.dwSampleRate, pp.dwVoices, sgroups, (int)pp.dwAudioChannels);
     if (!h) return E_OUTOFMEMORY;
     if (!(pp.dwEffectFlags & DMUS_EFFECT_REVERB)) dm_host_set_reverb(h, 0);
     rm_port *p = rm_port_new(h);

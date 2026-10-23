@@ -114,6 +114,12 @@ struct rm_perf {
     rm_buf *bufs;
     IDirectMusic8 *dm;
     BOOL closed;
+    /* dmime's version (+0x370): 6 when created, 7 after a QueryInterface for IDirectMusicPerformance2, 8 after one for
+     * IDirectMusicPerformance8, each setting it again.  Below 8: the graph works before Init, Init keeps the prepare
+     * time and bumper length, and the DirectX 8 behaviours of the engine (dxver) are off. */
+    volatile LONG ver;
+    IDirectMusicGraph *pregraph;            /* SetGraph's before Init (a reference; the engine's from Init on) */
+    DWORD prepare_ms, bumper_ms;            /* Set{PrepareTime,BumperLength}'s before Init */
     HANDLE notify;
     IDispatch *autod;                       /* its automation (dmscript's, aggregated: made on first QueryInterface) */
     struct rm_global { struct rm_global *next; GUID g; DWORD size; BYTE *data; } *globals;   /* +0x104 */
@@ -2288,15 +2294,24 @@ static rm_perf *perf_from_unknown(IUnknown *u)
 
 #define PERF_LOCKED(p, expr) do { if (!(p)->host) return DMUS_E_NOT_INIT; dm_host_lock((p)->host); expr; dm_host_unlock((p)->host); } while (0)
 
+static void perf_set_ver(rm_perf *p, LONG v)
+{
+    InterlockedExchange(&p->ver, v);
+    if (p->host) dm_perf_set_dxver(dm_host_perf(p->host), (uint32_t)v);
+}
+/* 77303ed2: IDirectMusicPerformance8 makes it a DirectX 8 application's, IDirectMusicPerformance2 a DirectX 7 one's */
 static HRESULT WINAPI pf_qi(IDirectMusicPerformance8 *i, REFIID riid, void **out)
 {
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicPerformance) ||
         IsEqualIID(riid, &IID_IDirectMusicPerformance2) || IsEqualIID(riid, &IID_IDirectMusicPerformance8)) {
+        if (IsEqualIID(riid, &IID_IDirectMusicPerformance8)) perf_set_ver(prf(i), 8);
+        else if (IsEqualIID(riid, &IID_IDirectMusicPerformance2)) perf_set_ver(prf(i), 7);
         *out = i; InterlockedIncrement(&prf(i)->ref); return S_OK;
     }
-    /* 77303eb4: the output tool and the graph (+4, +8) */
-    if (IsEqualIID(riid, &IID_IDirectMusicTool)) { *out = &prf(i)->IDirectMusicTool_iface; InterlockedIncrement(&prf(i)->ref); return S_OK; }
-    if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &prf(i)->IDirectMusicGraph_iface; InterlockedIncrement(&prf(i)->ref); return S_OK; }
+    /* 77303eb4: the output tool and the graph (+4, +8).  reAL does not count these two (pft_addref / pfg_addref), so
+     * handing one out takes no reference either: their Release would never give it back. */
+    if (IsEqualIID(riid, &IID_IDirectMusicTool)) { *out = &prf(i)->IDirectMusicTool_iface; return S_OK; }
+    if (IsEqualIID(riid, &IID_IDirectMusicGraph)) { *out = &prf(i)->IDirectMusicGraph_iface; return S_OK; }
     if (IsEqualIID(riid, &IID_IDispatch)) {
         rm_perf *p = prf(i);
         if (!p->autod && !(p->autod = rm_auto_new((IUnknown *)&p->IDirectMusicPerformance8_iface, RM_AUTO_PERFORMANCE))) { *out = NULL; return E_OUTOFMEMORY; }
@@ -2334,6 +2349,7 @@ static void pf_teardown(rm_perf *p)
     dm_host_free(p->host);
     for (int k = 1; k < 8; k++) rm_port_release(p->slot[k]);  /* (CreatePort'ed: their synths may go now) */
     if (p->dm) IDirectMusic8_Release(p->dm);
+    if (p->pregraph) IDirectMusicGraph_Release(p->pregraph);
     rm_auto_free(p->autod);
     while (p->globals) { struct rm_global *e = p->globals; p->globals = e->next; free(e->data); free(e); }
     DeleteCriticalSection(&p->gcs);
@@ -2364,6 +2380,16 @@ static ULONG WINAPI pf_release(IDirectMusicPerformance8 *i)
 
 static const dm_toolops s_toolops;
 static HRESULT WINAPI pf_setglobal(IDirectMusicPerformance8 *i, REFGUID g, void *v, DWORD sz);
+/* 77303d4d, on Init (the engine lock held): the version; a DirectX 8 application's prepare time and bumper length back
+ * to 1000 and 50 ms, an older one's as it set them (before Init, or before CloseDown); the graph set before Init */
+static void perf_init_settings(rm_perf *p, BOOL again)
+{
+    dm_perf *pf = dm_host_perf(p->host);
+    dm_perf_set_dxver(pf, (uint32_t)p->ver);
+    if (p->ver >= 8) { dm_perf_set_prepare_time(pf, 1000); dm_perf_set_bumper_length(pf, 50); }
+    else if (!again) { dm_perf_set_prepare_time(pf, p->prepare_ms); dm_perf_set_bumper_length(pf, p->bumper_ms); }
+    if (p->pregraph) { dm_perf_set_graph(pf, p->pregraph); p->pregraph = NULL; }
+}
 static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
 {
     if (p->host) return S_OK;
@@ -2378,11 +2404,24 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     while (*q) q = &(*q)->pnext;
     *q = p;
     dm_perf_set_toolops(dm_host_perf(p->host), &s_toolops, p);
+    perf_init_settings(p, FALSE);
     for (struct rm_global *e = p->globals; e; e = e->next)        /* (set before the performance was) */
         if (IsEqualGUID(&e->g, &G_PerfMasterGrooveLevel) && e->size >= 1) dm_perf_set_groove(dm_host_perf(p->host), *(char *)e->data);
     dm_host_unlock(p->host);
     BOOL off = FALSE;                       /* 77303d4d: automatic download off */
     pf_setglobal(&p->IDirectMusicPerformance8_iface, &GUID_PerfAutoDownload, &off, 4);
+    return S_OK;
+}
+
+/* Init or InitAudio again after CloseDown, as dmime allows (its CloseDown leaves it uninitialised): reAL keeps the
+ * engine (its synth and sink) and starts it over as Init would.  S_FALSE when there is none yet. */
+static HRESULT perf_reopen(rm_perf *p)
+{
+    if (!p->host) return S_FALSE;
+    dm_host_lock(p->host);
+    p->closed = FALSE;
+    perf_init_settings(p, TRUE);
+    dm_host_unlock(p->host);
     return S_OK;
 }
 
@@ -2396,11 +2435,13 @@ static HRESULT WINAPI pf_init(IDirectMusicPerformance8 *i, IDirectMusic **pdm, L
 {
     rm_perf *p = prf(i);
     LOG_CALL("music: Performance::Init");
-    if (p->host) return DMUS_E_ALREADY_INITED;
-    HRESULT hr = ensure_host(p, 22050, 64);
+    if (p->host && !p->closed) return DMUS_E_ALREADY_INITED;
+    HRESULT hr = perf_reopen(p);
+    if (hr == S_FALSE) hr = ensure_host(p, 22050, 64);
     if (FAILED(hr)) return hr;
     dm_host_lock(p->host);
     p->added[0] = 0;                        /* (the DirectX 6 way: AddPort, then AssignPChannelBlock) */
+    dm_host_port_enable(p->host, 0, p->host, 0);   /* (no port: no latency, nothing played, until AddPort) */
     dm_host_unlock(p->host);
     hand_out_dmusic(p, pdm);
     return S_OK;
@@ -2437,10 +2478,26 @@ static HRESULT WINAPI pf_getsegstate(IDirectMusicPerformance8 *i, IDirectMusicSe
     *o = (IDirectMusicSegmentState *)u;
     return S_OK;
 }
-static HRESULT WINAPI pf_setprepare(IDirectMusicPerformance8 *i, DWORD ms) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_set_prepare_time(dm_host_perf(p->host), ms)); return S_OK; }
-static HRESULT WINAPI pf_getprepare(IDirectMusicPerformance8 *i, DWORD *ms) { rm_perf *p = prf(i); if (!ms) return E_POINTER; PERF_LOCKED(p, *ms = dm_perf_get_prepare_time(dm_host_perf(p->host))); return S_OK; }
-static HRESULT WINAPI pf_setbumper(IDirectMusicPerformance8 *i, DWORD ms) { rm_perf *p = prf(i); PERF_LOCKED(p, dm_perf_set_bumper_length(dm_host_perf(p->host), ms)); return S_OK; }
-static HRESULT WINAPI pf_getbumper(IDirectMusicPerformance8 *i, DWORD *ms) { rm_perf *p = prf(i); if (!ms) return E_POINTER; PERF_LOCKED(p, *ms = dm_perf_get_bumper_length(dm_host_perf(p->host))); return S_OK; }
+/* these work before Init too (dmime keeps them in the performance; a DirectX 8 application's Init sets them back) */
+static HRESULT perf_timing(rm_perf *p, int bumper, const DWORD *set, DWORD *get)
+{
+    dm_engine_lock();                       /* (Init hands what was set before it to the engine under it) */
+    if (!p->host) {
+        DWORD *v = bumper ? &p->bumper_ms : &p->prepare_ms;
+        if (set) *v = *set;
+        else *get = *v;
+    } else {
+        dm_perf *pf = dm_host_perf(p->host);
+        if (set) { if (bumper) dm_perf_set_bumper_length(pf, *set); else dm_perf_set_prepare_time(pf, *set); }
+        else *get = bumper ? dm_perf_get_bumper_length(pf) : dm_perf_get_prepare_time(pf);
+    }
+    dm_engine_unlock();
+    return S_OK;
+}
+static HRESULT WINAPI pf_setprepare(IDirectMusicPerformance8 *i, DWORD ms) { return perf_timing(prf(i), 0, &ms, NULL); }
+static HRESULT WINAPI pf_getprepare(IDirectMusicPerformance8 *i, DWORD *ms) { if (!ms) return E_POINTER; return perf_timing(prf(i), 0, NULL, ms); }
+static HRESULT WINAPI pf_setbumper(IDirectMusicPerformance8 *i, DWORD ms) { return perf_timing(prf(i), 1, &ms, NULL); }
+static HRESULT WINAPI pf_getbumper(IDirectMusicPerformance8 *i, DWORD *ms) { if (!ms) return E_POINTER; return perf_timing(prf(i), 1, NULL, ms); }
 static HRESULT WINAPI pf_sendpmsg(IDirectMusicPerformance8 *i, DMUS_PMSG *m);
 static HRESULT WINAPI pf_m2r(IDirectMusicPerformance8 *i, MUSIC_TIME mt, REFERENCE_TIME *rt) { rm_perf *p = prf(i); if (!rt) return E_POINTER; PERF_LOCKED(p, dm_perf_m2r(dm_host_perf(p->host), mt, rt)); return S_OK; }
 static HRESULT WINAPI pf_r2m(IDirectMusicPerformance8 *i, REFERENCE_TIME rt, MUSIC_TIME *mt) { rm_perf *p = prf(i); if (!mt) return E_POINTER; PERF_LOCKED(p, dm_perf_r2m(dm_host_perf(p->host), rt, (mtime_t *)mt)); return S_OK; }
@@ -3116,27 +3173,36 @@ static rm_state *state_of(rm_perf *p, dm_segstate *ss)
     IUnknown *u = state_object(p, ss);
     return u ? sst((IDirectMusicSegmentState8 *)u) : NULL;
 }
-/* 77305a93 GetGraph, 77305b61 SetGraph: refused before Init (DX8) */
+/* 77305a93 GetGraph, 77305b61 SetGraph: refused while not initialised (before Init, after CloseDown) only to a
+ * DirectX 8 application; an older one's graph set before Init is the one Init starts with */
 static HRESULT WINAPI pf_getgraph(IDirectMusicPerformance8 *i, IDirectMusicGraph **g)
 {
     rm_perf *p = prf(i);
     if (IsBadWritePtr(g, sizeof(*g))) return E_POINTER;
-    if (!p->host) return DMUS_E_NOT_INIT;
-    dm_host_lock(p->host);
-    IDirectMusicGraph *x = dm_perf_get_graph(dm_host_perf(p->host));
-    if (x) { *g = x; IDirectMusicGraph_AddRef(x); }
-    dm_host_unlock(p->host);
-    return x ? S_OK : DMUS_E_NOT_FOUND;
+    dm_engine_lock();                       /* (Init hands what was set before it to the engine under it) */
+    IDirectMusicGraph *x = NULL;
+    HRESULT hr;
+    if ((!p->host || p->closed) && p->ver >= 8) hr = DMUS_E_NOT_INIT;
+    else {
+        x = p->host ? dm_perf_get_graph(dm_host_perf(p->host)) : p->pregraph;
+        if (x) { *g = x; IDirectMusicGraph_AddRef(x); }
+        hr = x ? S_OK : DMUS_E_NOT_FOUND;
+    }
+    dm_engine_unlock();
+    return hr;
 }
 static HRESULT WINAPI pf_setgraph(IDirectMusicPerformance8 *i, IDirectMusicGraph *g)
 {
     rm_perf *p = prf(i);
     if (g && (IsBadReadPtr(g, 4) || IsBadReadPtr(*(void **)g, 4) || IsBadCodePtr(**(FARPROC **)g))) return E_POINTER;
-    if (!p->host) return DMUS_E_NOT_INIT;
+    IDirectMusicGraph *old = NULL;
+    dm_engine_lock();
+    if ((!p->host || p->closed) && p->ver >= 8) { dm_engine_unlock(); return DMUS_E_NOT_INIT; }
     if (g) IDirectMusicGraph_AddRef(g);
-    dm_host_lock(p->host);
-    dm_perf_set_graph(dm_host_perf(p->host), g);
-    dm_host_unlock(p->host);
+    if (p->host) dm_perf_set_graph(dm_host_perf(p->host), g);
+    else { old = p->pregraph; p->pregraph = g; }
+    dm_engine_unlock();
+    if (old) IDirectMusicGraph_Release(old);
     return S_OK;
 }
 /* 77305b0d: the performance's graph, made empty if it has none (GetObjectInPath's performance stages) */
@@ -3494,14 +3560,19 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
     rm_perf *p = prf(i);
     LOG_CALL("music: Performance::InitAudio(dm %p/%p, ds %p/%p, type %lu, %lu pchannels, flags %lx)", (void *)pdm, pdm ? (void *)*pdm : NULL,
              (void *)pds, pds ? (void *)*pds : NULL, (unsigned long)type, (unsigned long)npch, (unsigned long)flags);
-    if (p->host) return DMUS_E_ALREADY_INITED;
+    if (p->host && !p->closed) return DMUS_E_ALREADY_INITED;
     p->audioflags = flags ? flags : DMUS_AUDIOF_ALL;
     uint32_t rate = 22050, voices = 64;
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {
         if ((params->dwValidData & DMUS_AUDIOPARAMS_SAMPLERATE) && params->dwSampleRate) rate = params->dwSampleRate;
         if ((params->dwValidData & DMUS_AUDIOPARAMS_VOICES) && params->dwVoices) voices = params->dwVoices;
     }
-    HRESULT hr = ensure_host(p, rate, voices);
+    HRESULT hr = perf_reopen(p);
+    if (hr == S_OK) {                       /* (again after CloseDown: the synth port added, as InitAudio adds it) */
+        dm_host_lock(p->host);
+        if (!p->added[0]) { p->added[0] = 1; dm_host_port_enable(p->host, 0, p->host, 1); }
+        dm_host_unlock(p->host);
+    } else hr = ensure_host(p, rate, voices);
     if (FAILED(hr)) return hr;
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {
         params->dwValidData |= DMUS_AUDIOPARAMS_SAMPLERATE | DMUS_AUDIOPARAMS_VOICES;
@@ -4092,6 +4163,8 @@ HRESULT rm_create(REFCLSID clsid, REFIID riid, void **out)
         p->IDirectMusicTool_iface.lpVtbl = &pft_vtbl;
         p->IDirectMusicGraph_iface.lpVtbl = &pfg_vtbl;
         p->ref = 1;
+        p->ver = 6;                         /* (7730a9ab; the QueryInterface below may raise it) */
+        p->prepare_ms = 1000; p->bumper_ms = 50;
         InitializeCriticalSection(&p->gcs);
         HRESULT hr = pf_qi(&p->IDirectMusicPerformance8_iface, riid, out);
         pf_release(&p->IDirectMusicPerformance8_iface);

@@ -13,6 +13,7 @@ typedef struct dm_host dm_host;
 
 /* rate / voices: the default synth port's parameters (DirectMusic: 22050 Hz, 64 voices); groups: channel groups */
 dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups);
+dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int channels);   /* 1 or 2 */
 /* not with the engine lock held, nor on one of the host's own threads (it waits for them, and they take the lock) */
 void dm_host_free(dm_host *h);
 int dm_host_own_thread(dm_host *h);       /* whether this thread is one of the host's */

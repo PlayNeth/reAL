@@ -50,7 +50,7 @@ void dm_perf_end_states(dm_perf *pf);
 void dm_perf_drop_all_messages(dm_perf *pf);   /* CloseDown: every queued message freed */       /* CloseDown: every segment state shut down (tracks, segment, audiopath let go) */
 /* IDirectMusicPerformance::AddPort / AssignPChannelBlock / AssignPChannel */
 int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx);
-void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx);
+void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx, int removed);
 int dm_perf_assign_block(dm_perf *pf, uint32_t block, int port, uint32_t group);
 int dm_perf_assign_pchannel(dm_perf *pf, uint32_t pch, int port, uint32_t group, uint32_t chan);
 
@@ -173,6 +173,7 @@ int dm_perf_m2r(dm_perf *pf, mtime_t mt, rtime_t *rt);
 int dm_perf_r2m(dm_perf *pf, rtime_t rt, mtime_t *mt);
 rtime_t dm_perf_latency_time(dm_perf *pf);
 rtime_t dm_perf_queue_time(dm_perf *pf);
+void dm_perf_set_dxver(dm_perf *pf, uint32_t v);
 void dm_perf_set_auto_download(dm_perf *pf, int on);
 int dm_perf_get_auto_download(dm_perf *pf);
 void dm_perf_set_prepare_time(dm_perf *pf, uint32_t ms);

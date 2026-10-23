@@ -482,6 +482,9 @@ static void play(void)
     if (!dm) return;
     DMUS_PORTPARAMS8 pp;
     memset(&pp, 0, sizeof(pp)); pp.dwSize = sizeof(pp);
+    if (GetEnvironmentVariableA("DX6TEST_MONO", NULL, 0)) {     /* (one audio channel, for checking reAL's mono port) */
+        pp.dwValidParams = DMUS_PORTPARAMS_AUDIOCHANNELS; pp.dwAudioChannels = 1;
+    }
     IDirectMusicPort *p = NULL;
     HRESULT hr = IDirectMusic8_CreatePort(dm, &GUID_NULL_, (DMUS_PORTPARAMS *)&pp, &p, NULL);
     P("  CreatePort %08lx\n", hr);

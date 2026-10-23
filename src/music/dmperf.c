@@ -36,6 +36,7 @@ typedef struct {
     uint32_t id;            /* reAL: unique in the process (a band's downloads are kept per port: dm_dlrec) */
     rtime_t lastpacked;     /* +0x00 */
     int dirty;              /* +0x14 */
+    int removed;            /* reAL: RemovePort's (dmime's has no port object then: +0x08 NULL) */
     bufev ev[BUF_BYTES / 24 + 1]; int nev; uint32_t used;
 } port;
 
@@ -117,7 +118,7 @@ struct dm_perf {
     float master;                               /* +0x340 */
     uint32_t period;                            /* +0x354 */
     int played, stopped, tempochanged;          /* +0x360 +0x364 +0x368 */
-    uint32_t dxver;                             /* +0x370 */
+    volatile uint32_t dxver;                    /* +0x370 */
     dm_segstate *ssplaying; uint32_t cfgplaying;   /* +0x374 +0x378 */
     sstrack *direct;                            /* reAL: the tracks the application plays itself (InitPlay) */
     int autodl;
@@ -1213,6 +1214,35 @@ static void flush_ports(dm_perf *pf)
     }
 }
 
+/* 7730a12a: a PChannel set back on its port (rt 0: just after what the port was last sent): its controllers' state,
+ * All Sound Off, Reset All Controllers 30 ms on, then (gm, a DirectX 8 application's, on the group's channel 0) a GM
+ * reset played at that time; nothing goes out before 60 ms on (the latency floor) */
+static void pch_reset(dm_perf *pf, pchentry *e, rtime_t rt, int gm)
+{
+    static const uint8_t gm_on[6] = { 0xf0, 0x7e, 0x7f, 0x09, 0x01, 0xf7 };     /* 7732aa18 */
+    if (e->port >= (uint32_t)pf->nports) return;
+    port *po = &pf->ports[e->port];
+    if (po->removed) return;
+    po->dirty = 1;
+    if (!rt) rt = po->lastpacked + 1;
+    else po->lastpacked = rt;
+    mg_resetall(e, 1);
+    pack(po, 0xb0 | e->chan | 0x78 << 8, rt, e->group);
+    pack(po, 0xb0 | e->chan | 0x79 << 8 | 1 << 16, rt + 300000, e->group);
+    if (!e->chan && gm && pf->dxver >= 8 && po->ops.play) {
+        dm_event ev = { rt + 300000, e->group, sizeof(gm_on), gm_on };
+        po->ops.play(po->ctx, &ev, 1);
+    }
+    pf->latfloor = rt + 600000;
+}
+/* 7730a313: every assigned PChannel (a group) set back, after what the ports have is sent */
+static void pch_reset_all(dm_perf *pf, rtime_t rt)
+{
+    flush_ports(pf);
+    for (pchblock *b = pf->blocks; b; b = b->next)
+        for (int i = 0; i < 16; i++) if (b->e[i].group) pch_reset(pf, &b->e[i], rt, 1);
+}
+
 /* ------------------------------------------------------------------ the output tool */
 /* 7730468d */
 static uint32_t curve_step(const dm_pmsg *p)
@@ -2238,14 +2268,18 @@ int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx)
 }
 
 /* reAL: a port's operations replaced (RemovePort and AddPort again: ops that play nothing, then the port's own) */
-void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx)
+void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx, int removed)
 {
     if (idx < 0 || idx >= pf->nports) return;
     pf->ports[idx].ops = *ops;
     pf->ports[idx].ctx = ctx;
+    pf->ports[idx].removed = removed;
 }
 void dm_perf_set_auto_download(dm_perf *pf, int on) { pf->autodl = on; }
 int dm_perf_get_auto_download(dm_perf *pf) { return pf->autodl; }
+/* the DirectX version the application asked for (6, 7 or 8, set by QueryInterface); read without the lock (a word
+ * written whole) */
+void dm_perf_set_dxver(dm_perf *pf, uint32_t v) { pf->dxver = v; }
 void dm_perf_set_prepare_time(dm_perf *pf, uint32_t ms) { pf->prepare_ms = ms; }
 uint32_t dm_perf_get_prepare_time(dm_perf *pf) { return pf->prepare_ms; }
 void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms) { pf->bumper_ms = ms; pf->bumper = (rtime_t)ms * 10000; }

@@ -783,6 +783,7 @@ int dm_perf_stop(dm_perf *pf, dm_segment *seg, dm_segstate *ss, mtime_t mt, uint
             for (int k = 6; k < 9; k++)
                 for (dm_segstate *s = pf->lists[k], *nx; s; s = nx) { nx = s->lnext; if (t <= s->mtlast) stop_state(pf, s, t, 1); }
             for (int k = 3; k < 6; k++) while (pf->lists[k]) stop_state(pf, pf->lists[k], t, 1);
+            pch_reset_all(pf, dm_perf_latency_time(pf));    /* (7730e05b) */
         } else
             for (int k = 0; k < 9; k++)
                 for (dm_segstate *s = pf->lists[k], *nx; s; s = nx) {

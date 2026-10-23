@@ -440,8 +440,8 @@ static void sink_pass(dm_host *h)
                 b2 = NULL;
                 break;
             }
-            case HB_DRY: case HB_STEREO:            /* two buses interleaved */
-                for (uint32_t i = 0; i < n; i++) { out[2 * i] = a[i]; out[2 * i + 1] = b2[i]; }
+            case HB_DRY: case HB_STEREO:            /* two buses interleaved (a mono host's one bus, twice) */
+                for (uint32_t i = 0; i < n; i++) { out[2 * i] = a[i]; out[2 * i + 1] = b2 ? b2[i] : a[i]; }
                 if (x->kind == HB_DRY) memcpy(dry, out, n * 4);
                 write_buffer(x->b, at, out, n, 2);
                 break;
@@ -530,7 +530,10 @@ static uint32_t host_clock_ms(void)
 }
 
 /* ------------------------------------------------------------------ construction */
-dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
+dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups) { return dm_host_new_ex(rate, voices, groups, 2); }
+/* channels 1: a mono synth (dmsynth's with one audio channel: no pan) on its one bus, the left; the dry buffer stays
+ * stereo (the host's clock counts its frames), both its channels that bus */
+dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int channels)
 {
     dm_host *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
@@ -548,7 +551,8 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     h->waveid = 0x40000000;
     h->voiceid = 1;
     if (FAILED(rl_device_acquire(&h->dev))) { h->dev = NULL; dm_host_free(h); return NULL; }
-    h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, 1);
+    int mono = channels == 1;
+    h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, !mono);
     if (h->syn) msynth_set_clock(h->syn, host_clock_ms);
     if (h->syn) msynth_set_fixes(h->syn, MS_FIX_WAVE_END | MS_FIX_WAVE_PASTEND);
     if (h->syn) msynth_set_gain(h->syn, 0);
@@ -560,7 +564,7 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     if (!h->syn || !h->dls || !h->rev || !h->dry || !h->wet) { dm_host_free(h); return NULL; }
     rl_buffer_set_sink(h->dry, 0x482c0);
     rl_buffer_set_sink(h->wet, 0x482c0);
-    h->hb[0] = (hbuf){ h->dry, HB_DRY, 2, 1, { 0, 1 }, { 0, 1 } };
+    h->hb[0] = mono ? (hbuf){ h->dry, HB_DRY, 1, 1, { 0 }, { 0 } } : (hbuf){ h->dry, HB_DRY, 2, 1, { 0, 1 }, { 0, 1 } };
     h->hb[1] = (hbuf){ h->wet, HB_REVERB, 1, 1, { 0x40 }, { 0x40 } };
     h->nextbus = 0x1000;
     dm_hostops ho = { host_clock, host_msec, host_signal };
@@ -666,7 +670,7 @@ void *dm_host_ins_download(dm_host *h, dm_collection *c, uint32_t patch, uint32_
 }
 void dm_host_ins_unload(dm_host *h, void *handle) { port_unload(h, handle); }
 int dm_host_port_add(dm_host *h, dm_host *port) { return dm_perf_add_port(h->pf, &s_portops, port); }
-void dm_host_port_enable(dm_host *h, int idx, dm_host *port, int on) { dm_perf_port_set_ops(h->pf, idx, on ? &s_portops : &s_offops, port); }
+void dm_host_port_enable(dm_host *h, int idx, dm_host *port, int on) { dm_perf_port_set_ops(h->pf, idx, on ? &s_portops : &s_offops, port, !on); }
 int dm_host_raw_download(dm_host *h, const void *buf, uint32_t size, void **handle) { return msynth_download(h->syn, buf, size, handle); }
 void dm_host_raw_unload(dm_host *h, void *handle) { sink_ul(h, handle); }
 rtime_t dm_host_clock(dm_host *h)      /* under the lock: an application's clock read races the sink otherwise */

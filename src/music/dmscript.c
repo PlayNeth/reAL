@@ -555,7 +555,7 @@ IDispatch *rm_auto_new(IUnknown *outer, int kind)
         /* the performance and its graph, without references (the object they are part of) */
         IUnknown *u;
         if (SUCCEEDED(IUnknown_QueryInterface(outer, &G_IidPerf8, (void **)&u))) { a->obj = u; IUnknown_Release(outer); }
-        if (SUCCEEDED(IUnknown_QueryInterface(outer, &G_IidGraph, (void **)&a->graph))) IUnknown_Release(outer);
+        IUnknown_QueryInterface(outer, &G_IidGraph, (void **)&a->graph);    /* (reDM's takes no reference) */
         a->seed = GetTickCount();
     }
     return &a->IDispatch_iface;

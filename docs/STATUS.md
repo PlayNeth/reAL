@@ -126,6 +126,21 @@ Doppler, and WASAPI output.
   `play` compares only what sounds; `DX6TEST_TIMES=1` prints when each note starts.
 - The master clock's and the latency clock's AdviseTime / AdvisePeriodic / Unadvise are E_NOTIMPL in Microsoft's
   DLLs too (the master clock: E_POINTER for no cookie); reDM answers the same (dx6test `clock`).
+- A CreatePort'ed port with one audio channel has a mono synth (no pan), its one bus written to both sides of the
+  host's stereo buffer.
+- The DirectX version, as dmime keeps it (+0x370): 6 when the performance is created, 7 after a QueryInterface for
+  IDirectMusicPerformance2, 8 after one for IDirectMusicPerformance8, each QueryInterface setting it again (the
+  last one asked for wins). Below 8: GetGraph / SetGraph work before Init (DMUS_E_NOT_FOUND for none) and the graph
+  set then is Init's; Init keeps the prepare time and bumper length (a DX8 application's go back to 1000 / 50 ms);
+  SendPMsg stamps no time on an untimed message (MUSICTIME keeps 0, no time flag is E_INVALIDARG); no
+  MUSICALMOSTEND; Stop of everything sends no GM reset (dx7test `6`, `7`, `8`, `qi`, `notify`, `stopall`).
+- Every version: Set/GetPrepareTime and Set/GetBumperLength work before Init; Init and InitAudio work again after
+  CloseDown (reDM keeps its engine and starts it over); Init's performance has no port until AddPort, so no latency
+  (GetLatencyTime is the time now) and nothing played (dx7test `noport`); a QueryInterface for the performance's
+  IDirectMusicGraph or IDirectMusicTool no longer keeps a reference that nothing gives back.
+- Stop of everything sets every assigned PChannel back on its port, as dmime does (7730a313): the controllers'
+  state, All Sound Off, Reset All Controllers 30 ms on, a DX8 application's GM reset on each group's channel 0, and
+  nothing sent before 60 ms on. A note held through Stop used to keep sounding (dx7test `stopall`).
 
 **DirectMusic: COM methods**
 - GetParam, SetParam and GetParamEx.
@@ -403,13 +418,13 @@ Smaller items still open:
   Microsoft's in every test so far).
 - Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the
   segment's load, as on Microsoft's). A working case needs a tool class registered in both Wine prefixes.
-- reAL treats every application as DX8 (`dxver` 8): a DX7 application calling Get/SetGraph before Init gets
-  DMUS_E_NOT_INIT, which Microsoft returns only to DX8 applications.
+- After CloseDown, methods Microsoft's refuse with DMUS_E_NOT_INIT (PChannelInfo, for one) still answer on reDM;
+  only Get/SetGraph refuse, to a DX8 application. dmime's Init also asks a DirectMusic it made for IDirectMusic2 when the version is above 6;
+  reDM's DirectMusic does not depend on that.
 - IPersistStream::Load on standalone track objects.
 - Track InitPlay/Play called directly by an application (returns E_NOTIMPL).
 - Segment::InitPlay and the DirectSound effects' DMO ProcessInput / ProcessOutput (E_NOTIMPL; games use the effects
   through SetFX).
-- A CreatePort'ed port asking for one audio channel reports a mono format but renders stereo.
 
 ## Testing
 
@@ -422,6 +437,8 @@ Smaller items still open:
   parameters, AddPort / AssignPChannelBlock / RemovePort with several ports, CreateMusicBuffer and the buffer's
   methods, PlayBuffer, the clocks' Advise calls): all match. `multiperf`'s `dx6` thread (MP_THREADS bit 0x40) runs
   that way of playing against the other threads.
+- `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|notify]` compares what changes with the interface asked for
+  (each section as DirectX 6, 7 and 8 where it differs): all match.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and
   the reAL prefix `/tmp/real/sp/realprefix` (`REAL_PREFIX`).
 - `build/lockstress.exe <seconds> <segments...> [script.spt]` (Wine) runs four threads on one loader and one
