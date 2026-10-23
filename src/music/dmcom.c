@@ -107,6 +107,10 @@ struct rm_perf {
     rm_path *defpath;
     DWORD audioflags;                       /* InitAudio's (DMUS_AUDIOF_*) */
     rm_port *port;                          /* the synth port (dmport.c) */
+    /* reAL: the port behind each of the engine's port indices: [0] the synth port, the others CreatePort'ed ones
+     * (references); and whether each is AddPort'ed (under the engine lock) */
+    rm_port *slot[8];
+    BYTE added[8];
     rm_buf *bufs;
     IDirectMusic8 *dm;
     BOOL closed;
@@ -177,9 +181,10 @@ static HRESULT WINAPI ck_gettime(IReferenceClock *i, REFERENCE_TIME *t)
     *t = x;
     return S_OK;
 }
-static HRESULT WINAPI ck_advise(IReferenceClock *i, REFERENCE_TIME a, REFERENCE_TIME b, HEVENT e, DWORD_PTR *c) { return rm_notimpl(__func__); }
-static HRESULT WINAPI ck_advper(IReferenceClock *i, REFERENCE_TIME a, REFERENCE_TIME b, HSEMAPHORE s, DWORD_PTR *c) { return rm_notimpl(__func__); }
-static HRESULT WINAPI ck_unadvise(IReferenceClock *i, DWORD_PTR c) { return rm_notimpl(__func__); }
+/* dmusic's master clock does not do these either (tests/dx6test.c clock: E_NOTIMPL, E_POINTER for no cookie) */
+static HRESULT WINAPI ck_advise(IReferenceClock *i, REFERENCE_TIME a, REFERENCE_TIME b, HEVENT e, DWORD_PTR *c) { return c ? E_NOTIMPL : E_POINTER; }
+static HRESULT WINAPI ck_advper(IReferenceClock *i, REFERENCE_TIME a, REFERENCE_TIME b, HSEMAPHORE s, DWORD_PTR *c) { return c ? E_NOTIMPL : E_POINTER; }
+static HRESULT WINAPI ck_unadvise(IReferenceClock *i, DWORD_PTR c) { return E_NOTIMPL; }
 static IReferenceClockVtbl ck_vtbl = { ck_qi, ck_addref, ck_release, ck_gettime, ck_advise, ck_advper, ck_unadvise };
 
 static IReferenceClock *new_clock(void)
@@ -214,15 +219,14 @@ static HRESULT WINAPI dmu_enumport(IDirectMusic8 *i, DWORD n, LPDMUS_PORTCAPS c)
     c->dwMemorySize = DMUS_PC_SYSTEMMEMORY;
     c->dwMaxChannelGroups = 1000; c->dwMaxVoices = 1000; c->dwMaxAudioChannels = 2;
     c->dwEffectFlags = DMUS_EFFECT_REVERB;
-    lstrcpyW(c->wszDescription, L"reDM Synthesizer");
+    lstrcpyW(c->wszDescription, L"Microsoft Synthesizer");   /* (as dmusic lists it, and GetCaps names it) */
     return S_OK;
 }
-static HRESULT WINAPI dmu_createbuffer(IDirectMusic8 *i, LPDMUS_BUFFERDESC d, LPDIRECTMUSICBUFFER *b, LPUNKNOWN o) { return rm_notimpl(__func__); }
+static HRESULT WINAPI dmu_createbuffer(IDirectMusic8 *i, LPDMUS_BUFFERDESC d, LPDIRECTMUSICBUFFER *b, LPUNKNOWN o) { return rm_mbuf_create(d, b, o); }
+/* a synth port of its own each time (dmport.c), as dmusic's; GUID_NULL is the default port, the synth */
 static HRESULT WINAPI dmu_createport(IDirectMusic8 *i, REFCLSID c, LPDMUS_PORTPARAMS p, LPDIRECTMUSICPORT *port, LPUNKNOWN o)
 {
-    LOG_INFO("music: IDirectMusic::CreatePort is not supported");
-    if (port) *port = NULL;
-    return rm_notimpl(__func__);
+    return rm_port_create(c, p, port, o);
 }
 static HRESULT WINAPI dmu_enumclock(IDirectMusic8 *i, DWORD n, LPDMUS_CLOCKINFO c) { return n ? S_FALSE : E_NOTIMPL; }
 static HRESULT WINAPI dmu_getclock(IDirectMusic8 *i, LPGUID g, IReferenceClock **c)
@@ -2328,6 +2332,7 @@ static void pf_teardown(rm_perf *p)
     rm_port_detach(p->port);
     rm_port_release(p->port);
     dm_host_free(p->host);
+    for (int k = 1; k < 8; k++) rm_port_release(p->slot[k]);  /* (CreatePort'ed: their synths may go now) */
     if (p->dm) IDirectMusic8_Release(p->dm);
     rm_auto_free(p->autod);
     while (p->globals) { struct rm_global *e = p->globals; p->globals = e->next; free(e->data); free(e); }
@@ -2365,6 +2370,8 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
     p->host = dm_host_new(rate ? rate : 22050, voices ? voices : 64, 64);
     if (!p->host) return E_OUTOFMEMORY;
     p->port = rm_port_new(p->host);
+    p->slot[0] = p->port;
+    p->added[0] = 1;                        /* (InitAudio's; Init's is not, until AddPort) */
     p->revparams.fInGain = 0; p->revparams.fReverbMix = 0; p->revparams.fReverbTime = 1000; p->revparams.fHighFreqRTRatio = 0.001f;
     dm_host_lock(p->host);
     rm_perf **q = &s_perfs;
@@ -2392,6 +2399,9 @@ static HRESULT WINAPI pf_init(IDirectMusicPerformance8 *i, IDirectMusic **pdm, L
     if (p->host) return DMUS_E_ALREADY_INITED;
     HRESULT hr = ensure_host(p, 22050, 64);
     if (FAILED(hr)) return hr;
+    dm_host_lock(p->host);
+    p->added[0] = 0;                        /* (the DirectX 6 way: AddPort, then AssignPChannelBlock) */
+    dm_host_unlock(p->host);
     hand_out_dmusic(p, pdm);
     return S_OK;
 }
@@ -3196,28 +3206,91 @@ static HRESULT WINAPI pf_remnotif(IDirectMusicPerformance8 *i, REFGUID g)
     PERF_LOCKED(p, hr = dm_perf_remove_notification_type(dm_host_perf(p->host), (const dm_guid *)g));
     return hr;
 }
+/* the engine's index of a port the performance has (AddPort'ed or not, -1 for none), with the engine lock held */
+static int perf_slot(rm_perf *p, rm_port *rp)
+{
+    for (int k = 0; rp && k < 8; k++) if (p->slot[k] == rp) return k;
+    return -1;
+}
+/* as dmime: a port AddPort'ed again is S_OK; NULL is the synth port, PChannels 0-15 on its channel group 1 when none
+ * are assigned yet.  A CreatePort'ed port joins the engine's ports (its own synth); another performance's port is
+ * refused. */
 static HRESULT WINAPI pf_addport(IDirectMusicPerformance8 *i, IDirectMusicPort *port)
 {
     rm_perf *p = prf(i);
-    PERF_LOCKED(p, if (!dm_perf_pchannels(dm_host_perf(p->host))) dm_perf_assign_block(dm_host_perf(p->host), 0, 0, 1));
-    return S_OK;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    rm_port *rp = port ? rm_port_of(port) : p->port;
+    dm_host *own = rp ? rm_port_own_host(rp) : NULL;
+    if (!rp || (rp != p->port && !own)) {
+        LOG_INFO("music: Performance::AddPort(%p): not a port of this performance's or IDirectMusic::CreatePort's", (void *)port);
+        return E_INVALIDARG;
+    }
+    HRESULT hr = S_OK;
+    long vol = 0;
+    int hasvol = 0;
+    EnterCriticalSection(&p->gcs);
+    for (struct rm_global *e = p->globals; e; e = e->next)
+        if (IsEqualGUID(&e->g, &GUID_PerfMasterVolume) && e->size == 4) { memcpy(&vol, e->data, 4); hasvol = 1; }
+    LeaveCriticalSection(&p->gcs);
+    dm_host_lock(p->host);
+    int k = perf_slot(p, rp);
+    if (k < 0) {
+        k = dm_host_port_add(p->host, own);
+        if (k < 1 || k >= 8) { hr = E_OUTOFMEMORY; k = -1; }
+        else { p->slot[k] = rp; IDirectMusicPort_AddRef(port); }
+    } else if (!p->added[k]) dm_host_port_enable(p->host, k, k ? own : p->host, 1);
+    if (k > 0 && hasvol) dm_host_set_volume(own, vol);     /* (the master volume already set) */
+    if (k >= 0) p->added[k] = 1;
+    if (!port && !dm_perf_pchannels(dm_host_perf(p->host))) dm_perf_assign_block(dm_host_perf(p->host), 0, 0, 1);
+    dm_host_unlock(p->host);
+    LOG_CALL("music: Performance::AddPort(%p) -> %08lx (port %d)", (void *)port, (unsigned long)hr, k);
+    return hr;
 }
-static HRESULT WINAPI pf_remport(IDirectMusicPerformance8 *i, IDirectMusicPort *port) { return S_OK; }
-static HRESULT WINAPI pf_assignblock(IDirectMusicPerformance8 *i, DWORD b, IDirectMusicPort *port, DWORD g)
+/* E_INVALIDARG for a port not added; the PChannels on it stay assigned, to no port (PChannelInfo), and play nothing */
+static HRESULT WINAPI pf_remport(IDirectMusicPerformance8 *i, IDirectMusicPort *port)
 {
     rm_perf *p = prf(i);
-    int hr;
-    if (!port) return E_POINTER;
-    PERF_LOCKED(p, hr = dm_perf_assign_block(dm_host_perf(p->host), b, 0, g));
+    if (!port) return S_OK;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    rm_port *rp = rm_port_of(port);
+    HRESULT hr = E_INVALIDARG;
+    dm_host_lock(p->host);
+    int k = perf_slot(p, rp);
+    if (k >= 0 && p->added[k]) {
+        p->added[k] = 0;
+        dm_host_port_enable(p->host, k, k ? rm_port_own_host(rp) : p->host, 0);
+        hr = S_OK;
+    }
+    dm_host_unlock(p->host);
     return hr;
+}
+/* the PChannels to an AddPort'ed port (E_INVALIDARG for another); S_FALSE when the group is beyond the port's channel
+ * groups (assigned all the same), as dmime answers */
+static HRESULT perf_assign(rm_perf *p, IDirectMusicPort *port, DWORD first, DWORD n, DWORD g, DWORD c)
+{
+    if (!port) return E_POINTER;
+    if (!p->host) return DMUS_E_NOT_INIT;
+    rm_port *rp = rm_port_of(port);
+    HRESULT hr;
+    dm_host_lock(p->host);
+    int k = perf_slot(p, rp);
+    if (k < 0 || !p->added[k]) hr = E_INVALIDARG;
+    else {
+        DWORD have = rm_port_groups(rp);
+        dm_perf *pf = dm_host_perf(p->host);
+        hr = n == 16 ? dm_perf_assign_block(pf, first / 16, k, g) : dm_perf_assign_pchannel(pf, first, k, g, c);
+        if (hr == S_OK && g > have) hr = S_FALSE;
+    }
+    dm_host_unlock(p->host);
+    return hr;
+}
+static HRESULT WINAPI pf_assignblock(IDirectMusicPerformance8 *i, DWORD b, IDirectMusicPort *port, DWORD g)
+{
+    return perf_assign(prf(i), port, b * 16, 16, g, 0);
 }
 static HRESULT WINAPI pf_assignpch(IDirectMusicPerformance8 *i, DWORD pch, IDirectMusicPort *port, DWORD g, DWORD c)
 {
-    rm_perf *p = prf(i);
-    int hr;
-    if (!port) return E_POINTER;
-    PERF_LOCKED(p, hr = dm_perf_assign_pchannel(dm_host_perf(p->host), pch, 0, g, c));
-    return hr;
+    return perf_assign(prf(i), port, pch, 1, g, c);
 }
 /* 7730672d */
 static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirectMusicPort **port, DWORD *g, DWORD *c)
@@ -3227,9 +3300,12 @@ static HRESULT WINAPI pf_pchinfo(IDirectMusicPerformance8 *i, DWORD pch, IDirect
         return E_POINTER;
     if (!p->host) return DMUS_E_NOT_INIT;
     int idx = 0, hr; uint32_t grp = 0, ch = 0;
-    PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch));
+    IDirectMusicPort *pp = NULL;            /* (none when its port was removed) */
+    PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch);
+                if (hr >= 0 && idx >= 0 && idx < 8 && p->added[idx] && p->slot[idx]) rm_port_query(p->slot[idx], &IID_IDirectMusicPort, (void **)&pp));
     if (hr < 0) return E_INVALIDARG;
-    if (port) { *port = NULL; if (p->port) rm_port_query(p->port, &IID_IDirectMusicPort, (void **)port); }
+    if (port) *port = pp;
+    else if (pp) IDirectMusicPort_Release(pp);
     if (g) *g = grp;
     if (c) *c = ch;
     return S_OK;
@@ -3245,11 +3321,11 @@ static HRESULT WINAPI pf_downloadinst(IDirectMusicPerformance8 *i, IDirectMusicI
         return E_POINTER;
     if (!p->host || !p->port) return DMUS_E_NOT_INIT;
     int idx = 0, hr; uint32_t grp = 0, ch = 0;
-    PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch));
-    if (hr < 0) return E_INVALIDARG;
     IDirectMusicPort *pt = NULL;
-    HRESULT h = rm_port_query(p->port, &IID_IDirectMusicPort, (void **)&pt);
-    if (FAILED(h)) return h;
+    PERF_LOCKED(p, hr = dm_perf_pchannel_info(dm_host_perf(p->host), pch, &idx, &grp, &ch);
+                if (hr >= 0 && idx >= 0 && idx < 8 && p->added[idx] && p->slot[idx]) rm_port_query(p->slot[idx], &IID_IDirectMusicPort, (void **)&pt));
+    if (hr < 0 || !pt) return E_INVALIDARG;
+    HRESULT h;
     h = IDirectMusicPort_DownloadInstrument(pt, in, d, r, n);
     if (FAILED(h)) { IDirectMusicPort_Release(pt); return h; }
     *port = pt;
@@ -3322,7 +3398,12 @@ static HRESULT WINAPI pf_setglobal(IDirectMusicPerformance8 *i, REFGUID g, void 
         if (p->host) { dm_host_lock(p->host); dm_perf_set_master_tempo(dm_host_perf(p->host), *(float *)v); dm_host_unlock(p->host); }
     } else if (IsEqualGUID(g, &GUID_PerfMasterVolume)) {
         if (sz != 4) return E_INVALIDARG;
-        if (p->host) dm_host_set_volume(p->host, *(long *)v);
+        if (p->host) {
+            dm_host_set_volume(p->host, *(long *)v);
+            dm_host_lock(p->host);              /* (each port's synth, as dmime sets the volume on each port) */
+            for (int k = 1; k < 8; k++) if (p->slot[k] && p->added[k]) dm_host_set_volume(rm_port_own_host(p->slot[k]), *(long *)v);
+            dm_host_unlock(p->host);
+        }
     }
     struct rm_global *e;
     EnterCriticalSection(&p->gcs);

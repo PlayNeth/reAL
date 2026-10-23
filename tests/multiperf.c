@@ -7,6 +7,10 @@
  *   steady:  a second performance that lives throughout, playing the same segments churn plays;
  *   editor:  those shared segments edited while both performances play them (repeats, a track inserted and taken
  *            out again, a track's parameters, notification types, clones);
+ *   dx6:     the DirectX 6/7 way, a performance made with Init and IDirectMusic::CreatePort's port (AddPort,
+ *            AssignPChannelBlock), segments played on it, MIDI through CreateMusicBuffer and PlayBuffer, the shared
+ *            collection's instruments downloaded one at a time (Port's and Performance's DownloadInstrument); the port
+ *            and the downloads let go of before or after the performance;
  *   reloader / objuser: styles, a chord map, a collection and a wave loaded again and again while another thread
  *            uses them (their bands downloaded, motifs, names, the composer, SetParam of each on the shared segments);
  *   (churn also plays a track itself (Track::InitPlay) on each of its performances, and ends it (EndPlay) after that
@@ -16,7 +20,7 @@
  * A watchdog reports a deadlock (no thread moving for 10 s) and ends the process with exit code 3; a crash ends it
  * otherwise.  multiperf.exe <seconds> <segment>...  (in a folder with the segments and compsty.sty, mix1.sty,
  * cmap1.cdm, bells.dls, tone.wav; MP_THREADS=<mask> runs only some threads: churn 1, user 2, steady 4, editor 8,
- * reloader 0x10, objuser 0x20) */
+ * reloader 0x10, objuser 0x20, dx6 0x40) */
 #define COBJMACROS
 #include <windows.h>
 #include <dmusici.h>
@@ -37,7 +41,7 @@ static IDirectMusicLoader8 *g_loader;
 static IDirectMusicSegment8 *g_segs[16];
 static WCHAR g_files[16][MAX_PATH];
 static int g_nsegs;
-static volatile LONG g_stop, g_moves[6], g_bad;
+static volatile LONG g_stop, g_moves[7], g_bad;
 /* the objects loaded again (reloader) while used (objuser): styles, a chord map, a collection, a wave */
 static const WCHAR *g_objfiles[5] = { L"compsty.sty", L"mix1.sty", L"cmap1.cdm", L"bells.dls", L"tone.wav" };
 static IUnknown *g_objs[5];
@@ -355,6 +359,80 @@ static DWORD WINAPI th_objuser(void *x)
     return 0;
 }
 
+static DWORD WINAPI th_dx6(void *x)
+{
+    CoInitialize(NULL);
+    for (int n = 0; !g_stop; n++) {
+        IDirectMusicPerformance8 *p = NULL;
+        IDirectMusic *dm1 = NULL;
+        IDirectMusic8 *dm = NULL;
+        CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&p);
+        if (!p || FAILED(IDirectMusicPerformance8_Init(p, &dm1, NULL, NULL)) || !dm1) {
+            InterlockedIncrement(&g_bad);
+            if (p) IDirectMusicPerformance8_Release(p);
+            Sleep(10);
+            continue;
+        }
+        IDirectMusic_QueryInterface(dm1, &IID_IDirectMusic8, (void **)&dm);
+        IDirectMusic_Release(dm1);
+        DMUS_PORTPARAMS8 pp;
+        memset(&pp, 0, sizeof(pp)); pp.dwSize = sizeof(pp);
+        pp.dwValidParams = DMUS_PORTPARAMS_CHANNELGROUPS; pp.dwChannelGroups = 1 + n % 2;
+        IDirectMusicPort *port = NULL;
+        if (FAILED(IDirectMusic8_CreatePort(dm, &GUID_NULL, (DMUS_PORTPARAMS *)&pp, &port, NULL)) || !port) InterlockedIncrement(&g_bad);
+        IDirectMusicDownloadedInstrument *di[2] = { NULL, NULL };
+        IDirectMusicInstrument *ins = NULL;
+        IDirectMusicBuffer *b = NULL;
+        if (port) {
+            IDirectMusicPort_Activate(port, TRUE);
+            if (FAILED(IDirectMusicPerformance8_AddPort(p, port)) ||
+                FAILED(IDirectMusicPerformance8_AssignPChannelBlock(p, 0, port, 1))) InterlockedIncrement(&g_bad);
+            IDirectMusicPerformance8_AssignPChannelBlock(p, 1, port, 2);
+            play_some(p, n);
+            IDirectMusicCollection *col = (IDirectMusicCollection *)g_objs[3];
+            DWORD patch; WCHAR nm[64];
+            if (col && IDirectMusicCollection_EnumInstrument(col, n % 3, &patch, nm, 64) == S_OK &&
+                SUCCEEDED(IDirectMusicCollection_GetInstrument(col, patch, &ins)) && ins) {
+                IDirectMusicInstrument_SetPatch(ins, n % 128);
+                IDirectMusicPort_DownloadInstrument(port, ins, &di[0], NULL, 0);
+                IDirectMusicPort *pp2 = NULL; DWORD g, c;
+                DMUS_NOTERANGE r = { 0, 60 };
+                IDirectMusicPerformance8_DownloadInstrument(p, ins, 17, &di[1], &r, 1, &pp2, &g, &c);
+                if (pp2) IDirectMusicPort_Release(pp2);
+            }
+            DMUS_BUFFERDESC d;
+            memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.cbBuffer = 128;
+            if (SUCCEEDED(IDirectMusic8_CreateMusicBuffer(dm, &d, &b, NULL)) && b) {
+                REFERENCE_TIME now = 0;
+                IReferenceClock *mc = NULL;
+                IDirectMusic8_GetMasterClock(dm, NULL, &mc);
+                if (mc) { IReferenceClock_GetTime(mc, &now); IReferenceClock_Release(mc); }
+                IDirectMusicBuffer_PackStructured(b, now, 1, 0x00403c90 | (n % 16));
+                IDirectMusicBuffer_PackStructured(b, now + 200000, 2, 0x00403e90);
+                IDirectMusicBuffer_PackStructured(b, now + 500000, 0, 0x000078b0);
+                IDirectMusicPort_PlayBuffer(port, b);
+            }
+        }
+        Sleep(n % 5);
+        if (n % 4 == 1 && port) IDirectMusicPerformance8_RemovePort(p, port);
+        if (n % 2 && port) {        /* the port and its downloads let go of before the performance */
+            for (int k = 0; k < 2; k++) if (di[k]) { if (n % 3) IDirectMusicPort_UnloadInstrument(port, di[k]); IDirectMusicDownloadedInstrument_Release(di[k]); di[k] = NULL; }
+            IDirectMusicPort_Release(port); port = NULL;
+        }
+        IDirectMusicPerformance8_CloseDown(p);
+        IDirectMusicPerformance8_Release(p);
+        if (b && port) IDirectMusicPort_PlayBuffer(port, b);      /* (the port outlives the performance) */
+        for (int k = 0; k < 2; k++) if (di[k]) { if (port) IDirectMusicPort_UnloadInstrument(port, di[k]); IDirectMusicDownloadedInstrument_Release(di[k]); }
+        if (port) IDirectMusicPort_Release(port);
+        if (b) IDirectMusicBuffer_Release(b);
+        if (ins) IDirectMusicInstrument_Release(ins);
+        if (dm) IDirectMusic8_Release(dm);
+        InterlockedIncrement(&g_moves[6]);
+    }
+    CoUninitialize();
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     void *volatile keep = (void *)DirectSoundCreate; (void)keep;     /* reAL loaded as a DirectSound game loads it */
@@ -378,22 +456,22 @@ int main(int argc, char **argv)
     for (int k = 0; k < 5; k++)
         if (FAILED(IDirectMusicLoader8_LoadObjectFromFile(g_loader, cls[k], &IID_IUnknown, (WCHAR *)g_objfiles[k], (void **)&g_objs[k])))
             g_objs[k] = NULL;
-    LPTHREAD_START_ROUTINE fn[6] = { th_churn, th_user, th_steady, th_editor, th_reloader, th_objuser };
-    HANDLE th[6];
+    LPTHREAD_START_ROUTINE fn[7] = { th_churn, th_user, th_steady, th_editor, th_reloader, th_objuser, th_dx6 };
+    HANDLE th[7];
     int nth = 0;
     const char *mask = getenv("MP_THREADS");          /* (which threads, a bit each in the order above: all by default) */
-    unsigned m = mask ? (unsigned)strtoul(mask, NULL, 0) : 0x3f;
-    for (int k = 0; k < 6; k++) if (m & (1u << k)) th[nth++] = CreateThread(NULL, 0, fn[k], NULL, 0, NULL);
-    LONG last[6] = { 0 };
+    unsigned m = mask ? (unsigned)strtoul(mask, NULL, 0) : 0x7f;
+    for (int k = 0; k < 7; k++) if (m & (1u << k)) th[nth++] = CreateThread(NULL, 0, fn[k], NULL, 0, NULL);
+    LONG last[7] = { 0 };
     DWORD still = GetTickCount(), end = GetTickCount() + secs * 1000;
     while ((LONG)(GetTickCount() - end) < 0) {
         Sleep(250);
         int moved = 0;
-        for (int k = 0; k < 6; k++) if (g_moves[k] != last[k]) { moved = 1; last[k] = g_moves[k]; }
+        for (int k = 0; k < 7; k++) if (g_moves[k] != last[k]) { moved = 1; last[k] = g_moves[k]; }
         if (moved) still = GetTickCount();
         else if (GetTickCount() - still > 10000) {
             printf("DEADLOCK: no thread moved for 10 s (performances %ld, port calls %ld, plays %ld, edits %ld, reloads %ld, "
-                   "object calls %ld)\n", g_moves[0], g_moves[1], g_moves[2], g_moves[3], g_moves[4], g_moves[5]);
+                   "object calls %ld, DirectX 6 performances %ld)\n", g_moves[0], g_moves[1], g_moves[2], g_moves[3], g_moves[4], g_moves[5], g_moves[6]);
             fflush(stdout);
             TerminateProcess(GetCurrentProcess(), 3);
         }
@@ -407,8 +485,8 @@ int main(int argc, char **argv)
     }
     if (g_port) IDirectMusicPort_Release(g_port);
     if (g_lat) IReferenceClock_Release(g_lat);
-    printf("%s: performances %ld, port calls %ld, plays %ld, edits %ld, reloads %ld, object calls %ld, objects %d, failures %ld\n",
-           g_bad ? "FAILED" : "ok", g_moves[0], g_moves[1], g_moves[2], g_moves[3], g_moves[4], g_moves[5],
+    printf("%s: performances %ld, port calls %ld, plays %ld, edits %ld, reloads %ld, object calls %ld, DirectX 6 performances %ld, "
+           "objects %d, failures %ld\n", g_bad ? "FAILED" : "ok", g_moves[0], g_moves[1], g_moves[2], g_moves[3], g_moves[4], g_moves[5], g_moves[6],
            !!g_objs[0] + !!g_objs[1] + !!g_objs[2] + !!g_objs[3] + !!g_objs[4], g_bad);
     for (int i = 0; i < g_nsegs; i++) IDirectMusicSegment8_Release(g_segs[i]);
     for (int k = 0; k < 5; k++) if (g_objs[k]) IUnknown_Release(g_objs[k]);

@@ -33,13 +33,43 @@ typedef struct rm_dlrec {
     DWORD id;
 } rm_dlrec;
 
+/* IDirectMusic::CreateMusicBuffer's buffer (dmusic's CDirectMusicBuffer): DMUS_EVENTHEADERs (20 bytes: the size of the
+ * data, the channel group, the offset from the start time, the flags) each followed by its data, each event 8-byte
+ * aligned, kept in time order */
+typedef struct rm_mbuf {
+    IDirectMusicBuffer IDirectMusicBuffer_iface;
+    LONG ref;
+    SRWLOCK lock;
+    BYTE *data;
+    DWORD max, used, rd;
+    REFERENCE_TIME start;
+    GUID fmt;
+} rm_mbuf;
+#define EVH 20                          /* sizeof(DMUS_EVENTHEADER) */
+/* the event at offset o, whole within the bytes used (0 when there is none: past the end, or cut off by SetUsedBytes);
+ * its data size, offset from the start time and the next event's offset */
+static int ev_at(const rm_mbuf *b, DWORD o, DWORD *cb, LONGLONG *delta, DWORD *next)
+{
+    if (o > b->used || b->used - o < EVH) return 0;
+    DWORD c;
+    memcpy(&c, b->data + o, 4);
+    if (c > b->used - o - EVH) return 0;
+    if (cb) *cb = c;
+    if (delta) memcpy(delta, b->data + o + 8, 8);
+    if (next) *next = o + ((EVH + c + 7) & ~7u);    /* (no overflow: c < used) */
+    return 1;
+}
+
 struct rm_port {
     IDirectMusicPort IDirectMusicPort_iface;
     IDirectMusicPortDownload IDirectMusicPortDownload_iface;
     IKsControl IKsControl_iface;
     LONG ref;
     dm_host *host;                      /* NULL once the performance closed down (under the engine lock) */
-    DWORD groups;                       /* SetNumChannelGroups beyond what the PChannels use */
+    DWORD groups;                       /* SetNumChannelGroups beyond what the PChannels use; a CreatePort'ed one's all */
+    BOOL own;                           /* IDirectMusic::CreatePort's: a synth of its own (the host), freed with it */
+    volatile LONG active;               /* Activate */
+    WORD chans;                         /* GetFormat's channels */
     rm_dlrec *dls;                      /* the application's downloads (under the engine lock) */
     struct rm_dlins *ins;               /* its DownloadInstrument downloads, each a reference (engine lock) */
 };
@@ -95,7 +125,13 @@ static void dlins_free_list(rm_dlins *o)
 static ULONG port_release(rm_port *p)
 {
     LONG r = InterlockedDecrement(&p->ref);
-    if (!r) { dlrecs_free(p->dls); dlins_free_list(p->ins); free(p); }
+    if (!r) {
+        dm_host *h = p->own ? p->host : NULL;
+        if (h) rm_port_detach(p);       /* (its downloads go with its synth) */
+        dlrecs_free(p->dls); dlins_free_list(p->ins);
+        free(p);
+        dm_host_free(h);
+    }
     return r;
 }
 
@@ -112,6 +148,7 @@ static void port_drop(void) { dm_engine_unlock(); }
 
 static DWORD port_groups(rm_port *p)
 {
+    if (p->own) return p->groups;
     dm_host *h = port_hold(p);
     if (!h) return p->groups;
     DWORD g = dm_perf_port_groups(dm_host_perf(h));
@@ -123,42 +160,57 @@ static DWORD port_groups(rm_port *p)
 static HRESULT WINAPI dp_QueryInterface(IDirectMusicPort *i, REFIID riid, void **out) { return port_qi(pt(i), riid, out); }
 static ULONG WINAPI dp_AddRef(IDirectMusicPort *i) { return InterlockedIncrement(&pt(i)->ref); }
 static ULONG WINAPI dp_Release(IDirectMusicPort *i) { return port_release(pt(i)); }
+static rm_mbuf *mbuf_of(IDirectMusicBuffer *i);
+static void mbuf_lock(rm_mbuf *b);
+static void mbuf_unlock(rm_mbuf *b);
+/* the buffer's events, each at its time (the buffer's start time plus its offset, in reference time; one already
+ * past as soon as possible) on its channel group (0: all of them), as dmusic's synth port plays them.  Read before
+ * the engine lock is taken: an application's own buffer object is not called with it held. */
 static HRESULT WINAPI dp_PlayBuffer(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b)
 {
     rm_port *p = pt(i);
     if (!b) return E_POINTER;
-    dm_host *h = port_hold(p);
-    if (!h) return DMUS_E_NOT_INIT;
-    port_drop();
-    /* the buffer's events, played now (reDM hands out no buffers of its own; an application's works).  Read first:
-     * the buffer is the application's object, not called with the engine lock held. */
-    IDirectMusicBuffer_ResetReadPtr(b);
-    REFERENCE_TIME t; DWORD g, len; BYTE *d;
+    if (!p->active) return DMUS_E_SYNTHINACTIVE;
+    typedef struct { REFERENCE_TIME t; DWORD g, len; } evh;
     BYTE *ev = NULL;
     size_t n = 0, cap = 0;
-    while (IDirectMusicBuffer_GetNextEvent(b, &t, &g, &len, &d) == S_OK) {
-        if (!len || !d) continue;
-        if (n + sizeof(DWORD) + len > cap) {
+    rm_mbuf *mb = mbuf_of(b);
+    if (mb) mbuf_lock(mb);
+    else IDirectMusicBuffer_ResetReadPtr(b);
+    DWORD rd = 0;
+    for (;;) {
+        evh e; BYTE *d = NULL;
+        if (mb) {               /* (ours read without moving its read pointer) */
+            DWORD nx; LONGLONG dt;
+            if (!ev_at(mb, rd, &e.len, &dt, &nx)) break;
+            memcpy(&e.g, mb->data + rd + 4, 4);
+            e.t = mb->start + dt; d = mb->data + rd + EVH;
+            rd = nx;
+        } else if (IDirectMusicBuffer_GetNextEvent(b, &e.t, &e.g, &e.len, &d) != S_OK) break;
+        if (!e.len || !d || e.len > 0x10000) continue;     /* (a message no synth takes: an application's own buffer) */
+        if (n + sizeof(e) + e.len > cap) {
             size_t c = cap ? cap * 2 : 256;
-            while (c < n + sizeof(DWORD) + len) c *= 2;
+            while (c < n + sizeof(e) + e.len) c *= 2;
             BYTE *x = realloc(ev, c);
-            if (!x) { free(ev); return E_OUTOFMEMORY; }
+            if (!x) { free(ev); if (mb) mbuf_unlock(mb); return E_OUTOFMEMORY; }
             ev = x; cap = c;
         }
-        memcpy(ev + n, &len, sizeof(DWORD)); memcpy(ev + n + sizeof(DWORD), d, len);
-        n += sizeof(DWORD) + len;
+        memcpy(ev + n, &e, sizeof(e)); memcpy(ev + n + sizeof(e), d, e.len);
+        n += sizeof(e) + e.len;
     }
-    if ((h = port_hold(p))) {
+    if (mb) mbuf_unlock(mb);
+    dm_host *h = port_hold(p);
+    if (h) {
         for (size_t k = 0; k < n; ) {
-            DWORD l;
-            memcpy(&l, ev + k, sizeof(DWORD));
-            dm_host_midi(h, ev + k + sizeof(DWORD), l);
-            k += sizeof(DWORD) + l;
+            evh e;
+            memcpy(&e, ev + k, sizeof(e));
+            dm_host_midi_at(h, e.t, e.g, ev + k + sizeof(e), e.len);
+            k += sizeof(e) + e.len;
         }
         port_drop();
     }
     free(ev);
-    return S_OK;
+    return h ? S_OK : DMUS_E_NOT_INIT;
 }
 static HRESULT WINAPI dp_SetReadNotificationHandle(IDirectMusicPort *i, HANDLE e) { return E_NOTIMPL; }
 static HRESULT WINAPI dp_Read(IDirectMusicPort *i, LPDIRECTMUSICBUFFER b) { return b ? E_NOTIMPL : E_POINTER; }
@@ -193,6 +245,7 @@ static HRESULT WINAPI dp_DownloadInstrument(IDirectMusicPort *i, IDirectMusicIns
                                             DMUS_NOTERANGE *r, DWORD n)
 {
     rm_port *p = pt(i);
+    if (n > 0x100000) return E_INVALIDARG;     /* (more ranges than keys: the sizes below cannot overflow) */
     if (!in || !d || IsBadWritePtr(d, sizeof(*d)) || (n && (!r || IsBadReadPtr(r, n * sizeof(*r))))) return E_POINTER;
     *d = NULL;
     dm_collection *c;
@@ -324,7 +377,7 @@ static HRESULT WINAPI dp_GetNumChannelGroups(IDirectMusicPort *i, LPDWORD n)
     *n = port_groups(pt(i));
     return S_OK;
 }
-static HRESULT WINAPI dp_Activate(IDirectMusicPort *i, WINBOOL on) { return S_OK; }
+static HRESULT WINAPI dp_Activate(IDirectMusicPort *i, WINBOOL on) { InterlockedExchange(&pt(i)->active, on != 0); return S_OK; }
 static HRESULT priority(rm_port *p, DWORD g, DWORD c, DWORD *prio, int set)
 {
     if (!g || g > port_groups(p) || c > 15) return E_INVALIDARG;
@@ -354,7 +407,7 @@ static HRESULT WINAPI dp_GetFormat(IDirectMusicPort *i, LPWAVEFORMATEX wf, LPDWO
     if (h) { rate = dm_host_rate(h); port_drop(); }
     if (wf) {
         if (*size < sizeof(WAVEFORMATEX)) return E_INVALIDARG;
-        WAVEFORMATEX f = { WAVE_FORMAT_PCM, 1, rate, rate * 2, 2, 16, 0 };
+        WAVEFORMATEX f = { WAVE_FORMAT_PCM, p->chans, rate, rate * 2 * p->chans, (WORD)(2 * p->chans), 16, 0 };
         *wf = f;
     }
     *size = sizeof(WAVEFORMATEX);
@@ -631,6 +684,279 @@ static HRESULT sink_new(rm_port *p, int latency, REFIID riid, void **out)
     return hr;
 }
 
+/* ------------------------------------------------------------------ IDirectMusicBuffer */
+static IDirectMusicBufferVtbl mb_vtbl;
+static rm_mbuf *mb(IDirectMusicBuffer *i) { return CONTAINING_RECORD(i, rm_mbuf, IDirectMusicBuffer_iface); }
+static rm_mbuf *mbuf_of(IDirectMusicBuffer *i) { return i && !IsBadReadPtr(i, sizeof(void *)) && i->lpVtbl == &mb_vtbl ? mb(i) : NULL; }
+static void mbuf_lock(rm_mbuf *b) { AcquireSRWLockExclusive(&b->lock); }
+static void mbuf_unlock(rm_mbuf *b) { ReleaseSRWLockExclusive(&b->lock); }
+static HRESULT WINAPI mb_QueryInterface(IDirectMusicBuffer *i, REFIID riid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (!IsEqualIID(riid, &IID_IUnknown) && !IsEqualIID(riid, &IID_IDirectMusicBuffer)) { *out = NULL; return E_NOINTERFACE; }
+    InterlockedIncrement(&mb(i)->ref);
+    *out = i;
+    return S_OK;
+}
+static ULONG WINAPI mb_AddRef(IDirectMusicBuffer *i) { return InterlockedIncrement(&mb(i)->ref); }
+static ULONG WINAPI mb_Release(IDirectMusicBuffer *i)
+{
+    rm_mbuf *b = mb(i);
+    LONG r = InterlockedDecrement(&b->ref);
+    if (!r) { free(b->data); free(b); }
+    return r;
+}
+static HRESULT WINAPI mb_Flush(IDirectMusicBuffer *i)
+{
+    rm_mbuf *b = mb(i);
+    mbuf_lock(b);
+    b->used = b->rd = 0;
+    mbuf_unlock(b);
+    return S_OK;
+}
+/* the last event's offset from the start time (0 when empty) */
+static HRESULT WINAPI mb_TotalTime(IDirectMusicBuffer *i, LPREFERENCE_TIME t)
+{
+    rm_mbuf *b = mb(i);
+    if (!t) return E_POINTER;
+    LONGLONG last = 0, d;
+    mbuf_lock(b);
+    for (DWORD o = 0; ev_at(b, o, NULL, &d, &o); ) last = d;
+    mbuf_unlock(b);
+    *t = last;
+    return S_OK;
+}
+/* an event put in time order (after those at the same time); one earlier than the start time moves the start time
+ * to it.  The data is copied as given: the alignment padding keeps what the memory had. */
+static HRESULT pack(rm_mbuf *b, REFERENCE_TIME rt, DWORD group, DWORD flags, DWORD cb, const BYTE *src)
+{
+    DWORD size = (EVH + cb + 7) & ~7u;
+    mbuf_lock(b);
+    if (size > b->max - b->used) { mbuf_unlock(b); return E_OUTOFMEMORY; }
+    if (!b->used) b->start = rt;
+    else if (rt < b->start) {
+        LONGLONG by = b->start - rt, d;
+        for (DWORD o = 0, nx; ev_at(b, o, NULL, &d, &nx); o = nx) { d += by; memcpy(b->data + o + 8, &d, 8); }
+        b->start = rt;
+    }
+    LONGLONG delta = rt - b->start;
+    DWORD at = 0, nx;
+    LONGLONG d;
+    while (ev_at(b, at, NULL, &d, &nx) && d <= delta) at = nx;
+    if (at > b->used) at = b->used;
+    memmove(b->data + at + size, b->data + at, b->used - at);
+    memcpy(b->data + at, &cb, 4);
+    memcpy(b->data + at + 4, &group, 4);
+    memcpy(b->data + at + 8, &delta, 8);
+    memcpy(b->data + at + 16, &flags, 4);
+    memcpy(b->data + at + EVH, src, cb);
+    b->used += size;
+    mbuf_unlock(b);
+    return S_OK;
+}
+/* a short message's length by its status byte, as dmusic takes it (0: not one it packs) */
+static DWORD msg_len(BYTE st)
+{
+    static const BYTE sys[16] = { 0, 2, 3, 2, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1 };
+    if (st < 0x80) return 0;
+    if (st < 0xc0 || (st >= 0xe0 && st < 0xf0)) return 3;
+    if (st < 0xe0) return 2;
+    return sys[st & 15];
+}
+static HRESULT WINAPI mb_PackStructured(IDirectMusicBuffer *i, REFERENCE_TIME rt, DWORD group, DWORD msg)
+{
+    DWORD len = msg_len((BYTE)msg);
+    if (!len) return DMUS_E_INVALID_EVENT;
+    BYTE d[4] = { (BYTE)msg, (BYTE)(msg >> 8), (BYTE)(msg >> 16), (BYTE)(msg >> 24) };
+    return pack(mb(i), rt, group, DMUS_EVENT_STRUCTURED, len, d);
+}
+static HRESULT WINAPI mb_PackUnstructured(IDirectMusicBuffer *i, REFERENCE_TIME rt, DWORD group, DWORD cb, LPBYTE data)
+{
+    if (!data || IsBadReadPtr(data, cb)) return E_POINTER;
+    if (cb > 0x7fffffff - 32) return E_OUTOFMEMORY;
+    return pack(mb(i), rt, group, 0, cb, data);
+}
+static HRESULT WINAPI mb_ResetReadPtr(IDirectMusicBuffer *i)
+{
+    rm_mbuf *b = mb(i);
+    mbuf_lock(b);
+    b->rd = 0;
+    mbuf_unlock(b);
+    return S_OK;
+}
+/* S_FALSE past the last; the data points into the buffer */
+static HRESULT WINAPI mb_GetNextEvent(IDirectMusicBuffer *i, LPREFERENCE_TIME t, LPDWORD g, LPDWORD len, LPBYTE *data)
+{
+    rm_mbuf *b = mb(i);
+    HRESULT hr = S_FALSE;
+    mbuf_lock(b);
+    DWORD cb, nx;
+    LONGLONG d;
+    if (ev_at(b, b->rd, &cb, &d, &nx)) {
+        BYTE *h = b->data + b->rd;
+        if (t) *t = b->start + d;
+        if (g) memcpy(g, h + 4, 4);
+        if (len) *len = cb;
+        if (data) *data = h + EVH;
+        b->rd = nx;
+        hr = S_OK;
+    }
+    mbuf_unlock(b);
+    return hr;
+}
+static HRESULT WINAPI mb_GetRawBufferPtr(IDirectMusicBuffer *i, LPBYTE *p)
+{
+    if (!p) return E_POINTER;
+    *p = mb(i)->data;
+    return S_OK;
+}
+/* DMUS_E_BUFFER_EMPTY, nothing written, when it has no events */
+static HRESULT WINAPI mb_GetStartTime(IDirectMusicBuffer *i, LPREFERENCE_TIME t)
+{
+    rm_mbuf *b = mb(i);
+    if (!t) return E_POINTER;
+    HRESULT hr = DMUS_E_BUFFER_EMPTY;
+    mbuf_lock(b);
+    if (b->used) { *t = b->start; hr = S_OK; }
+    mbuf_unlock(b);
+    return hr;
+}
+static HRESULT WINAPI mb_GetUsedBytes(IDirectMusicBuffer *i, LPDWORD n)
+{
+    if (!n) return E_POINTER;
+    *n = mb(i)->used;
+    return S_OK;
+}
+static HRESULT WINAPI mb_GetMaxBytes(IDirectMusicBuffer *i, LPDWORD n)
+{
+    if (!n) return E_POINTER;
+    *n = mb(i)->max;
+    return S_OK;
+}
+static HRESULT WINAPI mb_GetBufferFormat(IDirectMusicBuffer *i, LPGUID g)
+{
+    if (!g) return E_POINTER;
+    *g = mb(i)->fmt;
+    return S_OK;
+}
+static HRESULT WINAPI mb_SetStartTime(IDirectMusicBuffer *i, REFERENCE_TIME t)
+{
+    rm_mbuf *b = mb(i);
+    mbuf_lock(b);
+    b->start = t;
+    mbuf_unlock(b);
+    return S_OK;
+}
+static HRESULT WINAPI mb_SetUsedBytes(IDirectMusicBuffer *i, DWORD n)
+{
+    rm_mbuf *b = mb(i);
+    if (n > b->max) return DMUS_E_BUFFER_FULL;
+    mbuf_lock(b);
+    b->used = n;
+    if (b->rd > n) b->rd = n;
+    mbuf_unlock(b);
+    return S_OK;
+}
+static IDirectMusicBufferVtbl mb_vtbl = { mb_QueryInterface, mb_AddRef, mb_Release, mb_Flush, mb_TotalTime,
+    mb_PackStructured, mb_PackUnstructured, mb_ResetReadPtr, mb_GetNextEvent, mb_GetRawBufferPtr, mb_GetStartTime,
+    mb_GetUsedBytes, mb_GetMaxBytes, mb_GetBufferFormat, mb_SetStartTime, mb_SetUsedBytes };
+
+static const GUID s_KSDATAFORMAT_SUBTYPE_MIDI = { 0x1d262760, 0xe957, 0x11cf, { 0xa5, 0xd6, 0x28, 0xdb, 0x04, 0xc1, 0x00, 0x00 } };
+/* as dmusic: the size rounded up to 8 bytes; GUID_NULL as the format is MIDI */
+HRESULT rm_mbuf_create(const DMUS_BUFFERDESC *d, IDirectMusicBuffer **out, IUnknown *outer)
+{
+    if (!d || IsBadReadPtr(d, sizeof(DWORD)) || d->dwSize < sizeof(*d) || IsBadReadPtr(d, sizeof(*d))) return E_INVALIDARG;
+    if (!out || IsBadWritePtr(out, sizeof(*out))) return E_POINTER;
+    *out = NULL;
+    if (outer) return CLASS_E_NOAGGREGATION;
+    if (d->cbBuffer > 0x7fffffff) return E_OUTOFMEMORY;
+    rm_mbuf *b = calloc(1, sizeof(*b));
+    DWORD max = (d->cbBuffer + 7) & ~7u;
+    if (b) b->data = calloc(1, max ? max : 8);
+    if (!b || !b->data) { free(b); return E_OUTOFMEMORY; }
+    b->IDirectMusicBuffer_iface.lpVtbl = &mb_vtbl;
+    b->ref = 1;
+    InitializeSRWLock(&b->lock);
+    b->max = max;
+    static const GUID null_guid;
+    b->fmt = IsEqualGUID(&d->guidBufferFormat, &null_guid) ? s_KSDATAFORMAT_SUBTYPE_MIDI : d->guidBufferFormat;
+    *out = &b->IDirectMusicBuffer_iface;
+    return S_OK;
+}
+
+/* ------------------------------------------------------------------ IDirectMusic::CreatePort */
+/* the port's parameters as dmusic and its synth settle them (tests/dx6test.c): each one given and out of range is
+ * brought into it and makes the answer S_FALSE, except that dwFeatures given makes it S_OK whatever came before; the
+ * port keeps the channel groups asked for, the synth at most 1000 */
+static HRESULT port_params(DMUS_PORTPARAMS8 *pp, DWORD *groups)
+{
+    DWORD v = pp->dwValidParams;
+    BOOL part = FALSE, dx8 = pp->dwSize >= sizeof(DMUS_PORTPARAMS8);
+    if (v & DMUS_PORTPARAMS_VOICES) {
+        if (pp->dwVoices < 1) { pp->dwVoices = 1; part = TRUE; }
+        else if (pp->dwVoices > 1000) { pp->dwVoices = 1000; part = TRUE; }
+    } else pp->dwVoices = 32;
+    if (v & DMUS_PORTPARAMS_CHANNELGROUPS) {
+        *groups = pp->dwChannelGroups;
+        if (pp->dwChannelGroups < 1) { pp->dwChannelGroups = 1; part = TRUE; }
+        else if (pp->dwChannelGroups > 1000) { pp->dwChannelGroups = 1000; part = TRUE; }
+    } else { *groups = 1; pp->dwChannelGroups = 2; }
+    if (v & DMUS_PORTPARAMS_AUDIOCHANNELS) {
+        if (pp->dwAudioChannels < 1) { pp->dwAudioChannels = 1; part = TRUE; }
+        else if (pp->dwAudioChannels > 2) { pp->dwAudioChannels = 2; part = TRUE; }
+    } else pp->dwAudioChannels = 2;
+    if (v & DMUS_PORTPARAMS_SAMPLERATE) {
+        if (pp->dwSampleRate < 11025) { pp->dwSampleRate = 11025; part = TRUE; }
+        else if (pp->dwSampleRate > 96000) { pp->dwSampleRate = 96000; part = TRUE; }
+    } else pp->dwSampleRate = 22050;
+    if (v & DMUS_PORTPARAMS_EFFECTS) {
+        if (pp->dwEffectFlags & ~DMUS_EFFECT_REVERB) { pp->dwEffectFlags &= DMUS_EFFECT_REVERB; part = TRUE; }
+    } else pp->dwEffectFlags = DMUS_EFFECT_REVERB;
+    if (v & DMUS_PORTPARAMS_SHARE) {
+        if (pp->fShare) { pp->fShare = FALSE; part = TRUE; }
+    } else pp->fShare = FALSE;
+    if (dx8) {
+        if (v & DMUS_PORTPARAMS_FEATURES) part = FALSE;
+        else pp->dwFeatures = 0;
+    }
+    pp->dwValidParams = DMUS_PORTPARAMS_VOICES | DMUS_PORTPARAMS_CHANNELGROUPS | DMUS_PORTPARAMS_AUDIOCHANNELS |
+                        DMUS_PORTPARAMS_SAMPLERATE | DMUS_PORTPARAMS_EFFECTS | DMUS_PORTPARAMS_SHARE |
+                        (dx8 ? DMUS_PORTPARAMS_FEATURES : 0);
+    return part ? S_FALSE : S_OK;
+}
+/* a synth port of its own, as each of dmusic's CreatePort is: a host (its synth and sink) that lives as long as the
+ * port; a performance plays through it once AddPort'ed.  Created inactive (PlayBuffer wants Activate). */
+HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort **out, IUnknown *outer)
+{
+    static const GUID null_guid;
+    if (!params || IsBadReadPtr(params, sizeof(DWORD))) return E_INVALIDARG;
+    if (!out || IsBadWritePtr(out, sizeof(*out))) return E_POINTER;
+    *out = NULL;
+    if (params->dwSize < sizeof(DMUS_PORTPARAMS7) || IsBadWritePtr(params, sizeof(DMUS_PORTPARAMS7))) return E_INVALIDARG;
+    if (outer) return CLASS_E_NOAGGREGATION;
+    if (!cls || (!IsEqualGUID(cls, &null_guid) && !IsEqualGUID(cls, &RM_GUID_SynthPort))) return E_NOINTERFACE;
+    DMUS_PORTPARAMS8 pp;
+    memset(&pp, 0, sizeof(pp));
+    memcpy(&pp, params, params->dwSize < sizeof(pp) ? params->dwSize : sizeof(pp));
+    DWORD groups;
+    HRESULT hr = port_params(&pp, &groups);
+    memcpy(params, &pp, params->dwSize < sizeof(pp) ? params->dwSize : sizeof(pp));
+    DWORD sgroups = pp.dwChannelGroups < 64 ? 64 : pp.dwChannelGroups;
+    dm_host *h = dm_host_new(pp.dwSampleRate, pp.dwVoices, sgroups);
+    if (!h) return E_OUTOFMEMORY;
+    if (!(pp.dwEffectFlags & DMUS_EFFECT_REVERB)) dm_host_set_reverb(h, 0);
+    rm_port *p = rm_port_new(h);
+    if (!p) { dm_host_free(h); return E_OUTOFMEMORY; }
+    p->own = TRUE;
+    p->active = FALSE;
+    p->groups = groups;
+    p->chans = (WORD)pp.dwAudioChannels;
+    *out = &p->IDirectMusicPort_iface;
+    LOG_INFO("music: IDirectMusic::CreatePort: %lu Hz, %lu voices, %lu channel groups, %s -> %08lx", (unsigned long)pp.dwSampleRate,
+             (unsigned long)pp.dwVoices, (unsigned long)groups, pp.dwEffectFlags ? "reverb" : "no reverb", (unsigned long)hr);
+    return hr;
+}
+
 /* ------------------------------------------------------------------ for dmcom.c */
 rm_port *rm_port_new(dm_host *h)
 {
@@ -641,6 +967,8 @@ rm_port *rm_port_new(dm_host *h)
     p->IKsControl_iface.lpVtbl = &dk_vtbl;
     p->ref = 1;
     p->host = h;
+    p->active = TRUE;
+    p->chans = 1;
     return p;
 }
 void rm_port_detach(rm_port *p)
@@ -660,3 +988,6 @@ void rm_port_release(rm_port *p) { if (p) port_release(p); }
 HRESULT rm_port_query(rm_port *p, REFIID riid, void **out) { return port_qi(p, riid, out); }
 HRESULT rm_port_sink(rm_port *p, REFIID riid, void **out) { return sink_new(p, 0, riid, out); }
 BOOL rm_port_is(IDirectMusicPort *i, rm_port *p) { return i && i == &p->IDirectMusicPort_iface; }
+rm_port *rm_port_of(IDirectMusicPort *i) { return i && !IsBadReadPtr(i, sizeof(void *)) && i->lpVtbl == &dp_vtbl ? pt(i) : NULL; }
+dm_host *rm_port_own_host(rm_port *p) { return p->own ? p->host : NULL; }
+DWORD rm_port_groups(rm_port *p) { return port_groups(p); }

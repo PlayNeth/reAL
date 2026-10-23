@@ -1055,7 +1055,7 @@ static pchentry *pch_get(dm_perf *pf, uint32_t pch)
 
 int dm_perf_assign_pchannel(dm_perf *pf, uint32_t pch, int port, uint32_t group, uint32_t chan)
 {
-    if (port < 0 || port >= pf->nports || !group || chan > 15) return DM_E_INVALIDARG;
+    if (port < 0 || port >= pf->nports || chan > 15) return DM_E_INVALIDARG;   /* (group 0: all of the port's, as dmime takes it) */
     pchentry *e = pch_get(pf, pch);
     if (!e) return DM_E_OUTOFMEMORY;
     e->port = port; e->group = group; e->chan = chan; e->flags |= 6; e->used = 1;
@@ -2237,6 +2237,13 @@ int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx)
     return pf->nports++;
 }
 
+/* reAL: a port's operations replaced (RemovePort and AddPort again: ops that play nothing, then the port's own) */
+void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx)
+{
+    if (idx < 0 || idx >= pf->nports) return;
+    pf->ports[idx].ops = *ops;
+    pf->ports[idx].ctx = ctx;
+}
 void dm_perf_set_auto_download(dm_perf *pf, int on) { pf->autodl = on; }
 int dm_perf_get_auto_download(dm_perf *pf) { return pf->autodl; }
 void dm_perf_set_prepare_time(dm_perf *pf, uint32_t ms) { pf->prepare_ms = ms; }

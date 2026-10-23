@@ -409,6 +409,7 @@ static void instruments(void)
         printf("  Port::UnloadInstrument %08lx\n", IDirectMusicPort_UnloadInstrument(p, d));
         IDirectMusicDownloadedInstrument_Release(d), d = NULL;
     }
+    Sleep(3000);        /* (the last note's release over, and a second of statistics without it, for the sections after) */
     IDirectMusicPort_Release(p);
 }
 

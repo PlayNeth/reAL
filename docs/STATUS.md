@@ -99,7 +99,33 @@ Doppler, and WASAPI output.
   Unload of a buffer not downloaded S_OK). It used to be stubbed with E_NOTIMPL, and the game crashed on the buffer
   it never got.
 - `tests/comcmp.sh porttest.exe` matches but for that interface (`COMCMP_DIR=/tmp/real/sp/port`); its `download`
-  section matches in full.
+  and `inst` sections match in full.
+- Instruments one at a time, the DirectX 6/7 way: Collection::GetInstrument hands out an IDirectMusicInstrument
+  (GetPatch / SetPatch, any value; the same object while it lives; DMUS_E_INVALIDPATCH for a patch the collection
+  lacks), Port::DownloadInstrument downloads it with the engine's DLS code (key ranges included) as an
+  IDirectMusicDownloadedInstrument (the same object, counted, for the same instrument and patch without ranges;
+  UnloadInstrument S_FALSE until the last, then DMUS_E_NOT_DOWNLOADED_TO_PORT), and Performance::DownloadInstrument
+  through the PChannel's port, with its group and channel (porttest `inst`).
+- IDirectMusic::CreatePort: a synth port of its own each time, as dmusic's (a host of its own: synth and sink, freed
+  with the port; it outlives the performance). The parameters as dmusic and its synth settle them: voices 1-1000
+  (32), channel groups (the port keeps what was asked, the synth at most 1000; 1 when not given, 2 reported back),
+  audio channels 1-2, rate 11025-96000 (22050), reverb only, no sharing; each one brought into range makes it
+  S_FALSE, except that dwFeatures given makes it S_OK; dwValidParams comes back with them all; DX7's smaller
+  structure works; E_NOINTERFACE for a port GUID that is not the synth's (dx6test `port`).
+- AddPort / RemovePort / AssignPChannelBlock / AssignPChannel / PChannelInfo with several ports: Init's performance
+  has no port added (AddPort(NULL) adds its own and assigns PChannels 0-15 when there are none); AddPort of a port
+  does not assign PChannels; a port not added is E_INVALIDARG; a group beyond the port's channel groups is assigned
+  and answered S_FALSE, group 0 accepted; after RemovePort the PChannels stay, to no port, and play nothing. A
+  CreatePort'ed port joins the engine's ports (at most 8 per performance, a removed one keeping its place).
+- CreateMusicBuffer and IDirectMusicBuffer as dmusic's (dx6test `buffer`): the size rounded up to 8, events in time
+  order (after those at the same time; an earlier one moves the start time), DMUS_EVENTHEADER layout, status bytes
+  dmusic packs (F0, F4, F5, F7 and running status refused), E_OUTOFMEMORY when full, DMUS_E_BUFFER_EMPTY,
+  SetUsedBytes beyond the size DMUS_E_BUFFER_FULL. PlayBuffer plays each event at its time (the start time plus
+  its offset, the master clock's time; one already past at once) on its channel group (0: all), and answers
+  DMUS_E_SYNTHINACTIVE until Activate(TRUE). Microsoft's sink under Wine never lets its voices go, so dx6test
+  `play` compares only what sounds; `DX6TEST_TIMES=1` prints when each note starts.
+- The master clock's and the latency clock's AdviseTime / AdvisePeriodic / Unadvise are E_NOTIMPL in Microsoft's
+  DLLs too (the master clock: E_POINTER for no cookie); reDM answers the same (dx6test `clock`).
 
 **DirectMusic: COM methods**
 - GetParam, SetParam and GetParamEx.
@@ -381,6 +407,10 @@ Smaller items still open:
   DMUS_E_NOT_INIT, which Microsoft returns only to DX8 applications.
 - IPersistStream::Load on standalone track objects.
 - Track InitPlay/Play called directly by an application (returns E_NOTIMPL).
+- Segment::InitPlay and the DirectSound effects' DMO ProcessInput / ProcessOutput (E_NOTIMPL; games use the effects
+  through SetFX).
+- A CreatePort'ed port asking for one audio channel reports a mono format but renders stereo, and a port's synth
+  plays channel groups beyond the ones it was made with (Microsoft's would not).
 
 ## Testing
 
@@ -389,6 +419,10 @@ Smaller items still open:
 - `tests/comcmp.sh tooltest.exe` does the same for graphs and tools (the graph object, every owner's graph,
   GetObjectInPath stages, the messages tools receive while bells1 and fe_hard_04 play, Flush, loading).
   It gives 255 identical lines.
+- `tests/comcmp.sh dx6test.exe [port|buffer|play|clock]` compares the DirectX 6/7 calls (CreatePort and its
+  parameters, AddPort / AssignPChannelBlock / RemovePort with several ports, CreateMusicBuffer and the buffer's
+  methods, PlayBuffer, the clocks' Advise calls): all match. `multiperf`'s `dx6` thread (MP_THREADS bit 0x40) runs
+  that way of playing against the other threads.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and
   the reAL prefix `/tmp/real/sp/realprefix` (`REAL_PREFIX`).
 - `build/lockstress.exe <seconds> <segments...> [script.spt]` (Wine) runs four threads on one loader and one

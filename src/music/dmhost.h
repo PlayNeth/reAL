@@ -38,9 +38,15 @@ void dm_host_raw_unload(dm_host *h, void *handle);
 void *dm_host_ins_download(dm_host *h, dm_collection *c, uint32_t patch, uint32_t newpatch, const uint32_t *ranges,
                            int nranges, int *hr);
 void dm_host_ins_unload(dm_host *h, void *handle);
+/* with the engine lock held: another host's synth as a port of h's performance (CreatePort + AddPort; its index, < 0
+ * when there is no room), and that port taken out (RemovePort: nothing goes to it) or put back */
+int dm_host_port_add(dm_host *h, dm_host *port);
+void dm_host_port_enable(dm_host *h, int idx, dm_host *port, int on);
 
 /* plain MIDI input (the winmm MIDI device): a message (short, or sysex starting with 0xf0) played now */
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len);
+/* a message at a reference time on a channel group (0: all of them), as IDirectMusicPort::PlayBuffer plays it */
+void dm_host_midi_at(dm_host *h, rtime_t rt, uint32_t group, const uint8_t *msg, uint32_t len);
 int dm_host_download_all(dm_host *h, dm_collection *c);     /* returns how many instruments went in */
 void dm_host_set_reverb(dm_host *h, int on);
 /* audiopath buffers (see dmhost.c) */

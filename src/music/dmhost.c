@@ -317,6 +317,33 @@ static void port_voice_free(void *ctx, void *voice)
     free(v);
 }
 
+/* the synth port's operations, and those of a port the performance removed (RemovePort): nothing goes to its synth,
+ * while what was already there is still let go of */
+static const dm_portops s_portops = { port_latency, port_play, port_priority, port_download, port_unload, port_assign,
+                                      port_wave_download, port_wave_unload, port_voice_alloc, port_voice_play,
+                                      port_voice_stop, port_voice_free };
+static int off_latency(void *ctx, rtime_t *t) { (void)ctx; (void)t; return 0; }
+static void off_play(void *ctx, const dm_event *ev, int n) { (void)ctx; (void)ev; (void)n; }
+static void off_priority(void *ctx, uint32_t g, uint32_t ch, uint32_t prio) { (void)ctx; (void)g; (void)ch; (void)prio; }
+static void *off_download(void *ctx, dm_collection *c, uint32_t patch, int sp, uint32_t np, const uint32_t *r, int nr, int *hr)
+{
+    (void)ctx; (void)c; (void)patch; (void)sp; (void)np; (void)r; (void)nr;
+    *hr = (int)0x80004005;
+    return NULL;
+}
+static void off_assign(void *ctx, uint32_t g, uint32_t c, const uint32_t *buses, uint32_t n) { (void)ctx; (void)g; (void)c; (void)buses; (void)n; }
+static void *off_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr) { (void)ctx; (void)w; (void)hint; *hr = (int)0x80004005; return NULL; }
+static void *off_voice_alloc(void *ctx, void *dl, uint32_t chan, uint32_t group, rtime_t start, uint32_t ls, uint32_t le, int *hr)
+{
+    (void)ctx; (void)dl; (void)chan; (void)group; (void)start; (void)ls; (void)le;
+    *hr = (int)0x80004005;
+    return NULL;
+}
+static int off_voice_play(void *ctx, void *voice, rtime_t rt, int32_t pitch, int32_t vol) { (void)ctx; (void)voice; (void)rt; (void)pitch; (void)vol; return 0; }
+static const dm_portops s_offops = { off_latency, off_play, off_priority, off_download, port_unload, off_assign,
+                                     off_wave_download, port_wave_unload, off_voice_alloc, off_voice_play,
+                                     port_voice_stop, port_voice_free };
+
 /* ------------------------------------------------------------------ the sink */
 /* the standard buffers' formats as dmime asks for them (7732084b): 16-bit at the synth rate */
 static rl_buffer *make_buffer_ex(dm_host *h, int nch, DWORD flags, const GUID *alg3d)
@@ -546,10 +573,8 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups)
     if (!fixes) msynth_set_fixes(h->syn, 0);
     dm_wave_set_fix_length(fixes);
     dm_set_clone_fix(fixes);
-    dm_portops po = { port_latency, port_play, port_priority, port_download, port_unload, port_assign,
-                      port_wave_download, port_wave_unload, port_voice_alloc, port_voice_play, port_voice_stop, port_voice_free };
     host_enter(h);                      /* (the ports alive are the engine's, under its lock) */
-    dm_perf_add_port(h->pf, &po, h);
+    dm_perf_add_port(h->pf, &s_portops, h);
     host_leave(h);
     /* start both buffers in the same mixer period so they stay sample-aligned */
     EnterCriticalSection(&h->dev->lock);
@@ -640,6 +665,8 @@ void *dm_host_ins_download(dm_host *h, dm_collection *c, uint32_t patch, uint32_
     return port_download(h, c, patch, newpatch != patch, newpatch, ranges, nranges, hr);
 }
 void dm_host_ins_unload(dm_host *h, void *handle) { port_unload(h, handle); }
+int dm_host_port_add(dm_host *h, dm_host *port) { return dm_perf_add_port(h->pf, &s_portops, port); }
+void dm_host_port_enable(dm_host *h, int idx, dm_host *port, int on) { dm_perf_port_set_ops(h->pf, idx, on ? &s_portops : &s_offops, port); }
 int dm_host_raw_download(dm_host *h, const void *buf, uint32_t size, void **handle) { return msynth_download(h->syn, buf, size, handle); }
 void dm_host_raw_unload(dm_host *h, void *handle) { sink_ul(h, handle); }
 rtime_t dm_host_clock(dm_host *h)      /* under the lock: an application's clock read races the sink otherwise */
@@ -664,6 +691,16 @@ void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len)
     int64_t t = (host_clock(h) - h->rt0) * h->rate / 10000000 + (int64_t)h->rate * AHEAD_MS / 1000;
     if (t < h->written) t = h->written;
     msynth_midi(h->syn, t, msg, len, 1);
+    host_leave(h);
+}
+
+/* a MIDI message at a reference time (IDirectMusicPort::PlayBuffer): one already past plays as soon as possible */
+void dm_host_midi_at(dm_host *h, rtime_t rt, uint32_t group, const uint8_t *msg, uint32_t len)
+{
+    host_enter(h);
+    int64_t t = (rt - h->rt0) * (int64_t)h->rate / 10000000;
+    if (t < h->written) t = h->written;
+    msynth_midi(h->syn, t, msg, len, group);
     host_leave(h);
 }
 

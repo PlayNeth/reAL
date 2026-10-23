@@ -99,6 +99,7 @@ $CC -O1 -o build/tooltest.exe tests/tooltest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/fxtest.exe tests/fxtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/cfgtest.exe tests/cfgtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/porttest.exe tests/porttest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -Wno-format -o build/dx6test.exe tests/dx6test.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/theorytest.exe tests/theorytest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/styletest.exe tests/styletest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/stylecom.exe tests/stylecom.c -lole32 -luuid -ldxguid
