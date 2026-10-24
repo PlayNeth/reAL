@@ -59,7 +59,15 @@ Doppler, and WASAPI output.
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
-  api, params, data, seq, none) matches Windows 7's dsound line for line.
+  api, params, data, seq, none) matches Windows 7's dsound line for line, but for a NaN parameter in `params`:
+  reAL refuses it (E_INVALIDARG), where the original's range checks let it through and Chorus' and Flanger's Phase
+  would then index past their tables.
+- The effects' buffered DMO interface (IMediaObject::ProcessInput / ProcessOutput, dsdmo's CPCMDMO 10005480 /
+  100055b0): the input buffer held (with a reference) while it has a whole frame, output in whole frames after what
+  the output buffer already has, the input's time stamp moved on by the frames before, SYNCPOINT always and
+  INCOMPLETE while frames are left, GetInputStatus refusing while a buffer is held, Flush letting it go (fxtest
+  `process`: all match but I3DL2, which the test leaves out: reAL's is XP's, and the reference prefix's dsdmo keeps
+  the input's time stamp on every part of an I3DL2 output and does not give the in-place output).
 - `src/dsfx.c`: Gargle, Echo, ParamEq, Chorus, Flanger, Distortion, Compressor and Waves reverb, ported from
   Windows 11's dsdmo (10.0.26100.5074), bit-exact. XP's versions of these differ only in rounding, except XP's Waves
   (one frame earlier) and Distortion (about 2 dB quieter); Windows 11's are kept.
@@ -113,15 +121,17 @@ Doppler, and WASAPI output.
   quirk (the first sample of each four is not checked for the minimum). `DMGT_STATS` (dmgt) and `MS_STATS`
   (test_msynth) print them for an offline comparison; they match on both render paths.
 - The sink stage (0x5000): an object with IReferenceClock (the master clock; GetLatencyClock's gives the latency
-  clock) and IKsControl. Microsoft's also answers its private IDirectSoundSynthSink, which reDM does not offer.
+  clock), IKsControl and dsound's private IDirectSoundSynthSink (6efc7dcc): GetLatencyClock (the sink's own clock),
+  SampleToRefTime / RefToSampleTime (the sink's sample clock in dsound's steps: whole 1/10000 s, then ms), GetFormat
+  (16-bit mono at the synth's rate, 18 bytes) and Activate. Microsoft's sink also answers {182ea05a-5de3-4405-8589-
+  f0aadf3b6ac5} (dsound's interface for the synth's sources and buses), which reDM does not offer.
 - IDirectMusicPortDownload for an application's own downloads (Pro Evolution Soccer 6 builds its instruments that
   way): AllocateBuffer and the buffer object, GetDLId from the port's counter (the one its collections use),
   Download straight to the synth, GetBuffer by id, Unload, with dmusic's results (E_POINTER for a buffer too small
   for its header, DMUS_E_UNKNOWNDOWNLOAD for a type there is none of, an instrument without articulation refused,
   Unload of a buffer not downloaded S_OK). It used to be stubbed with E_NOTIMPL, and the game crashed on the buffer
   it never got.
-- `tests/comcmp.sh porttest.exe` matches but for that interface (`COMCMP_DIR=/tmp/real/sp/port`); its `download`
-  and `inst` sections match in full.
+- `tests/comcmp.sh porttest.exe` matches (`COMCMP_DIR=/tmp/real/sp/port`), its `download` and `inst` sections too.
 - Instruments one at a time, the DirectX 6/7 way: Collection::GetInstrument hands out an IDirectMusicInstrument
   (GetPatch / SetPatch, any value; the same object while it lives; DMUS_E_INVALIDPATCH for a patch the collection
   lacks), Port::DownloadInstrument downloads it with the engine's DLS code (key ranges included) as an
@@ -157,9 +167,16 @@ Doppler, and WASAPI output.
   SendPMsg stamps no time on an untimed message (MUSICTIME keeps 0, no time flag is E_INVALIDARG); no
   MUSICALMOSTEND; Stop of everything sends no GM reset (dx7test `6`, `7`, `8`, `qi`, `notify`, `stopall`).
 - Every version: Set/GetPrepareTime and Set/GetBumperLength work before Init; Init and InitAudio work again after
-  CloseDown (reDM keeps its engine and starts it over); Init's performance has no port until AddPort, so no latency
+  CloseDown (reDM keeps its engine and starts it over), and between CloseDown and that Init every method answers as
+  dmime's does with no master clock, ports or audiopaths (DMUS_E_NO_MASTER_CLOCK, DMUS_E_NOT_INIT, E_INVALIDARG,
+  DMUS_E_AUDIOPATHS_NOT_VALID: dx7test `closed`); Init's performance has no port until AddPort, so no latency
   (GetLatencyTime is the time now) and nothing played (dx7test `noport`); a QueryInterface for the performance's
   IDirectMusicGraph or IDirectMusicTool no longer keeps a reference that nothing gives back.
+- Segment::InitPlay (77311e05): for a segment never asked for IDirectMusicSegment2 or 8 (nor cloned from one), a
+  state that never plays, on no segment, holding the performance without a reference: GetSegment and
+  GetObjectInPath DMUS_E_NOT_FOUND, GetStartTime -1, SetTrackConfig DMUS_E_TRACK_NOT_FOUND, its StampPMsg the
+  performance's; IsPlaying S_FALSE and Stop / StopEx S_OK on it; E_NOTIMPL for any other segment (dx7test
+  `initplay`).
 - Stop of everything sets every assigned PChannel back on its port, as dmime does (7730a313): the controllers'
   state, All Sound Off, Reset All Controllers 30 ms on, a DX8 application's GM reset on each group's channel 0, and
   nothing sent before 60 ms on. A note held through Stop used to keep sounding (dx7test `stopall`).
@@ -440,13 +457,10 @@ Smaller items still open:
   Microsoft's in every test so far).
 - Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the
   segment's load, as on Microsoft's). A working case needs a tool class registered in both Wine prefixes.
-- After CloseDown, methods Microsoft's refuse with DMUS_E_NOT_INIT (PChannelInfo, for one) still answer on reDM;
-  only Get/SetGraph refuse, to a DX8 application. dmime's Init also asks a DirectMusic it made for IDirectMusic2 when the version is above 6;
-  reDM's DirectMusic does not depend on that.
-- IPersistStream::Load on standalone track objects.
-- Track InitPlay/Play called directly by an application (returns E_NOTIMPL).
-- Segment::InitPlay and the DirectSound effects' DMO ProcessInput / ProcessOutput (E_NOTIMPL; games use the effects
-  through SetFX).
+- dmime's Init asks a DirectMusic it made for IDirectMusic2 when the version is above 6; reDM's DirectMusic does not
+  depend on that.
+- A track's InitPlay / Play with the state Segment::InitPlay gives (it has no engine state behind it) returns
+  E_NOTIMPL.
 
 ## Testing
 
@@ -459,7 +473,7 @@ Smaller items still open:
   parameters, AddPort / AssignPChannelBlock / RemovePort with several ports, CreateMusicBuffer and the buffer's
   methods, PlayBuffer, the clocks' Advise calls): all match. `multiperf`'s `dx6` thread (MP_THREADS bit 0x40) runs
   that way of playing against the other threads.
-- `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|notify]` compares what changes with the interface asked for
+- `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay]` compares what changes with the interface asked for
   (each section as DirectX 6, 7 and 8 where it differs): all match.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and
   the reAL prefix `/tmp/real/sp/realprefix` (`REAL_PREFIX`).
