@@ -909,6 +909,22 @@ void dm_host_stats(dm_host *h, msynth_stats *st)
     msynth_get_stats(h->syn, st);
     host_leave(h);
 }
+/* IDirectSoundSynthSink::SampleToRefTime / RefToSampleTime (6efdc965 / 6efdc9b7): the sink's sample clock, sample 0
+ * at the host's start, in dsound's steps (whole 1/10000 s, then the ms) */
+rtime_t dm_host_sample_to_ref(dm_host *h, int64_t s)
+{
+    host_enter(h);
+    rtime_t t = s * 10000 / (int64_t)h->rate * 1000 + h->rt0;
+    host_leave(h);
+    return t;
+}
+int64_t dm_host_ref_to_sample(dm_host *h, rtime_t t)
+{
+    host_enter(h);
+    int64_t s = (t - h->rt0) / 1000 * (int64_t)h->rate / 10000;
+    host_leave(h);
+    return s;
+}
 rtime_t dm_host_latency(dm_host *h)
 {
     host_enter(h);

@@ -93,10 +93,23 @@ typedef struct {
     IUnknown IUnknown_iface;
     IReferenceClock IReferenceClock_iface;
     IKsControl IKsControl_iface;
+    struct dssink { const struct dssinkvtbl *lpVtbl; } IDirectSoundSynthSink_iface;
     LONG ref;
     rm_port *port;
     int latency;                        /* a latency clock (GetLatencyClock) rather than the sink */
 } rm_sink;
+/* IDirectSoundSynthSink (dsound's sink, 6efc7dcc: not in the SDK headers) */
+typedef struct dssinkvtbl {
+    HRESULT (WINAPI *QueryInterface)(struct dssink *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(struct dssink *);
+    ULONG (WINAPI *Release)(struct dssink *);
+    HRESULT (WINAPI *GetLatencyClock)(struct dssink *, IReferenceClock **);
+    HRESULT (WINAPI *Activate)(struct dssink *, BOOL);
+    HRESULT (WINAPI *SampleToRefTime)(struct dssink *, LONGLONG, REFERENCE_TIME *);
+    HRESULT (WINAPI *RefToSampleTime)(struct dssink *, REFERENCE_TIME, LONGLONG *);
+    HRESULT (WINAPI *GetFormat)(struct dssink *, WAVEFORMATEX *, DWORD, DWORD *);
+} dssinkvtbl;
+static const GUID s_IID_IDirectSoundSynthSink = { 0x73a6a85a, 0x493e, 0x4c87, { 0xb4, 0xa5, 0xbe, 0x53, 0xeb, 0x92, 0x74, 0x4b } };
 
 static rm_port *pt(IDirectMusicPort *i) { return impl_from(i, rm_port, IDirectMusicPort_iface); }
 static rm_port *pdl(IDirectMusicPortDownload *i) { return impl_from(i, rm_port, IDirectMusicPortDownload_iface); }
@@ -629,6 +642,7 @@ static HRESULT sink_qi(rm_sink *s, REFIID riid, void **out)
     if (IsEqualIID(riid, &IID_IUnknown)) *out = s->latency ? (void *)&s->IReferenceClock_iface : (void *)&s->IUnknown_iface;
     else if (IsEqualIID(riid, &IID_IReferenceClock)) *out = &s->IReferenceClock_iface;
     else if (!s->latency && IsEqualIID(riid, &s_IID_IKsControl)) *out = &s->IKsControl_iface;
+    else if (!s->latency && IsEqualIID(riid, &s_IID_IDirectSoundSynthSink)) *out = &s->IDirectSoundSynthSink_iface;
     else { *out = NULL; return E_NOINTERFACE; }
     InterlockedIncrement(&s->ref);
     return S_OK;
@@ -672,6 +686,56 @@ static HRESULT WINAPI sk_KsProperty(IKsControl *i, PKSPROPERTY p, ULONG pl, LPVO
 }
 static IKsControlVtbl sk_vtbl = { sk_QueryInterface, sk_AddRef, sk_Release, sk_KsProperty, dk_KsMethod, dk_KsEvent };
 
+static rm_sink *ss(struct dssink *i) { return impl_from(i, rm_sink, IDirectSoundSynthSink_iface); }
+static HRESULT WINAPI ss_QueryInterface(struct dssink *i, REFIID riid, void **out) { return sink_qi(ss(i), riid, out); }
+static ULONG WINAPI ss_AddRef(struct dssink *i) { return InterlockedIncrement(&ss(i)->ref); }
+static ULONG WINAPI ss_Release(struct dssink *i) { return sink_release(ss(i)); }
+/* 6efd72df: the sink's own clock interface */
+static HRESULT WINAPI ss_GetLatencyClock(struct dssink *i, IReferenceClock **c)
+{
+    if (!c) return E_INVALIDARG;
+    return sink_qi(ss(i), &IID_IReferenceClock, (void **)c);
+}
+/* 6efd7f27 -> 6efd790b: the sources' Activate (reDM's synth renders while its port is active) */
+static HRESULT WINAPI ss_Activate(struct dssink *i, BOOL on) { return S_OK; }
+static HRESULT WINAPI ss_SampleToRefTime(struct dssink *i, LONGLONG s, REFERENCE_TIME *t)
+{
+    if (!t) return E_INVALIDARG;
+    dm_host *h = port_hold(ss(i)->port);
+    if (!h) return E_FAIL;
+    *t = dm_host_sample_to_ref(h, s);
+    port_drop();
+    return S_OK;
+}
+static HRESULT WINAPI ss_RefToSampleTime(struct dssink *i, REFERENCE_TIME t, LONGLONG *s)
+{
+    if (!s) return E_INVALIDARG;
+    dm_host *h = port_hold(ss(i)->port);
+    if (!h) return E_FAIL;
+    *s = dm_host_ref_to_sample(h, t);
+    port_drop();
+    return S_OK;
+}
+/* 6efd73eb -> 6efb3431: the format of each of its buses (16-bit mono at the synth's rate), 18 bytes; the size needed
+ * when there is no room for it */
+static HRESULT WINAPI ss_GetFormat(struct dssink *i, WAVEFORMATEX *w, DWORD size, DWORD *written)
+{
+    if (!w && !written) return E_INVALIDARG;
+    if (!w) size = 0;
+    if (w && size < sizeof(WAVEFORMATEX)) return E_INVALIDARG;
+    if (w) {
+        dm_host *h = port_hold(ss(i)->port);
+        DWORD rate = 22050;
+        if (h) { rate = dm_host_rate(h); port_drop(); }
+        WAVEFORMATEX f = { WAVE_FORMAT_PCM, 1, rate, rate * 2, 2, 16, 0 };
+        memcpy(w, &f, sizeof(f));
+    }
+    if (written) *written = sizeof(WAVEFORMATEX);
+    return S_OK;
+}
+static const dssinkvtbl ss_vtbl = { ss_QueryInterface, ss_AddRef, ss_Release, ss_GetLatencyClock, ss_Activate,
+    ss_SampleToRefTime, ss_RefToSampleTime, ss_GetFormat };
+
 static HRESULT sink_new(rm_port *p, int latency, REFIID riid, void **out)
 {
     *out = NULL;
@@ -680,6 +744,7 @@ static HRESULT sink_new(rm_port *p, int latency, REFIID riid, void **out)
     s->IUnknown_iface.lpVtbl = &su_vtbl;
     s->IReferenceClock_iface.lpVtbl = &sc_vtbl;
     s->IKsControl_iface.lpVtbl = &sk_vtbl;
+    s->IDirectSoundSynthSink_iface.lpVtbl = &ss_vtbl;
     s->ref = 1; s->port = p; s->latency = latency;
     InterlockedIncrement(&p->ref);
     HRESULT hr = sink_qi(s, riid, out);

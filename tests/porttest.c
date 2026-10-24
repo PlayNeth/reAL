@@ -17,6 +17,20 @@ DEFINE_GUID(IID_IDirectMusicSynthSink_, 0x09823663, 0x5c85, 0x11d2, 0xaf, 0xa6, 
 DEFINE_GUID(IID_IDirectSoundConnect_, 0x5d4ab9ee, 0xc3e9, 0x4e95, 0x9d, 0xee, 0x7b, 0x2c, 0x2c, 0xd1, 0x1d, 0x53);
 DEFINE_GUID(IID_IDirectSoundSynthSink_, 0x73a6a85a, 0x493e, 0x4c87, 0xb4, 0xa5, 0xbe, 0x53, 0xeb, 0x92, 0x74, 0x4b);
 
+/* IDirectSoundSynthSink (dsound's sink: 6efc7dcc) */
+typedef struct dssink dssink;
+typedef struct {
+    HRESULT (WINAPI *QueryInterface)(dssink *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(dssink *);
+    ULONG (WINAPI *Release)(dssink *);
+    HRESULT (WINAPI *GetLatencyClock)(dssink *, IReferenceClock **);
+    HRESULT (WINAPI *Activate)(dssink *, BOOL);
+    HRESULT (WINAPI *SampleToRefTime)(dssink *, LONGLONG, REFERENCE_TIME *);
+    HRESULT (WINAPI *RefToSampleTime)(dssink *, REFERENCE_TIME, LONGLONG *);
+    HRESULT (WINAPI *GetFormat)(dssink *, WAVEFORMATEX *, DWORD, DWORD *);
+} dssinkvtbl;
+struct dssink { const dssinkvtbl *lpVtbl; };
+
 static IDirectMusicPerformance8 *perf;
 
 static void iids(const char *what, IUnknown *u)
@@ -434,7 +448,69 @@ static void get_port(IDirectMusicAudioPath *ap, const char *what)
     IUnknown *s = NULL;
     hr = IDirectMusicAudioPath_GetObjectInPath(ap, 0, 0x5000, 0, &GUID_All_Objects, 0, &IID_IUnknown, (void **)&s);
     printf("  sink: %08lx\n", hr);
-    if (s) { iids("sink interfaces", s); IUnknown_Release(s); }
+    if (s) {
+        iids("sink interfaces", s);
+        dssink *k = NULL;
+        IUnknown_QueryInterface(s, &IID_IDirectSoundSynthSink_, (void **)&k);
+        if (k) {
+            IReferenceClock *c = NULL, *c2 = NULL;
+            printf("  GetLatencyClock(NULL) %08lx\n", k->lpVtbl->GetLatencyClock(k, NULL));
+            hr = k->lpVtbl->GetLatencyClock(k, &c);
+            IUnknown_QueryInterface(s, &IID_IReferenceClock, (void **)&c2);
+            printf("  GetLatencyClock %08lx %s\n", hr, !c ? "NULL" : c == c2 ? "the sink's clock" : "another");
+            if (c) {
+                REFERENCE_TIME a = 0, b = 0, l = 0;
+                IReferenceClock_GetTime(c, &a);
+                Sleep(20);
+                IReferenceClock_GetTime(c, &b);
+                printf("  its time runs: %s\n", b >= a ? "yes" : "no");
+                (void)l;
+                IReferenceClock_Release(c);
+            }
+            if (c2) IReferenceClock_Release(c2);
+            REFERENCE_TIME rt = 0; LONGLONG sm = 0;
+            printf("  SampleToRefTime(NULL) %08lx\n", k->lpVtbl->SampleToRefTime(k, 0, NULL));
+            printf("  RefToSampleTime(NULL) %08lx\n", k->lpVtbl->RefToSampleTime(k, 0, NULL));
+            REFERENCE_TIME r0 = 0, r1 = 0;
+            k->lpVtbl->SampleToRefTime(k, 0, &r0);
+            hr = k->lpVtbl->SampleToRefTime(k, 22050, &r1);
+            /* (dsound's sample clock starts where the sink last synced, reDM's at its start: compared to a few
+             * samples, after the steps' truncation) */
+            printf("  SampleToRefTime %08lx: 22050 samples on is %s\n", hr, r1 - r0 > 9990000 && r1 - r0 <= 10000000 ? "a second" : "not a second");
+            hr = k->lpVtbl->RefToSampleTime(k, r1, &sm);
+            printf("  RefToSampleTime %08lx: back to %s\n", hr, sm >= 22045 && sm <= 22050 ? "22050" : "elsewhere");
+            LONGLONG s0 = 0;
+            k->lpVtbl->RefToSampleTime(k, r0, &s0);
+            k->lpVtbl->RefToSampleTime(k, r0 + 10000000, &sm);
+            printf("  a second on is %s\n", sm - s0 >= 22045 && sm - s0 <= 22051 ? "22050 samples" : "not 22050 samples");
+            REFERENCE_TIME now = 0;
+            IReferenceClock *mc = NULL;
+            IDirectMusicPerformance8_GetTime(perf, &now, NULL);
+            k->lpVtbl->RefToSampleTime(k, now, &sm);
+            k->lpVtbl->SampleToRefTime(k, sm, &rt);
+            printf("  now there and back: within %s\n", now - rt >= 0 && now - rt < 10000 ? "a ms" : "no");
+            (void)mc;
+            DWORD n = 0xdead;
+            BYTE w[64]; memset(w, 0xcc, sizeof(w));
+            printf("  GetFormat(NULL, NULL) %08lx\n", k->lpVtbl->GetFormat(k, NULL, 0, NULL));
+            hr = k->lpVtbl->GetFormat(k, NULL, 0, &n);
+            printf("  GetFormat(NULL) %08lx size %lu\n", hr, n);
+            n = 0xdead;
+            hr = k->lpVtbl->GetFormat(k, (WAVEFORMATEX *)w, 4, &n);
+            printf("  GetFormat(4 bytes) %08lx size %lx first %02x\n", hr, n, w[0]);
+            n = 0xdead;
+            hr = k->lpVtbl->GetFormat(k, (WAVEFORMATEX *)w, sizeof(w), &n);
+            WAVEFORMATEX *f = (WAVEFORMATEX *)w;
+            printf("  GetFormat %08lx size %lu: tag %u ch %u rate %lu avg %lu align %u bits %u cbSize %u byte18 %02x\n", hr, n,
+                   f->wFormatTag, f->nChannels, f->nSamplesPerSec, f->nAvgBytesPerSec, f->nBlockAlign, f->wBitsPerSample,
+                   f->cbSize, w[18]);
+            hr = k->lpVtbl->GetFormat(k, (WAVEFORMATEX *)w, sizeof(w), NULL);
+            printf("  GetFormat(no size out) %08lx\n", hr);
+            printf("  Activate(TRUE) %08lx\n", k->lpVtbl->Activate(k, TRUE));
+            k->lpVtbl->Release(k);
+        }
+        IUnknown_Release(s);
+    }
     if (!p) return;
     /* PChannelInfo's port */
     IDirectMusicPort *pi = NULL;

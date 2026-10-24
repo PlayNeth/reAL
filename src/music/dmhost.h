@@ -74,6 +74,8 @@ HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out);
 int dm_host_priority(dm_host *h, uint32_t group, uint32_t chan, uint32_t *prio, int set);     /* get / set */
 /* the synth's running statistics (IDirectMusicPort::GetRunningStats) */
 void dm_host_stats(dm_host *h, msynth_stats *st);
+rtime_t dm_host_sample_to_ref(dm_host *h, int64_t s);     /* the sink's sample clock (IDirectSoundSynthSink) */
+int64_t dm_host_ref_to_sample(dm_host *h, rtime_t t);
 rtime_t dm_host_latency(dm_host *h);       /* the latency clock: the time of the next sample to be written */
 int dm_host_reverb_set(dm_host *h, float ingain, float mix, float time, float hfratio);
 
