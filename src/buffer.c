@@ -103,8 +103,9 @@ static void update_gains(rl_buffer *b)
     if (spatial) { pan[0] = geo.pan[0]; pan[1] = geo.pan[1]; }
     else rl_pan_gains(b->is_primary ? 0 : b->pan, pan);
 
-    /* direct path level, EAX high-frequency damping and reverb send */
-    float direct = geo.dist_gain * geo.cone_gain, send = 0.0f;
+    /* direct path level, EAX high-frequency damping and reverb send; a 2D buffer has no distance or cone (its 3D
+     * state is the default, at the origin: the listener's distance from there used to attenuate it) */
+    float direct = is3d ? geo.dist_gain * geo.cone_gain : 1.0f, send = 0.0f;
     float lp_a = 1.0f, send_lp_a = 1.0f;
     BOOL eax4 = FALSE;
     float eax4_dop = 1.0f, eax4_df = 1.0f;
@@ -1168,6 +1169,7 @@ static HRESULT WINAPI b3d_SetVelocity(IDirectSound3DBuffer *iface, D3DVALUE x, D
 {
     B3D_SET_BEGIN(iface);
     This->src3d_pending.vel = to_v(x, y, z);
+    LOG_3D("Buffer[%d]::SetVelocity %.3f,%.3f,%.3f (%s)", This->id, x, y, z, apply ? "deferred" : "immediate");
     B3D_SET_END(apply);
 }
 
@@ -1256,19 +1258,23 @@ static HRESULT WINAPI lst_SetAllParameters(IDirectSound3DListener *iface, LPCDS3
     l->distance_factor = p->flDistanceFactor;
     l->rolloff_factor = p->flRolloffFactor;
     l->doppler_factor = p->flDopplerFactor;
-    LOG_3D("Listener::SetAllParameters (%s)", apply ? "deferred" : "immediate");
+    LOG_3D("Listener::SetAllParameters pos %.3f,%.3f,%.3f vel %.3f,%.3f,%.3f distance %g rolloff %g doppler %g (%s)",
+           l->pos.x, l->pos.y, l->pos.z, l->vel.x, l->vel.y, l->vel.z, l->distance_factor, l->rolloff_factor,
+           l->doppler_factor, apply ? "deferred" : "immediate");
     LST_SET_END(apply);
 }
 
 static HRESULT WINAPI lst_SetDistanceFactor(IDirectSound3DListener *iface, D3DVALUE v, DWORD apply)
 {
     if (v < DS3D_MINDISTANCEFACTOR || v > DS3D_MAXDISTANCEFACTOR) return DSERR_INVALIDPARAM;
+    LOG_3D("Listener::SetDistanceFactor %g (%s)", v, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->distance_factor = v; LST_SET_END(apply);
 }
 
 static HRESULT WINAPI lst_SetDopplerFactor(IDirectSound3DListener *iface, D3DVALUE v, DWORD apply)
 {
     if (v < DS3D_MINDOPPLERFACTOR || v > DS3D_MAXDOPPLERFACTOR) return DSERR_INVALIDPARAM;
+    LOG_3D("Listener::SetDopplerFactor %g (%s)", v, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->doppler_factor = v; LST_SET_END(apply);
 }
 
@@ -1294,17 +1300,20 @@ static HRESULT WINAPI lst_SetPosition(IDirectSound3DListener *iface, D3DVALUE x,
 static HRESULT WINAPI lst_SetRolloffFactor(IDirectSound3DListener *iface, D3DVALUE v, DWORD apply)
 {
     if (v < DS3D_MINROLLOFFFACTOR || v > DS3D_MAXROLLOFFFACTOR) return DSERR_INVALIDPARAM;
+    LOG_3D("Listener::SetRolloffFactor %g (%s)", v, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->rolloff_factor = v; LST_SET_END(apply);
 }
 
 static HRESULT WINAPI lst_SetVelocity(IDirectSound3DListener *iface, D3DVALUE x, D3DVALUE y, D3DVALUE z, DWORD apply)
 {
+    LOG_3D("Listener::SetVelocity %.3f,%.3f,%.3f (%s)", x, y, z, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->vel = to_v(x, y, z); LST_SET_END(apply);
 }
 
 static HRESULT WINAPI lst_CommitDeferredSettings(IDirectSound3DListener *iface)
 {
     rl_device *dev = LST_DEV(iface);
+    LOG_3D("Listener::CommitDeferredSettings");
     EnterCriticalSection(&dev->lock);
     dev->listener_dirty = TRUE;
     rl_device_commit_3d(dev);
