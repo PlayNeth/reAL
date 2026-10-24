@@ -452,7 +452,7 @@ Doppler, and WASAPI output.
 reported unsupported so games fall back to EAX 4.)
 
 Smaller items still open:
-- The sink object does not answer IDirectSoundSynthSink (Microsoft's private interface between dmusic and dsound).
+- The sink object does not answer dsound's {182ea05a} interface (the synth's sources and buses).
 - Standard audiopaths still use the host's fixed buffers rather than the configuration machinery (they match
   Microsoft's in every test so far).
 - Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the
