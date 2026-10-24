@@ -84,7 +84,7 @@ void rl_device_commit_3d(rl_device *dev)
 static void update_all_gains(rl_device *dev)
 {
     for (rl_buffer *b = dev->all; b; b = b->next_all)
-        if (!b->is_primary) rl_buffer_update_gains(b);
+        rl_buffer_update_gains(b);          /* (the primary's: its DSSCL_WRITEPRIMARY voice) */
 }
 
 /* The first EAX call of a version loads the reverb (ALchemy fn 0x10042220) and, when the game switches
@@ -445,8 +445,7 @@ static void load_hrtf(rl_device *dev, UINT32 rate)
         EnterCriticalSection(&dev->lock);
         rl_hrtf_free(&dev->hrtf);
         dev->hrtf = set;
-        for (rl_buffer *b = dev->all; b; b = b->next_all)
-            if (!b->is_primary) rl_buffer_update_gains(b);
+        for (rl_buffer *b = dev->all; b; b = b->next_all) rl_buffer_update_gains(b);
         LeaveCriticalSection(&dev->lock);
         LOG_INFO("HRTF: %s (%lu directions, %lu taps, %lu Hz)", cand[i], (unsigned long)set.n_dirs,
                  (unsigned long)set.taps, (unsigned long)set.rate);

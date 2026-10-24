@@ -191,6 +191,8 @@ struct rl_buffer {
     UINT32        cmss_rate, cmss_layout;   /* what voice.cmss was made for */
     struct rl_dsound *owner;    /* IDirectSound that created it (weak); NULL once that is released */
     BOOL          dead;         /* owner released: stopped for good, like real DirectSound */
+    BOOL          lost;         /* a secondary buffer of an owner at DSSCL_WRITEPRIMARY: DSERR_BUFFERLOST until Restore
+                                 * after the owner left that level (tests/primtest.c, as Windows' DirectSound) */
 
     /* effects (SetFX): processed into a copy of the buffer ahead of the play cursor, which the voice plays */
     struct rl_fxchain *fx;
@@ -213,6 +215,8 @@ void rl_buffer_set_sink(rl_buffer *b, DWORD caps);
 int32_t rl_buffer_sink_cents(rl_buffer *b);
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out);
 void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released */
+/* SetCooperativeLevel: the owner's level, and what it does to its buffers (DSSCL_WRITEPRIMARY) */
+void    rl_buffers_coop_level(rl_device *dev, rl_dsound *owner, DWORD level);
 void    rl_buffer_update_gains(rl_buffer *b);     /* lock held */
 void    rl_buffer_fx_run(rl_buffer *b, UINT32 out_frames, UINT32 out_rate);   /* lock held: effects ahead of the mix */
 /* a known FPU state for float work on the game's threads (and the game's own state back after) */

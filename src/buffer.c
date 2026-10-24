@@ -49,6 +49,38 @@ void rl_fpu_leave(unsigned int cw)
 }
 
 static DWORD orig_rate(rl_buffer *b);
+
+/* DSSCL_WRITEPRIMARY: the application writes the final mix into the primary buffer itself, as Windows' DirectSound
+ * lets it (ALchemy does not: its primary buffer plays nothing).  The primary buffer then holds PRIMARY_BYTES in the
+ * primary format, played round and round as a 2D voice, and its owner's secondary buffers are lost.  What Windows does
+ * is in tests/primtest.c. */
+#define PRIMARY_BYTES 32768
+/* (lock held) whether the buffer's owner is at DSSCL_WRITEPRIMARY */
+static BOOL writeprimary(const rl_buffer *b) { return b->owner && b->owner->coop_level == DSSCL_WRITEPRIMARY; }
+static HRESULT parse_format(const WAVEFORMATEX *wfx, WAVEFORMATEXTENSIBLE *out, rl_sfmt *sfmt);
+/* (lock held) the primary buffer's voice in the device's primary format; nothing plays of a format it cannot read */
+static void prim_format(rl_buffer *b)
+{
+    rl_sfmt sf;
+    WAVEFORMATEXTENSIBLE f;
+    if (!b->shared || FAILED(parse_format(&b->dev->primary_fmt, &f, &sf)) || f.Format.nChannels > 2) {
+        b->voice.size = 0;
+        b->voice.block = 0;
+        b->voice.playing = 0;
+        if (b->in_play_list) rl_device_stop_voice(b->dev, b);
+        return;
+    }
+    b->fmt = f;
+    b->voice.data = b->shared->data;
+    b->voice.interp = g_cfg.resampler;
+    b->voice.channels = f.Format.nChannels;
+    b->voice.block = f.Format.nBlockAlign;
+    b->voice.sfmt = sf;
+    b->voice.rate = f.Format.nSamplesPerSec;
+    b->voice.size = PRIMARY_BYTES - PRIMARY_BYTES % b->voice.block;
+    if ((b->voice.pos >> 32) >= rl_voice_frames(&b->voice)) b->voice.pos = 0;
+    rl_buffer_update_gains(b);
+}
 void rl_buffer_update_gains(rl_buffer *b)
 {
     unsigned int cw = rl_fpu_enter();
@@ -62,14 +94,14 @@ static void update_gains(rl_buffer *b)
 {
     rl_device *dev = b->dev;
     float base = rl_db100_to_gain(b->volume);
-    BOOL is3d = (b->desc.dwFlags & DSBCAPS_CTRL3D) != 0;
+    BOOL is3d = !b->is_primary && (b->desc.dwFlags & DSBCAPS_CTRL3D) != 0;   /* (the primary's: plain 2D, unpanned) */
     BOOL spatial = is3d && b->src3d.mode != RL_DS3DMODE_DISABLE;
     BOOL use_hrtf = spatial && b->hrtf && dev->hrtf.dirs;
     rl_geom geo;
     float pan[2];
     rl_spatial_geometry(&dev->listener, &b->src3d, &geo);
     if (spatial) { pan[0] = geo.pan[0]; pan[1] = geo.pan[1]; }
-    else rl_pan_gains(b->pan, pan);
+    else rl_pan_gains(b->is_primary ? 0 : b->pan, pan);
 
     /* direct path level, EAX high-frequency damping and reverb send */
     float direct = geo.dist_gain * geo.cone_gain, send = 0.0f;
@@ -356,7 +388,15 @@ static ULONG WINAPI dsb_AddRef(IDirectSoundBuffer8 *iface)
 static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
 {
     rl_buffer *This = BUF(iface);
-    ULONG ref = InterlockedDecrement(&This->ref);
+    ULONG ref;
+    if (This->is_primary) {
+        /* its owner hands it out again while it is alive (under the lock): it forgets it as it goes */
+        rl_device *d = This->dev;
+        EnterCriticalSection(&d->lock);
+        ref = InterlockedDecrement(&This->ref);
+        if (!ref && This->owner && This->owner->primary == This) This->owner->primary = NULL;
+        LeaveCriticalSection(&d->lock);
+    } else ref = InterlockedDecrement(&This->ref);
     if (ref) return ref;
 
     rl_device *dev = This->dev;
@@ -395,7 +435,11 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
         caps->dwFlags &= ~DSBCAPS_LOCDEFER;
         caps->dwFlags |= DSBCAPS_LOCHARDWARE;
     }
-    caps->dwBufferBytes = This->is_primary ? 4096 : This->desc.dwBufferBytes;
+    if (This->is_primary) {
+        EnterCriticalSection(&This->dev->lock);
+        caps->dwBufferBytes = writeprimary(This) ? PRIMARY_BYTES : 4096;
+        LeaveCriticalSection(&This->dev->lock);
+    } else caps->dwBufferBytes = This->desc.dwBufferBytes;
     if (This->sink) { caps->dwFlags = This->sink_caps; caps->dwBufferBytes = 0; }   /* as DirectSound's sink buffers */
     caps->dwUnlockTransferRate = 4096;
     caps->dwPlayCpuOverhead = 0;
@@ -482,12 +526,13 @@ void rl_buffer_fx_run(rl_buffer *b, UINT32 out_frames, UINT32 out_rate)
 static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD play, LPDWORD write)
 {
     rl_buffer *This = BUF(iface);
-    if (This->is_primary) {
+    EnterCriticalSection(&This->dev->lock);
+    if (This->is_primary && !writeprimary(This)) {
+        LeaveCriticalSection(&This->dev->lock);
         if (play) *play = 0;
         if (write) *write = 0;
         return DS_OK;
     }
-    EnterCriticalSection(&This->dev->lock);
     DWORD p = rl_voice_play_bytes(&This->voice);
     DWORD w = p;
     if (This->voice.playing) {
@@ -552,8 +597,18 @@ static HRESULT WINAPI dsb_GetStatus(IDirectSoundBuffer8 *iface, LPDWORD status)
     DWORD s = 0;
     EnterCriticalSection(&This->dev->lock);
     if (This->is_primary) {
+        /* no location (ALchemy 0x1001dda0, and Windows') */
         if (This->dev->primary_playing || This->dev->playing) s = DSBSTATUS_PLAYING | DSBSTATUS_LOOPING;
-    } else if (This->voice.playing) {
+        LeaveCriticalSection(&This->dev->lock);
+        *status = s;
+        return DS_OK;
+    }
+    if (This->lost) {
+        LeaveCriticalSection(&This->dev->lock);
+        *status = DSBSTATUS_BUFFERLOST;
+        return DS_OK;
+    }
+    if (This->voice.playing) {
         s = DSBSTATUS_PLAYING;
         if (This->voice.looping) s |= DSBSTATUS_LOOPING;
     }
@@ -584,10 +639,16 @@ static HRESULT WINAPI dsb_Lock(IDirectSoundBuffer8 *iface, DWORD offset, DWORD b
     if (b1) *b1 = 0;
     if (p2) *p2 = NULL;
     if (b2) *b2 = 0;
-    if (This->is_primary) return DSERR_PRIOLEVELNEEDED; /* DSSCL_WRITEPRIMARY not supported */
+    if (This->is_primary || This->lost) {
+        EnterCriticalSection(&This->dev->lock);
+        BOOL wp = writeprimary(This), lost = This->lost;
+        LeaveCriticalSection(&This->dev->lock);
+        if (lost) return DSERR_BUFFERLOST;
+        if (This->is_primary && !wp) return DSERR_PRIOLEVELNEEDED;     /* (only DSSCL_WRITEPRIMARY writes it) */
+    }
     if (!p1 || !b1) return DSERR_INVALIDPARAM;
 
-    DWORD size = This->voice.size;
+    DWORD size = This->is_primary ? PRIMARY_BYTES : This->voice.size;
     if (flags & DSBLOCK_FROMWRITECURSOR) dsb_GetCurrentPosition(iface, NULL, &offset);
     if (flags & DSBLOCK_ENTIREBUFFER) bytes = size;
     if (offset >= size || bytes > size || !bytes) return DSERR_INVALIDPARAM;
@@ -622,7 +683,23 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
         LOG_CALL("Buffer[%d]::Play on a buffer whose DirectSound object was released", This->id);
         return DSERR_BUFFERLOST;
     }
+    if (This->lost) {
+        LeaveCriticalSection(&This->dev->lock);
+        return DSERR_BUFFERLOST;
+    }
     if (This->is_primary) {
+        if (writeprimary(This)) {
+            /* its owner's own mix: played looping only (Windows refuses Play without DSBPLAY_LOOPING then) */
+            if (!(flags & DSBPLAY_LOOPING)) {
+                LeaveCriticalSection(&This->dev->lock);
+                return DSERR_INVALIDPARAM;
+            }
+            if (This->voice.block) {
+                This->voice.looping = 1;
+                rl_voice_start(&This->voice);
+                rl_device_start_voice(This->dev, This);
+            }
+        }
         This->dev->primary_playing = TRUE;
     } else {
         This->voice.looping = (flags & DSBPLAY_LOOPING) != 0;
@@ -661,10 +738,23 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
     rl_buffer *This = BUF(iface);
     if (!This->is_primary) return DSERR_INVALIDCALL;
     if (!wfx) return DSERR_INVALIDPARAM;
-    /* we always mix in float at the device rate; just remember what the game asked for */
-    This->dev->primary_fmt = *wfx;
-    This->dev->primary_fmt.cbSize = 0;
-    if (wfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) This->dev->primary_fmt.wFormatTag = WAVE_FORMAT_PCM;
+    rl_device *dev = This->dev;
+    EnterCriticalSection(&dev->lock);
+    if (writeprimary(This) && wfx->nChannels > 2) {     /* (Windows: at most stereo for the application's own mix) */
+        LeaveCriticalSection(&dev->lock);
+        return DSERR_INVALIDPARAM;
+    }
+    /* we always mix in float at the device rate; just remember what the game asked for, and play a
+     * DSSCL_WRITEPRIMARY primary buffer in it */
+    dev->primary_fmt = *wfx;
+    dev->primary_fmt.cbSize = 0;
+    if (wfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+        const WAVEFORMATEXTENSIBLE *x = (const WAVEFORMATEXTENSIBLE *)wfx;
+        dev->primary_fmt.wFormatTag = wfx->cbSize >= 22 && IsEqualGUID(&x->SubFormat, &RL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ?
+                                      3 /* WAVE_FORMAT_IEEE_FLOAT */ : WAVE_FORMAT_PCM;
+    }
+    for (rl_buffer *b = dev->all; b; b = b->next_all) if (b->is_primary) prim_format(b);
+    LeaveCriticalSection(&dev->lock);
     LOG_CALL("Primary::SetFormat %lu Hz %u ch %u bits", (unsigned long)wfx->nSamplesPerSec, wfx->nChannels, wfx->wBitsPerSample);
     return DS_OK;
 }
@@ -706,6 +796,19 @@ static HRESULT WINAPI dsb_SetFrequency(IDirectSoundBuffer8 *iface, DWORD freq)
     return DS_OK;
 }
 
+/* (lock held) a secondary buffer stopped: Stop, or lost */
+static void stop_locked(rl_buffer *b)
+{
+    BOOL was = b->voice.playing;
+    b->voice.playing = 0;
+    if ((b->desc.dwFlags & (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) == (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) {
+        b->fx_placed = FALSE;               /* a deferred buffer gives its effects' resources up */
+        rl_fxchain_place(b->fx, FALSE);
+    }
+    if (b->in_play_list) rl_device_stop_voice(b->dev, b);
+    if (was) rl_fire_stop(&b->voice, rl_signal_event);
+}
+
 static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
 {
     rl_buffer *This = BUF(iface);
@@ -713,15 +816,10 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
     EnterCriticalSection(&This->dev->lock);
     if (This->is_primary) {
         This->dev->primary_playing = FALSE;
-    } else {
-        BOOL was = This->voice.playing;
-        This->voice.playing = 0;
-        if ((This->desc.dwFlags & (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) == (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) {
-            This->fx_placed = FALSE;        /* a deferred buffer gives its effects' resources up */
-            rl_fxchain_place(This->fx, FALSE);
-        }
+        This->voice.playing = 0;            /* (the DSSCL_WRITEPRIMARY voice: Play goes on from here) */
         if (This->in_play_list) rl_device_stop_voice(This->dev, This);
-        if (was) rl_fire_stop(&This->voice, rl_signal_event);
+    } else {
+        stop_locked(This);
     }
     LeaveCriticalSection(&This->dev->lock);
     return DS_OK;
@@ -730,13 +828,32 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
 static HRESULT WINAPI dsb_Unlock(IDirectSoundBuffer8 *iface, LPVOID p1, DWORD b1, LPVOID p2, DWORD b2)
 {
     rl_buffer *This = BUF(iface);
-    (void)p1; (void)b1; (void)p2; (void)b2;
+    (void)b1; (void)p2; (void)b2;
+    if (This->is_primary) {
+        EnterCriticalSection(&This->dev->lock);
+        BOOL wp = writeprimary(This);
+        LeaveCriticalSection(&This->dev->lock);
+        if (!wp) return DSERR_PRIOLEVELNEEDED;
+    }
+    if (!p1) return DSERR_INVALIDPARAM;     /* (ALchemy 0x1001e6e0) */
     /* data is written in place; only the count of open locks is kept (SetFX is refused while one is open) */
     if (InterlockedDecrement(&This->locks) < 0) InterlockedIncrement(&This->locks);
     return DS_OK;
 }
 
-static HRESULT WINAPI dsb_Restore(IDirectSoundBuffer8 *iface) { (void)iface; return DS_OK; }
+/* a lost buffer is found again once its owner has left DSSCL_WRITEPRIMARY */
+static HRESULT WINAPI dsb_Restore(IDirectSoundBuffer8 *iface)
+{
+    rl_buffer *This = BUF(iface);
+    HRESULT hr = DS_OK;
+    EnterCriticalSection(&This->dev->lock);
+    if (This->lost) {
+        if (writeprimary(This)) hr = DSERR_BUFFERLOST;
+        else This->lost = FALSE;
+    }
+    LeaveCriticalSection(&This->dev->lock);
+    return hr;
+}
 
 static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFFECTDESC fx, LPDWORD results)
 {
@@ -1682,9 +1799,24 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
 
     if (desc->dwFlags & DSBCAPS_PRIMARYBUFFER) {
         b->is_primary = TRUE;
+        /* what an owner at DSSCL_WRITEPRIMARY writes: silence in the primary format to start with (Windows' 0x80 for
+         * its 8-bit default) */
+        b->shared = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*b->shared));
+        BYTE *data = b->shared ? HeapAlloc(GetProcessHeap(), 0, PRIMARY_BYTES) : NULL;
+        if (!data) {
+            HeapFree(GetProcessHeap(), 0, b->shared);
+            HeapFree(GetProcessHeap(), 0, b);
+            return DSERR_OUTOFMEMORY;
+        }
+        b->shared->ref = 1;
+        b->shared->data = data;
+        b->shared->size = PRIMARY_BYTES;
         rl_device_addref(dev);
         EnterCriticalSection(&dev->lock);
+        memset(data, dev->primary_fmt.wFormatTag == WAVE_FORMAT_PCM && dev->primary_fmt.wBitsPerSample == 8 ? 0x80 : 0,
+               PRIMARY_BYTES);
         list_add_all(dev, b);
+        prim_format(b);
         LeaveCriticalSection(&dev->lock);
         LOG_CALL("CreateSoundBuffer[%d] primary: %s", b->id, fl);
         *out = b;
@@ -1760,6 +1892,7 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     dev->n_buffers++;
     if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
     rl_buffer_update_gains(b);
+    b->lost = writeprimary(b);              /* (made while its owner writes the primary buffer) */
     LeaveCriticalSection(&dev->lock);
 
     LOG_CALL("CreateSoundBuffer[%d] %lu bytes, %lu Hz %u ch %u bit: %s", b->id, (unsigned long)bytes,
@@ -1802,6 +1935,7 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     if (b->desc.dwFlags & DSBCAPS_CTRL3D)
         b->hrtf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(rl_hrtf_voice));
     rl_buffer_update_gains(b);
+    b->lost = writeprimary(b);
     list_add_all(dev, b);
     dev->n_buffers++;
     if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
@@ -1813,11 +1947,38 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     return DS_OK;
 }
 
+/* As Windows' DirectSound (tests/primtest.c): at DSSCL_WRITEPRIMARY the owner's secondary buffers are lost (they
+ * stop; Lock, Play and Restore answer DSERR_BUFFERLOST, GetStatus DSBSTATUS_BUFFERLOST), and stay lost after it leaves
+ * that level until Restore; leaving it stops the primary buffer's own playing.  The level is set here, under the lock
+ * the buffers read it with. */
+void rl_buffers_coop_level(rl_device *dev, rl_dsound *owner, DWORD level)
+{
+    EnterCriticalSection(&dev->lock);
+    owner->coop_level = level;
+    int lost = 0;
+    for (rl_buffer *b = dev->all; b; b = b->next_all) {
+        if (b->owner != owner) continue;
+        if (b->is_primary) {
+            if (level != DSSCL_WRITEPRIMARY) {
+                b->voice.playing = 0;
+                if (b->in_play_list) rl_device_stop_voice(dev, b);
+            }
+            prim_format(b);                 /* (its gains) */
+        } else if (level == DSSCL_WRITEPRIMARY && !b->lost) {
+            b->lost = TRUE;
+            stop_locked(b);
+            lost++;
+        }
+    }
+    LeaveCriticalSection(&dev->lock);
+    if (lost) LOG_CALL("SetCooperativeLevel(DSSCL_WRITEPRIMARY): %d secondary buffer(s) lost", lost);
+}
+
 /* the owner's last release: its buffers stop for good, like real DirectSound's, and the ones the game still holds
  * move to the graveyard device (rl_device_grave), letting go of this one: a buffer kept by the game must not keep the
  * device, its thread and its state alive (Need for Speed III releases DirectSound for each sound setting in its menu
  * and keeps one buffer each time; with the device kept, the next DirectSound got the old one's EAX and 3D state).
- * The primary buffer goes too if the game holds it beyond the owner's reference. */
+ * The primary buffer goes too while the game holds it (the owner holds no reference to it). */
 void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
 {
     int n = 0, playing = 0, moved = 0;
@@ -1829,7 +1990,8 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
         if (b->owner != owner) continue;
         b->owner = NULL;
         if (b->is_primary) {
-            if (b->ref <= 1) continue;  /* only the owner's reference: released by the owner itself */
+            owner->primary = NULL;      /* (the game holds it: it lives on without its owner) */
+            b->voice.playing = 0;
         } else {
             b->dead = TRUE;
             if (b->voice.playing) playing++;

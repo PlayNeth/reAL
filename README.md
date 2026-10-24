@@ -50,7 +50,7 @@ reAL has two halves in one DLL:
 | Speakers: stereo, headphones, quad, 5.1, 7.1 (Windows' setup, or `speakers=`) | ✅ ALchemy's layouts, channel converter (multichannel buffers, LFE to the fronts through its bass limiter) and 3D speaker panning (front/rear split of the HRTF pair, centre, LFE and side speakers), verified in the emulator |
 | CMSS-3D upmix (`cmss=on`; off by default, as in ALchemy) | ✅ on quad, 5.1 and 7.1 (ALchemy's STFT upmixer: centre, rear, sides), on stereo speakers and on headphones (its quad through ALchemy's stereo virtualizer, speaker or headphone version), matching ALchemy in the emulator to better than -80 dB |
 | EAX 5.0 | ✖ not planned: games used it through OpenAL, not DirectSound (use OpenAL Soft); reported unsupported, so games fall back to EAX 4 |
-| Primary buffer write access (DSSCL_WRITEPRIMARY) | ✗ |
+| Primary buffer write access (DSSCL_WRITEPRIMARY) | ✅ as Windows' DirectSound (ALchemy has none): the game's own mix played from the primary buffer in the primary format, its secondary buffers lost meanwhile |
 
 ### reDM (DirectMusic)
 

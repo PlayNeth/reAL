@@ -54,8 +54,7 @@ static ULONG WINAPI ds_Release(IDirectSound8 *iface)
     if (!ref) {
         LOG_CALL("DirectSound %p destroyed", (void *)This);
         /* real DirectSound takes all buffers created through this object down with it */
-        if (This->dev) rl_buffers_orphan(This->dev, This);
-        if (This->primary) IDirectSoundBuffer8_Release(&This->primary->IDirectSoundBuffer8_iface);
+        if (This->dev) rl_buffers_orphan(This->dev, This);     /* (the primary buffer too, while the game holds it) */
         if (This->dev) rl_device_release(This->dev);
         if (This->real_ds) IDirectSound8_Release(This->real_ds);
         HeapFree(GetProcessHeap(), 0, This);
@@ -76,13 +75,24 @@ static HRESULT WINAPI ds_CreateSoundBuffer(IDirectSound8 *iface, LPCDSBUFFERDESC
 
     if (desc->dwFlags & DSBCAPS_PRIMARYBUFFER) {
         if (desc->lpwfxFormat || desc->dwBufferBytes || (desc->dwFlags & DSBCAPS_CTRLFX)) return DSERR_INVALIDPARAM;
-        /* one primary object per device object; hand out new references */
-        if (!This->primary) {
-            HRESULT hr = rl_buffer_create(This->dev, This, desc, &This->primary);
+        /* one primary object per device object while the game holds it (new references to it, its flags the first
+         * ones); once the game has let go of it, the next one is made afresh with the flags it asks for.  The
+         * device object holds no reference: its references are the game's, as Windows counts them (tests/primtest.c
+         * object). */
+        rl_buffer *p = NULL, *made = NULL;
+        EnterCriticalSection(&This->dev->lock);
+        if ((p = This->primary)) IDirectSoundBuffer8_AddRef(&p->IDirectSoundBuffer8_iface);
+        LeaveCriticalSection(&This->dev->lock);
+        if (!p) {
+            HRESULT hr = rl_buffer_create(This->dev, This, desc, &made);
             if (FAILED(hr)) return hr;
+            EnterCriticalSection(&This->dev->lock);
+            if ((p = This->primary)) IDirectSoundBuffer8_AddRef(&p->IDirectSoundBuffer8_iface);  /* (another thread's) */
+            else This->primary = p = made, made = NULL;
+            LeaveCriticalSection(&This->dev->lock);
+            if (made) IDirectSoundBuffer8_Release(&made->IDirectSoundBuffer8_iface);
         }
-        IDirectSoundBuffer8_AddRef(&This->primary->IDirectSoundBuffer8_iface);
-        *out = (LPDIRECTSOUNDBUFFER)&This->primary->IDirectSoundBuffer8_iface;
+        *out = (LPDIRECTSOUNDBUFFER)&p->IDirectSoundBuffer8_iface;
         return DS_OK;
     }
 
@@ -146,7 +156,7 @@ static HRESULT WINAPI ds_SetCooperativeLevel(IDirectSound8 *iface, HWND hwnd, DW
     LOG_CALL("DirectSound::SetCooperativeLevel(%lu)", (unsigned long)level);
     if (!This->dev) return DSERR_UNINITIALIZED;
     if (level < DSSCL_NORMAL || level > DSSCL_WRITEPRIMARY) return DSERR_INVALIDPARAM;
-    This->coop_level = level;
+    rl_buffers_coop_level(This->dev, This, level);
     return DS_OK;
 }
 

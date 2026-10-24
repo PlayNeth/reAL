@@ -100,6 +100,8 @@ $CC -O1 -Wno-format -o build/fxtest.exe tests/fxtest.c -ldsound -lole32 -luuid -
 $CC -O1 -Wno-format -o build/cfgtest.exe tests/cfgtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/porttest.exe tests/porttest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/dx6test.exe tests/dx6test.c -ldsound -lole32 -luuid -ldxguid
+# the primary buffer and DSSCL_WRITEPRIMARY against Windows' DirectSound (tests/comcmp.sh primtest.exe)
+$CC -O1 -Wno-format -o build/primtest.exe tests/primtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/dx7test.exe tests/dx7test.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/theorytest.exe tests/theorytest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/styletest.exe tests/styletest.c -lole32 -luuid -ldxguid

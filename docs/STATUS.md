@@ -34,6 +34,28 @@ Doppler, and WASAPI output.
 - Cost: 64 sinc voices with 32 muted went from about 9% to 5.5% of one core; a muted voice now costs almost
   nothing.
 
+**Primary buffer** (`src/buffer.c`, `tests/primtest.c`)
+- DSSCL_WRITEPRIMARY, which ALchemy does not do (its primary buffer plays nothing), as Windows 7's DirectSound does
+  it: the primary buffer holds 32768 bytes (GetCaps) in the primary format, Lock / Unlock / GetCurrentPosition work
+  on it, Play wants DSBPLAY_LOOPING, Stop keeps the position, SetFormat may change the format while it plays (at
+  most stereo). What it holds plays as a plain 2D voice: `primtest audio` recorded from Windows' and from reAL gives
+  the same samples.
+- The owner's secondary buffers are lost at that level: they stop, Lock / Play / Restore answer DSERR_BUFFERLOST,
+  GetStatus DSBSTATUS_BUFFERLOST; after the owner leaves it, Restore finds them again. Buffers made at that level
+  start lost.
+- Below that level the primary buffer is as before (ALchemy's): Lock and Unlock answer DSERR_PRIOLEVELNEEDED,
+  GetCurrentPosition 0, GetCaps 4096 bytes, SetFormat at any level.
+- The primary object as Windows keeps it: the DirectSound object holds no reference, CreateSoundBuffer hands out the
+  same one while the game holds it and makes a new one, with the flags asked for, once the game has let go (it used
+  to keep the first one's flags for good: a primary buffer made again with DSBCAPS_CTRLVOLUME after one made
+  without it had no volume control). GetStatus has no location bits (ALchemy's and Windows'). Unlock with no
+  pointer is DSERR_INVALIDPARAM (ALchemy's).
+- `tests/comcmp.sh primtest.exe` differs from Windows 7 only where reAL keeps ALchemy's answers: LOCHARDWARE in
+  GetCaps and in secondary buffers' GetStatus, 4096 bytes below DSSCL_WRITEPRIMARY, SetFormat and
+  GetCurrentPosition below it, Play without DSBPLAY_LOOPING below it, the primary volume read back (Windows answers
+  0), the listener without DSBCAPS_CTRL3D, Unlock not checked against the Lock, and the primary buffer once its
+  DirectSound object is released (Windows answers E_INVALIDARG to everything then).
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
