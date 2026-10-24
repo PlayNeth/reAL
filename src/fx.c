@@ -77,6 +77,16 @@ typedef struct rl_fx {
     dsfx *fx;
     WAVEFORMATEX wf;
     BOOL has_in, has_out;
+    /* the buffered interface (dsdmo's CPCMDMO): the input buffer held from ProcessInput until ProcessOutput has had
+     * all its whole frames */
+    IMediaBuffer *held;                     /* +0xf4 */
+    BYTE *in;                               /* +0xf8 its data, +0xfc its length, +0x100 how much went out */
+    DWORD in_len, in_used;
+    BOOL in_timed;                          /* +0x104 DMO_INPUT_DATA_BUFFERF_TIME, +0x108 the time */
+    REFERENCE_TIME in_t;
+    BOOL more;                              /* +0x9c ProcessInput since the last ProcessOutput, or that left more */
+    BOOL started;                           /* +0xf0 a ProcessOutput since the type was set (the first runs Discontinuity) */
+    BOOL typed;                             /* +0xbc both types have been set (clearing one later leaves it) */
 } rl_fx;
 
 static rl_fx *from_fx(void *i) { return (rl_fx *)i; }
@@ -103,6 +113,7 @@ static ULONG fx_release(rl_fx *This)
 {
     LONG r = InterlockedDecrement(&This->ref);
     if (!r) {
+        if (This->held) IMediaBuffer_Release(This->held);
         dsfx_free(This->fx);
         DeleteCriticalSection(&This->cs);
         HeapFree(GetProcessHeap(), 0, This);
@@ -252,6 +263,8 @@ static HRESULT set_type(rl_fx *This, DWORD s, const DMO_MEDIA_TYPE *mt, DWORD fl
         if (SUCCEEDED(hr)) {
             This->wf = wf;
             if (out) This->has_out = TRUE; else This->has_in = TRUE;
+            This->started = FALSE;
+            if (This->has_in && This->has_out) This->typed = TRUE;
         }
     }
     LeaveCriticalSection(&This->cs);
@@ -299,11 +312,13 @@ static HRESULT WINAPI mo_GetOutputSizeInfo(IMediaObject *i, DWORD s, DWORD *size
 }
 static HRESULT WINAPI mo_GetInputMaxLatency(IMediaObject *i, DWORD s, REFERENCE_TIME *t) { return E_NOTIMPL; }
 static HRESULT WINAPI mo_SetInputMaxLatency(IMediaObject *i, DWORD s, REFERENCE_TIME t) { return E_NOTIMPL; }
+/* 10005420 -> 10005e50: Discontinuity, and the input buffer let go of */
 static HRESULT WINAPI mo_Flush(IMediaObject *i)
 {
     rl_fx *This = from_mo(i);
     EnterCriticalSection(&This->cs);
     dsfx_discontinuity(This->fx);
+    if (This->held) { IMediaBuffer_Release(This->held); This->held = NULL; }
     LeaveCriticalSection(&This->cs);
     return S_OK;
 }
@@ -318,16 +333,103 @@ static HRESULT WINAPI mo_Discontinuity(IMediaObject *i, DWORD s)
 }
 static HRESULT WINAPI mo_AllocateStreamingResources(IMediaObject *i) { return S_OK; }
 static HRESULT WINAPI mo_FreeStreamingResources(IMediaObject *i) { return S_OK; }
+/* 10005330: data accepted once both types have been set, while no input buffer is held (10005ed0) */
 static HRESULT WINAPI mo_GetInputStatus(IMediaObject *i, DWORD s, DWORD *f)
 {
+    rl_fx *This = from_mo(i);
     if (s) return DMO_E_INVALIDSTREAMINDEX;
     if (!f) return E_POINTER;
-    *f = DMO_INPUT_STATUSF_ACCEPT_DATA;
+    EnterCriticalSection(&This->cs);
+    *f = This->typed && !This->held ? DMO_INPUT_STATUSF_ACCEPT_DATA : 0;
+    LeaveCriticalSection(&This->cs);
     return S_OK;
 }
-/* the buffered (not in place) interface: not offered, DirectSound only uses the in-place one */
-static HRESULT WINAPI mo_ProcessInput(IMediaObject *i, DWORD s, IMediaBuffer *b, DWORD f, REFERENCE_TIME t, REFERENCE_TIME l) { return E_NOTIMPL; }
-static HRESULT WINAPI mo_ProcessOutput(IMediaObject *i, DWORD f, DWORD n, DMO_OUTPUT_DATA_BUFFER *b, DWORD *st) { return E_NOTIMPL; }
+/* the buffered interface (DirectSound itself only uses the in-place one).  10005480 -> 10005bb0: the buffer is kept
+ * (with a reference) if it has a whole frame, S_FALSE otherwise; nothing is processed yet */
+static HRESULT WINAPI mo_ProcessInput(IMediaObject *i, DWORD s, IMediaBuffer *b, DWORD f, REFERENCE_TIME t, REFERENCE_TIME l)
+{
+    rl_fx *This = from_mo(i);
+    EnterCriticalSection(&This->cs);
+    HRESULT hr;
+    BYTE *p = NULL;
+    DWORD n = 0;
+    if (s) hr = DMO_E_INVALIDSTREAMINDEX;
+    else if (!This->has_in || !This->has_out) hr = DMO_E_TYPE_NOT_SET;
+    else if (This->held) hr = DMO_E_NOTACCEPTING;
+    else if (!b) hr = E_POINTER;
+    else if (SUCCEEDED(hr = IMediaBuffer_GetBufferAndLength(b, &p, &n))) {
+        if (!p) n = 0;
+        This->more = TRUE;
+        This->in = p; This->in_len = n; This->in_used = 0;
+        This->in_timed = (f & DMO_INPUT_DATA_BUFFERF_TIME) != 0;   /* (the length is not kept) */
+        This->in_t = t;
+        if (n < This->wf.nBlockAlign) hr = S_FALSE;
+        else { This->held = b; IMediaBuffer_AddRef(b); hr = S_OK; }
+    }
+    LeaveCriticalSection(&This->cs);
+    return hr;
+}
+/* 100055b0 -> 10005c60: as many whole frames of the input as the buffer has room for, after what it already has;
+ * the time stamp is the input's, moved on by the frames before; always a sync point, and incomplete while frames are
+ * left.  No buffer: nothing done, incomplete if ProcessInput (or the last ProcessOutput) left something */
+static HRESULT WINAPI mo_ProcessOutput(IMediaObject *i, DWORD f, DWORD n, DMO_OUTPUT_DATA_BUFFER *b, DWORD *st)
+{
+    rl_fx *This = from_mo(i);
+    if (!st) return E_POINTER;
+    EnterCriticalSection(&This->cs);
+    HRESULT hr;
+    *st = 0;
+    if (n != 1) { hr = E_INVALIDARG; goto out; }
+    if (!This->has_in || !This->has_out) { hr = DMO_E_TYPE_NOT_SET; goto out; }
+    b->dwStatus = 0;
+    BYTE *p = NULL;
+    DWORD cur = 0, max = 0;
+    if (!b->pBuffer) {                      /* (the output stream is neither optional nor discardable) */
+        if (This->more) b->dwStatus |= DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE;
+        hr = S_OK;
+        goto out;
+    }
+    if (FAILED(hr = IMediaBuffer_GetBufferAndLength(b->pBuffer, &p, &cur))) goto out;
+    if (FAILED(hr = IMediaBuffer_GetMaxLength(b->pBuffer, &max))) goto out;
+    if (cur) {
+        if (cur > max) { hr = E_INVALIDARG; goto out; }
+        if (p) p += cur;
+        max -= cur;
+    }
+    if (!This->started) { dsfx_discontinuity(This->fx); This->started = TRUE; }
+    DWORD ba = This->wf.nBlockAlign, made = 0;
+    DWORD frames = This->held ? (This->in_len - This->in_used) / ba : 0;
+    if (!frames) hr = S_FALSE;
+    else if (!(max / ba)) { hr = E_INVALIDARG; goto out; }
+    else {
+        if (frames > max / ba) frames = max / ba;
+        if (p) {
+            memcpy(p, This->in + This->in_used, frames * ba);
+            REFERENCE_TIME t = This->in_timed ? This->in_t + (REFERENCE_TIME)(This->in_used / ba) * 10000000 / This->wf.nSamplesPerSec : 0;
+            unsigned int cw = rl_fpu_enter();
+            dsfx_process_at(This->fx, p, frames, t);
+            rl_fpu_leave(cw);
+        }
+        b->dwStatus |= DMO_OUTPUT_DATA_BUFFERF_SYNCPOINT;
+        if (This->in_timed) {
+            b->rtTimestamp = This->in_t + (REFERENCE_TIME)(This->in_used / ba) * 10000000 / This->wf.nSamplesPerSec;
+            b->dwStatus |= DMO_OUTPUT_DATA_BUFFERF_TIME;
+        }
+        This->in_used += frames * ba;
+        if (This->in_len - This->in_used < ba) { IMediaBuffer_Release(This->held); This->held = NULL; }
+        else b->dwStatus |= DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE;
+        made = frames * ba;
+        hr = S_OK;
+    }
+    This->more = (b->dwStatus & DMO_OUTPUT_DATA_BUFFERF_INCOMPLETE) != 0;
+    if (p) {
+        HRESULT h2 = IMediaBuffer_SetLength(b->pBuffer, made + cur);
+        if (FAILED(h2)) hr = h2;
+    }
+out:
+    LeaveCriticalSection(&This->cs);
+    return hr;
+}
 static HRESULT WINAPI mo_Lock(IMediaObject *i, LONG l)
 {
     rl_fx *This = from_mo(i);
@@ -524,7 +626,7 @@ static HRESULT WINAPI ip_Clone(IMediaObjectInPlace *i, IMediaObjectInPlace **out
     }
     if (This->has_in || This->has_out) {
         dsfx_set_format(n->fx, This->wf.wFormatTag, This->wf.nChannels, This->wf.nSamplesPerSec, This->wf.wBitsPerSample);
-        n->wf = This->wf; n->has_in = This->has_in; n->has_out = This->has_out;
+        n->wf = This->wf; n->has_in = This->has_in; n->has_out = This->has_out; n->typed = This->has_in && This->has_out;
     }
     LeaveCriticalSection(&This->cs);
     rl_fpu_leave(cw);

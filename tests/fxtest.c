@@ -2,7 +2,7 @@
  * parameter interfaces and the processed audio.  Run through tests/comcmp.sh with the probe DMO (tests/fxprobe.c)
  * registered and FXPROBE_LOG=fxlog.txt FXPROBE_DATA=fxdata.raw in the environment:
  *   FXPROBE_LOG=fxlog.txt FXPROBE_DATA=fxdata.raw sh tests/comcmp.sh fxtest.exe [section]
- * Sections: api, params, data (default: all). */
+ * Sections: api, params, data, seq, process (default: all). */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -559,6 +559,136 @@ static void test_data(void)
     run_data("i3dl2", &GUID_DSFX_STANDARD_I3DL2REVERB, &i3, 3, 1, 48000, 32, 0);
 }
 
+/* ------------------------------------------------------------------ the buffered interface (ProcessInput/Output) */
+typedef struct { IMediaBuffer iface; LONG ref; BYTE *p; DWORD len, max; } mbuf;
+static mbuf *mb(IMediaBuffer *i) { return (mbuf *)i; }
+static HRESULT WINAPI mb_qi(IMediaBuffer *i, REFIID r, void **o)
+{
+    if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &IID_IMediaBuffer)) { *o = i; InterlockedIncrement(&mb(i)->ref); return S_OK; }
+    *o = NULL; return E_NOINTERFACE;
+}
+static ULONG WINAPI mb_addref(IMediaBuffer *i) { return InterlockedIncrement(&mb(i)->ref); }
+static ULONG WINAPI mb_release(IMediaBuffer *i) { return InterlockedDecrement(&mb(i)->ref); }      /* (on the stack) */
+static HRESULT WINAPI mb_setlen(IMediaBuffer *i, DWORD n) { if (n > mb(i)->max) return E_INVALIDARG; mb(i)->len = n; return S_OK; }
+static HRESULT WINAPI mb_getmax(IMediaBuffer *i, DWORD *n) { if (!n) return E_POINTER; *n = mb(i)->max; return S_OK; }
+static HRESULT WINAPI mb_get(IMediaBuffer *i, BYTE **b, DWORD *n) { if (b) *b = mb(i)->p; if (n) *n = mb(i)->len; return S_OK; }
+static IMediaBufferVtbl mb_vtbl = { mb_qi, mb_addref, mb_release, mb_setlen, mb_getmax, mb_get };
+
+static void pout(const char *what, IMediaObject *mo, mbuf *o, DWORD max, const BYTE *ref, DWORD at)
+{
+    DMO_OUTPUT_DATA_BUFFER d = { o ? &o->iface : NULL, 0xdead, -1, -1 };
+    DWORD st = 0xdead;
+    if (o) { o->len = 0; o->max = max; memset(o->p, 0xcc, max); }
+    HRESULT hr = IMediaObject_ProcessOutput(mo, 0, 1, &d, &st);
+    printf("  %s: %08lx status %lx flags %lx time %ld length %ld", what, hr, st, d.dwStatus, (long)d.rtTimestamp, (long)d.rtTimelength);
+    if (o) printf(" out %lu%s", o->len, o->len && ref ? (memcmp(o->p, ref + at, o->len) ? " (not as in place)" : " (as in place)") : "");
+    printf(" refs %ld\n", o ? o->ref : 0);
+}
+
+static void test_process(void)
+{
+    enum { N = 4410 * 4 };
+    BYTE *in = malloc(N), *ref = malloc(N), *ob = malloc(N);
+    fill(in, N, 16, 1);
+    for (unsigned k = 0; k < NFX; k++) {
+        const fxinfo *fx = &fxs[k];
+        /* (I3DL2: reAL's is Windows XP's; the later dsdmo's keeps the input's time stamp on every part and its output
+         * is not the in-place one) */
+        if (!strcmp(fx->name, "i3dl2")) continue;
+        printf("%s:\n", fx->name);
+        IDirectSoundBuffer8 *b1 = mkbuf(DSBCAPS_CTRLFX, 1, 2, 44100, 16, 500, NULL), *b2 = mkbuf(DSBCAPS_CTRLFX, 1, 2, 44100, 16, 500, NULL);
+        const GUID *g = fx->guid;
+        DSEFFECTDESC d = { sizeof(d), 0, *g, 0, 0 };
+        if (!b1 || !b2 || FAILED(IDirectSoundBuffer8_SetFX(b1, 1, &d, NULL)) || FAILED(IDirectSoundBuffer8_SetFX(b2, 1, &d, NULL))) { printf("  no buffers\n"); continue; }
+        IMediaObject *mo = NULL;
+        IMediaObjectInPlace *ip = NULL;
+        IDirectSoundBuffer8_GetObjectInPath(b1, g, 0, &IID_IMediaObject_, (void **)&mo);
+        IDirectSoundBuffer8_GetObjectInPath(b2, g, 0, &IID_IMediaObjectInPlace_, (void **)&ip);
+        if (!mo || !ip) { printf("  no objects\n"); continue; }
+        memcpy(ref, in, N);
+        HRESULT hr = IMediaObjectInPlace_Process(ip, N, ref, 10000000, 0);
+        printf("  in place %08lx\n", hr);
+        DWORD f = 0xdead;
+        printf("  GetInputStatus %08lx %lx\n", IMediaObject_GetInputStatus(mo, 0, &f), f);
+        mbuf o = { { &mb_vtbl }, 1, ob, 0, N };
+        pout("ProcessOutput, nothing in", mo, &o, N, NULL, 0);
+        BYTE *cp = malloc(N); memcpy(cp, in, N);
+        mbuf i = { { &mb_vtbl }, 1, cp, N, N };
+        printf("  ProcessInput(stream 1) %08lx\n", IMediaObject_ProcessInput(mo, 1, &i.iface, 0, 0, 0));
+        printf("  ProcessInput(NULL) %08lx\n", IMediaObject_ProcessInput(mo, 0, NULL, 0, 0, 0));
+        hr = IMediaObject_ProcessInput(mo, 0, &i.iface, DMO_INPUT_DATA_BUFFERF_SYNCPOINT | DMO_INPUT_DATA_BUFFERF_TIME, 10000000, 0);
+        printf("  ProcessInput %08lx refs %ld input %s\n", hr, i.ref, memcmp(cp, in, N) ? "changed" : "untouched");
+        f = 0xdead;
+        printf("  GetInputStatus %08lx %lx\n", IMediaObject_GetInputStatus(mo, 0, &f), f);
+        printf("  ProcessInput again %08lx\n", IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0));
+        printf("  ProcessOutput(2 buffers) %08lx\n", IMediaObject_ProcessOutput(mo, 0, 2, NULL, &f));
+        pout("ProcessOutput, a third", mo, &o, N / 3 + 1, ref, 0);
+        DWORD got = o.len;
+        pout("ProcessOutput, the rest", mo, &o, N, ref, got);
+        printf("  input %s\n", memcmp(cp, in, N) ? "changed" : "untouched");
+        pout("ProcessOutput, again", mo, &o, N, NULL, 0);
+        hr = IMediaObject_ProcessInput(mo, 0, &i.iface, DMO_INPUT_DATA_BUFFERF_TIME | DMO_INPUT_DATA_BUFFERF_TIMELENGTH, 20000000, 5000000);
+        printf("  ProcessInput, timed with a length %08lx\n", hr);
+        pout("ProcessOutput, a quarter", mo, &o, N / 4, NULL, 0);
+        pout("ProcessOutput, the rest", mo, &o, N, NULL, 0);
+        hr = IMediaObject_ProcessInput(mo, 0, &i.iface, DMO_INPUT_DATA_BUFFERF_TIMELENGTH, 0, 5000000);
+        printf("  ProcessInput, a length only %08lx\n", hr);
+        pout("ProcessOutput, a quarter", mo, &o, N / 4, NULL, 0);
+        pout("ProcessOutput, the rest", mo, &o, N, NULL, 0);
+        hr = IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0);
+        printf("  ProcessInput, untimed %08lx\n", hr);
+        pout("ProcessOutput, a quarter", mo, &o, N / 4, NULL, 0);
+        pout("ProcessOutput, 2 bytes", mo, &o, 2, NULL, 0);
+        pout("ProcessOutput, the rest", mo, &o, N, NULL, 0);
+        i.len = 7;
+        printf("  ProcessInput, a frame and a part %08lx\n", IMediaObject_ProcessInput(mo, 0, &i.iface, DMO_INPUT_DATA_BUFFERF_TIME, 5, 0));
+        pout("ProcessOutput", mo, &o, N, NULL, 0);
+        i.len = N;
+        hr = IMediaObject_ProcessInput(mo, 0, &i.iface, DMO_INPUT_DATA_BUFFERF_TIME | DMO_INPUT_DATA_BUFFERF_TIMELENGTH, 20000000, 5000000);
+        printf("  ProcessInput, timed %08lx\n", hr);
+        pout("ProcessOutput, no buffer", mo, NULL, 0, NULL, 0);
+        f = 0xdead;
+        printf("  GetInputStatus %08lx %lx\n", IMediaObject_GetInputStatus(mo, 0, &f), f);
+        hr = IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0);
+        printf("  ProcessInput, untimed %08lx\n", hr);
+        printf("  Flush %08lx refs %ld\n", IMediaObject_Flush(mo), i.ref);
+        pout("ProcessOutput after Flush", mo, &o, N, NULL, 0);
+        i.len = 3;
+        printf("  ProcessInput, a part of a frame %08lx\n", IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0));
+        pout("ProcessOutput", mo, &o, N, NULL, 0);
+        i.len = 0;
+        printf("  ProcessInput, empty %08lx\n", IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0));
+        pout("ProcessOutput", mo, &o, N, NULL, 0);
+        i.len = 64;
+        printf("  ProcessInput, 64 bytes %08lx\n", IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0));
+        {
+            DMO_OUTPUT_DATA_BUFFER od = { &o.iface, 0xdead, -1, -1 };
+            o.len = N + 4; o.max = N;
+            printf("  ProcessOutput, longer than it can be %08lx flags %lx len %lu\n", IMediaObject_ProcessOutput(mo, 0, 1, &od, &f), od.dwStatus, o.len);
+            o.len = 8;
+            printf("  ProcessOutput, 8 bytes in it %08lx flags %lx len %lu\n", IMediaObject_ProcessOutput(mo, 0, 1, &od, &f), od.dwStatus, o.len);
+            o.len = 8;
+            printf("  ProcessOutput, 8 bytes in it, nothing more %08lx flags %lx len %lu\n", IMediaObject_ProcessOutput(mo, 0, 1, &od, &f), od.dwStatus, o.len);
+        }
+        IMediaObject_Flush(mo);
+        printf("  SetInputType(clear) %08lx\n", IMediaObject_SetInputType(mo, 0, NULL, DMO_SET_TYPEF_CLEAR));
+        i.len = N;
+        printf("  ProcessInput, no type %08lx\n", IMediaObject_ProcessInput(mo, 0, &i.iface, 0, 0, 0));
+        f = 0xdead;
+        printf("  GetInputStatus, no type %08lx %lx\n", IMediaObject_GetInputStatus(mo, 0, &f), f);
+        o.len = 8;
+        DMO_OUTPUT_DATA_BUFFER od = { &o.iface, 0xdead, -1, -1 };
+        printf("  ProcessOutput, no type, 8 bytes in it %08lx len %lu\n", IMediaObject_ProcessOutput(mo, 0, 1, &od, &f), o.len);
+        pout("ProcessOutput, no type", mo, &o, N, NULL, 0);
+        free(cp);
+        IMediaObject_Release(mo);
+        IMediaObjectInPlace_Release(ip);
+        IDirectSoundBuffer8_Release(b1);
+        IDirectSoundBuffer8_Release(b2);
+    }
+    free(in); free(ref); free(ob);
+}
+
 int main(int argc, char **argv)
 {
     const char *sec = argc > 1 ? argv[1] : "all";
@@ -569,6 +699,7 @@ int main(int argc, char **argv)
     if (!strcmp(sec, "all") || !strcmp(sec, "params")) test_params();
     if (!strcmp(sec, "all") || !strcmp(sec, "data")) test_data();
     if (!strcmp(sec, "all") || !strcmp(sec, "seq")) test_seq();
+    if (!strcmp(sec, "all") || !strcmp(sec, "process")) test_process();
     if (!strcmp(sec, "none")) run_data("none", NULL, NULL, 1, 2, 44100, 16, 0);
     IDirectSound8_Release(ds);
     CoUninitialize();
