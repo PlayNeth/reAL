@@ -284,7 +284,14 @@ static void dump(IDirectMusicBuffer *b)
     IDirectMusicBuffer_GetRawBufferPtr(b, &raw);
     IDirectMusicBuffer_GetUsedBytes(b, &used);
     P("    raw:");
-    for (DWORD k = 0; raw && k < used; k++) P("%s%02x", k % 8 ? "" : " ", raw[k]);
+    /* (the padding after each event's data is whatever the buffer's memory held: shown as ..) */
+    for (DWORD at = 0; raw && at + 20 <= used; ) {       /* (DMUS_EVENTHEADER: cbEvent first, 20 bytes) */
+        DWORD n = *(DWORD *)(raw + at), end = at + ((20 + n + 7) & ~7u);
+        for (DWORD k = at; k < end && k < used; k++)
+            if (k < at + 20 + n) P("%s%02x", k % 8 ? "" : " ", raw[k]); else P("%s..", k % 8 ? "" : " ");
+        if (end <= at) break;
+        at = end;
+    }
     P("\n");
 }
 static void events(IDirectMusicBuffer *b)
@@ -539,6 +546,10 @@ static void play(void)
                 { 0, -1, 0, 0, "group 0" },
                 { 0, -1, 3, 0, "group 3" },
             };
+            /* the last case's notes gone first (the synth's statistics cover a second, and under Wine Microsoft's
+             * voices may not go at all): wait for silence, then count only voices above what is left */
+            for (DWORD w0 = GetTickCount(); voices(p) && GetTickCount() - w0 < 3000; ) Sleep(20);
+            DWORD base = voices(p);
             IDirectMusicBuffer_Flush(b);
             IReferenceClock_GetTime(mc, &now);
             REFERENCE_TIME off = t[k].on && !t[k].setstart ? now : 0;
@@ -546,7 +557,7 @@ static void play(void)
             if (t[k].on2 >= 0) IDirectMusicBuffer_PackStructured(b, off + (REFERENCE_TIME)t[k].on2 * 10000, t[k].group, 0x00643e90);
             if (t[k].setstart) IDirectMusicBuffer_SetStartTime(b, now + (REFERENCE_TIME)t[k].on * 10000);
             hr = IDirectMusicPort_PlayBuffer(p, b);
-            DWORD t0 = GetTickCount(), last = 0;
+            DWORD t0 = GetTickCount(), last = base;
             int on[2] = { -1, -1 }, n = 0;
             while (GetTickCount() - t0 < 2500) {
                 DWORD v = voices(p);
