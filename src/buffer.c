@@ -726,6 +726,7 @@ static HRESULT WINAPI dsb_SetCurrentPosition(IDirectSoundBuffer8 *iface, DWORD p
     rl_buffer *This = BUF(iface);
     if (This->is_primary) return DSERR_INVALIDCALL;
     if (pos >= This->voice.size) return DSERR_INVALIDPARAM;
+    LOG_TRACE("Buffer[%d]::SetCurrentPosition %lu", This->id, (unsigned long)pos);
     EnterCriticalSection(&This->dev->lock);
     rl_voice_jump(&This->voice, (uint64_t)(pos / This->voice.block) << 32);
     if (This->fx && This->voice.playing) fx_restart(This);    /* stopped: Play makes the fresh start */
@@ -764,6 +765,7 @@ static HRESULT WINAPI dsb_SetVolume(IDirectSoundBuffer8 *iface, LONG vol)
     rl_buffer *This = BUF(iface);
     if (!(This->desc.dwFlags & DSBCAPS_CTRLVOLUME)) return DSERR_CONTROLUNAVAIL;
     if (vol < DSBVOLUME_MIN || vol > DSBVOLUME_MAX) return DSERR_INVALIDPARAM;
+    LOG_TRACE("Buffer[%d]::SetVolume %ld", This->id, (long)vol);
     EnterCriticalSection(&This->dev->lock);
     if (This->is_primary) This->dev->primary_volume = vol;
     else { This->volume = vol; rl_buffer_update_gains(This); }
@@ -776,6 +778,7 @@ static HRESULT WINAPI dsb_SetPan(IDirectSoundBuffer8 *iface, LONG pan)
     rl_buffer *This = BUF(iface);
     if (!(This->desc.dwFlags & DSBCAPS_CTRLPAN)) return DSERR_CONTROLUNAVAIL;
     if (pan < DSBPAN_LEFT || pan > DSBPAN_RIGHT) return DSERR_INVALIDPARAM;
+    LOG_TRACE("Buffer[%d]::SetPan %ld", This->id, (long)pan);
     EnterCriticalSection(&This->dev->lock);
     This->pan = pan;
     if (!This->is_primary) rl_buffer_update_gains(This);
@@ -788,6 +791,7 @@ static HRESULT WINAPI dsb_SetFrequency(IDirectSoundBuffer8 *iface, DWORD freq)
     rl_buffer *This = BUF(iface);
     if (This->is_primary || !(This->desc.dwFlags & DSBCAPS_CTRLFREQUENCY)) return DSERR_CONTROLUNAVAIL;
     if (freq != DSBFREQUENCY_ORIGINAL && (freq < DSBFREQUENCY_MIN || freq > DSBFREQUENCY_MAX)) return DSERR_INVALIDPARAM;
+    LOG_TRACE("Buffer[%d]::SetFrequency %lu", This->id, (unsigned long)freq);
     EnterCriticalSection(&This->dev->lock);
     This->freq = freq;
     if (This->sink) rl_buffer_update_gains(This);
