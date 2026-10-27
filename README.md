@@ -120,9 +120,9 @@ Or do it by hand: put `dsound.dll` next to the game's exe and set `WINEDLLOVERRI
 On Windows, put it next to the game's exe. Don't overwrite the system copy.
 
 A game that makes its DirectSound through COM (`CoCreateInstance`) gets Windows' own dsound.dll and never
-sees the one next to it. `tools/dsound-com-redirect.reg` points DirectSound 8's COM class at reAL for the
-current user: set the path in it to your `dsound.dll` and double-click it. It applies to every 32-bit
-program of yours that does the same (few do), and not to games run as administrator.
+sees the one next to it. `tools/dsound-com-redirect.reg` points the DirectSound and DirectSound 8 COM classes
+at reAL for the current user: set the two paths in it to your `dsound.dll` and double-click it. It applies to
+every 32-bit program of yours that does the same (few do), and not to games run as administrator.
 `tools/dsound-com-redirect-undo.reg` removes it.
 
 ## Configure
