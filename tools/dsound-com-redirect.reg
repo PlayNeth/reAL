@@ -1,0 +1,17 @@
+Windows Registry Editor Version 5.00
+
+; dsound-com-redirect: DirectSound 8 made through COM comes from reAL, for this Windows user.
+; Some games (Hot Wheels: Beat That!, for one) make their DirectSound through COM, which loads Windows' own
+; dsound.dll and ignores one placed next to the game. This points DirectSound 8's COM class at reAL's
+; dsound.dll in the game's folder. Change the path below to yours (\\ for each backslash).
+; NOTE: every 32-bit program of yours that makes DirectSound 8 through COM uses this reAL too (few
+; do; most call DirectSoundCreate). If dsound.dll isn't there, those programs get no sound.
+; Windows only (Wine's COM ignores per-user classes), and not for games run as administrator.
+; Undo with dsound-com-redirect-undo.reg.
+
+[HKEY_CURRENT_USER\Software\Classes\Wow6432Node\CLSID\{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}]
+@="DirectSound 8 (dsound-com-redirect: reAL)"
+
+[HKEY_CURRENT_USER\Software\Classes\Wow6432Node\CLSID\{3901CC3F-84B5-4FA4-BA35-AA8172B8A09B}\InprocServer32]
+@="C:\\Games\\MyGame\\dsound.dll"
+"ThreadingModel"="Both"

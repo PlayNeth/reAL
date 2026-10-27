@@ -119,6 +119,12 @@ Or do it by hand: put `dsound.dll` next to the game's exe and set `WINEDLLOVERRI
 
 On Windows, put it next to the game's exe. Don't overwrite the system copy.
 
+A game that makes its DirectSound through COM (`CoCreateInstance`) gets Windows' own dsound.dll and never
+sees the one next to it. `tools/dsound-com-redirect.reg` points DirectSound 8's COM class at reAL for the
+current user: set the path in it to your `dsound.dll` and double-click it. It applies to every 32-bit
+program of yours that does the same (few do), and not to games run as administrator.
+`tools/dsound-com-redirect-undo.reg` removes it.
+
 ## Configure
 
 `C:\windows\reAL.ini`, with a `[default]` section and per-exe sections. See `reAL.ini.example`.
@@ -161,7 +167,8 @@ src/        the DLL (C11, Win32 COM by hand)
   music/    reDM: engine (dm*.c), synth (msynth.c), DLS / SoundFont, COM layer (dmcom*.c)
 tests/      unit tests (native) and COM test programs (run under Wine; comcmp.sh diffs them against Microsoft's)
 tools/      RE helpers (pe.py, rtti.py), dmgt (drives Microsoft's DirectMusic offline), sty/ (style, chord map and
-            segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py
+            segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py,
+            dsound-com-redirect*.reg (Windows: reAL for games that make DirectSound through COM)
 dmtrace/    DirectMusic API tracer (gen.py generates the logging wrappers from the MinGW headers)
 docs/       RE notes, vtables.json (every ALchemy class + vtable)
 ```
