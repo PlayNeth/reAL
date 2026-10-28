@@ -791,6 +791,120 @@ static void orient(void)
     IDirectSound8_Release(ds);
 }
 
+/* ------------------------------------------------------------------ every method on a lost buffer: the owner's, and
+ * another DirectSound object's, while one object writes the primary buffer and after it leaves that level */
+static void lost_calls(const char *what, IDirectSoundBuffer *b)
+{
+    void *p1, *p2; DWORD b1 = 0, b2 = 0, pl = 0xdead, wr = 0xdead, st = 0xdead, fr = 0;
+    LONG v = 1;
+    HRESULT hr = IDirectSoundBuffer_Lock(b, 0, 64, &p1, &b1, &p2, &b2, 0);
+    P("    %s: Lock %08lx", what, hr);
+    if (SUCCEEDED(hr)) P(" Unlock %08lx", IDirectSoundBuffer_Unlock(b, p1, b1, p2, b2));
+    P(" Play %08lx", IDirectSoundBuffer_Play(b, 0, 0, DSBPLAY_LOOPING));
+    hr = IDirectSoundBuffer_GetStatus(b, &st);
+    P(" GetStatus %08lx %lx", hr, st);
+    P(" Stop %08lx", IDirectSoundBuffer_Stop(b));
+    P(" SetCurrentPosition %08lx", IDirectSoundBuffer_SetCurrentPosition(b, 8));
+    hr = IDirectSoundBuffer_GetCurrentPosition(b, &pl, &wr);
+    P(" GetCurrentPosition %08lx %lx %lx\n", hr, pl, wr);
+    P("      SetVolume %08lx", IDirectSoundBuffer_SetVolume(b, -100));
+    hr = IDirectSoundBuffer_GetVolume(b, &v);
+    P(" GetVolume %08lx %ld", hr, v);
+    P(" SetFrequency %08lx", IDirectSoundBuffer_SetFrequency(b, 22050));
+    hr = IDirectSoundBuffer_GetFrequency(b, &fr);
+    P(" GetFrequency %08lx %lu", hr, fr);
+    P(" SetPan %08lx", IDirectSoundBuffer_SetPan(b, 0));
+    DSBCAPS c; memset(&c, 0, sizeof(c)); c.dwSize = sizeof(c);
+    P(" GetCaps %08lx", IDirectSoundBuffer_GetCaps(b, &c));
+    WAVEFORMATEX f; DWORD got = 0;
+    P(" GetFormat %08lx", IDirectSoundBuffer_GetFormat(b, &f, sizeof(f), &got));
+    IDirectSoundNotify *n = NULL;
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSoundNotify, (void **)&n);
+    if (n) {
+        DSBPOSITIONNOTIFY pn = { 0, CreateEventA(NULL, FALSE, FALSE, NULL) };
+        P(" SetNotificationPositions %08lx", IDirectSoundNotify_SetNotificationPositions(n, 1, &pn));
+        IDirectSoundNotify_Release(n);
+        CloseHandle(pn.hEventNotify);
+    }
+    IDirectSound3DBuffer *d3 = NULL;
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&d3);
+    if (d3) {
+        P(" 3D SetPosition %08lx", IDirectSound3DBuffer_SetPosition(d3, 1, 2, 3, DS3D_IMMEDIATE));
+        IDirectSound3DBuffer_Release(d3);
+    }
+    P("\n");
+}
+
+static void lost(void)
+{
+    IDirectSound8 *a = make_ds(), *bo = NULL;
+    IDirectSound *old = NULL;
+    if (!a) return;
+    DirectSoundCreate8(NULL, &bo, NULL);
+    DirectSoundCreate(NULL, &old, NULL);
+    IDirectSound8_SetCooperativeLevel(a, wnd(), DSSCL_PRIORITY);
+    if (bo) IDirectSound8_SetCooperativeLevel(bo, wnd(), DSSCL_PRIORITY);
+    if (old) IDirectSound_SetCooperativeLevel(old, wnd(), DSSCL_NORMAL);
+    WAVEFORMATEX f = pcm(22050, 1, 16);
+    DSBUFFERDESC d;
+    memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.dwBufferBytes = 22050; d.lpwfxFormat = &f;
+    d.dwFlags = DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPOSITIONNOTIFY;
+    IDirectSoundBuffer *own = NULL, *other = NULL, *older = NULL, *other3d = NULL;
+    IDirectSound8_CreateSoundBuffer(a, &d, &own, NULL);
+    if (bo) IDirectSound8_CreateSoundBuffer(bo, &d, &other, NULL);
+    if (old) IDirectSound_CreateSoundBuffer(old, &d, &older, NULL);
+    DSBUFFERDESC d3 = d; d3.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME;
+    if (bo) IDirectSound8_CreateSoundBuffer(bo, &d3, &other3d, NULL);
+    if (other) IDirectSoundBuffer_Play(other, 0, 0, DSBPLAY_LOOPING);
+    P("  SetCooperativeLevel(WRITEPRIMARY) %08lx\n", IDirectSound8_SetCooperativeLevel(a, wnd(), DSSCL_WRITEPRIMARY));
+    if (own) lost_calls("owner's", own);
+    if (other) lost_calls("another object's", other);
+    if (older) lost_calls("an IDirectSound's", older);
+    if (other3d) lost_calls("another object's 3D", other3d);
+    IDirectSoundBuffer *late = NULL;
+    HRESULT hr = bo ? IDirectSound8_CreateSoundBuffer(bo, &d, &late, NULL) : E_FAIL;
+    P("  another object's CreateSoundBuffer %08lx\n", hr);
+    if (late) lost_calls("made at that level", late);
+    if (bo) {
+        DSCAPS c; memset(&c, 0, sizeof(c)); c.dwSize = sizeof(c);
+        P("  another object: SetCooperativeLevel(PRIORITY) %08lx, GetCaps %08lx\n",
+          IDirectSound8_SetCooperativeLevel(bo, wnd(), DSSCL_PRIORITY), IDirectSound8_GetCaps(bo, &c));
+        IDirectSoundBuffer *prim = make_primary(bo, 0, &hr);
+        P("  another object's primary %08lx", hr);
+        if (prim) {
+            void *p1, *p2; DWORD b1 = 0, b2 = 0;
+            WAVEFORMATEX pf = pcm(44100, 2, 16);
+            P(" Lock %08lx SetFormat %08lx Play %08lx", IDirectSoundBuffer_Lock(prim, 0, 64, &p1, &b1, &p2, &b2, 0),
+              IDirectSoundBuffer_SetFormat(prim, &pf), IDirectSoundBuffer_Play(prim, 0, 0, DSBPLAY_LOOPING));
+            IDirectSoundBuffer_Stop(prim);
+            IDirectSoundBuffer_Release(prim);
+        }
+        P("\n");
+    }
+    P("  SetCooperativeLevel(PRIORITY) %08lx\n", IDirectSound8_SetCooperativeLevel(a, wnd(), DSSCL_PRIORITY));
+    if (other) {
+        DWORD st = 0;
+        IDirectSoundBuffer_GetStatus(other, &st);
+        P("    another object's, after: GetStatus %lx Play %08lx Restore %08lx", st, IDirectSoundBuffer_Play(other, 0, 0, 0),
+          IDirectSoundBuffer_Restore(other));
+        IDirectSoundBuffer_GetStatus(other, &st);
+        P(" GetStatus %lx Play %08lx\n", st, IDirectSoundBuffer_Play(other, 0, 0, 0));
+        IDirectSoundBuffer_Stop(other);
+    }
+    if (late) {
+        P("    made at that level, after: Restore %08lx\n", IDirectSoundBuffer_Restore(late));
+        IDirectSoundBuffer_Release(late);
+    }
+    /* the other object releases while the first writes the primary: nothing of it stays lost */
+    if (own) IDirectSoundBuffer_Release(own);
+    if (other) IDirectSoundBuffer_Release(other);
+    if (older) IDirectSoundBuffer_Release(older);
+    if (other3d) IDirectSoundBuffer_Release(other3d);
+    if (old) IDirectSound_Release(old);
+    if (bo) IDirectSound8_Release(bo);
+    IDirectSound8_Release(a);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -806,6 +920,7 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "sizes")) { P("sizes:\n"); sizes(); }
     if (!only || !strcmp(only, "locksize")) { P("locksize:\n"); locksize(); }
     if (!only || !strcmp(only, "orient")) { P("orient:\n"); orient(); }
+    if (!only || !strcmp(only, "lost")) { P("lost:\n"); lost(); }
     if (only && !strcmp(only, "audio")) { P("audio:\n"); audio(); }
     CoUninitialize();
     return 0;
