@@ -60,7 +60,10 @@ Doppler, and WASAPI output.
 IDirectSoundNotify, IKsPropertySet, the primary's listener) counts its own references and answers them from AddRef /
 Release, as ALchemy and Windows do (`primtest refs` matches Windows 7); the buffer goes when all are released. With
 one count for all, Fallout 3 and Fallout: New Vegas, which release a buffer until Release answers 0 while holding its
-3D interface, freed the buffer under it and crashed at the intro.
+3D interface, freed the buffer under it and crashed at the intro. A buffer released through one interface more
+often than referenced still goes (ALchemy's and Windows' count), but, as Windows', what goes keeps its interfaces:
+every call on them is E_INVALIDARG and AddRef / Release answer 0xffffffff (`primtest overrelease` matches Windows 7).
+Fallout's later calls on such a buffer used to land in freed memory and corrupt the heap.
 
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),

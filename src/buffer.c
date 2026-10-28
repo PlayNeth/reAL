@@ -396,6 +396,7 @@ static ULONG buf_addref(rl_buffer *b, int k)
     return InterlockedIncrement(&b->iref[k]);
 }
 static ULONG buf_release(rl_buffer *b, int k);
+static void zombify(rl_buffer *b);
 static ULONG WINAPI dsb_AddRef(IDirectSoundBuffer8 *iface) { return buf_addref(BUF(iface), RL_IREF_BUF); }
 static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface) { return buf_release(BUF(iface), RL_IREF_BUF); }
 
@@ -438,7 +439,7 @@ static ULONG buf_release(rl_buffer *b, int k)
     HeapFree(GetProcessHeap(), 0, This->notifies);
     HeapFree(GetProcessHeap(), 0, This->hrtf);
     cmss_free(&This->voice);
-    HeapFree(GetProcessHeap(), 0, This);
+    zombify(This);                          /* (not freed: see zombify) */
     rl_device_release(dev);
     return (ULONG)own;
 }
@@ -1762,6 +1763,45 @@ static HRESULT WINAPI ks_QuerySupport(IKsPropertySet *iface, REFGUID set, ULONG 
 static IKsPropertySetVtbl ks_vtbl = {
     ks_QueryInterface, ks_AddRef, ks_Release, ks_Get, ks_Set, ks_QuerySupport,
 };
+
+/* =========================================================== a released buffer
+ * Windows' DirectSound keeps a released buffer's interfaces answering: every call on one is E_INVALIDARG and
+ * AddRef / Release answer 0xffffffff (tests/primtest.c overrelease).  Games that release an interface more often than
+ * they referenced it, and so let the buffer go under another interface they still use (Fallout 3, Fallout: New Vegas),
+ * live with that; a freed buffer took their later calls into freed memory (the heap corrupted, or a crash).  So a
+ * buffer that goes keeps its interfaces, shrunk to them, with these tables. */
+#define ZDECL(n, ...) static HRESULT WINAPI z##n(void *t, ##__VA_ARGS__) { (void)t; return DSERR_INVALIDPARAM; }
+ZDECL(0)
+ZDECL(1, DWORD a) ZDECL(2, DWORD a, DWORD b) ZDECL(3, DWORD a, DWORD b, DWORD c)
+ZDECL(4, DWORD a, DWORD b, DWORD c, DWORD d) ZDECL(6, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f)
+ZDECL(7, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f, DWORD g)
+static ULONG WINAPI zref(void *t) { (void)t; return 0xffffffffu; }
+static HRESULT WINAPI zqi(void *t, REFIID riid, void **out)
+{
+    (void)t; (void)riid;
+    if (out) *out = NULL;
+    return DSERR_INVALIDPARAM;
+}
+#define ZU (void *)zqi, (void *)zref, (void *)zref
+static void *const z_dsb[] = { ZU, z1, z2, z3, z1, z1, z1, z1, z2, z7, z3, z1, z1, z1, z1, z1, z0, z4, z0, z3, z3, z4 };
+static void *const z_b3d[] = { ZU, z1, z2, z1, z1, z1, z1, z1, z1, z1, z2, z3, z4, z2, z2, z2, z2, z4, z4 };
+static void *const z_ntf[] = { ZU, z2 };
+static void *const z_ks[] = { ZU, z7, z6, z3 };
+static void *const z_lst[] = { ZU, z1, z1, z1, z2, z1, z1, z1, z2, z2, z2, z7, z4, z2, z4, z0 };
+_Static_assert(sizeof(z_dsb) == sizeof(IDirectSoundBuffer8Vtbl), "dsb");
+_Static_assert(sizeof(z_b3d) == sizeof(IDirectSound3DBufferVtbl), "b3d");
+_Static_assert(sizeof(z_ntf) == sizeof(IDirectSoundNotifyVtbl), "ntf");
+_Static_assert(sizeof(z_ks) == sizeof(IKsPropertySetVtbl), "ks");
+_Static_assert(sizeof(z_lst) == sizeof(IDirectSound3DListenerVtbl), "lst");
+static void zombify(rl_buffer *b)
+{
+    b->IDirectSoundBuffer8_iface.lpVtbl = (void *)z_dsb;
+    b->IDirectSound3DBuffer_iface.lpVtbl = (void *)z_b3d;
+    b->IDirectSoundNotify_iface.lpVtbl = (void *)z_ntf;
+    b->IKsPropertySet_iface.lpVtbl = (void *)z_ks;
+    b->IDirectSound3DListener_iface.lpVtbl = (void *)z_lst;
+    HeapReAlloc(GetProcessHeap(), HEAP_REALLOC_IN_PLACE_ONLY, b, offsetof(rl_buffer, ref));    /* (kept as it is if not) */
+}
 
 /* =========================================================== creation */
 

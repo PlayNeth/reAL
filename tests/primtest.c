@@ -1,6 +1,7 @@
 /* primtest - the primary buffer, and writing to it at DSSCL_WRITEPRIMARY, against Microsoft's DirectSound: every
- * HRESULT and out-parameter.  Run with tests/comcmp.sh primtest.exe [levels|api|secondary|more|object|refs]; `audio` (not
- * in the default run) plays a tone through the primary buffer for recording the output. */
+ * HRESULT and out-parameter.  Run with tests/comcmp.sh primtest.exe [levels|api|secondary|more|object|refs]; not in the default
+ * run: `audio` plays a tone through the primary buffer for recording the output, `overrelease` (crashes a DirectSound
+ * that frees a buffer still in use), `slack` (the readable memory after a buffer's data: the heap's, not comparable). */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -581,6 +582,89 @@ static void refs(void)
     IDirectSound8_Release(ds);
 }
 
+/* ------------------------------------------------------------------ an interface released more often than it was
+ * referenced: does the buffer go while another interface still holds it (each probe on a buffer of its own; one
+ * that frees the buffer crashes the next call, which is printed first) */
+static IDirectSoundBuffer *refbuf(IDirectSound8 *ds)
+{
+    static WAVEFORMATEX f;
+    f = pcm(22050, 1, 16);
+    DSBUFFERDESC d;
+    memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.dwBufferBytes = 22050 * 2; d.lpwfxFormat = &f;
+    d.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME;
+    IDirectSoundBuffer *b = NULL;
+    IDirectSound8_CreateSoundBuffer(ds, &d, &b, NULL);
+    return b;
+}
+static void overrelease(void)
+{
+    IDirectSound8 *ds = make_ds();
+    if (!ds) return;
+    IDirectSound8_SetCooperativeLevel(ds, wnd(), DSSCL_PRIORITY);
+    /* 1: the 3D interface released twice, the buffer interface still held */
+    IDirectSoundBuffer *b = refbuf(ds);
+    IDirectSound3DBuffer *b3 = NULL;
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&b3);
+    P("  3D Release %lu\n", IDirectSound3DBuffer_Release(b3));
+    P("  3D Release again %lu\n", IDirectSound3DBuffer_Release(b3));
+    LONG v = 1;
+    P("  then the buffer: GetVolume %08lx\n", IDirectSoundBuffer_GetVolume(b, &v));
+    P("  buffer AddRef %lu Release %lu\n", IDirectSoundBuffer_AddRef(b), IDirectSoundBuffer_Release(b));
+    P("  buffer Release %lu\n", IDirectSoundBuffer_Release(b));
+    /* 2: the buffer interface released twice, the 3D interface still held */
+    b = refbuf(ds);
+    b3 = NULL;
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&b3);
+    P("  buffer Release %lu\n", IDirectSoundBuffer_Release(b));
+    P("  buffer Release again %lu\n", IDirectSoundBuffer_Release(b));
+    D3DVALUE md = -1;
+    P("  then the 3D interface: GetMinDistance %08lx\n", IDirectSound3DBuffer_GetMinDistance(b3, &md));
+    P("  3D Release %lu\n", IDirectSound3DBuffer_Release(b3));
+    /* 3: the 3D interface released twice while the buffer interface has two references */
+    b = refbuf(ds);
+    IDirectSoundBuffer_AddRef(b);
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&b3);
+    P("  3D Release %lu, again %lu, again %lu\n", IDirectSound3DBuffer_Release(b3), IDirectSound3DBuffer_Release(b3),
+      IDirectSound3DBuffer_Release(b3));
+    P("  then the buffer: GetVolume %08lx\n", IDirectSoundBuffer_GetVolume(b, &v));
+    P("  buffer Release %lu\n", IDirectSoundBuffer_Release(b));
+    P("  then the buffer: GetVolume %08lx\n", IDirectSoundBuffer_GetVolume(b, &v));
+    P("  buffer Release %lu\n", IDirectSoundBuffer_Release(b));
+    IDirectSound8_Release(ds);
+}
+
+/* ------------------------------------------------------------------ how much readable memory follows a buffer's data
+ * (a game that reads past the end of what it locked: Fallout: New Vegas) */
+static void slack(void)
+{
+    IDirectSound8 *ds = make_ds();
+    if (!ds) return;
+    IDirectSound8_SetCooperativeLevel(ds, wnd(), DSSCL_PRIORITY);
+    static const DWORD sizes[] = { 4096, 48004, 176400, 529280, 553184, 1000000 };
+    for (int fx = 0; fx < 2; fx++)
+        for (unsigned k = 0; k < sizeof(sizes) / sizeof(sizes[0]); k++) {
+            WAVEFORMATEX f = pcm(48000, 2, 16);
+            DSBUFFERDESC d;
+            memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.dwBufferBytes = sizes[k]; d.lpwfxFormat = &f;
+            d.dwFlags = DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | (fx ? DSBCAPS_CTRLFX : 0);
+            IDirectSoundBuffer *b = NULL;
+            HRESULT hr = IDirectSound8_CreateSoundBuffer(ds, &d, &b, NULL);
+            if (!b) { P("  %s %lu: %08lx\n", fx ? "CTRLFX" : "plain", sizes[k], hr); continue; }
+            void *p1, *p2; DWORD b1, b2;
+            if (SUCCEEDED(IDirectSoundBuffer_Lock(b, 0, 0, &p1, &b1, &p2, &b2, DSBLOCK_ENTIREBUFFER))) {
+                BYTE *end = (BYTE *)p1 + b1;
+                MEMORY_BASIC_INFORMATION mi;
+                VirtualQuery(end, &mi, sizeof(mi));
+                DWORD after = (DWORD)((BYTE *)mi.BaseAddress + mi.RegionSize - end);
+                P("  %s %lu: readable after the end %s\n", fx ? "CTRLFX" : "plain", sizes[k],
+                  after >= 65536 ? ">= 64 KB" : after >= 23904 ? ">= 23904" : "less than 23904");
+                IDirectSoundBuffer_Unlock(b, p1, b1, p2, b2);
+            }
+            IDirectSoundBuffer_Release(b);
+        }
+    IDirectSound8_Release(ds);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -591,6 +675,8 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "more")) { P("more:\n"); more(); }
     if (!only || !strcmp(only, "object")) { P("object:\n"); object(); }
     if (!only || !strcmp(only, "refs")) { P("refs:\n"); refs(); }
+    if (only && !strcmp(only, "overrelease")) { P("overrelease:\n"); overrelease(); }
+    if (only && !strcmp(only, "slack")) { P("slack:\n"); slack(); }
     if (only && !strcmp(only, "audio")) { P("audio:\n"); audio(); }
     CoUninitialize();
     return 0;
