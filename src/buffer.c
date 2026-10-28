@@ -1300,6 +1300,20 @@ static HRESULT WINAPI lst_SetDopplerFactor(IDirectSound3DListener *iface, D3DVAL
 static HRESULT WINAPI lst_SetOrientation(IDirectSound3DListener *iface, D3DVALUE fx, D3DVALUE fy, D3DVALUE fz,
                                          D3DVALUE tx, D3DVALUE ty, D3DVALUE tz, DWORD apply)
 {
+    /* ALchemy (0x10043740): every component finite, and neither vector all zero, else DSERR_INVALIDPARAM and the
+     * orientation kept (Fallout 3 sets 0,0,0 / 0,0,0 until the player has one; taken, it left the 3D math NaN) */
+    const float v[6] = { fx, fy, fz, tx, ty, tz };
+    for (int k = 0; k < 6; k++) {          /* (by the exponent bits; the build's fast math takes every float as
+                                             * finite and folds the test away, so the empty asm hides where u came from) */
+        uint32_t u;
+        memcpy(&u, &v[k], 4);
+        __asm__("" : "+r"(u));
+        if ((u & 0x7f800000u) == 0x7f800000u) return DSERR_INVALIDPARAM;
+    }
+    if ((fx == 0.0f && fy == 0.0f && fz == 0.0f) || (tx == 0.0f && ty == 0.0f && tz == 0.0f)) {
+        LOG_3D("Listener::SetOrientation front %.3f,%.3f,%.3f top %.3f,%.3f,%.3f: a zero vector, refused", fx, fy, fz, tx, ty, tz);
+        return DSERR_INVALIDPARAM;
+    }
     LST_SET_BEGIN(iface);
     l->front = to_v(fx, fy, fz);
     l->top = to_v(tx, ty, tz);

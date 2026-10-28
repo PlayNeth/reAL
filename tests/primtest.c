@@ -665,6 +665,110 @@ static void slack(void)
     IDirectSound8_Release(ds);
 }
 
+/* ------------------------------------------------------------------ the sizes a buffer reports (GetCaps, Lock of the
+ * whole) for the sizes and flags Fallout asks for */
+static void sizes(void)
+{
+    IDirectSound8 *ds = make_ds();
+    if (!ds) return;
+    IDirectSound8_SetCooperativeLevel(ds, wnd(), DSSCL_PRIORITY);
+    static const struct { DWORD rate; WORD ch; DWORD bytes, flags; } t[] = {
+        { 32000, 1, 254744, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+        { 32000, 1, 270680, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+        { 48000, 2, 529280, DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX },
+        { 48000, 2, 553184, DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME },
+        { 32000, 1, 149030, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+        { 44100, 1, 57294, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+    };
+    for (unsigned k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
+        WAVEFORMATEX f = pcm(t[k].rate, t[k].ch, 16);
+        DSBUFFERDESC d;
+        memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.dwBufferBytes = t[k].bytes; d.lpwfxFormat = &f; d.dwFlags = t[k].flags;
+        IDirectSoundBuffer *b = NULL;
+        HRESULT hr = IDirectSound8_CreateSoundBuffer(ds, &d, &b, NULL);
+        DSBCAPS c; memset(&c, 0, sizeof(c)); c.dwSize = sizeof(c);
+        DWORD lk = 0;
+        if (b) {
+            IDirectSoundBuffer_GetCaps(b, &c);
+            void *p1, *p2; DWORD b1 = 0, b2;
+            if (SUCCEEDED(IDirectSoundBuffer_Lock(b, 0, 0, &p1, &b1, &p2, &b2, DSBLOCK_ENTIREBUFFER))) {
+                lk = b1;
+                IDirectSoundBuffer_Unlock(b, p1, b1, p2, b2);
+            }
+            IDirectSoundBuffer_Release(b);
+        }
+        P("  %lu Hz %u ch %lu bytes flags %lx: %08lx GetCaps %lu Lock %lu\n", t[k].rate, t[k].ch, t[k].bytes, t[k].flags, hr, c.dwBufferBytes, lk);
+    }
+    IDirectSound8_Release(ds);
+}
+
+/* ------------------------------------------------------------------ Lock of a secondary buffer beyond its size */
+static void locksize(void)
+{
+    IDirectSound8 *ds = make_ds();
+    if (!ds) return;
+    IDirectSound8_SetCooperativeLevel(ds, wnd(), DSSCL_PRIORITY);
+    for (int fx = 0; fx < 2; fx++) {
+        WAVEFORMATEX f = pcm(32000, 1, 16);
+        DSBUFFERDESC d;
+        memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.dwBufferBytes = 254744; d.lpwfxFormat = &f;
+        d.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_GETCURRENTPOSITION2 |
+                    DSBCAPS_MUTE3DATMAXDISTANCE | (fx ? DSBCAPS_CTRLFX : 0);
+        IDirectSoundBuffer *b = NULL;
+        IDirectSound8_CreateSoundBuffer(ds, &d, &b, NULL);
+        if (!b) continue;
+        P("  %s:\n", fx ? "CTRLFX" : "plain");
+        lock("size + 15936", b, 0, 270680, 0, TRUE);
+        lock("size + 1", b, 0, 254745, 0, TRUE);
+        lock("size + 2", b, 0, 254746, 0, TRUE);
+        lock("odd size", b, 0, 254743, 0, TRUE);
+        lock("odd offset, to the end", b, 1, 254743, 0, TRUE);
+        lock("offset at the size", b, 254744, 16, 0, TRUE);
+        lock("0 bytes", b, 0, 0, 0, TRUE);
+        IDirectSoundBuffer_Release(b);
+    }
+    IDirectSound8_Release(ds);
+}
+
+/* ------------------------------------------------------------------ the listener's orientation: which ones are refused */
+static void orient(void)
+{
+    IDirectSound8 *ds = make_ds();
+    if (!ds) return;
+    IDirectSound8_SetCooperativeLevel(ds, wnd(), DSSCL_PRIORITY);
+    HRESULT hr;
+    IDirectSoundBuffer *b = make_primary(ds, DSBCAPS_CTRL3D, &hr);
+    IDirectSound3DListener *l = NULL;
+    if (b) IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DListener, (void **)&l);
+    if (!l) { P("  no listener\n"); IDirectSound8_Release(ds); return; }
+    union { DWORD u; float f; } inf = { 0x7f800000 }, nan = { 0x7fc00000 };
+    static const struct { float v[6]; const char *n; } t[] = {
+        { { 0, 0, 1, 0, 1, 0 }, "ordinary" }, { { 0, 0, 0, 0, 0, 0 }, "all zero" }, { { 0, 0, 0, 0, 1, 0 }, "front zero" },
+        { { 0, 0, 1, 0, 0, 0 }, "top zero" }, { { 0, 0, 1, 0, 0, 1 }, "parallel" }, { { 0, 0, 1, 0, 0, -3 }, "opposite" },
+        { { 0, 0, 5, 0, 7, 0 }, "not unit" }, { { 1e-30f, 0, 0, 0, 1e-30f, 0 }, "tiny" }, { { -0.0f, 0, 0, 0, 1, 0 }, "minus zero" },
+    };
+    for (unsigned k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
+        const float *v = t[k].v;
+        hr = IDirectSound3DListener_SetOrientation(l, v[0], v[1], v[2], v[3], v[4], v[5], DS3D_IMMEDIATE);
+        D3DVECTOR f, u;
+        IDirectSound3DListener_GetOrientation(l, &f, &u);
+        P("  SetOrientation(%s) %08lx -> front %.3f,%.3f,%.3f top %.3f,%.3f,%.3f\n", t[k].n, hr, f.x, f.y, f.z, u.x, u.y, u.z);
+        IDirectSound3DListener_SetOrientation(l, 0, 0, 1, 0, 1, 0, DS3D_IMMEDIATE);
+    }
+    hr = IDirectSound3DListener_SetOrientation(l, inf.f, 0, 1, 0, 1, 0, DS3D_IMMEDIATE);
+    P("  SetOrientation(infinite) %08lx\n", hr);
+    hr = IDirectSound3DListener_SetOrientation(l, 0, 0, 1, 0, nan.f, 0, DS3D_IMMEDIATE);
+    P("  SetOrientation(NaN) %08lx\n", hr);
+    hr = IDirectSound3DListener_SetOrientation(l, 0, 0, 0, 0, 0, 0, DS3D_DEFERRED);
+    P("  SetOrientation(all zero, deferred) %08lx, Commit %08lx\n", hr, IDirectSound3DListener_CommitDeferredSettings(l));
+    D3DVECTOR f, u;
+    IDirectSound3DListener_GetOrientation(l, &f, &u);
+    P("    -> front %.3f,%.3f,%.3f top %.3f,%.3f,%.3f\n", f.x, f.y, f.z, u.x, u.y, u.z);
+    IDirectSound3DListener_Release(l);
+    IDirectSoundBuffer_Release(b);
+    IDirectSound8_Release(ds);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -677,6 +781,9 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "refs")) { P("refs:\n"); refs(); }
     if (only && !strcmp(only, "overrelease")) { P("overrelease:\n"); overrelease(); }
     if (only && !strcmp(only, "slack")) { P("slack:\n"); slack(); }
+    if (!only || !strcmp(only, "sizes")) { P("sizes:\n"); sizes(); }
+    if (!only || !strcmp(only, "locksize")) { P("locksize:\n"); locksize(); }
+    if (!only || !strcmp(only, "orient")) { P("orient:\n"); orient(); }
     if (only && !strcmp(only, "audio")) { P("audio:\n"); audio(); }
     CoUninitialize();
     return 0;

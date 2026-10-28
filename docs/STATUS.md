@@ -65,6 +65,12 @@ often than referenced still goes (ALchemy's and Windows' count), but, as Windows
 every call on them is E_INVALIDARG and AddRef / Release answer 0xffffffff (`primtest overrelease` matches Windows 7).
 Fallout's later calls on such a buffer used to land in freed memory and corrupt the heap.
 
+**Listener orientation** (`src/buffer.c`): SetOrientation refuses, as ALchemy (0x10043740), a front or top vector
+that is all zero or has an infinite / NaN component (DSERR_INVALIDPARAM, the orientation kept). Fallout 3 sets
+0,0,0 / 0,0,0 hundreds of times before the player has one; Windows refuses those too. reAL took them and its 3D
+math went NaN. Microsoft's DLL also refuses parallel vectors and keeps them normalised; ALchemy doesn't, and nor
+does reAL (`primtest orient`).
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
