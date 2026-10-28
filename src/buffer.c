@@ -2052,6 +2052,9 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
             w->cbSize = (WORD)(n - sizeof(WAVEFORMATEX));
             b->shared->wfx = w;
         }
+        /* b->fmt holds 40 bytes: its own cbSize no more than that (GetFormat and SetFX fall back to it without w) */
+        if (b->fmt.Format.cbSize > sizeof(b->fmt) - sizeof(WAVEFORMATEX))
+            b->fmt.Format.cbSize = (WORD)(sizeof(b->fmt) - sizeof(WAVEFORMATEX));
     }
 
     b->voice.data = data;
