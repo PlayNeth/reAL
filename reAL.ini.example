@@ -32,7 +32,13 @@ resampler=sinc
 ;cmss=off
 ;cmssintensity=0
 
-; logging: 0 off, 1 info, 2 API calls, 3 everything (per Lock/Play - very verbose)
+; fixes: where ALchemy lets through what Windows refuses and it does harm (a zero 3D distance, a Doppler shift or
+; gain that overflows), reAL refuses or tames it, and reAL's effects fix dsdmo's flaws. fixes=false (or REAL_NOFIXES
+; in the environment) behaves as ALchemy and dsdmo do.
+;fixes=true
+
+; logging: 0 off, 1 info, 2 API calls, 3 everything (per Lock/Play - very verbose).
+; With log=1 or more, every DirectSound call reAL refuses is logged too ("refused: ...", with the caller).
 log=0
 log3d=false
 logeax=false

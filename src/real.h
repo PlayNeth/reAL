@@ -28,6 +28,7 @@ typedef struct rl_config {
     int  disable_dmusic;
     int  enabled;           /* 0 = forward everything to the real dsound.dll */
     int  log_level;         /* 0 off, 1 info, 2 calls, 3 verbose (per-lock / per-play) */
+    int  fixes;             /* reAL's fixes of what ALchemy lets through (default on; fixes=0 or REAL_NOFIXES: off) */
     int  log_3d;
     int  log_eax;
     char log_file[MAX_PATH];
@@ -85,6 +86,7 @@ typedef struct rl_buffer rl_buffer;
 typedef struct rl_device {
     CRITICAL_SECTION lock;
     LONG        ref;              /* number of IDirectSound objects using the device */
+    int         wp_owners;        /* of them, at DSSCL_WRITEPRIMARY (lock held): every secondary buffer is lost */
     HANDLE      thread;
     HANDLE      quit_event;
     volatile LONG running;
@@ -164,6 +166,7 @@ typedef struct rl_shared_data {
     LONG   ref;
     BYTE  *data;
     DWORD  size;
+    WAVEFORMATEX *wfx;      /* a format other than PCM as given, its cbSize bytes included (GetFormat answers it) */
 } rl_shared_data;
 
 enum { RL_IREF_BUF, RL_IREF_3D, RL_IREF_NOTIFY, RL_IREF_KS, RL_IREF_LISTENER };

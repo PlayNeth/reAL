@@ -28,6 +28,7 @@ static void defaults(void)
     g_cfg.resampler = RL_INTERP_SINC;
     g_cfg.midi_rate = 22050;
     g_cfg.midi_reverb = 1;
+    g_cfg.fixes = 1;
     g_cfg.headphones = -1;
 }
 
@@ -71,6 +72,7 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "latency"))    g_cfg.latency_ms = clampi(atoi(val), 0, 500);
     else if (!_stricmp(key, "log"))        g_cfg.log_level = clampi(atoi(val), 0, 3);
     else if (!_stricmp(key, "log3d"))      g_cfg.log_3d = is_true(val);
+    else if (!_stricmp(key, "fixes"))      g_cfg.fixes = is_true(val);
     else if (!_stricmp(key, "logeax"))     g_cfg.log_eax = is_true(val);
     else if (!_stricmp(key, "logfile"))    lstrcpynA(g_cfg.log_file, val, MAX_PATH);
     else if (!_stricmp(key, "realdsound")) lstrcpynA(g_cfg.real_dsound, val, MAX_PATH);
@@ -175,6 +177,7 @@ void rl_config_load(void)
 
     if (GetEnvironmentVariableA("REAL_INI", path, MAX_PATH) && load_file(path, exe_name))
         lstrcpynA(s_loaded[n++], path, MAX_PATH);
+    if (GetEnvironmentVariableA("REAL_NOFIXES", NULL, 0)) g_cfg.fixes = 0;
     if (GetEnvironmentVariableA("REAL_LOG", path, MAX_PATH))
         g_cfg.log_level = clampi(atoi(path), 0, 3);
 

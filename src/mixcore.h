@@ -61,6 +61,8 @@ typedef struct rl_voice {
      * channels goes through mc[source channel][output channel] (ALchemy's channel converter) instead, its
      * level in gain[0]; mc_lfe is its LFE channel when that goes to the front pair through the bass limiter. */
     int      route_on;
+    /* a stereo 3D buffer (allowed on a DirectSound before 8) plays as its mono sum while it is positioned */
+    int      mono3d;
     float    rt[3][RL_MAXOUT];      /* target weights of left, right, mono */
     float    rc[3][RL_MAXOUT];      /* current (smoothed) */
     int      mc_on, mc_lfe;

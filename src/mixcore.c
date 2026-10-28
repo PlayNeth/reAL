@@ -537,6 +537,8 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
             v->xfade_left--;
         }
 
+        if (v->mono3d)
+            for (uint32_t i = 0; i < n; i++) L[i] = R[i] = 0.5f * (L[i] + R[i]);
         /* effect sends: the mono sum, through each send's HF filter */
         for (int j = 0; j < ns; j++) {
             gain_run(G, gs[j], ds[j], v->send_gain[sk[j]], ramp, i0, n, &gs[j]);

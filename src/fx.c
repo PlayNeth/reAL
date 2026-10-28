@@ -46,7 +46,7 @@ static const struct { const GUID *cls; const GUID *iid; int kind; } s_std[] = {
 /* fixes of dsdmo's flaws: on, except for comparison runs */
 static uint32_t fx_fixes(void)
 {
-    if (GetEnvironmentVariableA("REAL_NOFIXES", NULL, 0) || GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0)) return 0;
+    if (!g_cfg.fixes || GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0)) return 0;    /* (fixes=false, REAL_NOFIXES) */
     return DSFX_FIX_ECHO_PANDELAY | DSFX_FIX_I3DL2_QUALITY;
 }
 

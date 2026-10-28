@@ -83,6 +83,40 @@ its vtable at load, which logs a failed call with its arguments and caller (modu
 buffer's interfaces are logged too. The first 8 of each method, then every power of two, and a count at the end.
 The effect interfaces (fx.c) log their own results.
 
+**Compared with Windows by random calls** (`tests/dsfuzz.c`, `tests/fuzzcmp.py`): seeded random DirectSound calls,
+mostly at the edges, run under Windows 7's DirectSound and under reAL; each seed reports its first difference, sorted
+by risk. What it found and what changed:
+- A stereo CTRL3D buffer on an IDirectSound older than 8, or asked with the older DSBUFFERDESC1, was refused;
+  Windows takes it (ALchemy 0x10010100 on the older object). It plays as its mono sum while positioned.
+- A buffer's format as Windows keeps it: nAvgBytesPerSec as given (reAL recomputed it), a float format's cbSize and
+  the bytes after it (any length; GetFormat answers them), WAVE_FORMAT_EXTENSIBLE's valid bits filled in when 0.
+  nBlockAlign is still settled by reAL (Windows refuses a wrong one).
+- GetCaps keeps DSBCAPS_LOCDEFER (Windows and both of ALchemy's buffer classes do).
+- DSSCL_WRITEPRIMARY loses every secondary buffer of the device, any DirectSound object's, and the ones made at that
+  level; Stop, SetCurrentPosition and GetCurrentPosition answer DSERR_BUFFERLOST on a lost buffer too
+  (`primtest lost` matches Windows 7 but for the LOCHARDWARE bit).
+- 3D values as ALchemy checks them: an infinite or NaN position, velocity, cone orientation or listener factor, an all
+  zero cone orientation and a negative distance are refused (they made the 3D maths NaN, or a gain negative);
+  SetAllParameters checks each value as its own method does.
+- `fixes` (reAL.ini, default on; `fixes=false` or REAL_NOFIXES turns it off, with reAL's fixes of dsdmo): a zero
+  distance is refused as Windows does, and a non-finite gain or Doppler pitch never reaches the mixer.
+
+Known differences it still shows, kept on purpose:
+- reAL answers as ALchemy's hardware device: LOCHARDWARE, DirectSound GetCaps (192000 Hz at most), DS_OK for an HRTF
+  3D algorithm (Windows: DS_NO_VIRTUALIZATION), the primary buffer below DSSCL_WRITEPRIMARY.
+- Read back as ALchemy: deferred 3D values read back new (Windows: the committed ones), a cone orientation as given
+  (Windows normalises it), a duplicate's position 0 and the source's 3D values (Windows: the source's position,
+  default 3D values).
+- Non-finite 3D values are refused (Windows takes them, and its maths gives NaN).
+- Lenient where Windows refuses, as ALchemy: Play's priority and TERMINATEBY / LOC flags without LOCDEFER, any dwApply
+  other than 0 taken as deferred, SetCooperativeLevel with no window, Compact below DSSCL_PRIORITY, SetSpeakerConfig
+  values, GetCaps with a larger dwSize, a duplicate made through another DirectSound object, a Lock overlapping one
+  not yet unlocked, Unlock lengths, notifications with no event or out of order, IDirectSoundBuffer8 from an older
+  IDirectSound's buffer, formats Windows refuses (a wrong nBlockAlign, more than two channels without
+  WAVE_FORMAT_EXTENSIBLE, odd channel masks), a cone's inside angle wider than its outside one. None of these leaves
+  a state the mixer cannot play.
+- Both refuse with other error codes: mostly bad formats (reAL DSERR_BADFORMAT, Windows DSERR_INVALIDPARAM).
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
@@ -502,6 +536,10 @@ Smaller items still open:
   that way of playing against the other threads.
 - `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay]` compares what changes with the interface asked for
   (each section as DirectX 6, 7 and 8 where it differs): all match.
+- `tests/fuzzcmp.py <first seed> <seeds> [ops]` runs `dsfuzz.exe` under both DirectSounds (through comcmp.sh, in
+  chunks of 25 seeds) and lists each seed's first difference by risk; `dsfuzz.exe formats` sweeps CreateSoundBuffer
+  over a grid of formats. Windows 7's DirectSound divides by zero on some CTRLFX formats (24-bit, more than two
+  channels, WAVE_FORMAT_EXTENSIBLE), which the sweep leaves out.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and
   the reAL prefix `/tmp/real/sp/realprefix` (`REAL_PREFIX`).
 - `build/lockstress.exe <seconds> <segments...> [script.spt]` (Wine) runs four threads on one loader and one

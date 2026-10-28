@@ -57,6 +57,24 @@ static DWORD orig_rate(rl_buffer *b);
 #define PRIMARY_BYTES 32768
 /* (lock held) whether the buffer's owner is at DSSCL_WRITEPRIMARY */
 static BOOL writeprimary(const rl_buffer *b) { return b->owner && b->owner->coop_level == DSSCL_WRITEPRIMARY; }
+/* (lock held) a DirectSound object of the device writes the primary buffer: every secondary buffer is lost, any
+ * object's (Windows 7: tests/primtest.c lost) */
+static BOOL device_writeprimary(const rl_device *dev) { return dev->wp_owners > 0; }
+
+/* a float that is neither infinite nor NaN, by its exponent bits: the build's fast math takes every float as finite
+ * and folds isfinite() away (the empty asm hides where u came from) */
+static BOOL is_finite(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    __asm__("" : "+r"(u));
+    return (u & 0x7f800000u) != 0x7f800000u;
+}
+static BOOL finite3(float x, float y, float z) { return is_finite(x) && is_finite(y) && is_finite(z); }
+/* a minimum or maximum distance: finite and not negative (ALchemy 0x10042a90); not zero either, as Windows (a fix) */
+static BOOL distance_ok(float d) { return is_finite(d) && d >= 0.0f && (!g_cfg.fixes || d > 0.0f); }
+/* a direction: finite, and not all zero (ALchemy 0x10042960, 0x10043740) */
+static BOOL direction_ok(float x, float y, float z) { return finite3(x, y, z) && !(x == 0.0f && y == 0.0f && z == 0.0f); }
 static HRESULT parse_format(const WAVEFORMATEX *wfx, WAVEFORMATEXTENSIBLE *out, rl_sfmt *sfmt);
 /* (lock held) the primary buffer's voice in the device's primary format; nothing plays of a format it cannot read */
 static void prim_format(rl_buffer *b)
@@ -172,6 +190,8 @@ static void update_gains(rl_buffer *b)
     } else {
         b->voice.pitch = spatial ? rl_spatial_doppler(&dev->listener, &b->src3d, dop) : 1.0f;
     }
+    /* (a fix: an overflowing Doppler shift, from speeds near the float range, never reaches the resampler) */
+    if (g_cfg.fixes && (!is_finite(b->voice.pitch) || b->voice.pitch <= 0.0f)) b->voice.pitch = 1.0f;
 
     if (b->sink) {
         /* a sink buffer keeps its rate: the shift goes to the synth as a per-bus pitch offset (DirectX 8 sink).  These
@@ -202,8 +222,12 @@ static void update_gains(rl_buffer *b)
     } else {
         b->voice.hrtf = NULL;
     }
+    b->voice.mono3d = spatial && b->voice.channels == 2;
     b->voice.gain[0] = pan[0] * direct * base;
     b->voice.gain[1] = pan[1] * direct * base;
+    /* (a fix: a NaN gain would carry into the mix, the reverb and every later block) */
+    if (g_cfg.fixes)
+        for (int k = 0; k < 2; k++) if (!is_finite(b->voice.gain[k])) b->voice.gain[k] = 0.0f;
     route_speakers(b, spatial, use_hrtf, pan, direct * base);
 }
 
@@ -315,7 +339,7 @@ static HRESULT parse_format(const WAVEFORMATEX *wfx, WAVEFORMATEXTENSIBLE *out, 
     } else if (tag == WAVE_FORMAT_PCM || tag == 3 /* WAVE_FORMAT_IEEE_FLOAT */) {
         is_float = tag == 3;
         out->Format = *wfx;
-        out->Format.cbSize = 0;
+        if (tag == WAVE_FORMAT_PCM) out->Format.cbSize = 0;    /* (kept for float, as Windows: rl_buffer_create) */
     } else {
         return DSERR_BADFORMAT;
     }
@@ -332,9 +356,12 @@ static HRESULT parse_format(const WAVEFORMATEX *wfx, WAVEFORMATEXTENSIBLE *out, 
         case 32: *sfmt = RL_S32; break;
         default: return DSERR_BADFORMAT;
     }
-    /* recompute derived fields; some games pass garbage */
+    /* the block size as it must be (some games pass garbage, which Windows refuses); the byte rate as given, as
+     * Windows and ALchemy answer it, unless it is 0 */
     out->Format.nBlockAlign = (WORD)(wfx->nChannels * bits / 8);
-    out->Format.nAvgBytesPerSec = out->Format.nBlockAlign * wfx->nSamplesPerSec;
+    if (!out->Format.nAvgBytesPerSec) out->Format.nAvgBytesPerSec = out->Format.nBlockAlign * wfx->nSamplesPerSec;
+    /* WAVE_FORMAT_EXTENSIBLE without valid bits: all of them (Windows) */
+    if (tag == WAVE_FORMAT_EXTENSIBLE && !out->Samples.wValidBitsPerSample) out->Samples.wValidBitsPerSample = bits;
     return DS_OK;
 }
 
@@ -434,6 +461,7 @@ static ULONG buf_release(rl_buffer *b, int k)
     HeapFree(GetProcessHeap(), 0, This->fxdata);
     if (This->shared && !InterlockedDecrement(&This->shared->ref)) {
         HeapFree(GetProcessHeap(), 0, This->shared->data);
+        HeapFree(GetProcessHeap(), 0, This->shared->wfx);
         HeapFree(GetProcessHeap(), 0, This->shared);
     }
     HeapFree(GetProcessHeap(), 0, This->notifies);
@@ -452,8 +480,7 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
     if ((caps->dwFlags & (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER | DSBCAPS_LOCSOFTWARE)) == (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) {
         /* effects buffers are software ones (Windows 7): a deferred one is placed by Play / AcquireResources */
     } else if (!(caps->dwFlags & DSBCAPS_LOCSOFTWARE)) {
-        caps->dwFlags &= ~DSBCAPS_LOCDEFER;
-        caps->dwFlags |= DSBCAPS_LOCHARDWARE;
+        caps->dwFlags |= DSBCAPS_LOCHARDWARE;    /* (LOCDEFER kept: ALchemy 0x1001dbd0 and Windows keep it) */
     }
     if (This->is_primary) {
         EnterCriticalSection(&This->dev->lock);
@@ -547,6 +574,10 @@ static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD
 {
     rl_buffer *This = BUF(iface);
     EnterCriticalSection(&This->dev->lock);
+    if (This->lost) {                       /* (Windows: Lock, Play, Stop and the positions answer that) */
+        LeaveCriticalSection(&This->dev->lock);
+        return DSERR_BUFFERLOST;
+    }
     if (This->is_primary && !writeprimary(This)) {
         LeaveCriticalSection(&This->dev->lock);
         if (play) *play = 0;
@@ -572,7 +603,8 @@ static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD
 static HRESULT WINAPI dsb_GetFormat(IDirectSoundBuffer8 *iface, LPWAVEFORMATEX wfx, DWORD size, LPDWORD written)
 {
     rl_buffer *This = BUF(iface);
-    const WAVEFORMATEX *src = This->is_primary ? &This->dev->primary_fmt : &This->fmt.Format;
+    const WAVEFORMATEX *src = This->is_primary ? &This->dev->primary_fmt :
+                              This->shared && This->shared->wfx ? This->shared->wfx : &This->fmt.Format;
     DWORD need = sizeof(WAVEFORMATEX) + src->cbSize;
     if (!wfx && !written) return DSERR_INVALIDPARAM;
     if (wfx) {
@@ -748,6 +780,10 @@ static HRESULT WINAPI dsb_SetCurrentPosition(IDirectSoundBuffer8 *iface, DWORD p
     if (pos >= This->voice.size) return DSERR_INVALIDPARAM;
     LOG_TRACE("Buffer[%d]::SetCurrentPosition %lu", This->id, (unsigned long)pos);
     EnterCriticalSection(&This->dev->lock);
+    if (This->lost) {
+        LeaveCriticalSection(&This->dev->lock);
+        return DSERR_BUFFERLOST;
+    }
     rl_voice_jump(&This->voice, (uint64_t)(pos / This->voice.block) << 32);
     if (This->fx && This->voice.playing) fx_restart(This);    /* stopped: Play makes the fresh start */
     LeaveCriticalSection(&This->dev->lock);
@@ -838,6 +874,10 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
     rl_buffer *This = BUF(iface);
     LOG_TRACE("Buffer[%d]::Stop", This->id);
     EnterCriticalSection(&This->dev->lock);
+    if (This->lost) {                       /* (stopped when it was lost) */
+        LeaveCriticalSection(&This->dev->lock);
+        return DSERR_BUFFERLOST;
+    }
     if (This->is_primary) {
         This->dev->primary_playing = FALSE;
         This->voice.playing = 0;            /* (the DSSCL_WRITEPRIMARY voice: Play goes on from here) */
@@ -865,14 +905,14 @@ static HRESULT WINAPI dsb_Unlock(IDirectSoundBuffer8 *iface, LPVOID p1, DWORD b1
     return DS_OK;
 }
 
-/* a lost buffer is found again once its owner has left DSSCL_WRITEPRIMARY */
+/* a lost buffer is found again once no object writes the primary buffer */
 static HRESULT WINAPI dsb_Restore(IDirectSoundBuffer8 *iface)
 {
     rl_buffer *This = BUF(iface);
     HRESULT hr = DS_OK;
     EnterCriticalSection(&This->dev->lock);
     if (This->lost) {
-        if (writeprimary(This)) hr = DSERR_BUFFERLOST;
+        if (device_writeprimary(This->dev)) hr = DSERR_BUFFERLOST;
         else This->lost = FALSE;
     }
     LeaveCriticalSection(&This->dev->lock);
@@ -906,7 +946,8 @@ static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFF
     HRESULT hr;
     BOOL defer = (This->desc.dwFlags & DSBCAPS_LOCDEFER) != 0;     /* a new chain is not placed yet */
     This->fx_placed = FALSE;
-    rl_fxchain *c = rl_fxchain_create(&This->fmt.Format, count, fx, results, defer, &hr);
+    rl_fxchain *c = rl_fxchain_create(This->shared->wfx ? This->shared->wfx : &This->fmt.Format, count, fx, results,
+                                      defer, &hr);
     if (!c) return hr;
     if (!This->fxdata) This->fxdata = HeapAlloc(GetProcessHeap(), 0, This->voice.size);
     if (!This->fxdata) { rl_fxchain_free(c); return DSERR_OUTOFMEMORY; }
@@ -1111,6 +1152,13 @@ static HRESULT WINAPI b3d_GetVelocity(IDirectSound3DBuffer *iface, D3DVECTOR *v)
 static HRESULT WINAPI b3d_SetAllParameters(IDirectSound3DBuffer *iface, LPCDS3DBUFFER p, DWORD apply)
 {
     if (!p || p->dwSize < sizeof(*p)) return DSERR_INVALIDPARAM;
+    /* each value as its own method takes it */
+    if (!finite3(p->vPosition.x, p->vPosition.y, p->vPosition.z) || !finite3(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z) ||
+        p->dwInsideConeAngle > 360 || p->dwOutsideConeAngle > 360 ||
+        !direction_ok(p->vConeOrientation.x, p->vConeOrientation.y, p->vConeOrientation.z) ||
+        p->lConeOutsideVolume < DSBVOLUME_MIN || p->lConeOutsideVolume > DSBVOLUME_MAX ||
+        !distance_ok(p->flMinDistance) || !distance_ok(p->flMaxDistance) || p->dwMode > DS3DMODE_DISABLE)
+        return DSERR_INVALIDPARAM;
     B3D_SET_BEGIN(iface);
     rl_source3d *s = &This->src3d_pending;
     s->pos = to_v(p->vPosition.x, p->vPosition.y, p->vPosition.z);
@@ -1138,6 +1186,7 @@ static HRESULT WINAPI b3d_SetConeAngles(IDirectSound3DBuffer *iface, DWORD in, D
 
 static HRESULT WINAPI b3d_SetConeOrientation(IDirectSound3DBuffer *iface, D3DVALUE x, D3DVALUE y, D3DVALUE z, DWORD apply)
 {
+    if (!direction_ok(x, y, z)) return DSERR_INVALIDPARAM;
     B3D_SET_BEGIN(iface);
     This->src3d_pending.cone_orient = to_v(x, y, z);
     B3D_SET_END(apply);
@@ -1153,6 +1202,7 @@ static HRESULT WINAPI b3d_SetConeOutsideVolume(IDirectSound3DBuffer *iface, LONG
 
 static HRESULT WINAPI b3d_SetMaxDistance(IDirectSound3DBuffer *iface, D3DVALUE d, DWORD apply)
 {
+    if (!distance_ok(d)) return DSERR_INVALIDPARAM;
     B3D_SET_BEGIN(iface);
     This->src3d_pending.max_dist = d;
     LOG_3D("Buffer[%d]::SetMaxDistance %.3f", This->id, d);
@@ -1161,6 +1211,7 @@ static HRESULT WINAPI b3d_SetMaxDistance(IDirectSound3DBuffer *iface, D3DVALUE d
 
 static HRESULT WINAPI b3d_SetMinDistance(IDirectSound3DBuffer *iface, D3DVALUE d, DWORD apply)
 {
+    if (!distance_ok(d)) return DSERR_INVALIDPARAM;
     B3D_SET_BEGIN(iface);
     This->src3d_pending.min_dist = d;
     LOG_3D("Buffer[%d]::SetMinDistance %.3f", This->id, d);
@@ -1178,6 +1229,7 @@ static HRESULT WINAPI b3d_SetMode(IDirectSound3DBuffer *iface, DWORD mode, DWORD
 
 static HRESULT WINAPI b3d_SetPosition(IDirectSound3DBuffer *iface, D3DVALUE x, D3DVALUE y, D3DVALUE z, DWORD apply)
 {
+    if (!finite3(x, y, z)) return DSERR_INVALIDPARAM;     /* (ALchemy 0x10042800) */
     B3D_SET_BEGIN(iface);
     This->src3d_pending.pos = to_v(x, y, z);
     LOG_3D("Buffer[%d]::SetPosition %.3f,%.3f,%.3f (%s)", This->id, x, y, z, apply ? "deferred" : "immediate");
@@ -1186,6 +1238,7 @@ static HRESULT WINAPI b3d_SetPosition(IDirectSound3DBuffer *iface, D3DVALUE x, D
 
 static HRESULT WINAPI b3d_SetVelocity(IDirectSound3DBuffer *iface, D3DVALUE x, D3DVALUE y, D3DVALUE z, DWORD apply)
 {
+    if (!finite3(x, y, z)) return DSERR_INVALIDPARAM;
     B3D_SET_BEGIN(iface);
     This->src3d_pending.vel = to_v(x, y, z);
     LOG_3D("Buffer[%d]::SetVelocity %.3f,%.3f,%.3f (%s)", This->id, x, y, z, apply ? "deferred" : "immediate");
@@ -1269,6 +1322,14 @@ static HRESULT WINAPI lst_GetVelocity(IDirectSound3DListener *iface, D3DVECTOR *
 static HRESULT WINAPI lst_SetAllParameters(IDirectSound3DListener *iface, LPCDS3DLISTENER p, DWORD apply)
 {
     if (!p || p->dwSize < sizeof(*p)) return DSERR_INVALIDPARAM;
+    /* each value as its own method takes it */
+    if (!finite3(p->vPosition.x, p->vPosition.y, p->vPosition.z) || !finite3(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z) ||
+        !direction_ok(p->vOrientFront.x, p->vOrientFront.y, p->vOrientFront.z) ||
+        !direction_ok(p->vOrientTop.x, p->vOrientTop.y, p->vOrientTop.z) ||
+        !is_finite(p->flDistanceFactor) || p->flDistanceFactor < DS3D_MINDISTANCEFACTOR || p->flDistanceFactor > DS3D_MAXDISTANCEFACTOR ||
+        !is_finite(p->flRolloffFactor) || p->flRolloffFactor < DS3D_MINROLLOFFFACTOR || p->flRolloffFactor > DS3D_MAXROLLOFFFACTOR ||
+        !is_finite(p->flDopplerFactor) || p->flDopplerFactor < DS3D_MINDOPPLERFACTOR || p->flDopplerFactor > DS3D_MAXDOPPLERFACTOR)
+        return DSERR_INVALIDPARAM;
     LST_SET_BEGIN(iface);
     l->pos = to_v(p->vPosition.x, p->vPosition.y, p->vPosition.z);
     l->vel = to_v(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z);
@@ -1285,14 +1346,14 @@ static HRESULT WINAPI lst_SetAllParameters(IDirectSound3DListener *iface, LPCDS3
 
 static HRESULT WINAPI lst_SetDistanceFactor(IDirectSound3DListener *iface, D3DVALUE v, DWORD apply)
 {
-    if (v < DS3D_MINDISTANCEFACTOR || v > DS3D_MAXDISTANCEFACTOR) return DSERR_INVALIDPARAM;
+    if (!is_finite(v) || v < DS3D_MINDISTANCEFACTOR || v > DS3D_MAXDISTANCEFACTOR) return DSERR_INVALIDPARAM;
     LOG_3D("Listener::SetDistanceFactor %g (%s)", v, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->distance_factor = v; LST_SET_END(apply);
 }
 
 static HRESULT WINAPI lst_SetDopplerFactor(IDirectSound3DListener *iface, D3DVALUE v, DWORD apply)
 {
-    if (v < DS3D_MINDOPPLERFACTOR || v > DS3D_MAXDOPPLERFACTOR) return DSERR_INVALIDPARAM;
+    if (!is_finite(v) || v < DS3D_MINDOPPLERFACTOR || v > DS3D_MAXDOPPLERFACTOR) return DSERR_INVALIDPARAM;
     LOG_3D("Listener::SetDopplerFactor %g (%s)", v, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->doppler_factor = v; LST_SET_END(apply);
 }
@@ -1302,16 +1363,8 @@ static HRESULT WINAPI lst_SetOrientation(IDirectSound3DListener *iface, D3DVALUE
 {
     /* ALchemy (0x10043740): every component finite, and neither vector all zero, else DSERR_INVALIDPARAM and the
      * orientation kept (Fallout 3 sets 0,0,0 / 0,0,0 until the player has one; taken, it left the 3D math NaN) */
-    const float v[6] = { fx, fy, fz, tx, ty, tz };
-    for (int k = 0; k < 6; k++) {          /* (by the exponent bits; the build's fast math takes every float as
-                                             * finite and folds the test away, so the empty asm hides where u came from) */
-        uint32_t u;
-        memcpy(&u, &v[k], 4);
-        __asm__("" : "+r"(u));
-        if ((u & 0x7f800000u) == 0x7f800000u) return DSERR_INVALIDPARAM;
-    }
-    if ((fx == 0.0f && fy == 0.0f && fz == 0.0f) || (tx == 0.0f && ty == 0.0f && tz == 0.0f)) {
-        LOG_3D("Listener::SetOrientation front %.3f,%.3f,%.3f top %.3f,%.3f,%.3f: a zero vector, refused", fx, fy, fz, tx, ty, tz);
+    if (!direction_ok(fx, fy, fz) || !direction_ok(tx, ty, tz)) {
+        LOG_3D("Listener::SetOrientation front %.3f,%.3f,%.3f top %.3f,%.3f,%.3f: a zero or non-finite vector, refused", fx, fy, fz, tx, ty, tz);
         return DSERR_INVALIDPARAM;
     }
     LST_SET_BEGIN(iface);
@@ -1324,6 +1377,7 @@ static HRESULT WINAPI lst_SetOrientation(IDirectSound3DListener *iface, D3DVALUE
 
 static HRESULT WINAPI lst_SetPosition(IDirectSound3DListener *iface, D3DVALUE x, D3DVALUE y, D3DVALUE z, DWORD apply)
 {
+    if (!finite3(x, y, z)) return DSERR_INVALIDPARAM;     /* (ALchemy 0x100435e0) */
     LST_SET_BEGIN(iface);
     l->pos = to_v(x, y, z);
     LOG_3D("Listener::SetPosition %.3f,%.3f,%.3f (%s)", x, y, z, apply ? "deferred" : "immediate");
@@ -1332,13 +1386,14 @@ static HRESULT WINAPI lst_SetPosition(IDirectSound3DListener *iface, D3DVALUE x,
 
 static HRESULT WINAPI lst_SetRolloffFactor(IDirectSound3DListener *iface, D3DVALUE v, DWORD apply)
 {
-    if (v < DS3D_MINROLLOFFFACTOR || v > DS3D_MAXROLLOFFFACTOR) return DSERR_INVALIDPARAM;
+    if (!is_finite(v) || v < DS3D_MINROLLOFFFACTOR || v > DS3D_MAXROLLOFFFACTOR) return DSERR_INVALIDPARAM;
     LOG_3D("Listener::SetRolloffFactor %g (%s)", v, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->rolloff_factor = v; LST_SET_END(apply);
 }
 
 static HRESULT WINAPI lst_SetVelocity(IDirectSound3DListener *iface, D3DVALUE x, D3DVALUE y, D3DVALUE z, DWORD apply)
 {
+    if (!finite3(x, y, z)) return DSERR_INVALIDPARAM;     /* (ALchemy 0x10043690) */
     LOG_3D("Listener::SetVelocity %.3f,%.3f,%.3f (%s)", x, y, z, apply ? "deferred" : "immediate");
     LST_SET_BEGIN(iface); l->vel = to_v(x, y, z); LST_SET_END(apply);
 }
@@ -1949,7 +2004,11 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
         HeapFree(GetProcessHeap(), 0, b);
         return hr;
     }
-    if ((desc->dwFlags & DSBCAPS_CTRL3D) && b->fmt.Format.nChannels != 1) {
+    /* a 3D buffer is mono on a DirectSound 8 asked with DirectX 8's DSBUFFERDESC; one made through an older
+     * IDirectSound, or with the older DSBUFFERDESC1, may be stereo (Windows 7; ALchemy 0x10010100 by the object), and
+     * plays as its mono sum while it is positioned */
+    if ((desc->dwFlags & DSBCAPS_CTRL3D) && b->fmt.Format.nChannels != 1 &&
+        ((owner && owner->is_ds8 && desc->dwSize >= sizeof(DSBUFFERDESC)) || b->fmt.Format.nChannels > 2)) {
         LOG_CALL("CreateSoundBuffer: 3D buffer must be mono");
         HeapFree(GetProcessHeap(), 0, b);
         return DSERR_INVALIDPARAM;
@@ -1978,6 +2037,22 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     b->shared->ref = 1;
     b->shared->data = data;
     b->shared->size = bytes;
+    if (b->fmt.Format.wFormatTag != WAVE_FORMAT_PCM) {
+        /* Windows keeps a format other than PCM whole, the cbSize bytes after it too (GetFormat answers them); the
+         * fields reAL settled (the block size, the byte rate, the valid bits) as reAL has them */
+        const WAVEFORMATEX *in = desc->lpwfxFormat;
+        DWORD n = sizeof(WAVEFORMATEX) + in->cbSize;
+        BOOL readable = !IsBadReadPtr(in, n);
+        if (!readable) n = sizeof(b->fmt);                      /* (the caller's cbSize runs past its memory) */
+        WAVEFORMATEX *w = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, n > sizeof(b->fmt) ? n : sizeof(b->fmt));
+        if (w) {
+            if (readable) memcpy(w, in, n);
+            /* the settled fields: the header, and for WAVE_FORMAT_EXTENSIBLE the rest of its 40 bytes */
+            memcpy(w, &b->fmt, b->fmt.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE ? sizeof(b->fmt) : sizeof(WAVEFORMATEX));
+            w->cbSize = (WORD)(n - sizeof(WAVEFORMATEX));
+            b->shared->wfx = w;
+        }
+    }
 
     b->voice.data = data;
     b->voice.interp = g_cfg.resampler;
@@ -1997,7 +2072,7 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     dev->n_buffers++;
     if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
     rl_buffer_update_gains(b);
-    b->lost = writeprimary(b);              /* (made while its owner writes the primary buffer) */
+    b->lost = device_writeprimary(dev);     /* (made while an object writes the primary buffer) */
     LeaveCriticalSection(&dev->lock);
 
     LOG_CALL("CreateSoundBuffer[%d] %lu bytes, %lu Hz %u ch %u bit: %s", b->id, (unsigned long)bytes,
@@ -2040,7 +2115,7 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     if (b->desc.dwFlags & DSBCAPS_CTRL3D)
         b->hrtf = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(rl_hrtf_voice));
     rl_buffer_update_gains(b);
-    b->lost = writeprimary(b);
+    b->lost = device_writeprimary(dev);
     list_add_all(dev, b);
     dev->n_buffers++;
     if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
@@ -2052,28 +2127,33 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     return DS_OK;
 }
 
-/* As Windows' DirectSound (tests/primtest.c): at DSSCL_WRITEPRIMARY the owner's secondary buffers are lost (they
- * stop; Lock, Play and Restore answer DSERR_BUFFERLOST, GetStatus DSBSTATUS_BUFFERLOST), and stay lost after it leaves
- * that level until Restore; leaving it stops the primary buffer's own playing.  The level is set here, under the lock
+/* As Windows' DirectSound (tests/primtest.c): at DSSCL_WRITEPRIMARY every secondary buffer of the device is lost,
+ * any object's (they stop; Lock, Play, Stop, Restore and the positions answer DSERR_BUFFERLOST, GetStatus
+ * DSBSTATUS_BUFFERLOST), and stays lost after it leaves that level until Restore; leaving it stops the primary
+ * buffer's own playing.  The level is set here, under the lock
  * the buffers read it with. */
 void rl_buffers_coop_level(rl_device *dev, rl_dsound *owner, DWORD level)
 {
     EnterCriticalSection(&dev->lock);
+    if ((owner->coop_level == DSSCL_WRITEPRIMARY) != (level == DSSCL_WRITEPRIMARY))
+        dev->wp_owners += level == DSSCL_WRITEPRIMARY ? 1 : -1;
     owner->coop_level = level;
     int lost = 0;
     for (rl_buffer *b = dev->all; b; b = b->next_all) {
-        if (b->owner != owner) continue;
-        if (b->is_primary) {
-            if (level != DSSCL_WRITEPRIMARY) {
-                b->voice.playing = 0;
-                if (b->in_play_list) rl_device_stop_voice(dev, b);
+        if (!b->is_primary) {               /* (any object's: Windows loses them all) */
+            if (level == DSSCL_WRITEPRIMARY && !b->lost) {
+                b->lost = TRUE;
+                stop_locked(b);
+                lost++;
             }
-            prim_format(b);                 /* (its gains) */
-        } else if (level == DSSCL_WRITEPRIMARY && !b->lost) {
-            b->lost = TRUE;
-            stop_locked(b);
-            lost++;
+            continue;
         }
+        if (b->owner != owner) continue;
+        if (level != DSSCL_WRITEPRIMARY) {
+            b->voice.playing = 0;
+            if (b->in_play_list) rl_device_stop_voice(dev, b);
+        }
+        prim_format(b);                     /* (its gains) */
     }
     LeaveCriticalSection(&dev->lock);
     if (lost) LOG_CALL("SetCooperativeLevel(DSSCL_WRITEPRIMARY): %d secondary buffer(s) lost", lost);
@@ -2090,6 +2170,7 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
     rl_device *grave = rl_device_grave();
     rl_buffer *gone = NULL;             /* (linked through next_playing, unused once out of the play list) */
     EnterCriticalSection(&dev->lock);
+    if (owner->coop_level == DSSCL_WRITEPRIMARY) dev->wp_owners--;  /* (the others' buffers may be restored now) */
     for (rl_buffer *b = dev->all, *next; b; b = next) {
         next = b->next_all;
         if (b->owner != owner) continue;
