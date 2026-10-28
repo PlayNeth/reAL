@@ -1,5 +1,5 @@
 /* primtest - the primary buffer, and writing to it at DSSCL_WRITEPRIMARY, against Microsoft's DirectSound: every
- * HRESULT and out-parameter.  Run with tests/comcmp.sh primtest.exe [levels|api|secondary|more|object]; `audio` (not
+ * HRESULT and out-parameter.  Run with tests/comcmp.sh primtest.exe [levels|api|secondary|more|object|refs]; `audio` (not
  * in the default run) plays a tone through the primary buffer for recording the output. */
 #define COBJMACROS
 #define INITGUID
@@ -529,6 +529,58 @@ static void audio(void)
     IDirectSound8_Release(ds);
 }
 
+/* ------------------------------------------------------------------ each interface's references (a secondary buffer's
+ * IDirectSoundBuffer, IDirectSound3DBuffer, IDirectSoundNotify, IKsPropertySet), and what over-releasing one does */
+static void refs(void)
+{
+    IDirectSound8 *ds = make_ds();
+    if (!ds) return;
+    IDirectSound8_SetCooperativeLevel(ds, wnd(), DSSCL_PRIORITY);
+    WAVEFORMATEX f = pcm(22050, 1, 16);
+    DSBUFFERDESC d;
+    memset(&d, 0, sizeof(d)); d.dwSize = sizeof(d); d.dwBufferBytes = 22050 * 2; d.lpwfxFormat = &f;
+    d.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLPOSITIONNOTIFY | DSBCAPS_CTRLVOLUME;
+    IDirectSoundBuffer *b = NULL;
+    HRESULT hr = IDirectSound8_CreateSoundBuffer(ds, &d, &b, NULL);
+    P("  CreateSoundBuffer %08lx\n", hr);
+    if (!b) { IDirectSound8_Release(ds); return; }
+    IDirectSound3DBuffer *b3 = NULL;
+    IDirectSoundNotify *n = NULL;
+    IKsPropertySet *k = NULL;
+    IDirectSoundBuffer8 *b8 = NULL;
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&b3);
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSoundNotify, (void **)&n);
+    IDirectSoundBuffer_QueryInterface(b, &IID_IKsPropertySet, (void **)&k);
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSoundBuffer8, (void **)&b8);
+    P("  interfaces: 3D %s notify %s property set %s buffer8 %s\n", b3 ? "yes" : "no", n ? "yes" : "no", k ? "yes" : "no",
+      b8 ? (b8 == (IDirectSoundBuffer8 *)b ? "the same" : "another") : "no");
+    if (!b3 || !n || !k) { IDirectSound8_Release(ds); return; }
+    P("  AddRef: buffer %lu 3D %lu notify %lu property set %lu\n", IDirectSoundBuffer_AddRef(b), IDirectSound3DBuffer_AddRef(b3),
+      IDirectSoundNotify_AddRef(n), IKsPropertySet_AddRef(k));
+    P("  Release: buffer %lu 3D %lu notify %lu property set %lu\n", IDirectSoundBuffer_Release(b), IDirectSound3DBuffer_Release(b3),
+      IDirectSoundNotify_Release(n), IKsPropertySet_Release(k));
+    IUnknown *u = NULL;
+    IDirectSound3DBuffer_QueryInterface(b3, &IID_IDirectSoundBuffer, (void **)&u);
+    P("  3D QueryInterface(buffer): %s, AddRef %lu Release %lu\n", u == (IUnknown *)b ? "the same" : "another",
+      IDirectSoundBuffer_AddRef(b), IDirectSoundBuffer_Release(b));
+    if (u) P("  Release it %lu\n", IUnknown_Release(u));
+    IDirectSound3DBuffer *b3b = NULL;
+    IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&b3b);
+    P("  3D again: %s, Release %lu\n", b3b == b3 ? "the same" : "another", b3b ? IDirectSound3DBuffer_Release(b3b) : 99);
+    if (b8) P("  Release buffer8 %lu\n", IDirectSoundBuffer8_Release(b8));
+    P("  Release notify %lu, property set %lu\n", IDirectSoundNotify_Release(n), IKsPropertySet_Release(k));
+    /* the buffer released as long as Release answers more than 0, the 3D interface still held */
+    int loops = 0;
+    ULONG r;
+    do { r = IDirectSoundBuffer_Release(b); loops++; } while (r && loops < 10);
+    P("  buffer released until 0: %d Release(s)\n", loops);
+    D3DVALUE md = -1;
+    hr = IDirectSound3DBuffer_GetMinDistance(b3, &md);
+    P("  3D still works: GetMinDistance %08lx %.1f\n", hr, md);
+    P("  Release 3D %lu\n", IDirectSound3DBuffer_Release(b3));
+    IDirectSound8_Release(ds);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -538,6 +590,7 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "secondary")) { P("secondary:\n"); secondary(); }
     if (!only || !strcmp(only, "more")) { P("more:\n"); more(); }
     if (!only || !strcmp(only, "object")) { P("object:\n"); object(); }
+    if (!only || !strcmp(only, "refs")) { P("refs:\n"); refs(); }
     if (only && !strcmp(only, "audio")) { P("audio:\n"); audio(); }
     CoUninitialize();
     return 0;

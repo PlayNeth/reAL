@@ -355,6 +355,7 @@ static void list_remove_all(rl_device *dev, rl_buffer *b)
 
 /* =========================================================== IDirectSoundBuffer8 */
 
+static ULONG buf_addref(rl_buffer *b, int k);
 static HRESULT WINAPI dsb_QueryInterface(IDirectSoundBuffer8 *iface, REFIID riid, void **out)
 {
     rl_buffer *This = BUF(iface);
@@ -374,21 +375,38 @@ static HRESULT WINAPI dsb_QueryInterface(IDirectSoundBuffer8 *iface, REFIID riid
         *out = &This->IDirectSound3DListener_iface;
 
     if (*out) {
-        InterlockedIncrement(&This->ref);
+        int k = *out == &This->IDirectSoundBuffer8_iface ? RL_IREF_BUF : *out == &This->IDirectSound3DBuffer_iface ? RL_IREF_3D :
+                *out == &This->IDirectSoundNotify_iface ? RL_IREF_NOTIFY : *out == &This->IKsPropertySet_iface ? RL_IREF_KS :
+                RL_IREF_LISTENER;
+        buf_addref(This, k);
         return S_OK;
     }
     LOG_CALL("Buffer[%d]::QueryInterface unsupported %s", This->id, rl_guid_str(riid, gb));
     return E_NOINTERFACE;
 }
 
-static ULONG WINAPI dsb_AddRef(IDirectSoundBuffer8 *iface)
+/* Each interface counts its own references, and AddRef / Release answer that count, as ALchemy's (0x1001db50,
+ * 0x1001fbf0) and Windows' do; the object goes when all of them are released.  A game that releases a buffer until
+ * Release answers 0 while it still holds the buffer's 3D interface (Fallout 3, Fallout: New Vegas) then keeps the
+ * buffer: with one count for all, the loop released the 3D interface's reference too, and the game's next call on
+ * it crashed.  An interface released more often than it was referenced answers 0 (ALchemy's). */
+static ULONG buf_addref(rl_buffer *b, int k)
 {
-    return InterlockedIncrement(&BUF(iface)->ref);
+    InterlockedIncrement(&b->ref);
+    return InterlockedIncrement(&b->iref[k]);
 }
+static ULONG buf_release(rl_buffer *b, int k);
+static ULONG WINAPI dsb_AddRef(IDirectSoundBuffer8 *iface) { return buf_addref(BUF(iface), RL_IREF_BUF); }
+static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface) { return buf_release(BUF(iface), RL_IREF_BUF); }
 
-static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
+static ULONG buf_release(rl_buffer *b, int k)
 {
-    rl_buffer *This = BUF(iface);
+    LONG own, was;
+    do {                                    /* (the interface's own count stops at 0) */
+        was = b->iref[k];
+        own = was > 0 ? was - 1 : 0;
+    } while (was > 0 && InterlockedCompareExchange(&b->iref[k], own, was) != was);
+    rl_buffer *This = b;
     ULONG ref;
     if (This->is_primary) {
         /* its owner hands it out again while it is alive (under the lock): it forgets it as it goes */
@@ -398,7 +416,7 @@ static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
         if (!ref && This->owner && This->owner->primary == This) This->owner->primary = NULL;
         LeaveCriticalSection(&d->lock);
     } else ref = InterlockedDecrement(&This->ref);
-    if (ref) return ref;
+    if (ref) return (ULONG)own;
 
     rl_device *dev = This->dev;
     LOG_CALL("Buffer[%d] destroyed", This->id);
@@ -422,7 +440,7 @@ static ULONG WINAPI dsb_Release(IDirectSoundBuffer8 *iface)
     cmss_free(&This->voice);
     HeapFree(GetProcessHeap(), 0, This);
     rl_device_release(dev);
-    return 0;
+    return (ULONG)own;
 }
 
 static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
@@ -943,9 +961,9 @@ static IDirectSoundBuffer8Vtbl dsb_vtbl = {
 static HRESULT WINAPI ntf_QueryInterface(IDirectSoundNotify *iface, REFIID riid, void **out)
 { return dsb_QueryInterface(&NOTIFY(iface)->IDirectSoundBuffer8_iface, riid, out); }
 static ULONG WINAPI ntf_AddRef(IDirectSoundNotify *iface)
-{ return dsb_AddRef(&NOTIFY(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_addref(NOTIFY(iface), RL_IREF_NOTIFY); }
 static ULONG WINAPI ntf_Release(IDirectSoundNotify *iface)
-{ return dsb_Release(&NOTIFY(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_release(NOTIFY(iface), RL_IREF_NOTIFY); }
 
 static HRESULT WINAPI ntf_SetNotificationPositions(IDirectSoundNotify *iface, DWORD count, LPCDSBPOSITIONNOTIFY pos)
 {
@@ -990,9 +1008,9 @@ static IDirectSoundNotifyVtbl ntf_vtbl = {
 static HRESULT WINAPI b3d_QueryInterface(IDirectSound3DBuffer *iface, REFIID riid, void **out)
 { return dsb_QueryInterface(&BUF3D(iface)->IDirectSoundBuffer8_iface, riid, out); }
 static ULONG WINAPI b3d_AddRef(IDirectSound3DBuffer *iface)
-{ return dsb_AddRef(&BUF3D(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_addref(BUF3D(iface), RL_IREF_3D); }
 static ULONG WINAPI b3d_Release(IDirectSound3DBuffer *iface)
-{ return dsb_Release(&BUF3D(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_release(BUF3D(iface), RL_IREF_3D); }
 
 static rl_vec3 to_v(D3DVALUE x, D3DVALUE y, D3DVALUE z) { rl_vec3 v = { x, y, z }; return v; }
 
@@ -1186,9 +1204,9 @@ static IDirectSound3DBufferVtbl b3d_vtbl = {
 static HRESULT WINAPI lst_QueryInterface(IDirectSound3DListener *iface, REFIID riid, void **out)
 { return dsb_QueryInterface(&LISTENER(iface)->IDirectSoundBuffer8_iface, riid, out); }
 static ULONG WINAPI lst_AddRef(IDirectSound3DListener *iface)
-{ return dsb_AddRef(&LISTENER(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_addref(LISTENER(iface), RL_IREF_LISTENER); }
 static ULONG WINAPI lst_Release(IDirectSound3DListener *iface)
-{ return dsb_Release(&LISTENER(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_release(LISTENER(iface), RL_IREF_LISTENER); }
 
 #define LST_DEV(iface) (LISTENER(iface)->dev)
 
@@ -1334,9 +1352,9 @@ static IDirectSound3DListenerVtbl lst_vtbl = {
 static HRESULT WINAPI ks_QueryInterface(IKsPropertySet *iface, REFIID riid, void **out)
 { return dsb_QueryInterface(&PROPS(iface)->IDirectSoundBuffer8_iface, riid, out); }
 static ULONG WINAPI ks_AddRef(IKsPropertySet *iface)
-{ return dsb_AddRef(&PROPS(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_addref(PROPS(iface), RL_IREF_KS); }
 static ULONG WINAPI ks_Release(IKsPropertySet *iface)
-{ return dsb_Release(&PROPS(iface)->IDirectSoundBuffer8_iface); }
+{ return buf_release(PROPS(iface), RL_IREF_KS); }
 
 /* EAX 1.0 property sets (what ALchemy answers, see dstrace of NFS4) */
 static const GUID RL_EAX1_LISTENER =
@@ -1757,6 +1775,7 @@ static rl_buffer *alloc_buffer(rl_device *dev)
     b->IKsPropertySet_iface.lpVtbl = &ks_vtbl;
     b->IDirectSound3DListener_iface.lpVtbl = &lst_vtbl;
     b->ref = 1;
+    b->iref[RL_IREF_BUF] = 1;
     b->id = InterlockedIncrement(&s_next_id);
     b->dev = dev;
     rl_source_defaults(&b->src3d);

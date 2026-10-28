@@ -56,6 +56,12 @@ Doppler, and WASAPI output.
   0), the listener without DSBCAPS_CTRL3D, Unlock not checked against the Lock, and the primary buffer once its
   DirectSound object is released (Windows answers E_INVALIDARG to everything then).
 
+**Reference counts** (`src/buffer.c`): each interface of a buffer (IDirectSoundBuffer, IDirectSound3DBuffer,
+IDirectSoundNotify, IKsPropertySet, the primary's listener) counts its own references and answers them from AddRef /
+Release, as ALchemy and Windows do (`primtest refs` matches Windows 7); the buffer goes when all are released. With
+one count for all, Fallout 3 and Fallout: New Vegas, which release a buffer until Release answers 0 while holding its
+3D interface, freed the buffer under it and crashed at the intro.
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections

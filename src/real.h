@@ -157,13 +157,15 @@ typedef struct rl_shared_data {
     DWORD  size;
 } rl_shared_data;
 
+enum { RL_IREF_BUF, RL_IREF_3D, RL_IREF_NOTIFY, RL_IREF_KS, RL_IREF_LISTENER };
 struct rl_buffer {
     IDirectSoundBuffer8    IDirectSoundBuffer8_iface;
     IDirectSound3DBuffer   IDirectSound3DBuffer_iface;
     IDirectSoundNotify     IDirectSoundNotify_iface;
     IKsPropertySet         IKsPropertySet_iface;
     IDirectSound3DListener IDirectSound3DListener_iface;   /* primary only */
-    LONG          ref;
+    LONG          ref;          /* every interface's references: the object goes at 0 */
+    LONG          iref[5];      /* each interface's own (RL_IREF_*), what its AddRef / Release answer (ALchemy's) */
     int           id;
     rl_device    *dev;
     BOOL          is_primary;
