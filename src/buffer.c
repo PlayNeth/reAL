@@ -1944,8 +1944,11 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
         HeapFree(GetProcessHeap(), 0, b);
         return DSERR_INVALIDPARAM;
     }
-    bytes -= bytes % block;
-    if (!bytes) bytes = block;
+    /* a size that isn't a whole number of blocks is rounded up, as Windows (GetCaps answers the rounded size, and a
+     * Lock of the size asked for succeeds); ALchemy keeps the size as asked.  Fallout 3 asks for its sample's byte
+     * count, which can be odd for 16-bit mono; rounded down, its Lock of that count failed, the game took the sound
+     * as not loaded, and its copy of it then wrote past the end of a buffer */
+    if (bytes % block) bytes += block - bytes % block;
     b->desc.dwBufferBytes = bytes;
 
     b->shared = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*b->shared));

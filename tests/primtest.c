@@ -679,6 +679,12 @@ static void sizes(void)
         { 48000, 2, 553184, DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME },
         { 32000, 1, 149030, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
         { 44100, 1, 57294, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+        /* sizes that aren't a whole number of blocks, as Fallout 3 asks (its sample's byte count) */
+        { 32000, 1, 254745, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFX | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+        { 32000, 1, 210739, DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME | DSBCAPS_GETCURRENTPOSITION2 | DSBCAPS_MUTE3DATMAXDISTANCE },
+        { 48000, 2, 529283, DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME },
+        { 48000, 2, 529281, DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME | DSBCAPS_STATIC },
+        { 22050, 1, 1001, 0 },
     };
     for (unsigned k = 0; k < sizeof(t) / sizeof(t[0]); k++) {
         WAVEFORMATEX f = pcm(t[k].rate, t[k].ch, 16);
@@ -695,9 +701,25 @@ static void sizes(void)
                 lk = b1;
                 IDirectSoundBuffer_Unlock(b, p1, b1, p2, b2);
             }
-            IDirectSoundBuffer_Release(b);
         }
         P("  %lu Hz %u ch %lu bytes flags %lx: %08lx GetCaps %lu Lock %lu\n", t[k].rate, t[k].ch, t[k].bytes, t[k].flags, hr, c.dwBufferBytes, lk);
+        if (b) {                            /* Lock of the size asked for, and its last byte */
+            void *p1, *p2; DWORD b1 = 0, b2 = 0;
+            hr = IDirectSoundBuffer_Lock(b, 0, t[k].bytes, &p1, &b1, &p2, &b2, 0);
+            P("    Lock(0, %lu) %08lx %lu + %lu", t[k].bytes, hr, b1, b2);
+            if (SUCCEEDED(hr)) {
+                ((BYTE *)p1)[b1 - 1] = 0x55;
+                P(", Unlock %08lx", IDirectSoundBuffer_Unlock(b, p1, b1, p2, b2));
+            }
+            hr = IDirectSoundBuffer_Lock(b, t[k].bytes - 1, 1, &p1, &b1, &p2, &b2, 0);
+            P("; Lock(%lu, 1) %08lx %lu + %lu", t[k].bytes - 1, hr, b1, b2);
+            if (SUCCEEDED(hr)) IDirectSoundBuffer_Unlock(b, p1, b1, p2, b2);
+            DWORD play = 0, write = 0;
+            IDirectSoundBuffer_SetCurrentPosition(b, t[k].bytes - 1);
+            IDirectSoundBuffer_GetCurrentPosition(b, &play, &write);
+            P("; SetCurrentPosition(%lu) -> %lu\n", t[k].bytes - 1, play);
+            IDirectSoundBuffer_Release(b);
+        }
     }
     IDirectSound8_Release(ds);
 }

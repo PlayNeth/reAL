@@ -71,6 +71,12 @@ that is all zero or has an infinite / NaN component (DSERR_INVALIDPARAM, the ori
 math went NaN. Microsoft's DLL also refuses parallel vectors and keeps them normalised; ALchemy doesn't, and nor
 does reAL (`primtest orient`).
 
+**Buffer sizes** (`src/buffer.c`): a secondary buffer's size that isn't a whole number of blocks is rounded up, as
+Windows (GetCaps answers the rounded size; `primtest sizes` matches Windows 7). ALchemy keeps the size as asked; both
+let a Lock of the size asked for succeed. reAL used to round down, so Fallout 3's and New Vegas's Lock of a sample's
+odd byte count failed; the game then took the sound as not loaded and its copy of it ran past the end of a buffer,
+corrupting the heap a few seconds into the intro.
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
