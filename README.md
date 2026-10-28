@@ -1,237 +1,284 @@
 # reAL
 
-**A drop-in `dsound.dll` that brings back EAX, 3D audio and DirectMusic in classic games.**
+A drop-in `dsound.dll` that brings back **EAX, 3D audio, surround and DirectMusic** in classic PC games.
 
-reAL is an open reimplementation of **Creative ALchemy**'s `dsound.dll` and of Microsoft's **DirectMusic**,
-aimed at Linux + Wine. Put it next to a game's executable and the game gets ALchemy's EAX 1-4 effects, HRTF
-3D audio and reverb, surround up to 7.1 with CMSS-3D upmixing, and (with `music=true`) a DirectMusic of its
-own, with no Creative hardware or Windows DLLs needed. Both halves are tested against the originals: the EAX
-processing bit-for-bit against ALchemy, and DirectMusic call-for-call against Windows XP's DLLs. One `.ini`,
-no GUI.
+reAL is an open reimplementation of **Creative ALchemy**'s `dsound.dll` and of Microsoft's **DirectMusic**. Put it in place of DirectSound and a game gets ALchemy's EAX 1–4 effects and reverb, HRTF 3D audio on headphones, surround up to 7.1 with CMSS-3D upmixing, and, if you want it, a DirectMusic of its own. No Creative hardware or Windows DLLs are needed. It's made for Linux with Wine or Proton, and works on Windows too.
 
-*reAL is an independent project, not affiliated with or endorsed by Creative Technology or Microsoft, and
-contains none of their files. Creative, ALchemy, EAX, Microsoft, DirectSound and DirectMusic are trademarks of
-their owners.*
+Both halves are checked against the originals: the EAX processing bit for bit against ALchemy, and DirectMusic call for call against Windows XP's DLLs. One `.ini` file, no GUI.
 
-ALchemy has two engines. On Creative X-Fi/Audigy hardware it translates DirectSound to OpenAL.
-On everything else (and under Wine) it runs Creative's own software renderer straight to WASAPI:
-HRTF, CMSS-3D, an "HRvb" reverb and all 12 EAX 4/5 effects. That second engine is the sound reAL
-is chasing, so reAL is **its own mixer outputting to WASAPI**, not another OpenAL wrapper.
-See [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md).
+*reAL is an independent project, not affiliated with or endorsed by Creative Technology or Microsoft, and contains none of their files. Creative, ALchemy, EAX, Microsoft, DirectSound and DirectMusic are trademarks of their owners.*
 
-## Status
+---
 
-reAL has two halves in one DLL:
-- **The DirectSound side** is the ALchemy reimplementation. It is done.
-- **reDM** is its own DirectMusic, switched on with `music=true` (see "reDM" below). It is a faithful port of
-  Windows XP's DirectMusic, and it is complete.
+## Contents
+
+- [Requirements](#requirements)
+- [Installing](#installing)
+- [Uninstalling](#uninstalling)
+- [What it does](#what-it-does)
+- [Settings](#settings)
+- [Files reAL uses](#files-real-uses)
+- [Troubleshooting](#troubleshooting)
+- [HRTF data](#hrtf-data)
+- [Building from source](#building-from-source)
+- [For developers](#for-developers)
+- [License](#license)
+
+---
+
+## Requirements
+
+- A **32-bit game** that plays its sound through DirectSound, and optionally DirectMusic or Windows' MIDI.
+- **Linux** with Wine or Proton, or **Windows**. reAL plays through WASAPI and uses Microsoft's Universal C Runtime, which Windows 10 and 11 include; Windows 7 and 8.1 get it from Windows Update.
+- **Optional, for DirectMusic music (reDM):** the General MIDI collection `gm.dls`. Windows has it; under Wine, copy it from a Windows install or point `gmdls=` at another DLS file or a SoundFont.
+- **Optional, for HRTF on headphones:** a `reAL_hrtf.bin` you build yourself (see [HRTF data](#hrtf-data)). Without it, 3D sounds use stereo panning.
+
+## Installing
+
+### Linux (Wine / Proton)
+
+Unzip the release, then run `install.sh` for the prefix the game uses:
+
+```sh
+WINEPREFIX=~/Games/foo ./install.sh                  # every program in the prefix
+WINEPREFIX=~/Games/foo ./install.sh --app game.exe   # only game.exe; the rest keep Wine's dsound
+```
+
+It copies `dsound.dll` into the prefix's `syswow64` (64-bit prefix) or `system32` (32-bit prefix), keeping Wine's own copy, sets the `dsound=native,builtin` override, and writes a default `C:\windows\reAL.ini`.
+
+- **Proton:** use the game's prefix, `.../steamapps/compatdata/<appid>/pfx`.
+- **After a Wine or Proton update,** run it again: updating the prefix puts Wine's `dsound.dll` back.
+- **By hand, for one game:** put `dsound.dll` next to the game's exe and run the game with `WINEDLLOVERRIDES=dsound=n,b` (on Steam: `WINEDLLOVERRIDES=dsound=n,b %command%` in the launch options).
+
+### Windows
+
+Put `dsound.dll` next to the game's exe. Don't replace the one in `System32` or `SysWOW64`.
+
+> **Games that create DirectSound through COM** (`CoCreateInstance`; Hot Wheels: Beat That!, for one) load Windows' own `dsound.dll` and never see the one next to them. For those, set the two paths in `tools/dsound-com-redirect.reg` to your `dsound.dll` and double-click it. It points DirectSound's COM classes at reAL for your Windows user, so it also applies to any other 32-bit program of yours that does the same (few do). It doesn't apply to programs run as administrator. `tools/dsound-com-redirect-undo.reg` removes it.
+
+### Checking it works
+
+Set `log=1` in `reAL.ini` and start the game. `reAL.log` appears next to the game's exe, and its first line names reAL's version and build.
+
+## Uninstalling
+
+- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `dsound.dll` back and removes the global override. Per-game overrides made with `--app` stay, but fall back to Wine's DLL.
+- **Windows:** delete `dsound.dll` from the game's folder. If you used the COM redirect, run `dsound-com-redirect-undo.reg`. If you registered `reDM.dll` (see [DirectMusic](#directmusic-redm)), run `regsvr32 /u` on it.
+- You can also delete `reAL.ini`, `reAL.log` and `reAL_hrtf.bin`.
+
+---
+
+## What it does
+
+reAL has two halves in one DLL. The DirectSound side is the ALchemy reimplementation, and **reDM** is its own DirectMusic, a port of Windows XP's, switched on with `music=true`. Both are complete.
+
+ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectSound to OpenAL. Everywhere else, Wine included, it runs Creative's own software renderer straight to WASAPI: HRTF, CMSS-3D, the "HRvb" reverb and all the EAX 4 effects. That second engine is the sound reAL recreates, so reAL is **its own mixer playing through WASAPI**, not another OpenAL wrapper. [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md) has the details.
 
 ### DirectSound
 
-| | |
+- **All of DirectSound 8:**
+  - buffers in PCM (8, 16, 24 and 32-bit), float and WAVE_FORMAT_EXTENSIBLE, 1 to 8 channels;
+  - looping and one-shot sounds, Lock / Unlock, position notifications, duplicate buffers;
+  - volume, pan and frequency, with a 32-tap windowed-sinc resampler;
+  - smoothed volume changes and declicked position jumps;
+  - writing to the primary buffer (DSSCL_WRITEPRIMARY), as Windows' DirectSound does.
+- **Hardware 3D voices:** reAL reports hardware-accelerated buffers, as ALchemy does, so games turn on their best sound options.
+- **Answers as Windows does:** reAL has been compared with Windows 7's DirectSound over thousands of random call sequences. Where Windows accepts a call, so does reAL; where ALchemy is more lenient than Windows, reAL keeps ALchemy's behaviour. The differences kept on purpose are listed in [`docs/STATUS.md`](docs/STATUS.md).
+- **Capture and full duplex** are passed to the system's DirectSound.
+
+### EAX
+
+- **EAX 1.0, 2.0 and 3.0:** ALchemy's own reverb, its property handling and its per-sound model (direct, room, obstruction, occlusion, exclusion, roll-off, air absorption), checked bit for bit against ALchemy.
+- **EAX 4.0:** the context, four effect slots with a reverb engine each, per-sound sends, and all 12 effects: reverb, AGC compressor, autowah, chorus, distortion, echo, equalizer, flanger, frequency shifter, pitch shifter, ring modulator and vocal morpher. The 11 non-reverb effects are ported from ALchemy's and match it to better than 310 dB.
+- **EAX 5.0** isn't supported, on purpose: games used it through OpenAL, which OpenAL Soft covers. reAL reports it unsupported, so games fall back to EAX 4.
+
+### 3D audio and speakers
+
+- **DirectSound 3D:** listener and sounds, deferred settings, cones, distances, and Doppler with ALchemy's formula.
+- **HRTF on headphones,** from a `reAL_hrtf.bin` (see [HRTF data](#hrtf-data)).
+- **Stereo 3D sounds from older games** are accepted, as Windows accepts them, and play as their mono mix while positioned.
+- **Speakers:** stereo, headphones, quad, 5.1 and 7.1, from Windows' speaker setup or `speakers=`. ALchemy's layouts, its channel converter for multichannel sounds (the LFE goes to the fronts through its bass limiter), and its 3D panning across the speakers.
+- **CMSS-3D** (`cmss=on`, off by default as in ALchemy): ALchemy's stereo-to-surround upmixer for music, ambience and videos. On quad, 5.1 and 7.1 it moves centred sound to the centre speaker and ambience to the rears and sides; on stereo speakers and headphones it virtualizes the rear pair. It matches ALchemy to better than −80 dB.
+
+### DirectSound effects
+
+- **SetFX:** Gargle, Echo, ParamEq, Chorus, Flanger, Distortion, Compressor, Waves reverb and I3DL2 reverb, as bit-exact ports of Microsoft's own effects. Their checks and placement match Windows 7's DirectSound.
+
+### DirectMusic (reDM)
+
+`music=true` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except the General MIDI collection, and `gmdls=` can point at another DLS file or a SoundFont instead.
+
+- **What's covered:**
+  - the loader with its cache, containers and MIDI files;
+  - segments and all their tracks: sequence, band, tempo, time signature, SysEx, wave, marker, lyrics, triggers and parameter control;
+  - the performance, with transitions, loops, notifications and tool graphs;
+  - the DLS synth, with the Waves reverb;
+  - audiopaths and their configurations;
+  - ports, buffers and clocks, including the older DirectX 6 and 7 ways of driving them;
+  - styles, chord maps and the composer;
+  - scripts: AudioVBScript, VBScript, JScript and the script track.
+- **Checked against Microsoft's DLLs:** test programs run against both and their output is compared line by line, and offline captures are compared event by event.
+- **When reAL takes over:** when the game loads `dsound.dll`, which nearly every game does before its music starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reDM.dll` and register it with `regsvr32` (under Wine, `wine regsvr32`). Games with `music=true` get reDM, and every other program is handed to the DirectMusic registered before.
+
+### MIDI music
+
+`midi=true` adds a "reDM GM Synth" output and makes it the MIDI mapper, for games that play General MIDI through Windows' MIDI functions (Claw, for one). The music plays through reAL with the same GM collection.
+
+### Where reAL differs from ALchemy
+
+reAL fixes what ALchemy gets wrong:
+
+- **Cleaner sound:**
+  - no ~11 kHz cut on the output;
+  - a windowed-sinc resampler instead of linear interpolation. A 9 kHz tone in a 22 kHz sound loses 5 dB and gets a mirror image only 6.5 dB below it with linear; with sinc it loses 0.1 dB and the image is 85 dB down. `resampler=linear` gives ALchemy's.
+- **EAX fixes:**
+  - EAX 3 reverb panned hard right goes to the right speakers (ALchemy swaps two of its slots, so it lands in the front speaker);
+  - setting EAX 3 air absorption back to 0 takes effect;
+  - an EAX 4 reverb loaded through ALLPARAMETERS starts from the default room (ALchemy leaves it all zeros, which breaks F.E.A.R.'s extra reverb slot);
+  - the flanger's default delay is the SDK's 0.002 s (ALchemy: 0.0002).
+- **EAX 4 effect bugs fixed:**
+  - the ring modulator processes both channels;
+  - the frequency shifter shifts by the frequency asked for, not twice it;
+  - the pitch shifter plays forwards (ALchemy's comes out reversed in ~20 ms chunks);
+  - the AGC compressor keeps its look-ahead after being switched off and on;
+  - the vocal morpher's reset no longer zeroes a formant;
+  - the chorus and flanger work at 192 kHz;
+  - a slot's volume is applied after the effect.
+- **`fixes`** (on by default): where ALchemy lets through something harmful, reAL refuses a zero 3D distance, as Windows does, and keeps a runaway Doppler shift or volume out of the mix. It also fixes flaws in Microsoft's DirectSound effects. `fixes=false` behaves exactly as ALchemy and Microsoft's effects do.
+
+reDM fixes Microsoft's DirectMusic bugs the same way; `REDM_NOFIXES` in the environment turns those off. [`docs/STATUS.md`](docs/STATUS.md) has the details.
+
+---
+
+## Settings
+
+reAL reads `reAL.ini` from these places, later ones winning:
+
+1. `C:\windows\reAL.ini` (in a Wine prefix, `drive_c/windows/reAL.ini`);
+2. `dsound.ini` next to `dsound.dll`, in ALchemy's format;
+3. `reAL.ini` in the game's folder;
+4. the file named by the `REAL_INI` environment variable.
+
+Keys in `[default]` apply to every game, and a `[game.exe]` section overrides them for that game. [`reAL.ini.example`](reAL.ini.example) explains every key. The common ones:
+
+| Setting | What it does |
 |---|---|
-| IDirectSound / IDirectSound8, class factory (CoCreateInstance) | ✅ |
-| Secondary buffers: PCM 8/16/24/32-bit, float, WAVE_FORMAT_EXTENSIBLE, 1-8 ch | ✅ |
-| Lock/Unlock (wrap), play/write cursors, looping, one-shots, SetCurrentPosition | ✅ |
-| Volume, pan, frequency | ✅ 32-tap windowed-sinc resampler (`resampler=linear` for ALchemy's) |
-| Position notifications incl. DSBPN_OFFSETSTOP | ✅ |
-| DuplicateSoundBuffer (shared data) | ✅ |
-| DS3D buffer + listener, deferred settings/commit, cones, distance model | ✅ |
-| HRTF 3D (headphones) | ✅ from `reAL_hrtf.bin` (measured with hrtfprobe); stereo panning if absent |
-| Reports hardware-accelerated 3D voices (LOCHARDWARE), like ALchemy | ✅ |
-| Output | ✅ WASAPI |
-| Capture / full duplex | forwarded to the real dsound.dll if one is reachable |
-| EAX 1.0 (listener environment/volume/decay/damping, per-buffer reverb mix) | ✅ ALchemy's own reverb (CHRvbReverb) ported and verified sample-for-sample against ALchemy, incl. its stereo virtualizer |
-| Volume/pan/send smoothing, declicked position jumps | ✅ |
-| EAX 2.0 and 3.0 (listener reverb incl. environment size scaling, EAX 3 reflections/reverb panning, per-buffer direct/room/HF, obstruction, occlusion, exclusion, roll-off, air absorption) | ✅ ALchemy's property handling and per-source model ported; verified bit-for-bit against ALchemy in the emulator |
-| EAX 4.0 (context, 4 FX slots, a reverb engine per slot, per-source sends / occlusion / exclusion per slot, properties of all 12 effects) | ✅ ALchemy's handling and source model ported; bit-for-bit against ALchemy in the emulator. Audio: all 12 effects (reverb, AGC compressor, autowah, chorus, distortion, echo, equalizer, flanger, frequency shifter, pitch shifter, ring modulator, vocal morpher), the 11 non-reverb ones ported from ALchemy's `CPlug*` DSP and matching it to >310 dB SNR |
-| Doppler (DS3D factor, EAX 3 per-buffer factor) | ✅ ALchemy's formula, bit-identical in the emulator |
-| DirectSound effects (SetFX): Gargle, Echo, ParamEq, Chorus, Flanger, Distortion, Compressor, Waves reverb, I3DL2 reverb | ✅ bit-exact ports of Microsoft's dsdmo (Windows 11's; I3DL2 from XP SP3); SetFX's validation and placement match Windows 7's dsound |
-| Speakers: stereo, headphones, quad, 5.1, 7.1 (Windows' setup, or `speakers=`) | ✅ ALchemy's layouts, channel converter (multichannel buffers, LFE to the fronts through its bass limiter) and 3D speaker panning (front/rear split of the HRTF pair, centre, LFE and side speakers), verified in the emulator |
-| CMSS-3D upmix (`cmss=on`; off by default, as in ALchemy) | ✅ on quad, 5.1 and 7.1 (ALchemy's STFT upmixer: centre, rear, sides), on stereo speakers and on headphones (its quad through ALchemy's stereo virtualizer, speaker or headphone version), matching ALchemy in the emulator to better than -80 dB |
-| EAX 5.0 | ✖ not planned: games used it through OpenAL, not DirectSound (use OpenAL Soft); reported unsupported, so games fall back to EAX 4 |
-| Primary buffer write access (DSSCL_WRITEPRIMARY) | ✅ as Windows' DirectSound (ALchemy has none): the game's own mix played from the primary buffer in the primary format, its secondary buffers lost meanwhile |
+| `log` | `0` off, `1` info, `2` API calls, `3` everything (very verbose). With `1` or more, refused calls are logged too. |
+| `music` | `true` uses reDM, reAL's own DirectMusic. |
+| `gmdls` | Another DLS file or SoundFont (`.sf2`) for reDM's instruments. A Linux path works under Wine. |
+| `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` and `midireverb=` adjust it. |
+| `speakers` | `auto` (Windows' setup), `stereo`, `headphones`, `quad`, `5.1` or `7.1`. |
+| `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
+| `hrtf` | A path to a `reAL_hrtf.bin`, or `off`. |
+| `resampler` | `sinc` (default) or `linear` (ALchemy's). |
+| `fixes` | `false` behaves exactly as ALchemy. |
+| `latency` | WASAPI buffer length in ms; `0` uses ALchemy's `buffers` × `duration` / 2. |
+| `buffers`, `duration`, `maxvoicecount`, `disabledirectmusic` | ALchemy's own keys, with the same meaning and limits. |
+| `enabled`, `realdsound` | `enabled=false` hands everything to the DirectSound named by `realdsound=`. |
 
-### reDM (DirectMusic)
+**Environment variables:** `REAL_LOG=0`–`3` overrides `log`, `REAL_INI` names an extra ini file, `REAL_NOFIXES` is `fixes=false`, and `REDM_NOFIXES` turns off reDM's fixes.
 
-Checked against Microsoft's own DLLs running under Wine: COM test programs run against both and their output is
-diffed line by line, and offline captures are compared event by event.
+## Files reAL uses
 
-| | |
+| File | |
 |---|---|
-| Loader, segments (sequence, band, tempo, time signature, SysEx, wave, marker tracks), MIDI files | ✅ |
-| Performance: playback, transitions, loops, control and secondary segments, notifications, GetParam/SetParam, tool graphs and application tools | ✅ |
-| DLS synth (dmsynth port, incl. wave voices and streaming), the Waves reverb, SoundFont banks converted to DLS | ✅ |
-| Audiopaths: the standard ones and audiopath configurations (buffers, effects, sends, PChannel maps) | ✅ |
-| Port objects (the synth port, its sink and master clock) | ✅ |
-| MIDI through winmm (midiOut, midiStream, MCI) for games that play General MIDI | ✅ |
-| Styles: style and motif tracks, the pattern chooser, variations, chord mapping, mute and pattern tracks, IDirectMusicPatternTrack, chord regeneration | ✅ |
-| Chord maps and the composer: chord map, chord map and signpost tracks, ComposeSegmentFromTemplate, ComposeSegmentFromShape, ComposeTemplateFromShape, ChangeChordMap, Segment::Compose | ✅ |
-| Composer: ComposeTransition / AutoTransition, Segment::Compose with from/to segments, recomposing while a segment plays | ✅ |
-| Start times: align, valid starts, markers, segment end | ✅ |
-| Lyrics and segment trigger tracks | ✅ |
-| Parameter control track, effect parameter envelopes (IMediaParams) | ✅ |
-| The loader as dmloader has it (object cache, garbage collection, ScanDirectory, EnumObject) and containers (.con) | ✅ |
-| Standalone track objects (CoCreateInstance, Load, direct InitPlay/Play) | ✅ |
-| Scripts (dmscript, AudioVBScript): loading, routines, variables, the performance's, segments', segment states', audiopaths' script methods | ✅ |
-| Scripts: the script track, VBScript/JScript (Active Scripting) | ✅ |
+| `dsound.dll` | reAL itself. |
+| `reAL.ini` | Settings (see [Settings](#settings)). |
+| `dsound.ini` | ALchemy's settings file, if you have one next to the DLL. |
+| `reAL.log` | Next to the game's exe, with `log=1` or more; `logfile=` puts it elsewhere. Send it with any bug report. |
+| `reAL_hrtf.bin` | HRTF filters, next to `dsound.dll` or in the Windows folder. |
+| `gm.dls` | DirectMusic's instruments, for reDM: the system's, or the one named by `gmdls=`. |
+| `reDM.dll` | Only if you registered reAL as DirectMusic's server (a copy of `dsound.dll`). |
 
-As on the DirectSound side, Microsoft's bugs are fixed behind flags. `REDM_NOFIXES` in the environment
-turns the fixes off for comparison runs. `docs/STATUS.md` has the details and the testing setup.
+## Troubleshooting
 
-Deliberate departures from ALchemy (things it gets wrong): no ~11 kHz cut on the output; a
-windowed-sinc resampler instead of linear interpolation (a 9 kHz tone in a 22 kHz sound: −5 dB and a
-mirror image only 6.5 dB below it with linear, −0.1 dB and −85 dB with sinc); EAX 3
-reverb panning routes the late reverb's right-hand 30°/90° slots to front-right/side-right like the
-reflections (ALchemy swaps those two, so a reverb panned hard right lands in the front speaker);
-setting EAX 3 air absorption back to 0 takes effect (ALchemy keeps the old HF-decay limit); an EAX 4
-reverb loaded into a slot through ALLPARAMETERS starts from the default room (ALchemy leaves it all zeros,
-which breaks F.E.A.R.'s extra reverb slot); the flanger's default delay is the SDK's 0.002 s (ALchemy 0.0002).
-EAX 4 effect bugs fixed: the ring modulator processes both channels (ALchemy filters and modulates the left
-one twice and leaves the right dry); the frequency shifter shifts by the frequency asked for (ALchemy: twice
-it); the pitch shifter plays its grains forwards (ALchemy's taps run backwards, so everything but a pure tone
-comes out reversed in ~20 ms chunks); the AGC compressor gets its look-ahead back after off → on; the vocal
-morpher's reset no longer zeroes phoneme A's first formant; the chorus / flanger delay lines are long enough
-for 192 kHz; a slot's volume is applied after the effect (it matters for distortion / AGC).
+- **Nothing changes, and `log=1` writes no `reAL.log`:** reAL isn't being loaded.
+  - Under Wine: run `install.sh` again (a Wine or Proton update puts Wine's DLL back), or check the `dsound=n,b` override.
+  - On Windows: the game may create DirectSound through COM; use the COM redirect (see [Installing](#windows)). The redirect doesn't apply to games run as administrator.
+- **A game misbehaves or crashes:** set `log=1` and look for `refused:` lines in `reAL.log`. Each one is a DirectSound call reAL turned down, with its arguments and where in the game it came from. A game seldom expects a call that works on Windows to fail, so these are the first place to look. Please report problems with the log.
+- **No DirectMusic music:** set `music=true` for that game. If the game creates DirectMusic before loading `dsound.dll`, register `reDM.dll` (see [DirectMusic](#directmusic-redm)). The log says which GM collection was loaded; if none was found, set `gmdls=`.
+- **Microsoft's DirectMusic under Wine** (`winetricks directmusic`) needs two private DirectSound interfaces that Wine's dsound lacks. reAL passes them to the real dsound, so point `realdsound=` at Microsoft's `dsound.dll` for those games, or use reDM instead.
+- **No MIDI music** in an older game: try `midi=true`.
+- **Crackling or stutter:** raise `latency=`, or `buffers` / `duration` for that game.
+- **To compare with ALchemy:** `fixes=false` and `resampler=linear`.
 
-Tested under Wine (9.0 with winepulse → PulseAudio; 9.22 WoW64 for the reDM comparisons).
+## HRTF data
 
-## Build
+reAL renders 3D sounds on headphones through per-direction filters loaded from `reAL_hrtf.bin`, next to `dsound.dll` or in the Windows folder (`hrtf=<path>` or `hrtf=off` in `reAL.ini`). The file isn't included: build it from a measurement of the implementation you want to match, such as your own ALchemy install. The tools are in the release's `tools` folder:
 
-```sh
-pip install ziglang     # or have i686-w64-mingw32-gcc in PATH
-./build.sh              # -> build/dsound.dll (DirectSound + reDM), the tracers and the test programs
+```
+hrtfprobe.exe                                   # on Windows: plays and records itself -> hrtfprobe.wav / .txt
+python3 tools/hrtf_extract.py hrtfprobe.wav hrtfprobe.txt measured.npz
+python3 tools/hrtf_build.py measured.npz reAL_hrtf.bin
 ```
 
-## Install (Wine)
+Measured against ALchemy: a median difference of 1.1 % (−39 dB) over 133 directions, with ear levels within 0.1 dB.
+
+## Building from source
+
+Releases are built with Zig 0.17 (its C compiler, `zig cc`):
 
 ```sh
-WINEPREFIX=~/Games/foo ./install.sh                     # every app in the prefix
-WINEPREFIX=~/Games/foo ./install.sh --app game.exe      # only game.exe (others keep Wine's dsound)
-WINEPREFIX=~/Games/foo ./install.sh --uninstall
+pip install ziglang     # or have zig in PATH
+./build.sh              # -> build/dsound.dll, the tracers, the test programs, and runs the native unit tests
 ```
 
-That copies the DLL into `syswow64` (64-bit prefix) or `system32` (32-bit prefix), sets the
-`dsound=native,builtin` override and drops a default `C:\windows\reAL.ini`. Then forget about it.
-Re-run after a Wine upgrade, because `wineboot -u` restores Wine's dsound.dll.
+`build.sh` also takes a MinGW-w64 toolchain (`CC=i686-w64-mingw32-gcc ./build.sh`).
 
-Or do it by hand: put `dsound.dll` next to the game's exe and set `WINEDLLOVERRIDES=dsound=n,b`.
+---
 
-On Windows, put it next to the game's exe. Don't overwrite the system copy.
+## For developers
 
-A game that makes its DirectSound through COM (`CoCreateInstance`) gets Windows' own dsound.dll and never
-sees the one next to it. `tools/dsound-com-redirect.reg` points the DirectSound and DirectSound 8 COM classes
-at reAL for the current user: set the two paths in it to your `dsound.dll` and double-click it. It applies to
-every 32-bit program of yours that does the same (few do), and not to games run as administrator.
-`tools/dsound-com-redirect-undo.reg` removes it.
-
-## Configure
-
-`C:\windows\reAL.ini`, with a `[default]` section and per-exe sections. See `reAL.ini.example`.
-ALchemy's own `dsound.ini` keys (`buffers`, `duration`, `maxvoicecount`, `disabledirectmusic`,
-`logdirectsound*`) are also accepted, from a `dsound.ini` next to the DLL. `REAL_LOG=2` in the
-environment turns on API logging to `reAL.log` next to the game's exe.
-
-With any logging on (`log=1` or more), `reAL.log` also lists every DirectSound call reAL refuses, with its
-arguments and the module and offset it came from (`refused: IDirectSoundBuffer::Lock(...) -> 80070057, from
-game.exe+1234`), and a count of each at the end. A game seldom expects a call that works on Windows to fail, so
-these lines are the first place to look when a game misbehaves under reAL.
-
-## reDM
-
-`music=true` in `reAL.ini` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except
-the GM instrument collection (`gm.dls`), and `gmdls=` can point at another DLS file or a SoundFont instead.
-reAL takes over DirectMusic when the game loads `dsound.dll`, which nearly every game does before its music
-starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reDM.dll` and register it with
-`regsvr32` (other programs are handed on to the DirectMusic registered before). `midi=true` adds a GM synth
-MIDI output for games that play General MIDI through winmm. `reAL.ini.example` has the details.
-
-## Roadmap
-
-1. ~~DirectSound core + WASAPI mixer~~
-2. ~~EAX 1/2/3 via IKsPropertySet~~ (src/eax.c)
-3. ~~HRTF 3D path (`C3DStream`, `CHspHrtfFilterState`), Doppler~~
-4. ~~HRvb reverb (`CHRvbReverb`, `CHRvbDspEngine`, early reflections + late reverb)~~ (src/alrv*.c)
-5. ~~EAX 4: FX slots, sends, all 12 effects~~ (src/eax4dsp.c)
-6. ~~DirectSound effects (SetFX)~~ (src/fx.c, src/dsfx.c, src/i3dl2.c)
-7. ~~reDM, reAL's own DirectMusic: playback, synth, audiopaths, tools, styles, the composer, scripts
-   (AudioVBScript, VBScript/JScript, the script track)~~ (src/music/)
-8. ~~Speaker configs > 2.0, CMSS-3D upmix~~ (src/speakers.c, src/cmss3.c, src/virt.c)
-9. ~~EAX 5~~ dropped: games used it through OpenAL, which OpenAL Soft covers
-
-## Repo layout
+### Repo layout
 
 ```
 src/        the DLL (C11, Win32 COM by hand)
-  mixcore.* platform independent voice mixer  (unit tested natively)
-  eax4dsp.* the 11 non-reverb EAX 4 effects (tests/test_fx.c against ALchemy)
-  spatial.* placeholder DS3D model            (unit tested natively)
-  device.c  WASAPI render thread
-  buffer.c  DSB8 / 3DBuffer / Notify / KsPropertySet / 3DListener
-  fx.c, dsfx.c, i3dl2.c  DirectSound effects (SetFX)
-  music/    reDM: engine (dm*.c), synth (msynth.c), DLS / SoundFont, COM layer (dmcom*.c)
-tests/      unit tests (native) and COM test programs (run under Wine; comcmp.sh diffs them against Microsoft's)
-tools/      RE helpers (pe.py, rtti.py), dmgt (drives Microsoft's DirectMusic offline), sty/ (style, chord map and
-            segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py,
-            dsound-com-redirect*.reg (Windows: reAL for games that make DirectSound through COM)
-dmtrace/    DirectMusic API tracer (gen.py generates the logging wrappers from the MinGW headers)
-docs/       RE notes, vtables.json (every ALchemy class + vtable)
+  dsound.c, buffer.c   IDirectSound8, buffers, 3D buffers and listener, notifications, property sets
+  device.c             the WASAPI output thread
+  mixcore.*            the platform-independent voice mixer (unit tested natively)
+  spatial.*            the DirectSound 3D model (distance, cones, Doppler)
+  eax*.c, alrv*.c      EAX 1-4 and ALchemy's reverb; eax4dsp.* the 11 non-reverb EAX 4 effects
+  speakers.c, cmss3.c, virt.c, hrtf.c   speaker layouts, CMSS-3D, virtualizers, HRTF
+  fx.c, dsfx.c, i3dl2.c                 DirectSound effects (SetFX)
+  refused.c            the log of refused calls
+  music/               reDM: engine (dm*.c), synth (msynth.c), DLS / SoundFont, COM layer (dmcom*.c)
+tests/      native unit tests, and test programs run under Wine (comcmp.sh and fuzzcmp.py compare them with
+            Microsoft's DLLs)
+tools/      RE helpers (pe.py, rtti.py), dmgt (drives Microsoft's DirectMusic offline), sty/ (style, chord map
+            and segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py, dsound-com-redirect*.reg
+tracer/     dstrace, the DirectSound API tracer
+dmtrace/    dmtrace, the DirectMusic API tracer (gen.py generates its wrappers from the MinGW headers)
+docs/       STATUS.md (what's done, how it's tested), RE notes, vtables.json (every ALchemy class and vtable)
 ```
 
-Personal project. ALchemy is © Creative Technology. This repo contains no Creative code or binaries.
+[`docs/STATUS.md`](docs/STATUS.md) describes how each part is tested against the originals.
 
-## dstrace — DirectSound API tracer
+### dstrace: DirectSound API tracer
 
-`build/tracer/dsound.dll` sits in front of any other dsound.dll and logs every call the game makes
-and what came back, including the raw values of every EAX property set/get. This is how we capture
-reference traces from ALchemy: its software engine has no call logging of its own.
+`build/tracer/dsound.dll` sits in front of another `dsound.dll` and logs every call the game makes and what came back, including the raw values of every EAX property. This is how reference traces are taken from ALchemy, whose software engine has no call logging of its own.
 
 ```
 game dir/
   dsound.dll            <- build/tracer/dsound.dll
   alchemy_dsound.dll    <- ALchemy's dsound.dll, renamed
-  (optional) dstrace.ini:  target=alchemy_dsound.dll   level=1|2
+  dstrace.ini           (optional) target=alchemy_dsound.dll  level=1|2
 ```
-Run with `WINEDLLOVERRIDES=dsound=n,b`. Output: `dstrace.log` next to the game exe.
-`level=2` adds per-frame calls (Lock/Unlock/GetCurrentPosition/GetStatus/AddRef/Release).
 
-## dmtrace — DirectMusic API tracer
+Run with `WINEDLLOVERRIDES=dsound=n,b`. The output is `dstrace.log` next to the game's exe. `level=2` adds the per-frame calls (Lock, Unlock, GetCurrentPosition, GetStatus, AddRef, Release).
 
-Logs what a game asks DirectMusic to do (it started reDM).
-DirectMusic is a set of COM classes, so dmtrace is installed as their server for the current user instead of
-being dropped into the game folder:
+### dmtrace: DirectMusic API tracer
 
-1. Put `dmtrace.dll` somewhere permanent, e.g. `C:\dmtrace\`.
-2. `regsvr32 C:\dmtrace\dmtrace.dll` — no admin needed: it only writes `HKCU\Software\Classes\CLSID`, so
-   Windows' own registration is untouched. (Under Wine, whose COM ignores HKCU classes, it also redirects
-   the machine-wide entries and keeps the originals to restore.)
-3. Run the game (not as administrator: elevated programs ignore per-user COM registrations). The log is
-   `dmtrace.log` next to the game's exe.
-4. `regsvr32 /u C:\dmtrace\dmtrace.dll` to uninstall.
+Logs what a game asks DirectMusic to do (it's how reDM started). DirectMusic is a set of COM classes, so dmtrace is installed as their server for the current user instead of going into the game's folder:
 
-`dmtrace.ini` next to the dll: `level=1` (calls the game makes), `2` (also AddRef/Release, GetTime,
-GetParam, ...), `3` (also DirectMusic's internal calls); `target_dir=` to load the DirectMusic DLLs from
-another folder. `dmtest.exe` plays `test.mid` through DirectMusic as a smoke test.
+1. Put `dmtrace.dll` somewhere permanent, such as `C:\dmtrace\`.
+2. Run `regsvr32 C:\dmtrace\dmtrace.dll`. No administrator rights are needed: it only writes to `HKCU\Software\Classes\CLSID`, so Windows' own registration is untouched. (Under Wine, whose COM ignores per-user classes, it also redirects the machine-wide entries and keeps the originals to restore.)
+3. Run the game, not as administrator. The log is `dmtrace.log` next to the game's exe.
+4. `regsvr32 /u C:\dmtrace\dmtrace.dll` uninstalls it.
 
-Under Wine, Microsoft's DirectMusic DLLs need DirectSound's private DirectMusic interfaces, which Wine's
-dsound does not have (reAL forwards them to the system dsound, as ALchemy does) — another reason for an own
-DirectMusic implementation rather than Wine's or Microsoft's.
+`dmtrace.ini` next to the DLL: `level=1` (the game's calls), `2` (also AddRef / Release, GetTime, GetParam and similar), `3` (also DirectMusic's internal calls); `target_dir=` loads the DirectMusic DLLs from another folder. `dmtest.exe` plays `test.mid` through DirectMusic as a smoke test.
 
-## HRTF data
-
-reAL renders 3D sounds through per-direction filters loaded from `reAL_hrtf.bin`
-(next to dsound.dll, or in the Windows directory; `hrtf=<path>` or `hrtf=off` in reAL.ini).
-The file is **not** in this repo: build it from a measurement of the implementation you want to
-match, e.g. your own ALchemy install:
-
-```
-hrtfprobe.exe                       # Windows: plays + records itself -> hrtfprobe.wav/.txt
-python3 tools/hrtf_extract.py hrtfprobe.wav hrtfprobe.txt measured.npz
-python3 tools/hrtf_build.py measured.npz reAL_hrtf.bin
-```
-Measured against ALchemy: median rms difference 1.1 % (−39 dB) over 133 directions, ear levels
-within 0.1 dB.
+---
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE).
+MIT, see [`LICENSE`](LICENSE). A personal project; ALchemy is © Creative Technology, and this repository contains no Creative or Microsoft code or binaries.
