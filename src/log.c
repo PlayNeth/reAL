@@ -47,6 +47,18 @@ void rl_log(int level, const char *fmt, ...)
     LeaveCriticalSection(&s_log_cs);
 }
 
+int rl_log_try(const char *line, int process_exit)
+{
+    if (!s_inited || !s_log) return 0;
+    if (process_exit) {                     /* (another thread, killed, may hold the lock) */
+        if (!TryEnterCriticalSection(&s_log_cs)) return 0;
+    } else EnterCriticalSection(&s_log_cs);
+    fprintf(s_log, "[%8lu %04lx] %s\n", (unsigned long)GetTickCount(), (unsigned long)GetCurrentThreadId(), line);
+    fflush(s_log);
+    LeaveCriticalSection(&s_log_cs);
+    return 1;
+}
+
 void rl_log_flush(void)
 {
     if (!s_inited || !s_log) return;
@@ -67,7 +79,7 @@ const char *rl_guid_str(const GUID *g, char buf[64])
 /* ---------------------------------------------------------------- crash report
  * Faults are logged with module+offset and the return addresses found on the stack, so a crash in the field can
  * be located from reAL.log alone. */
-static void addr_str(DWORD_PTR a, char *out, int n)
+void rl_addr_str(DWORD_PTR a, char *out, int n)
 {
     HMODULE m = NULL;
     char path[MAX_PATH];
@@ -96,7 +108,7 @@ static LONG CALLBACK crash_handler(EXCEPTION_POINTERS *ep)
     if (k < 16) seen[k] = at;
     if (InterlockedIncrement(&count) > 6) return EXCEPTION_CONTINUE_SEARCH;
     char a[MAX_PATH + 32];
-    addr_str((DWORD_PTR)ep->ExceptionRecord->ExceptionAddress, a, sizeof(a));
+    rl_addr_str((DWORD_PTR)ep->ExceptionRecord->ExceptionAddress, a, sizeof(a));
     CONTEXT *c = ep->ContextRecord;
 #ifdef _M_IX86
     rl_log(0, "EXCEPTION %08lx (first chance) at %s (access %lu %08lx) eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esi=%08lx edi=%08lx ebp=%08lx esp=%08lx",
@@ -109,7 +121,7 @@ static LONG CALLBACK crash_handler(EXCEPTION_POINTERS *ep)
         if (!VirtualQuery(sp + i, &mi, sizeof(mi)) || mi.State != MEM_COMMIT) break;
         DWORD v = sp[i];
         if (VirtualQuery((void *)v, &mi, sizeof(mi)) && mi.State == MEM_COMMIT && (mi.Protect & 0xF0) && mi.Type == MEM_IMAGE) {
-            addr_str(v, a, sizeof(a));
+            rl_addr_str(v, a, sizeof(a));
             rl_log(0, "  stack+%03x: %s", i * 4, a);
             found++;
         }

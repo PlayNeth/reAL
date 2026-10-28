@@ -210,6 +210,8 @@ static IDirectSound8Vtbl ds_vtbl = {
     ds_VerifyCertification,
 };
 
+void **rl_dsound_vtable(void) { return (void **)&ds_vtbl; }
+
 HRESULT rl_dsound_create(REFIID riid, void **out, BOOL ds8)
 {
     rl_dsound *This = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*This));

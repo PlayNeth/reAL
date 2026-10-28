@@ -77,6 +77,12 @@ let a Lock of the size asked for succeed. reAL used to round down, so Fallout 3'
 odd byte count failed; the game then took the sound as not loaded and its copy of it ran past the end of a buffer,
 corrupting the heap a few seconds into the intro.
 
+**Refused calls** (`src/refused.c`): with log >= 1, each HRESULT method of IDirectSound8, IDirectSoundBuffer8,
+IDirectSoundNotify, IDirectSound3DBuffer, IDirectSound3DListener and IKsPropertySet goes through a wrapper put in
+its vtable at load, which logs a failed call with its arguments and caller (module+offset); calls on a released
+buffer's interfaces are logged too. The first 8 of each method, then every power of two, and a count at the end.
+The effect interfaces (fx.c) log their own results.
+
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections

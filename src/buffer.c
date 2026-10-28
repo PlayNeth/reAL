@@ -1778,13 +1778,28 @@ static IKsPropertySetVtbl ks_vtbl = {
     ks_QueryInterface, ks_AddRef, ks_Release, ks_Get, ks_Set, ks_QuerySupport,
 };
 
+/* the vtables, for refused.c's wrappers */
+void **rl_vtable(int which)
+{
+    switch (which) {
+    case RL_VT_DS:  return rl_dsound_vtable();
+    case RL_VT_DSB: return (void **)&dsb_vtbl;
+    case RL_VT_NTF: return (void **)&ntf_vtbl;
+    case RL_VT_B3D: return (void **)&b3d_vtbl;
+    case RL_VT_LST: return (void **)&lst_vtbl;
+    case RL_VT_KS:  return (void **)&ks_vtbl;
+    }
+    return NULL;
+}
+
 /* =========================================================== a released buffer
  * Windows' DirectSound keeps a released buffer's interfaces answering: every call on one is E_INVALIDARG and
  * AddRef / Release answer 0xffffffff (tests/primtest.c overrelease).  Games that release an interface more often than
  * they referenced it, and so let the buffer go under another interface they still use (Fallout 3, Fallout: New Vegas),
  * live with that; a freed buffer took their later calls into freed memory (the heap corrupted, or a crash).  So a
  * buffer that goes keeps its interfaces, shrunk to them, with these tables. */
-#define ZDECL(n, ...) static HRESULT WINAPI z##n(void *t, ##__VA_ARGS__) { (void)t; return DSERR_INVALIDPARAM; }
+#define ZDECL(n, ...) static HRESULT WINAPI z##n(void *t, ##__VA_ARGS__) \
+    { if (g_cfg.log_level >= 1) rl_refused_zombie(t, __builtin_return_address(0)); return DSERR_INVALIDPARAM; }
 ZDECL(0)
 ZDECL(1, DWORD a) ZDECL(2, DWORD a, DWORD b) ZDECL(3, DWORD a, DWORD b, DWORD c)
 ZDECL(4, DWORD a, DWORD b, DWORD c, DWORD d) ZDECL(6, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f)
@@ -1792,7 +1807,8 @@ ZDECL(7, DWORD a, DWORD b, DWORD c, DWORD d, DWORD e, DWORD f, DWORD g)
 static ULONG WINAPI zref(void *t) { (void)t; return 0xffffffffu; }
 static HRESULT WINAPI zqi(void *t, REFIID riid, void **out)
 {
-    (void)t; (void)riid;
+    (void)riid;
+    if (g_cfg.log_level >= 1) rl_refused_zombie(t, __builtin_return_address(0));
     if (out) *out = NULL;
     return DSERR_INVALIDPARAM;
 }

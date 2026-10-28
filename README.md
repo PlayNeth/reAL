@@ -132,6 +132,11 @@ ALchemy's own `dsound.ini` keys (`buffers`, `duration`, `maxvoicecount`, `disabl
 `logdirectsound*`) are also accepted, from a `dsound.ini` next to the DLL. `REAL_LOG=2` in the
 environment turns on API logging to `reAL.log` next to the game's exe.
 
+With any logging on (`log=1` or more), `reAL.log` also lists every DirectSound call reAL refuses, with its
+arguments and the module and offset it came from (`refused: IDirectSoundBuffer::Lock(...) -> 80070057, from
+game.exe+1234`), and a count of each at the end. A game seldom expects a call that works on Windows to fail, so
+these lines are the first place to look when a game misbehaves under reAL.
+
 ## reDM
 
 `music=true` in `reAL.ini` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except

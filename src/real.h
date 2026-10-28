@@ -66,6 +66,15 @@ void rl_log(int level, const char *fmt, ...);
 #define LOG_3D(...)    do { if (g_cfg.log_3d) rl_log(3, __VA_ARGS__); } while (0)
 #define LOG_EAX(...)   do { if (g_cfg.log_eax) rl_log(3, __VA_ARGS__); } while (0)
 const char *rl_guid_str(const GUID *g, char buf[64]);
+void rl_addr_str(DWORD_PTR a, char *out, int n);    /* module+offset */
+int rl_log_try(const char *line, int process_exit);   /* a level-1 line; at process exit only if the log is free */
+/* refused calls (refused.c): the vtables' wrappers, installed at load with log >= 1 */
+enum { RL_VT_DS, RL_VT_DSB, RL_VT_NTF, RL_VT_B3D, RL_VT_LST, RL_VT_KS };
+void **rl_vtable(int which);
+void **rl_dsound_vtable(void);
+void rl_refused_install(void);
+void rl_refused_summary(int process_exit);
+void rl_refused_zombie(void *iface, void *caller);
 
 /* ---------------- real dsound forwarding ---------------- */
 HMODULE rl_real_dsound(void);
