@@ -102,6 +102,8 @@ $CC -O1 -Wno-format -o build/porttest.exe tests/porttest.c -ldsound -lole32 -luu
 $CC -O1 -Wno-format -o build/dx6test.exe tests/dx6test.c -ldsound -lole32 -luuid -ldxguid
 # the primary buffer and DSSCL_WRITEPRIMARY against Windows' DirectSound (tests/comcmp.sh primtest.exe)
 $CC -O1 -Wno-format -o build/primtest.exe tests/primtest.c -ldsound -lole32 -luuid -ldxguid
+# what the mixer's stages cost (wine build/bench_mix.exe [seconds] [reAL_hrtf.bin])
+$CC $CFLAGS -o build/bench_mix.exe tests/bench_mix.c src/mixcore.c src/reverb.c src/alrv.c src/hrtf.c src/virt.c build/obj/speakers.o build/obj/cmss3.o build/obj/alrv_params.o
 # random DirectSound calls, the same on any DLL (tests/fuzzcmp.py compares reAL with Windows' DirectSound)
 $CC -O1 -Wno-format -o build/dsfuzz.exe tests/dsfuzz.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/dx7test.exe tests/dx7test.c -ldsound -lole32 -luuid -ldxguid

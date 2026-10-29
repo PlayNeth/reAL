@@ -34,6 +34,15 @@ Doppler, and WASAPI output.
 - Cost: 64 sinc voices with 32 muted went from about 9% to 5.5% of one core; a muted voice now costs almost
   nothing.
 
+**Resampler kernels** (`src/mixcore.c`): the sinc resampler reads float, unsigned 8-bit, 24- and 32-bit sources (mono
+and stereo) four taps at a time with SSE, as it did 16-bit ones; before, they went through the per-sample path.
+`tests/bench_mix.c` (32 voices, 48 kHz, 10 ms blocks, under Wine; one core): float stereo 12.6% -> 3.9%, 24-bit
+stereo 18.4% -> 7.1%, 32-bit mono 9.7% -> 2.6%, 8-bit stereo 6.2% -> 3.8%, 8-bit mono 3.2% -> 2.8%; 16-bit
+unchanged (bit for bit). The output differs from the per-sample path by rounding only (at most 8.3e-7).
+What the rest costs, from the same benchmark: a heavy scene (64 3D voices with EAX sends, 8 2D streams, the
+reverb) about 10% of one core, 15% with HRTF; the reverb 0.5%; CMSS-3D about 1.4% per voice (off by default). The
+HRTF convolution is already vectorised by the compiler.
+
 **Primary buffer** (`src/buffer.c`, `tests/primtest.c`)
 - DSSCL_WRITEPRIMARY, which ALchemy does not do (its primary buffer plays nothing), as Windows 7's DirectSound does
   it: the primary buffer holds 32768 bytes (GetCaps) in the primary format, Lock / Unlock / GetCurrentPosition work
@@ -536,6 +545,8 @@ Smaller items still open:
   that way of playing against the other threads.
 - `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay]` compares what changes with the interface asked for
   (each section as DirectX 6, 7 and 8 where it differs): all match.
+- `wine build/bench_mix.exe [seconds] [reAL_hrtf.bin]` times the mixer's stages (voices of each kind and format, the
+  reverb, a heavy scene) per 10 ms block, built as the DLL is.
 - `tests/fuzzcmp.py <first seed> <seeds> [ops]` runs `dsfuzz.exe` under both DirectSounds (through comcmp.sh, in
   chunks of 25 seeds) and lists each seed's first difference by risk; `dsfuzz.exe formats` sweeps CreateSoundBuffer
   over a grid of formats. Windows 7's DirectSound divides by zero on some CTRLFX formats (24-bit, more than two

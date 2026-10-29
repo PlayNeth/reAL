@@ -218,6 +218,96 @@ static inline void sinc_s16_stereo(const float *a, const float *b, float u, cons
     *l = _mm_cvtss_f32(acc);
     *r = _mm_cvtss_f32(_mm_shuffle_ps(acc, acc, 1));
 }
+/* the other formats the same way: float, unsigned 8-bit, 24- and 32-bit (mono and stereo).  One kernel per channel
+ * count, the four samples of a step loaded by LOAD (frames k .. k+3; channel c of a stereo source), the weights
+ * interpolated as above */
+#define SINC_KERNEL_MONO(name, ptype, LOAD) \
+static inline float name(const float *a, const float *b, float u, const ptype *q, int T) \
+{ \
+    const __m128 vu = _mm_set1_ps(u); \
+    __m128 acc = _mm_setzero_ps(); \
+    for (int k = 0; k < T; k += 4) { \
+        __m128 wa = _mm_loadu_ps(a + k), wb = _mm_loadu_ps(b + k); \
+        __m128 w = _mm_add_ps(wa, _mm_mul_ps(vu, _mm_sub_ps(wb, wa))); \
+        acc = _mm_add_ps(acc, _mm_mul_ps(w, LOAD(q, k, 1, 0))); \
+    } \
+    acc = _mm_add_ps(acc, _mm_movehl_ps(acc, acc)); \
+    acc = _mm_add_ss(acc, _mm_shuffle_ps(acc, acc, 1)); \
+    return _mm_cvtss_f32(acc); \
+}
+#define SINC_KERNEL_STEREO(name, ptype, LOAD) \
+static inline void name(const float *a, const float *b, float u, const ptype *q, int T, float *l, float *r) \
+{ \
+    const __m128 vu = _mm_set1_ps(u); \
+    __m128 al = _mm_setzero_ps(), ar = _mm_setzero_ps(); \
+    for (int k = 0; k < T; k += 4) { \
+        __m128 wa = _mm_loadu_ps(a + k), wb = _mm_loadu_ps(b + k); \
+        __m128 w = _mm_add_ps(wa, _mm_mul_ps(vu, _mm_sub_ps(wb, wa))); \
+        al = _mm_add_ps(al, _mm_mul_ps(w, LOAD(q, k, 2, 0))); \
+        ar = _mm_add_ps(ar, _mm_mul_ps(w, LOAD(q, k, 2, 1))); \
+    } \
+    al = _mm_add_ps(al, _mm_movehl_ps(al, al)); \
+    al = _mm_add_ss(al, _mm_shuffle_ps(al, al, 1)); \
+    ar = _mm_add_ps(ar, _mm_movehl_ps(ar, ar)); \
+    ar = _mm_add_ss(ar, _mm_shuffle_ps(ar, ar, 1)); \
+    *l = _mm_cvtss_f32(al); \
+    *r = _mm_cvtss_f32(ar); \
+}
+static inline int32_t rd_s24(const uint8_t *q) { return (int32_t)((uint32_t)q[0] << 8 | (uint32_t)q[1] << 16 | (uint32_t)q[2] << 24) >> 8; }
+static inline int32_t rd_s32(const uint8_t *q) { int32_t s; memcpy(&s, q, 4); return s; }
+static inline float   rd_f32(const uint8_t *q) { float f; memcpy(&f, q, 4); return f; }
+#define LOAD_F32(q, k, C, c) ((C) == 1 ? _mm_loadu_ps((const float *)(const void *)(q) + (k)) : \
+    _mm_setr_ps(rd_f32((q) + ((k) * (C) + (c)) * 4), rd_f32((q) + (((k) + 1) * (C) + (c)) * 4), \
+                rd_f32((q) + (((k) + 2) * (C) + (c)) * 4), rd_f32((q) + (((k) + 3) * (C) + (c)) * 4)))
+#define LOAD_S24(q, k, C, c) _mm_cvtepi32_ps(_mm_setr_epi32(rd_s24((q) + ((k) * (C) + (c)) * 3), \
+    rd_s24((q) + (((k) + 1) * (C) + (c)) * 3), rd_s24((q) + (((k) + 2) * (C) + (c)) * 3), \
+    rd_s24((q) + (((k) + 3) * (C) + (c)) * 3)))
+#define LOAD_S32(q, k, C, c) _mm_cvtepi32_ps(_mm_setr_epi32(rd_s32((q) + ((k) * (C) + (c)) * 4), \
+    rd_s32((q) + (((k) + 1) * (C) + (c)) * 4), rd_s32((q) + (((k) + 2) * (C) + (c)) * 4), \
+    rd_s32((q) + (((k) + 3) * (C) + (c)) * 4)))
+SINC_KERNEL_MONO(sinc_f32_mono, uint8_t, LOAD_F32)
+SINC_KERNEL_STEREO(sinc_f32_stereo, uint8_t, LOAD_F32)
+/* unsigned 8-bit: the bytes widened in the register (as the S16 kernels do) */
+static inline float sinc_u8_mono(const float *a, const float *b, float u, const uint8_t *p, int T)
+{
+    const __m128 vu = _mm_set1_ps(u);
+    const __m128i z = _mm_setzero_si128();
+    __m128 acc = _mm_setzero_ps();
+    for (int k = 0; k < T; k += 4) {
+        __m128 wa = _mm_loadu_ps(a + k), wb = _mm_loadu_ps(b + k);
+        __m128 w = _mm_add_ps(wa, _mm_mul_ps(vu, _mm_sub_ps(wb, wa)));
+        int32_t raw;
+        memcpy(&raw, p + k, 4);
+        __m128i x = _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128(raw), z), z);
+        acc = _mm_add_ps(acc, _mm_mul_ps(w, _mm_cvtepi32_ps(x)));
+    }
+    acc = _mm_add_ps(acc, _mm_movehl_ps(acc, acc));
+    acc = _mm_add_ss(acc, _mm_shuffle_ps(acc, acc, 1));
+    return _mm_cvtss_f32(acc);
+}
+
+static inline void sinc_u8_stereo(const float *a, const float *b, float u, const uint8_t *p, int T, float *l, float *r)
+{
+    const __m128 vu = _mm_set1_ps(u);
+    const __m128i z = _mm_setzero_si128();
+    __m128 acc = _mm_setzero_ps();
+    for (int k = 0; k < T; k += 4) {
+        __m128 wa = _mm_loadu_ps(a + k), wb = _mm_loadu_ps(b + k);
+        __m128 w = _mm_add_ps(wa, _mm_mul_ps(vu, _mm_sub_ps(wb, wa)));
+        __m128i s = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i *)(p + 2 * k)), z);   /* L0 R0 .. L3 R3 */
+        __m128 x01 = _mm_cvtepi32_ps(_mm_unpacklo_epi16(s, z));
+        __m128 x23 = _mm_cvtepi32_ps(_mm_unpackhi_epi16(s, z));
+        acc = _mm_add_ps(acc, _mm_mul_ps(_mm_unpacklo_ps(w, w), x01));
+        acc = _mm_add_ps(acc, _mm_mul_ps(_mm_unpackhi_ps(w, w), x23));
+    }
+    acc = _mm_add_ps(acc, _mm_movehl_ps(acc, acc));                          /* L R */
+    *l = _mm_cvtss_f32(acc);
+    *r = _mm_cvtss_f32(_mm_shuffle_ps(acc, acc, 1));
+}
+SINC_KERNEL_MONO(sinc_s24_mono, uint8_t, LOAD_S24)
+SINC_KERNEL_STEREO(sinc_s24_stereo, uint8_t, LOAD_S24)
+SINC_KERNEL_MONO(sinc_s32_mono, uint8_t, LOAD_S32)
+SINC_KERNEL_STEREO(sinc_s32_stereo, uint8_t, LOAD_S32)
 #endif
 
 static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos, uint32_t nframes,
@@ -240,6 +330,23 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
             *l *= 1.0f / 32768.0f; *r *= 1.0f / 32768.0f;
         }
         return;
+    }
+    if (inside && v->channels <= 2 && v->sfmt != RL_S16) {
+        const uint8_t *p = v->data + (size_t)base * v->block;
+        float x, y;
+        int st = v->channels == 2;
+        switch (v->sfmt) {
+        case RL_F32: if (st) sinc_f32_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_f32_mono(a, b, u, p, T);
+                     *l = x; *r = y; return;
+        case RL_U8:  if (st) sinc_u8_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_u8_mono(a, b, u, p, T);
+                     /* weights sum to 1: the 128 offset taken off once, as below */
+                     *l = (x - 128.0f) * (1.0f / 128.0f); *r = (y - 128.0f) * (1.0f / 128.0f); return;
+        case RL_S24: if (st) sinc_s24_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_s24_mono(a, b, u, p, T);
+                     *l = x * (1.0f / 8388608.0f); *r = y * (1.0f / 8388608.0f); return;
+        case RL_S32: if (st) sinc_s32_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_s32_mono(a, b, u, p, T);
+                     *l = x * (1.0f / 2147483648.0f); *r = y * (1.0f / 2147483648.0f); return;
+        default: break;
+        }
     }
 #endif
     float w[SINC_MAXT];
