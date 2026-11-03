@@ -289,4 +289,4 @@ Logs what a game asks DirectMusic to do (it's how reDM started). DirectMusic is 
 
 MIT, see [`LICENSE`](LICENSE). A personal project; ALchemy is © Creative Technology, and this repository contains no Creative or Microsoft code or binaries.
 
-The built-in HRTF set is derived from the MIT KEMAR measurements: B. Gardner and K. Martin, "HRTF Measurements of a KEMAR Dummy-Head Microphone", MIT Media Lab Perceptual Computing Technical Report #280, 1994. MIT provides them without usage restrictions. The 48 kHz tables are from mit-hrtf-lib (© 2007 Aristotel Digenis, © 2014 greekgoddj, MIT licence); the notice is in `src/hrtf_kemar_data.h`.
+The built-in HRTF set is derived from the MIT KEMAR measurements: B. Gardner and K. Martin, "HRTF Measurements of a KEMAR Dummy-Head Microphone", MIT Media Lab Perceptual Computing Technical Report #280, 1994. MIT provides them without usage restrictions. The 48 kHz tables are from mit-hrtf-lib (© 2007 Aristotel Digenis, © 2014 greekgoddj, MIT licence); its notice is in [`LICENSE-HRTF`](LICENSE-HRTF).
