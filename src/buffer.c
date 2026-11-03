@@ -71,6 +71,15 @@ static BOOL is_finite(float f)
     return (u & 0x7f800000u) != 0x7f800000u;
 }
 static BOOL finite3(float x, float y, float z) { return is_finite(x) && is_finite(y) && is_finite(z); }
+/* NaN, by its bits (x != x folds away under fast math) */
+static BOOL is_nan(float f)
+{
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    __asm__("" : "+r"(u));
+    return (u & 0x7fffffffu) > 0x7f800000u;
+}
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
 /* a minimum or maximum distance: finite and not negative (ALchemy 0x10042a90); not zero either, as Windows (a fix) */
 static BOOL distance_ok(float d) { return is_finite(d) && d >= 0.0f && (!g_cfg.fixes || d > 0.0f); }
 /* a direction: finite, and not all zero (ALchemy 0x10042960, 0x10043740) */
@@ -222,7 +231,7 @@ static void update_gains(rl_buffer *b)
     } else {
         b->voice.hrtf = NULL;
     }
-    b->voice.mono3d = spatial && b->voice.channels == 2;
+    b->voice.mono3d = spatial && b->voice.channels >= 2;   /* (positioned: the mono sum of every channel) */
     b->voice.gain[0] = pan[0] * direct * base;
     b->voice.gain[1] = pan[1] * direct * base;
     /* (a fix: a NaN gain would carry into the mix, the reverb and every later block) */
@@ -279,7 +288,7 @@ static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const floa
     v->route_on = v->mc_on = 0;
     route_cmss(b);
     if (!lay->n) return;
-    if (v->channels > 2) {
+    if (v->channels > 2 && !spatial) {
         /* ALchemy's 2D stream: every channel through the converter, the level applied after it */
         DWORD mask = 0;
         if (b->fmt.Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE) mask = b->fmt.dwChannelMask & 0xfff;
@@ -344,8 +353,12 @@ static HRESULT parse_format(const WAVEFORMATEX *wfx, WAVEFORMATEXTENSIBLE *out, 
         return DSERR_BADFORMAT;
     }
 
+    /* ALchemy (tests/alprobe.c create): WAVE_FORMAT_PCM and IEEE_FLOAT at most stereo, more channels only as
+     * WAVE_FORMAT_EXTENSIBLE (Windows refuses them too); any rate.  No channel or a rate of 0, which ALchemy also
+     * takes (and later divides by), stay refused */
     if (!wfx->nChannels || wfx->nChannels > 8) return DSERR_BADFORMAT;
-    if (wfx->nSamplesPerSec < DSBFREQUENCY_MIN || wfx->nSamplesPerSec > DSBFREQUENCY_MAX) return DSERR_BADFORMAT;
+    if (tag != WAVE_FORMAT_EXTENSIBLE && wfx->nChannels > 2) return DSERR_BADFORMAT;
+    if (!wfx->nSamplesPerSec) return DSERR_BADFORMAT;
     if (is_float) {
         if (bits != 32) return DSERR_BADFORMAT;
         *sfmt = RL_F32;
@@ -389,16 +402,20 @@ static HRESULT WINAPI dsb_QueryInterface(IDirectSoundBuffer8 *iface, REFIID riid
     char gb[64];
     if (!out) return E_POINTER;
     *out = NULL;
-    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectSoundBuffer) ||
-        (!This->is_primary && IsEqualIID(riid, &IID_IDirectSoundBuffer8)))
+    /* ALchemy (tests/dsfuzz.c against it): IDirectSoundBuffer8 and IDirectSoundNotify on any buffer, the primary too
+     * and without CTRLPOSITIONNOTIFY, and IDirectSound3DBuffer on any CTRL3D one; Windows on secondaries only, with
+     * the flags */
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectSoundBuffer) || IsEqualIID(riid, &IID_IDirectSoundBuffer8))
         *out = &This->IDirectSoundBuffer8_iface;
-    else if (!This->is_primary && IsEqualIID(riid, &IID_IDirectSound3DBuffer) && (This->desc.dwFlags & DSBCAPS_CTRL3D))
+    else if (IsEqualIID(riid, &IID_IDirectSound3DBuffer) && (This->desc.dwFlags & DSBCAPS_CTRL3D))
         *out = &This->IDirectSound3DBuffer_iface;
-    else if (!This->is_primary && IsEqualIID(riid, &IID_IDirectSoundNotify) && (This->desc.dwFlags & DSBCAPS_CTRLPOSITIONNOTIFY))
+    else if (IsEqualIID(riid, &IID_IDirectSoundNotify))
         *out = &This->IDirectSoundNotify_iface;
     else if (IsEqualIID(riid, &IID_IKsPropertySet))
         *out = &This->IKsPropertySet_iface;
-    else if (This->is_primary && IsEqualIID(riid, &IID_IDirectSound3DListener))
+    /* the listener: on the primary buffer (whatever its flags: one primary object serves every request), and on a
+     * CTRL3D secondary, as ALchemy */
+    else if ((This->is_primary || (This->desc.dwFlags & DSBCAPS_CTRL3D)) && IsEqualIID(riid, &IID_IDirectSound3DListener))
         *out = &This->IDirectSound3DListener_iface;
 
     if (*out) {
@@ -477,11 +494,9 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
     rl_buffer *This = BUF(iface);
     if (!caps || caps->dwSize < sizeof(*caps)) return DSERR_INVALIDPARAM;
     caps->dwFlags = This->desc.dwFlags;
-    if ((caps->dwFlags & (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER | DSBCAPS_LOCSOFTWARE)) == (DSBCAPS_CTRLFX | DSBCAPS_LOCDEFER)) {
-        /* effects buffers are software ones (Windows 7): a deferred one is placed by Play / AcquireResources */
-    } else if (!(caps->dwFlags & DSBCAPS_LOCSOFTWARE)) {
-        caps->dwFlags |= DSBCAPS_LOCHARDWARE;    /* (LOCDEFER kept: ALchemy 0x1001dbd0 and Windows keep it) */
-    }
+    /* hardware unless asked for software, effects buffers too (ALchemy: tests/alprobe.c create; LOCDEFER kept, as
+     * ALchemy 0x1001dbd0 and Windows keep it) */
+    if (!(caps->dwFlags & DSBCAPS_LOCSOFTWARE)) caps->dwFlags |= DSBCAPS_LOCHARDWARE;
     if (This->is_primary) {
         EnterCriticalSection(&This->dev->lock);
         caps->dwBufferBytes = writeprimary(This) ? PRIMARY_BYTES : 4096;
@@ -619,7 +634,6 @@ static HRESULT WINAPI dsb_GetVolume(IDirectSoundBuffer8 *iface, LPLONG vol)
 {
     rl_buffer *This = BUF(iface);
     if (!vol) return DSERR_INVALIDPARAM;
-    if (!(This->desc.dwFlags & DSBCAPS_CTRLVOLUME)) return DSERR_CONTROLUNAVAIL;
     *vol = This->is_primary ? This->dev->primary_volume : This->volume;
     return DS_OK;
 }
@@ -628,8 +642,7 @@ static HRESULT WINAPI dsb_GetPan(IDirectSoundBuffer8 *iface, LPLONG pan)
 {
     rl_buffer *This = BUF(iface);
     if (!pan) return DSERR_INVALIDPARAM;
-    if (!(This->desc.dwFlags & DSBCAPS_CTRLPAN)) return DSERR_CONTROLUNAVAIL;
-    *pan = This->pan;
+    *pan = This->pan;          /* (ALchemy answers pan * 65536 / 100, which no game could use: the pan as set) */
     return DS_OK;
 }
 
@@ -637,7 +650,7 @@ static HRESULT WINAPI dsb_GetFrequency(IDirectSoundBuffer8 *iface, LPDWORD freq)
 {
     rl_buffer *This = BUF(iface);
     if (!freq) return DSERR_INVALIDPARAM;
-    if (This->is_primary || !(This->desc.dwFlags & DSBCAPS_CTRLFREQUENCY)) return DSERR_CONTROLUNAVAIL;
+    if (This->is_primary) { *freq = This->dev->primary_fmt.nSamplesPerSec; return DS_OK; }
     *freq = This->freq ? This->freq : orig_rate(This);
     return DS_OK;
 }
@@ -665,14 +678,9 @@ static HRESULT WINAPI dsb_GetStatus(IDirectSoundBuffer8 *iface, LPDWORD status)
         if (This->voice.looping) s |= DSBSTATUS_LOOPING;
     }
     LeaveCriticalSection(&This->dev->lock);
-    if (This->sink) {
-        /* DirectMusic's buffers: in software where DirectMusic deferred them (its standard ones), else no location */
-        if (This->sink_caps & DSBCAPS_LOCDEFER) s |= DSBSTATUS_LOCSOFTWARE;
-    } else if (This->desc.dwFlags & DSBCAPS_CTRLFX) {
-        /* effects buffers are DirectSound's own (software) ones: the location only for a deferred one, as there */
-        if ((This->desc.dwFlags & DSBCAPS_LOCDEFER) && This->fx_placed) s |= DSBSTATUS_LOCSOFTWARE;
-    } else if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) s |= DSBSTATUS_LOCHARDWARE;
-    else s |= DSBSTATUS_LOCSOFTWARE;
+    /* DirectMusic's buffers (Microsoft DirectSound's under ALchemy too): in software where DirectMusic deferred them
+     * (its standard ones).  ALchemy's own answer no location (tests/alprobe.c play) */
+    if (This->sink && (This->sink_caps & DSBCAPS_LOCDEFER)) s |= DSBSTATUS_LOCSOFTWARE;
     *status = s;
     return DS_OK;
 }
@@ -693,17 +701,24 @@ static HRESULT WINAPI dsb_Lock(IDirectSoundBuffer8 *iface, DWORD offset, DWORD b
     if (b2) *b2 = 0;
     if (This->is_primary || This->lost) {
         EnterCriticalSection(&This->dev->lock);
-        BOOL wp = writeprimary(This), lost = This->lost;
+        BOOL lost = This->lost;
         LeaveCriticalSection(&This->dev->lock);
         if (lost) return DSERR_BUFFERLOST;
-        if (This->is_primary && !wp) return DSERR_PRIOLEVELNEEDED;     /* (only DSSCL_WRITEPRIMARY writes it) */
+        /* the primary buffer below DSSCL_WRITEPRIMARY: ALchemy locks it (what is written there plays nowhere);
+         * Windows answers DSERR_PRIOLEVELNEEDED */
     }
     if (!p1 || !b1) return DSERR_INVALIDPARAM;
 
-    DWORD size = This->is_primary ? PRIMARY_BYTES : This->voice.size;
+    DWORD size = This->voice.size;
+    if (This->is_primary) {                 /* (the size GetCaps answers) */
+        EnterCriticalSection(&This->dev->lock);
+        size = writeprimary(This) ? PRIMARY_BYTES : 4096;
+        LeaveCriticalSection(&This->dev->lock);
+    }
     if (flags & DSBLOCK_FROMWRITECURSOR) dsb_GetCurrentPosition(iface, NULL, &offset);
     if (flags & DSBLOCK_ENTIREBUFFER) bytes = size;
-    if (offset >= size || bytes > size || !bytes) return DSERR_INVALIDPARAM;
+    /* (no bytes: ALchemy locks nothing at the offset, tests/alprobe.c lock; Windows refuses) */
+    if (offset >= size || bytes > size) return DSERR_INVALIDPARAM;
 
     BYTE *data = This->shared->data;
     if (offset + bytes <= size) {
@@ -726,8 +741,7 @@ static HRESULT WINAPI dsb_Lock(IDirectSoundBuffer8 *iface, DWORD offset, DWORD b
 static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD prio, DWORD flags)
 {
     rl_buffer *This = BUF(iface);
-    (void)prio;
-    if (res1) return DSERR_INVALIDPARAM;
+    (void)prio; (void)res1;                     /* (ALchemy takes any reserved value: tests/alprobe.c play) */
     LOG_TRACE("Buffer[%d]::Play flags %lx", This->id, (unsigned long)flags);
     EnterCriticalSection(&This->dev->lock);
     if (This->dead) {
@@ -819,8 +833,11 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
 static HRESULT WINAPI dsb_SetVolume(IDirectSoundBuffer8 *iface, LONG vol)
 {
     rl_buffer *This = BUF(iface);
-    if (!(This->desc.dwFlags & DSBCAPS_CTRLVOLUME)) return DSERR_CONTROLUNAVAIL;
-    if (vol < DSBVOLUME_MIN || vol > DSBVOLUME_MAX) return DSERR_INVALIDPARAM;
+    /* ALchemy (tests/alprobe.c ctrl): no DSBCAPS_CTRLVOLUME needed (as for pan and frequency), below DSBVOLUME_MIN
+     * taken as the minimum.  It takes a volume above 0 too and amplifies by it (+100 dB at 10000): taken as 0 here,
+     * fixes or not (the mixer never amplifies; Windows refuses it) */
+    if (vol < DSBVOLUME_MIN) vol = DSBVOLUME_MIN;
+    if (vol > DSBVOLUME_MAX) vol = DSBVOLUME_MAX;
     LOG_TRACE("Buffer[%d]::SetVolume %ld", This->id, (long)vol);
     EnterCriticalSection(&This->dev->lock);
     if (This->is_primary) This->dev->primary_volume = vol;
@@ -832,7 +849,6 @@ static HRESULT WINAPI dsb_SetVolume(IDirectSoundBuffer8 *iface, LONG vol)
 static HRESULT WINAPI dsb_SetPan(IDirectSoundBuffer8 *iface, LONG pan)
 {
     rl_buffer *This = BUF(iface);
-    if (!(This->desc.dwFlags & DSBCAPS_CTRLPAN)) return DSERR_CONTROLUNAVAIL;
     if (pan < DSBPAN_LEFT || pan > DSBPAN_RIGHT) return DSERR_INVALIDPARAM;
     LOG_TRACE("Buffer[%d]::SetPan %ld", This->id, (long)pan);
     EnterCriticalSection(&This->dev->lock);
@@ -845,8 +861,8 @@ static HRESULT WINAPI dsb_SetPan(IDirectSoundBuffer8 *iface, LONG pan)
 static HRESULT WINAPI dsb_SetFrequency(IDirectSoundBuffer8 *iface, DWORD freq)
 {
     rl_buffer *This = BUF(iface);
-    if (This->is_primary || !(This->desc.dwFlags & DSBCAPS_CTRLFREQUENCY)) return DSERR_CONTROLUNAVAIL;
-    if (freq != DSBFREQUENCY_ORIGINAL && (freq < DSBFREQUENCY_MIN || freq > DSBFREQUENCY_MAX)) return DSERR_INVALIDPARAM;
+    /* ALchemy: any frequency (0 the original), on the primary buffer too (nothing changes there) */
+    if (This->is_primary) return DS_OK;
     LOG_TRACE("Buffer[%d]::SetFrequency %lu", This->id, (unsigned long)freq);
     EnterCriticalSection(&This->dev->lock);
     This->freq = freq;
@@ -893,12 +909,7 @@ static HRESULT WINAPI dsb_Unlock(IDirectSoundBuffer8 *iface, LPVOID p1, DWORD b1
 {
     rl_buffer *This = BUF(iface);
     (void)b1; (void)p2; (void)b2;
-    if (This->is_primary) {
-        EnterCriticalSection(&This->dev->lock);
-        BOOL wp = writeprimary(This);
-        LeaveCriticalSection(&This->dev->lock);
-        if (!wp) return DSERR_PRIOLEVELNEEDED;
-    }
+    /* (the primary buffer at any level, as its Lock: ALchemy) */
     if (!p1) return DSERR_INVALIDPARAM;     /* (ALchemy 0x1001e6e0) */
     /* data is written in place; only the count of open locks is kept (SetFX is refused while one is open) */
     if (InterlockedDecrement(&This->locks) < 0) InterlockedIncrement(&This->locks);
@@ -922,6 +933,8 @@ static HRESULT WINAPI dsb_Restore(IDirectSoundBuffer8 *iface)
 static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFFECTDESC fx, LPDWORD results)
 {
     rl_buffer *This = BUF(iface);
+    /* an effects buffer only ALchemy makes: ALchemy's answer, whatever the arguments */
+    if ((This->desc.dwFlags & DSBCAPS_CTRLFX) && !This->fx_ok) return DSERR_CONTROLUNAVAIL;
     /* DirectSound's order (tests/fxtest.c): the arguments, the buffer's caps, its state */
     if (count ? !fx : (fx || results)) return DSERR_INVALIDPARAM;
     for (DWORD i = 0; i < count; i++)
@@ -968,8 +981,7 @@ static HRESULT WINAPI dsb_AcquireResources(IDirectSoundBuffer8 *iface, DWORD fla
     EnterCriticalSection(&This->dev->lock);
     HRESULT hr = DS_OK;
     if (!(This->desc.dwFlags & DSBCAPS_LOCDEFER)) {
-        hr = DSERR_INVALIDCALL;         /* not a deferred buffer (the effects' state is still given) */
-        rl_fxchain_status(This->fx, results, count);
+        /* not a deferred buffer: nothing to place (ALchemy DS_OK, tests/alprobe.c misc; Windows refuses) */
     } else if (count != rl_fxchain_count(This->fx) || (count && !results)) hr = DSERR_INVALIDPARAM;
     else {
         if (This->fx) { rl_fxchain_place(This->fx, TRUE); This->fx_placed = TRUE; }
@@ -982,7 +994,7 @@ static HRESULT WINAPI dsb_AcquireResources(IDirectSoundBuffer8 *iface, DWORD fla
 static HRESULT WINAPI dsb_GetObjectInPath(IDirectSoundBuffer8 *iface, REFGUID obj, DWORD idx, REFGUID iid, LPVOID *out)
 {
     rl_buffer *This = BUF(iface);
-    if (!(This->desc.dwFlags & DSBCAPS_CTRLFX)) return DSERR_CONTROLUNAVAIL;
+    if (!(This->desc.dwFlags & DSBCAPS_CTRLFX) || !This->fx_ok) return DSERR_CONTROLUNAVAIL;
     if (!obj || !iid || !out) return DSERR_INVALIDPARAM;
     EnterCriticalSection(&This->dev->lock);
     HRESULT hr = rl_fxchain_get_object(This->fx, obj, idx, iid, out);
@@ -1011,9 +1023,7 @@ static HRESULT WINAPI ntf_SetNotificationPositions(IDirectSoundNotify *iface, DW
 {
     rl_buffer *This = NOTIFY(iface);
     if (count && !pos) return DSERR_INVALIDPARAM;
-    for (DWORD i = 0; i < count; i++)
-        if (pos[i].dwOffset != (DWORD)DSBPN_OFFSETSTOP && pos[i].dwOffset >= This->voice.size)
-            return DSERR_INVALIDPARAM;
+    /* (offsets past the end: ALchemy takes them, tests/alprobe.c notify; they never fire) */
 
     rl_notify *n = NULL;
     if (count) {
@@ -1151,25 +1161,24 @@ static HRESULT WINAPI b3d_GetVelocity(IDirectSound3DBuffer *iface, D3DVECTOR *v)
 
 static HRESULT WINAPI b3d_SetAllParameters(IDirectSound3DBuffer *iface, LPCDS3DBUFFER p, DWORD apply)
 {
-    if (!p || p->dwSize < sizeof(*p)) return DSERR_INVALIDPARAM;
-    /* each value as its own method takes it */
-    if (!finite3(p->vPosition.x, p->vPosition.y, p->vPosition.z) || !finite3(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z) ||
-        p->dwInsideConeAngle > 360 || p->dwOutsideConeAngle > 360 ||
-        !direction_ok(p->vConeOrientation.x, p->vConeOrientation.y, p->vConeOrientation.z) ||
-        p->lConeOutsideVolume < DSBVOLUME_MIN || p->lConeOutsideVolume > DSBVOLUME_MAX ||
-        !distance_ok(p->flMinDistance) || !distance_ok(p->flMaxDistance) || p->dwMode > DS3DMODE_DISABLE)
-        return DSERR_INVALIDPARAM;
+    if (!p || p->dwSize != sizeof(*p)) return DSERR_INVALIDPARAM;     /* (exactly: ALchemy and Windows) */
+    /* ALchemy (tests/dsfuzz.c against it) takes the call whatever the values: each one as its own method would take
+     * it, a value that method refuses left as it was (so none can make the 3D math NaN) */
     B3D_SET_BEGIN(iface);
     rl_source3d *s = &This->src3d_pending;
-    s->pos = to_v(p->vPosition.x, p->vPosition.y, p->vPosition.z);
-    s->vel = to_v(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z);
-    s->cone_inside = p->dwInsideConeAngle;
-    s->cone_outside = p->dwOutsideConeAngle;
-    s->cone_orient = to_v(p->vConeOrientation.x, p->vConeOrientation.y, p->vConeOrientation.z);
-    s->cone_outside_volume = p->lConeOutsideVolume;
-    s->min_dist = p->flMinDistance;
-    s->max_dist = p->flMaxDistance;
-    s->mode = p->dwMode;
+    if (finite3(p->vPosition.x, p->vPosition.y, p->vPosition.z)) s->pos = to_v(p->vPosition.x, p->vPosition.y, p->vPosition.z);
+    if (finite3(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z)) s->vel = to_v(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z);
+    if (p->dwInsideConeAngle <= 360 && p->dwOutsideConeAngle <= 360) {
+        s->cone_inside = p->dwInsideConeAngle;
+        s->cone_outside = p->dwOutsideConeAngle;
+    }
+    if (direction_ok(p->vConeOrientation.x, p->vConeOrientation.y, p->vConeOrientation.z))
+        s->cone_orient = to_v(p->vConeOrientation.x, p->vConeOrientation.y, p->vConeOrientation.z);
+    if (p->lConeOutsideVolume >= DSBVOLUME_MIN && p->lConeOutsideVolume <= DSBVOLUME_MAX)
+        s->cone_outside_volume = p->lConeOutsideVolume;
+    if (distance_ok(p->flMinDistance) && p->flMinDistance != 0.0f) s->min_dist = p->flMinDistance;
+    if (distance_ok(p->flMaxDistance)) s->max_dist = p->flMaxDistance;
+    if (p->dwMode <= DS3DMODE_DISABLE) s->mode = p->dwMode;
     LOG_3D("Buffer[%d]::SetAllParameters pos %.3f,%.3f,%.3f min %.3f max %.3f mode %lu (%s)", This->id,
            s->pos.x, s->pos.y, s->pos.z, s->min_dist, s->max_dist, (unsigned long)s->mode, apply ? "deferred" : "immediate");
     B3D_SET_END(apply);
@@ -1211,7 +1220,8 @@ static HRESULT WINAPI b3d_SetMaxDistance(IDirectSound3DBuffer *iface, D3DVALUE d
 
 static HRESULT WINAPI b3d_SetMinDistance(IDirectSound3DBuffer *iface, D3DVALUE d, DWORD apply)
 {
-    if (!distance_ok(d)) return DSERR_INVALIDPARAM;
+    /* (a minimum of 0: ALchemy refuses it too, tests/alprobe.c d3; a maximum of 0 only Windows and the fixes) */
+    if (!distance_ok(d) || d == 0.0f) return DSERR_INVALIDPARAM;
     B3D_SET_BEGIN(iface);
     This->src3d_pending.min_dist = d;
     LOG_3D("Buffer[%d]::SetMinDistance %.3f", This->id, d);
@@ -1322,22 +1332,22 @@ static HRESULT WINAPI lst_GetVelocity(IDirectSound3DListener *iface, D3DVECTOR *
 static HRESULT WINAPI lst_SetAllParameters(IDirectSound3DListener *iface, LPCDS3DLISTENER p, DWORD apply)
 {
     if (!p || p->dwSize < sizeof(*p)) return DSERR_INVALIDPARAM;
-    /* each value as its own method takes it */
-    if (!finite3(p->vPosition.x, p->vPosition.y, p->vPosition.z) || !finite3(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z) ||
-        !direction_ok(p->vOrientFront.x, p->vOrientFront.y, p->vOrientFront.z) ||
-        !direction_ok(p->vOrientTop.x, p->vOrientTop.y, p->vOrientTop.z) ||
-        !is_finite(p->flDistanceFactor) || p->flDistanceFactor < DS3D_MINDISTANCEFACTOR || p->flDistanceFactor > DS3D_MAXDISTANCEFACTOR ||
-        !is_finite(p->flRolloffFactor) || p->flRolloffFactor < DS3D_MINROLLOFFFACTOR || p->flRolloffFactor > DS3D_MAXROLLOFFFACTOR ||
-        !is_finite(p->flDopplerFactor) || p->flDopplerFactor < DS3D_MINDOPPLERFACTOR || p->flDopplerFactor > DS3D_MAXDOPPLERFACTOR)
-        return DSERR_INVALIDPARAM;
+    /* ALchemy (tests/dsfuzz.c against it) takes the call whatever the values: each one as its own method would take
+     * it, a value that method refuses left as it was (so none can make the 3D math NaN) */
     LST_SET_BEGIN(iface);
-    l->pos = to_v(p->vPosition.x, p->vPosition.y, p->vPosition.z);
-    l->vel = to_v(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z);
-    l->front = to_v(p->vOrientFront.x, p->vOrientFront.y, p->vOrientFront.z);
-    l->top = to_v(p->vOrientTop.x, p->vOrientTop.y, p->vOrientTop.z);
-    l->distance_factor = p->flDistanceFactor;
-    l->rolloff_factor = p->flRolloffFactor;
-    l->doppler_factor = p->flDopplerFactor;
+    if (finite3(p->vPosition.x, p->vPosition.y, p->vPosition.z)) l->pos = to_v(p->vPosition.x, p->vPosition.y, p->vPosition.z);
+    if (finite3(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z)) l->vel = to_v(p->vVelocity.x, p->vVelocity.y, p->vVelocity.z);
+    if (direction_ok(p->vOrientFront.x, p->vOrientFront.y, p->vOrientFront.z) &&
+        direction_ok(p->vOrientTop.x, p->vOrientTop.y, p->vOrientTop.z)) {
+        l->front = to_v(p->vOrientFront.x, p->vOrientFront.y, p->vOrientFront.z);
+        l->top = to_v(p->vOrientTop.x, p->vOrientTop.y, p->vOrientTop.z);
+    }
+    if (is_finite(p->flDistanceFactor) && p->flDistanceFactor >= DS3D_MINDISTANCEFACTOR && p->flDistanceFactor <= DS3D_MAXDISTANCEFACTOR)
+        l->distance_factor = p->flDistanceFactor;
+    if (is_finite(p->flRolloffFactor) && p->flRolloffFactor >= DS3D_MINROLLOFFFACTOR && p->flRolloffFactor <= DS3D_MAXROLLOFFFACTOR)
+        l->rolloff_factor = p->flRolloffFactor;
+    if (is_finite(p->flDopplerFactor) && p->flDopplerFactor >= DS3D_MINDOPPLERFACTOR && p->flDopplerFactor <= DS3D_MAXDOPPLERFACTOR)
+        l->doppler_factor = p->flDopplerFactor;
     LOG_3D("Listener::SetAllParameters pos %.3f,%.3f,%.3f vel %.3f,%.3f,%.3f distance %g rolloff %g doppler %g (%s)",
            l->pos.x, l->pos.y, l->pos.z, l->vel.x, l->vel.y, l->vel.z, l->distance_factor, l->rolloff_factor,
            l->doppler_factor, apply ? "deferred" : "immediate");
@@ -1431,8 +1441,6 @@ static const GUID RL_EAX1_LISTENER =
     { 0x4a4e6fc1, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
 static const GUID RL_EAX1_BUFFER =
     { 0x4a4e6fc0, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
-static const GUID RL_DSPROPSETID_VoiceManager =
-    { 0x62a69bae, 0xdf9d, 0x11d1, { 0x99, 0xa6, 0x00, 0xc0, 0x4f, 0xc9, 0x9d, 0x46 } };
 
 /* EAX 2.0 and 3.0 property sets */
 static const GUID RL_EAX2_LISTENER =
@@ -1471,7 +1479,8 @@ static int eax4_which(REFGUID set)
 
 static HRESULT eax_hr(int r)
 {
-    return r == EAX_OK ? DS_OK : r == EAX_BADID ? E_PROP_ID_UNSUPPORTED : DSERR_INVALIDPARAM;
+    /* (ALchemy: E_INVALIDARG for any property it refuses, an unknown id too: tests/dsfuzz.c against it) */
+    return r == EAX_OK ? DS_OK : DSERR_INVALIDPARAM;
 }
 
 /* property names for the EAX log; a leading '#' marks an integer (mB / enum / flags) property */
@@ -1567,12 +1576,12 @@ static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
     rl_device *dev = This->dev;
     char gb[64];
     (void)inst; (void)inst_len;
-    if (ret) *ret = 0;
-    HRESULT hr = E_PROP_ID_UNSUPPORTED;
+    /* (ALchemy: an unknown set E_INVALIDARG; *ret written only when the call succeeds) */
+    HRESULT hr = DSERR_INVALIDPARAM;
 
     int w4 = eax4_which(set);
     if (w4) {
-        if (w4 == 45 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return E_PROP_ID_UNSUPPORTED;
+        if (w4 == 45 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         uint32_t got = 0;
         int r;
         EnterCriticalSection(&dev->lock);
@@ -1581,15 +1590,15 @@ static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         else if (w4 == 45) r = eax4s_get(&This->eax4, &dev->eax4c, id, data, data_len, &got);
         else r = eax4fx_get(&dev->eax4s[w4 - 41], &dev->eax4c, id, data, data_len, &got);
         LeaveCriticalSection(&dev->lock);
-        if (ret) *ret = got;
         hr = eax_hr(r);
+        if (ret && hr == DS_OK) *ret = got;
         log_eax4(This, "Get", w4, id, r == EAX_OK ? data : NULL, got, hr);
         return hr;
     }
 
     int which = eax23_set(set);
     if (which) {
-        if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return E_PROP_ID_UNSUPPORTED;
+        if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         uint32_t got = 0;
         int r;
         EnterCriticalSection(&dev->lock);
@@ -1601,8 +1610,8 @@ static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         default: r = eax3b_get(&This->eax3, id, data, data_len, &got); break;
         }
         LeaveCriticalSection(&dev->lock);
-        if (ret) *ret = got;
         hr = eax_hr(r);
+        if (ret && hr == DS_OK) *ret = got;
         log_eax23(This, "Get", which, id, r == EAX_OK ? data : NULL, got, hr);
         return hr;
     }
@@ -1645,11 +1654,11 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
     rl_device *dev = This->dev;
     char gb[64];
     (void)inst; (void)inst_len;
-    HRESULT hr = E_PROP_ID_UNSUPPORTED;
+    HRESULT hr = DSERR_INVALIDPARAM;                /* (an unknown set: ALchemy's E_INVALIDARG) */
 
     int w4 = eax4_which(set);
     if (w4) {
-        if (w4 == 45 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return E_PROP_ID_UNSUPPORTED;
+        if (w4 == 45 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         int r;
         EnterCriticalSection(&dev->lock);
         rl_device_eax_use(dev, 4);
@@ -1670,7 +1679,7 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
 
     int which = eax23_set(set);
     if (which) {
-        if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return E_PROP_ID_UNSUPPORTED;
+        if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         int r;
         BOOL now = !(id & EAX_DEFERRED);
         EnterCriticalSection(&dev->lock);
@@ -1701,8 +1710,8 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
             switch (id) {
             case EAX1_L_ALL: {
                 const rl_eax1_reverb *r = data;
-                if (r->volume != r->volume || r->decay != r->decay || r->damping != r->damping) {
-                    hr = DSERR_INVALIDPARAM; break;   /* ALchemy rejects NaNs */
+                if (is_nan(r->volume) || is_nan(r->decay) || is_nan(r->damping)) {
+                    hr = DSERR_INVALIDPARAM; break;   /* ALchemy rejects NaNs (this test used to fold away) */
                 }
                 dev->eax1_env = r->environment > 25 ? 25 : r->environment;
                 dev->eax1_volume = r->volume;
@@ -1720,13 +1729,15 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
                 dev->eax1_damping = rl_eax1_presets[env].damping;
                 break;
             }
-            case EAX1_L_VOLUME: {
+            /* each value: a NaN refused, the rest clamped to its range (ALchemy: tests/alprobe.c eaxval) */
+            case EAX1_L_VOLUME: case EAX1_L_DECAYTIME: case EAX1_L_DAMPING: {
                 float v = *(const float *)data;
-                dev->eax1_volume = v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+                if (is_nan(v)) { hr = DSERR_INVALIDPARAM; break; }
+                if (id == EAX1_L_VOLUME) dev->eax1_volume = clampf(v, 0.0f, 1.0f);
+                else if (id == EAX1_L_DECAYTIME) dev->eax1_decay = clampf(v, 0.1f, 20.0f);
+                else dev->eax1_damping = clampf(v, 0.0f, 2.0f);
                 break;
             }
-            case EAX1_L_DECAYTIME: dev->eax1_decay = *(const float *)data; break;
-            case EAX1_L_DAMPING:   dev->eax1_damping = *(const float *)data; break;
             }
             if (hr == DS_OK) rl_device_eax1_changed(dev);
         }
@@ -1737,9 +1748,10 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         rl_device_eax_use(dev, 1);
         if (!data || data_len < 4) hr = DSERR_INVALIDPARAM;
         else {
+            /* -1 (by distance) or 0..1; more is taken as 1 (ALchemy: tests/alprobe.c eaxval), a NaN refused */
             float mix = *(const float *)data;
-            if (mix != -1.0f && (mix < 0.0f || mix > 1.0f)) hr = DSERR_INVALIDPARAM;
-            else { This->eax1_mix = mix; rl_buffer_update_gains(This); hr = DS_OK; }
+            if (is_nan(mix) || (mix != -1.0f && mix < 0.0f)) hr = DSERR_INVALIDPARAM;
+            else { This->eax1_mix = mix > 1.0f ? 1.0f : mix; rl_buffer_update_gains(This); hr = DS_OK; }
         }
         LOG_EAX("Buffer[%d]::KsProp Set EAX1 reverb mix %.3f (%08lx)", This->id, This->eax1_mix, (unsigned long)hr);
     } else {
@@ -1801,26 +1813,27 @@ static HRESULT WINAPI ks_QuerySupport(IKsPropertySet *iface, REFGUID set, ULONG 
 {
     rl_buffer *This = PROPS(iface);
     char gb[64];
-    HRESULT hr = E_PROP_ID_UNSUPPORTED;
-    ULONG s = 0;
-    if (IsEqualGUID(set, &RL_DSPROPSETID_VoiceManager)) {
-        hr = DS_OK;                               /* ALchemy: S_OK, support 0 */
-    } else if (IsEqualGUID(set, &RL_EAX1_LISTENER) && id < EAX1_L_COUNT) {
-        hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
-    } else if (IsEqualGUID(set, &RL_EAX1_BUFFER) && id < EAX1_B_COUNT && (This->desc.dwFlags & DSBCAPS_CTRL3D)) {
-        hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
-    } else if (eax4_which(set)) {
-        int w4 = eax4_which(set);
-        ULONG pid = id & ~EAX_DEFERRED;
-        BOOL ok = w4 == 40 ? pid < EAX4C_COUNT : w4 == 45 ? (pid < EAX4S_COUNT && (This->desc.dwFlags & DSBCAPS_CTRL3D))
-                                                        : pid <= 0x10005;
-        if (ok) { hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET; }
-    } else {
+    /* ALchemy (tests/alprobe.c eax, tests/dsfuzz.c against it), on any buffer whatever its flags: a known set's
+     * property GET | SET; an id the set doesn't have E_NOTIMPL, *support untouched; a set it doesn't know (the voice
+     * manager's too) S_OK with no support.  The deferred flag is taken off the id for EAX 2 to 4, not for EAX 1. */
+    ULONG pid = id & ~EAX_DEFERRED;
+    int w4 = eax4_which(set), which = eax23_set(set), known = 1;
+    BOOL ok;
+    if (IsEqualGUID(set, &RL_EAX1_LISTENER)) ok = id < EAX1_L_COUNT;
+    else if (IsEqualGUID(set, &RL_EAX1_BUFFER)) ok = id < EAX1_B_COUNT;
+    else if (w4 == 40) ok = pid < EAX4C_COUNT;
+    else if (w4 == 45) ok = pid < EAX4S_COUNT;
+    else if (w4) ok = pid < EAX3L_COUNT || (pid >= EAX4FXS_NONE && pid <= EAX4FXS_FLAGS);   /* (a slot: its effect's ids) */
+    else if (which) {
         static const ULONG count[] = { [2] = EAX2L_COUNT, [3] = EAX3L_COUNT, [12] = EAX2B_COUNT, [13] = EAX3B_COUNT };
-        int which = eax23_set(set);
-        if (which && (id & ~EAX_DEFERRED) < count[which] && (which < 12 || (This->desc.dwFlags & DSBCAPS_CTRL3D))) {
-            hr = DS_OK; s = KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET;
-        }
+        ok = pid < count[which];
+    } else { known = 0; ok = 0; }
+    HRESULT hr = !known ? DS_OK : ok ? DS_OK : E_NOTIMPL;
+    ULONG s = known && ok ? KSPROPERTY_SUPPORT_GET | KSPROPERTY_SUPPORT_SET : 0;
+    if (known && !ok) {
+        LOG_EAX("Buffer[%d]::KsProp QuerySupport %s id %lu -> %08lx", This->id, rl_guid_str(set, gb), (unsigned long)id,
+                (unsigned long)hr);
+        return hr;
     }
     if (support) *support = s;
     const char *sn = eax_set_name(set);
@@ -1950,7 +1963,7 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     if (!b) return DSERR_OUTOFMEMORY;
     b->owner = owner;
     memset(&b->desc, 0, sizeof(b->desc));
-    memcpy(&b->desc, desc, desc->dwSize);
+    memcpy(&b->desc, desc, desc->dwSize >= sizeof(DSBUFFERDESC) ? sizeof(DSBUFFERDESC) : sizeof(DSBUFFERDESC1));
     b->desc.dwSize = sizeof(b->desc);
     b->desc.lpwfxFormat = NULL;
 
@@ -1983,39 +1996,31 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     rl_sfmt sfmt;
     HRESULT hr = parse_format(desc->lpwfxFormat, &b->fmt, &sfmt);
     if (SUCCEEDED(hr) && (desc->dwFlags & DSBCAPS_CTRLFX)) {
-        /* effects buffers (Windows 7): IDirectSound8 only, software, not static, PCM 8/16 or float, at most two
-         * channels, at least DSBSIZE_FX_MIN ms */
+        /* effects buffers: ALchemy makes any (it has no effects: its SetFX answers DSERR_CONTROLUNAVAIL); reAL's
+         * effects work on the ones Windows 7 makes - IDirectSound8 only, not hardware, not static, PCM 8/16 or float,
+         * at most two channels, at least DSBSIZE_FX_MIN ms - and SetFX on the others answers as ALchemy */
         const WAVEFORMATEX *w = &b->fmt.Format;
-        if (owner && !owner->is_ds8) hr = DSERR_DS8_REQUIRED;
-        else if (desc->dwFlags & DSBCAPS_LOCHARDWARE) hr = E_NOTIMPL;
+        HRESULT why = DS_OK;
+        if (owner && !owner->is_ds8) why = DSERR_DS8_REQUIRED;
+        else if (desc->dwFlags & DSBCAPS_LOCHARDWARE) why = E_NOTIMPL;
         else if ((desc->dwFlags & DSBCAPS_STATIC) || w->nChannels > 2 ||
-                 (sfmt != RL_U8 && sfmt != RL_S16 && sfmt != RL_F32)) hr = DSERR_INVALIDPARAM;
+                 (sfmt != RL_U8 && sfmt != RL_S16 && sfmt != RL_F32)) why = DSERR_INVALIDPARAM;
         else if ((unsigned long long)desc->dwBufferBytes * 1000 < (unsigned long long)DSBSIZE_FX_MIN * w->nAvgBytesPerSec)
-            hr = DSERR_BUFFERTOOSMALL;
-        if (FAILED(hr)) {
-            LOG_CALL("CreateSoundBuffer: CTRLFX refused (%08lx)", (unsigned long)hr);
-            HeapFree(GetProcessHeap(), 0, b);
-            return hr;
-        }
-        if (!(desc->dwFlags & DSBCAPS_LOCDEFER)) b->desc.dwFlags |= DSBCAPS_LOCSOFTWARE;
+            why = DSERR_BUFFERTOOSMALL;
+        b->fx_ok = SUCCEEDED(why);
+        if (!b->fx_ok) LOG_CALL("CreateSoundBuffer: CTRLFX outside Windows' rules (%08lx): no effects", (unsigned long)why);
     }
     if (FAILED(hr)) {
         LOG_CALL("CreateSoundBuffer: bad format (tag %u)", desc->lpwfxFormat ? desc->lpwfxFormat->wFormatTag : 0);
         HeapFree(GetProcessHeap(), 0, b);
         return hr;
     }
-    /* a 3D buffer is mono on a DirectSound 8 asked with DirectX 8's DSBUFFERDESC; one made through an older
-     * IDirectSound, or with the older DSBUFFERDESC1, may be stereo (Windows 7; ALchemy 0x10010100 by the object), and
-     * plays as its mono sum while it is positioned */
-    if ((desc->dwFlags & DSBCAPS_CTRL3D) && b->fmt.Format.nChannels != 1 &&
-        ((owner && owner->is_ds8 && desc->dwSize >= sizeof(DSBUFFERDESC)) || b->fmt.Format.nChannels > 2)) {
-        LOG_CALL("CreateSoundBuffer: 3D buffer must be mono");
-        HeapFree(GetProcessHeap(), 0, b);
-        return DSERR_INVALIDPARAM;
-    }
+    /* a 3D buffer of any channel count: ALchemy makes them from any object (tests/alprobe.c create; Windows 7 makes a
+     * stereo one only through an older IDirectSound or with DSBUFFERDESC1, and nothing wider).  It plays as its mono
+     * sum while it is positioned.  The size: ALchemy takes any but 0 (kept: it divides by it), rounded up to a block */
     DWORD block = b->fmt.Format.nBlockAlign;
     DWORD bytes = desc->dwBufferBytes;
-    if (bytes < DSBSIZE_MIN || bytes > DSBSIZE_MAX) {
+    if (!bytes || bytes > 0xffffffffu - block) {
         HeapFree(GetProcessHeap(), 0, b);
         return DSERR_INVALIDPARAM;
     }
@@ -2087,7 +2092,8 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out)
 {
     *out = NULL;
-    if (src->desc.dwFlags & DSBCAPS_CTRLFX) return DSERR_INVALIDCALL;
+    /* (an effects buffer too, as ALchemy duplicates it, tests/dsfuzz.c against it; Windows refuses: the copy plays
+     * the samples without the effects, and takes none of its own, fx_ok FALSE) */
     rl_buffer *b = alloc_buffer(dev);
     if (!b) return DSERR_OUTOFMEMORY;
     b->owner = owner;
@@ -2098,6 +2104,7 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     b->shared = src->shared;
     InterlockedIncrement(&b->shared->ref);
     b->voice = src->voice;
+    b->voice.data = b->shared->data;           /* (the source's may be its effects' output) */
     b->voice.pos = 0;
     b->voice.playing = 0;
     b->voice.looping = 0;

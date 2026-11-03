@@ -22,7 +22,19 @@ void rl_pan_gains(int32_t pan, float out[2])
     out[1] = pan < 0 ? rl_db100_to_gain(pan) : 1.0f;
 }
 
+static inline float fetch1(const rl_voice *v, uint32_t frame, int ch);
+/* channel ch of a frame; a positioned voice of more than two channels (mono3d) gives the mean of them all */
 static inline float fetch(const rl_voice *v, uint32_t frame, int ch)
+{
+    if (v->mono3d && v->channels > 2) {
+        float s = 0.0f;
+        for (int c = 0; c < v->channels; c++) s += fetch1(v, frame, c);
+        return s / (float)v->channels;
+    }
+    return fetch1(v, frame, ch);
+}
+
+static inline float fetch1(const rl_voice *v, uint32_t frame, int ch)
 {
     if (ch >= v->channels) ch = v->channels - 1;
     const uint8_t *p = v->data + (size_t)frame * v->block;
@@ -452,7 +464,10 @@ static uint32_t render_src(const rl_voice *v, const sinc_tab *kt, uint64_t *ppos
         pos += step;
         if (pos >= end) {
             if (!v->looping) { *ended = 1; break; }
-            while (pos >= end) { pos -= end; (*wraps)++; }
+            /* (a division: the step can be many times a short buffer, at a frequency far above its rate) */
+            uint64_t w = pos / end;
+            pos -= w * end;
+            *wraps += (uint32_t)w;
         }
     }
     *ppos = pos;
@@ -552,7 +567,7 @@ static void resume_filter(const rl_voice *v, const sinc_tab *kt, uint64_t step, 
         *z0 += la * (l - *z0);
         *z1 += la * (r - *z1);
         p += step;
-        if (p >= end && v->looping) while (p >= end) p -= end;
+        if (p >= end && v->looping) p %= end;
     }
 }
 
@@ -640,7 +655,7 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
             L[i] = L[i] * (1.0f - t) + ol * t;
             R[i] = R[i] * (1.0f - t) + orr * t;
             v->xfade_pos += step;
-            if (v->xfade_pos >= end && v->looping) v->xfade_pos -= end;
+            if (v->xfade_pos >= end && v->looping) v->xfade_pos %= end;
             v->xfade_left--;
         }
 
@@ -841,7 +856,7 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
             }
             for (int c = 0; c < nch; c++) x[c] = x[c] * (1.0f - t) + ox[c] * t;
             v->xfade_pos += step;
-            if (v->xfade_pos >= end && v->looping) v->xfade_pos -= end;
+            if (v->xfade_pos >= end && v->looping) v->xfade_pos %= end;
             v->xfade_left--;
         }
         if (ns) {
@@ -862,7 +877,8 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
         v->pos += step;
         if (v->pos >= end) {
             if (v->looping) {
-                while (v->pos >= end) { v->pos -= end; wraps++; }
+                wraps += (uint32_t)(v->pos / end);   /* (a division, as render_src) */
+                v->pos %= end;
             } else {
                 v->pos = 0;
                 v->playing = 0;

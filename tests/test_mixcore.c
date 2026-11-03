@@ -117,6 +117,41 @@ static void test_u8_stereo(void)
     CHECK(NEAR(out[2], -1) && NEAR(out[3], 0));
 }
 
+/* a positioned (mono3d) voice of more than two channels plays the mean of them all; one of two the mean of both;
+ * and a step many times the buffer (any frequency is taken) wraps a loop in one go */
+static void test_mono3d(void)
+{
+    int16_t d[2 * 4] = { 4000, 8000, 12000, 16000,  -4000, -8000, -12000, -16000 };
+    rl_voice v;
+    memset(&v, 0, sizeof(v));
+    v.data = (uint8_t *)d; v.size = sizeof(d); v.channels = 4; v.block = 8; v.sfmt = RL_S16;
+    v.rate = 1000; v.playing = 1; v.looping = 1; v.mono3d = 1;
+    v.gain[0] = v.gain[1] = 1; v.cur_gain[0] = v.cur_gain[1] = 1;
+    float out[4] = { 0 };
+    rl_voice_mix(&v, out, NULL, 2, 1000, NULL);
+    CHECK(NEAR(out[0], 10000 / 32768.0f) && NEAR(out[1], 10000 / 32768.0f));
+    CHECK(NEAR(out[2], -10000 / 32768.0f) && NEAR(out[3], -10000 / 32768.0f));
+
+    int16_t s[2 * 2] = { 1000, 3000, -1000, -3000 };
+    memset(&v, 0, sizeof(v));
+    v.data = (uint8_t *)s; v.size = sizeof(s); v.channels = 2; v.block = 4; v.sfmt = RL_S16;
+    v.rate = 1000; v.playing = 1; v.looping = 1; v.mono3d = 1;
+    v.gain[0] = v.gain[1] = 1; v.cur_gain[0] = v.cur_gain[1] = 1;
+    memset(out, 0, sizeof(out));
+    rl_voice_mix(&v, out, NULL, 2, 1000, NULL);
+    CHECK(NEAR(out[0], 2000 / 32768.0f) && NEAR(out[1], 2000 / 32768.0f));
+    CHECK(NEAR(out[2], -2000 / 32768.0f));
+
+    /* 0xffffffff Hz from a 2-frame loop at 1 kHz: about 4.3 million wraps per frame, done by a division */
+    memset(&v, 0, sizeof(v));
+    v.data = (uint8_t *)s; v.size = sizeof(s); v.channels = 2; v.block = 4; v.sfmt = RL_S16;
+    v.rate = 0xffffffffu; v.playing = 1; v.looping = 1;
+    v.gain[0] = v.gain[1] = 1; v.cur_gain[0] = v.cur_gain[1] = 1;
+    float big[2 * 64] = { 0 };
+    rl_voice_mix(&v, big, NULL, 64, 1000, NULL);
+    CHECK((v.pos >> 32) < 2);
+}
+
 static void test_spatial(void)
 {
     rl_listener3d l; rl_source3d s; float g[2];
@@ -450,6 +485,7 @@ int main(void)
     test_one_shot_end();
     test_u8_stereo();
     test_spatial();
+    test_mono3d();
     if (fails) { printf("%d check(s) failed\n", fails); return 1; }
     printf("mixcore tests: all passed\n");
     return 0;

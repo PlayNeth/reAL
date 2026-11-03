@@ -76,11 +76,12 @@ int main(int argc, char **argv)
     IDirectSoundBuffer_GetCaps(buf, &bc);
     CHECK(bc.dwFlags & DSBCAPS_LOCHARDWARE, "buffer reports LOCHARDWARE");
 
-    /* stereo 3D buffer must be rejected */
+    /* a stereo 3D buffer: ALchemy makes it, from IDirectSound8 too (tests/alprobe.c create); it plays as its mono sum */
     WAVEFORMATEX wf2 = { WAVE_FORMAT_PCM, 2, rate, rate * 4, 4, 16, 0 };
     DSBUFFERDESC bd2 = { sizeof(bd2), DSBCAPS_CTRL3D, 4096, 0, &wf2 };
     IDirectSoundBuffer *bad = NULL;
-    CHECK(IDirectSound8_CreateSoundBuffer(ds, &bd2, &bad, NULL) == DSERR_INVALIDPARAM, "stereo 3D buffer rejected");
+    CHECK(IDirectSound8_CreateSoundBuffer(ds, &bd2, &bad, NULL) == DS_OK, "stereo 3D buffer made");
+    if (bad) IDirectSoundBuffer_Release(bad);
 
     HANDLE ev[4];
     DSBPOSITIONNOTIFY pn[4];
@@ -166,7 +167,7 @@ int main(int argc, char **argv)
 
     ULONG sup = 0;
     hr = IKsPropertySet_QuerySupport(ks, &IID_IDirectSound3DBuffer, 0, &sup);
-    CHECK(FAILED(hr), "IKsPropertySet: unknown set unsupported");
+    CHECK(hr == S_OK && sup == 0, "IKsPropertySet: unknown set, no support (ALchemy: S_OK, 0)");
     static const GUID eax1_l = { 0x4a4e6fc1, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
     static const GUID eax1_b = { 0x4a4e6fc0, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } };
     static const GUID vm = { 0x62a69bae, 0xdf9d, 0x11d1, { 0x99, 0xa6, 0x00, 0xc0, 0x4f, 0xc9, 0x9d, 0x46 } };

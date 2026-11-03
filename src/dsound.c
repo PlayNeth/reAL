@@ -70,11 +70,12 @@ static HRESULT WINAPI ds_CreateSoundBuffer(IDirectSound8 *iface, LPCDSBUFFERDESC
     if (!desc || !out) return DSERR_INVALIDPARAM;
     *out = NULL;
     if (outer) return DSERR_NOAGGREGATION;
-    if (desc->dwSize != sizeof(DSBUFFERDESC) && desc->dwSize != sizeof(DSBUFFERDESC1))
-        return DSERR_INVALIDPARAM;
+    /* ALchemy takes any dwSize (tests/dsfuzz.c against it; Windows only DSBUFFERDESC's and DSBUFFERDESC1's): the
+     * DirectX 8 fields are read only from a descriptor that is that long (rl_buffer_create) */
 
     if (desc->dwFlags & DSBCAPS_PRIMARYBUFFER) {
-        if (desc->lpwfxFormat || desc->dwBufferBytes || (desc->dwFlags & DSBCAPS_CTRLFX)) return DSERR_INVALIDPARAM;
+        /* a size and a format for the primary buffer: ALchemy ignores them (Windows refuses) */
+        if (desc->dwFlags & DSBCAPS_CTRLFX) return DSERR_INVALIDPARAM;
         /* one primary object per device object while the game holds it (new references to it, its flags the first
          * ones); once the game has let go of it, the next one is made afresh with the flags it asks for.  The
          * device object holds no reference: its references are the game's, as Windows counts them (tests/primtest.c
@@ -188,7 +189,7 @@ static HRESULT WINAPI ds_Initialize(IDirectSound8 *iface, LPCGUID guid)
     rl_dsound *This = impl(iface);
     char gb[64];
     LOG_CALL("DirectSound::Initialize(%s)", rl_guid_str(guid, gb));
-    if (This->dev) return DSERR_ALREADYINITIALIZED;
+    if (This->dev) return DS_OK;          /* (ALchemy: tests/alprobe.c misc; Windows DSERR_ALREADYINITIALIZED) */
     /* any playback device GUID is reAL's device (see is_playback_guid in dllmain.c) */
     if (guid && (IsEqualGUID(guid, &DSDEVID_DefaultCapture) || IsEqualGUID(guid, &DSDEVID_DefaultVoiceCapture)))
         return DSERR_NODRIVER;

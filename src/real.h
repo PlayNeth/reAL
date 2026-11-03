@@ -216,6 +216,7 @@ struct rl_buffer {
     uint32_t      fx_last;      /* the play cursor (frames) when that was worked out */
     LONG          locks;        /* Lock calls not yet unlocked (SetFX is refused meanwhile) */
     BOOL          fx_placed;    /* a LOCDEFER buffer's effects have their resources (Play / AcquireResources to Stop) */
+    BOOL          fx_ok;        /* CTRLFX within Windows' rules for effects buffers: SetFX works (ALchemy takes any) */
 
     /* EAX per-buffer */
     float         eax1_mix;     /* EAX_REVERBMIX_USEDISTANCE (-1) or 0..1 */

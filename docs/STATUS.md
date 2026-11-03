@@ -123,7 +123,7 @@ The effect interfaces (fx.c) log their own results.
 mostly at the edges, run under Windows 7's DirectSound and under reAL; each seed reports its first difference, sorted
 by risk. What it found and what changed:
 - A stereo CTRL3D buffer on an IDirectSound older than 8, or asked with the older DSBUFFERDESC1, was refused;
-  Windows takes it (ALchemy 0x10010100 on the older object). It plays as its mono sum while positioned.
+  Windows takes it. It plays as its mono sum while positioned. (ALchemy takes any 3D buffer: see below.)
 - A buffer's format as Windows keeps it: nAvgBytesPerSec as given (reAL recomputed it), a float format's cbSize and
   the bytes after it (any length; GetFormat answers them), WAVE_FORMAT_EXTENSIBLE's valid bits filled in when 0.
   nBlockAlign is still settled by reAL (Windows refuses a wrong one).
@@ -132,13 +132,13 @@ by risk. What it found and what changed:
   level; Stop, SetCurrentPosition and GetCurrentPosition answer DSERR_BUFFERLOST on a lost buffer too
   (`primtest lost` matches Windows 7 but for the LOCHARDWARE bit).
 - 3D values as ALchemy checks them: an infinite or NaN position, velocity, cone orientation or listener factor, an all
-  zero cone orientation and a negative distance are refused (they made the 3D maths NaN, or a gain negative);
-  SetAllParameters checks each value as its own method does.
+  zero cone orientation and a negative distance are refused (they made the 3D maths NaN, or a gain negative).
+  SetAllParameters takes each value as its own method does and leaves a refused one as it was (see below).
 - `fixes` (reAL.ini, default on; `fixes=false` or REAL_NOFIXES turns it off, with reAL's fixes of dsdmo): a zero
   distance is refused as Windows does, and a non-finite gain or Doppler pitch never reaches the mixer.
 
 Known differences it still shows, kept on purpose:
-- reAL answers as ALchemy's hardware device: LOCHARDWARE, DirectSound GetCaps (192000 Hz at most), DS_OK for an HRTF
+- reAL answers as ALchemy's hardware device: LOCHARDWARE in GetCaps (no location in GetStatus), DirectSound GetCaps (192000 Hz at most), DS_OK for an HRTF
   3D algorithm (Windows: DS_NO_VIRTUALIZATION), the primary buffer below DSSCL_WRITEPRIMARY.
 - Read back as ALchemy: deferred 3D values read back new (Windows: the committed ones), a cone orientation as given
   (Windows normalises it), a duplicate's position 0 and the source's 3D values (Windows: the source's position,
@@ -148,10 +148,56 @@ Known differences it still shows, kept on purpose:
   other than 0 taken as deferred, SetCooperativeLevel with no window, Compact below DSSCL_PRIORITY, SetSpeakerConfig
   values, GetCaps with a larger dwSize, a duplicate made through another DirectSound object, a Lock overlapping one
   not yet unlocked, Unlock lengths, notifications with no event or out of order, IDirectSoundBuffer8 from an older
-  IDirectSound's buffer, formats Windows refuses (a wrong nBlockAlign, more than two channels without
-  WAVE_FORMAT_EXTENSIBLE, odd channel masks), a cone's inside angle wider than its outside one. None of these leaves
-  a state the mixer cannot play.
+  IDirectSound's buffer, formats Windows refuses (a wrong nBlockAlign, odd channel masks), a cone's inside angle wider
+  than its outside one, and the ones measured against ALchemy below. None of these leaves a state the mixer cannot
+  play.
 - Both refuse with other error codes: mostly bad formats (reAL DSERR_BADFORMAT, Windows DSERR_INVALIDPARAM).
+
+**Measured against ALchemy** (`tests/alprobe.c`, `tests/dsfuzz.c`, run on Windows 11 under ALchemy 2.4.2.1's software
+engine, Realtek output, through `tools/alchemy-kit`). reAL's API answers had come from Windows 7 wherever ALchemy's
+code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz seeds, takes much more:
+- CreateSoundBuffer:
+  - a 3D buffer of any channel count from any object and descriptor (it plays as the mean of its channels while
+    positioned);
+  - an effects buffer of any format, object, size or flags. ALchemy has no effects (its SetFX and GetObjectInPath
+    answer DSERR_CONTROLUNAVAIL); reAL's run on the buffers Windows 7 would make (`fx_ok`), the others answer as
+    ALchemy;
+  - any rate from 1 Hz, any dwSize (the DirectX 8 fields read only from a full DSBUFFERDESC), sizes below
+    DSBSIZE_MIN and above DSBSIZE_MAX (rounded up to a block), a size and a format given for the primary buffer;
+  - refused, as ALchemy and Windows: WAVE_FORMAT_PCM and IEEE_FLOAT of more than two channels (reAL took them);
+  - GetCaps of an effects buffer reports LOCHARDWARE, as every other one.
+- Volume, pan and frequency need no CTRL flag. Volume below DSBVOLUME_MIN is taken as the minimum; any frequency is
+  taken (the mixer's loop wrap is now a division, so a step far longer than the buffer costs nothing).
+- Play takes any reserved value; Lock of 0 bytes locks nothing at the offset; the primary buffer can be locked below
+  DSSCL_WRITEPRIMARY (what is written plays nowhere); notification positions past the end are taken (they never
+  fire); IDirectSoundNotify and IDirectSoundBuffer8 are given for any buffer, the primary too, IDirectSound3DBuffer
+  for any CTRL3D one and IDirectSound3DListener for the primary and any CTRL3D buffer; AcquireResources on a buffer
+  that isn't LOCDEFER is DS_OK; Initialize on an initialised object is DS_OK; an effects buffer can be duplicated
+  (the copy plays without effects).
+- GetStatus reports no location (reAL reported LOCHARDWARE / LOCSOFTWARE).
+- SetMinDistance(0) is refused with or without the fixes (ALchemy refuses it; a maximum of 0 only with the fixes).
+  SetAllParameters (buffer and listener) takes any values and applies the ones their own methods take; its dwSize
+  must be exact.
+- EAX: EAX 2, 3 and 4 matched value for value (every property's default, the 27 environments, edge values of each
+  property). Changed:
+  - EAX 1: a NaN refused (the old NaN test folded away under fast math), decay time clamped to 0.1..20, damping to
+    0..2, the reverb mix above 1 taken as 1;
+  - QuerySupport answers on any buffer, GET | SET for a known set's id, E_NOTIMPL for an id the set lacks (support
+    untouched), S_OK with no support for a set it doesn't know; an EAX 4 slot's ids are its effect's 0..25 and
+    0x10000..0x10005; Get and Set answer E_INVALIDARG for anything refused, and write *pcbReturned only on success.
+- Not copied, on purpose:
+  - formats with no channel or a rate of 0, and 0-byte buffers (ALchemy takes them, then divides by zero: most of
+    its crashes in the fuzz runs);
+  - a volume above 0 (ALchemy amplifies by it, +100 dB at 10000): taken as 0;
+  - read-back quirks: GetPan answers pan x 65536 / 100, GetVolume and GetFrequency rounded, frequency 0 read back as
+    0, a format's nBlockAlign / nAvgBytesPerSec / PCM cbSize read back as given, sizes not rounded to a block, the
+    primary buffer's size as asked;
+  - SetFormat on a secondary buffer (ALchemy changes its format); SetNotificationPositions(0) refused (Windows takes
+    it); WAVE_FORMAT_EXTENSIBLE of 9 or more channels; EAX listener properties through a 2D buffer (ALchemy refuses
+    them, reAL keeps taking them); EAX 5 (this ALchemy answers it, probably because its licence check was patched
+    to grant every feature).
+- ALchemy's own failures in these runs: 101 crashes (divide by zero at dsound+1e2a4 and +1f95c, access violations)
+  and 61 hangs in 766 seeds; reAL none.
 
 **DirectSound effects (SetFX)**
 - `src/fx.c`: the chain SetFX builds, with Windows 7's validation, placement (LOCDEFER, AcquireResources),

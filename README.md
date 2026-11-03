@@ -96,7 +96,7 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
 
 - **DirectSound 3D:** listener and sounds, deferred settings, cones, distances, and Doppler with ALchemy's formula.
 - **HRTF on headphones,** from the built-in MIT KEMAR set or a `reAL_hrtf.bin` (see [HRTF data](#hrtf-data)). Off by default.
-- **Stereo 3D sounds from older games** are accepted, as Windows accepts them, and play as their mono mix while positioned.
+- **3D sounds of any channel count** are accepted, as ALchemy accepts them, and play as their mono mix while positioned.
 - **Speakers:** stereo, headphones, quad, 5.1 and 7.1, from Windows' speaker setup or `speakers=`. ALchemy's layouts, its channel converter for multichannel sounds (the LFE goes to the fronts through its bass limiter), and its 3D panning across the speakers.
 - **CMSS-3D** (`cmss=on`, off by default as in ALchemy): ALchemy's stereo-to-surround upmixer for music, ambience and videos. On quad, 5.1 and 7.1 it moves centred sound to the centre speaker and ambience to the rears and sides; on stereo speakers and headphones it virtualizes the rear pair. It matches ALchemy to better than −80 dB.
 

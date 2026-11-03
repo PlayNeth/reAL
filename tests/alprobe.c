@@ -421,6 +421,7 @@ static void sec_misc(void)
         HRESULT h2 = IDirectSound8_GetSpeakerConfig(s_ds8, &g);
         CASE("SetSpeakerConfig(%lx) %08lx get %08lx %s\n", sc[k], hr, h2, g == orig ? "unchanged" : g == sc[k] ? "as set" : "other");
     }
+    IDirectSound8_SetSpeakerConfig(s_ds8, orig);      /* (back as it was: Windows 7's DirectSound keeps it in the registry) */
     /* caps sizes */
     static const DWORD cs[] = { 0, sizeof(DSCAPS) - 1, sizeof(DSCAPS), sizeof(DSCAPS) + 1 };
     for (unsigned k = 0; k < 4; k++) {
