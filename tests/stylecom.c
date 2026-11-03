@@ -9,6 +9,7 @@
 
 DEFINE_GUID(GUID_SeedVariations_, 0x65b76fa5, 0xff37, 0x11d2, 0x81, 0x4e, 0x00, 0xc0, 0x4f, 0xa3, 0x6e, 0x58);
 DEFINE_GUID(GUID_IDirectMusicStyle_, 0xd2ac28a1, 0xb39b, 0x11d1, 0x87, 0x04, 0x00, 0x60, 0x08, 0x93, 0xb1, 0xbd);
+DEFINE_GUID(GUID_StyleTimeSig_, 0x76612507, 0x4f37, 0x4b35, 0x80, 0x92, 0x50, 0x48, 0x4e, 0xd4, 0xba, 0x92);
 static const GUID GUID_NULL_ = { 0 };
 #define BAR 3072
 
@@ -183,6 +184,7 @@ static void style(IDirectMusicStyle8 *s)
 
 int main(void)
 {
+    setvbuf(stdout, NULL, _IONBF, 0);
     LoadLibraryA("dsound.dll");
     CoInitialize(NULL);
     IDirectMusicLoader8 *ld;
@@ -240,6 +242,15 @@ int main(void)
             printf("  notify mb %08lx\n", IDirectMusicTrack_AddNotificationType(tr, &GUID_NOTIFICATION_MEASUREANDBEAT));
             printf("  notify chord %08lx\n", IDirectMusicTrack_AddNotificationType(tr, &GUID_NOTIFICATION_CHORD));
             printf("  remove mb %08lx\n", IDirectMusicTrack_RemoveNotificationType(tr, &GUID_NOTIFICATION_MEASUREANDBEAT));
+            {   /* dmstyle's private GUID_StyleTimeSig: a segment, then the time signature of the pattern picked there */
+                struct { IDirectMusicSegment *seg; DMUS_TIMESIGNATURE ts; } q;
+                MUSIC_TIME nx = -1;
+                printf("  supported styletimesig %08lx\n", IDirectMusicTrack_IsParamSupported(tr, &GUID_StyleTimeSig_));
+                printf("  styletimesig NULL %08lx\n", IDirectMusicTrack_GetParam(tr, &GUID_StyleTimeSig_, 0, &nx, NULL));
+                memset(&q, 0xee, sizeof(q)); q.seg = NULL;
+                printf("  styletimesig no segment %08lx\n", IDirectMusicTrack_GetParam(tr, &GUID_StyleTimeSig_, 0, &nx, &q));
+                /* (with a segment, Microsoft's crashes: its pattern chooser reads through a NULL performance) */
+            }
             if (st) {
                 printf("  set style %08lx\n", IDirectMusicTrack_SetParam(tr, &GUID_IDirectMusicStyle_, 2 * BAR, st));
                 for (MUSIC_TIME t = 0; t < 9 * BAR; t += BAR) {

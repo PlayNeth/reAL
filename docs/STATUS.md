@@ -475,7 +475,9 @@ Known differences it still shows, kept on purpose:
 - The style track: Microsoft's pattern chooser (groove and embellishment commands, rhythm, destination groove),
   variation choice in every mode, markers and chord alignment, the chord mapping (play modes, inversions, subchords),
   ranges, curves, chase, and measure-and-beat notifications. It supports several styles, time signature changes,
-  loops, transitions, stops, and control and secondary segments.
+  loops, transitions, stops, and control and secondary segments. dmstyle's private GUID_StyleTimeSig (for its
+  composer: a segment, then a time signature) is checked as dmstyle checks it; past the checks dmstyle's pattern
+  chooser reads through a NULL performance and crashes, and reDM returns E_POINTER there instead.
 - The motif track: IDirectMusicStyle::GetMotif segments, with beat and marker alignment and the motif's band.
 - The pattern track ('DMPT'): load, play (no inversions), and Clone by measures. IDirectMusicPatternTrack:
   CreateSegment, SetVariation (the audition, also through a part's variation lock) and SetPatternByName;
@@ -485,7 +487,7 @@ Known differences it still shows, kept on purpose:
 - rand() is the one Microsoft's code uses. The style and motif tracks reseed it from time() when they are made or
   cloned; the pattern track never does. It plays the same as Microsoft's when time() is fixed (`DMGT_TIME`).
 - `tools/sty/cases.py` writes the cases. `tools/sty/cap.sh <case>` compares dmgt with test_perf; every case matches
-  event for event. `tests/comcmp.sh styletest.exe` gives 927 lines and `stylecom.exe` gives 186, all identical.
+  event for event. `tests/comcmp.sh styletest.exe` gives 927 lines and `stylecom.exe` gives 189, all identical.
 - Chord changes reach notes already queued (77309f00): DMUS_NOTEF_REGENERATE notes are played on in the new chord
   when it makes another note, NOINVALIDATE_INSCALE / _INCHORD notes are cut when they no longer fit; a note waiting
   to start is shortened to the chord, a sounding one ended through its tool (`cap.sh regen 20000` matches).

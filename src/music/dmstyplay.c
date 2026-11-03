@@ -1517,7 +1517,19 @@ static int stytrack_getparam(const dm_track *t, stystate *S, int prm, mtime_t mt
         }
         return hr;
     }
-    if (prm == PRM_STYLETS) return DM_E_NOTIMPL;      /* TODO: the composer's (with a segment) */
+    if (prm == PRM_STYLETS) {
+        /* 774122ac: dmstyle's private parameter for its composer: { the segment, a DMUS_TIMESIGNATURE }.  After these
+         * checks dmstyle runs its pattern chooser with no performance and reads through the NULL pointer (an access
+         * violation at 7740b9d2 for any style that has a pattern: stylecom); reDM refuses there instead */
+        if (!*(void **)data) return STY_E_POINTER;
+        if (!T) return (int)0x88781162;
+        const dms_stynode *x = T->styles;
+        if (!x) return DMUS_E_NOT_FOUND;
+        dms_style *cur = x->style;
+        for (const dms_stynode *n = x->next; n && n->t <= mt; n = n->next) cur = n->style;
+        if (!cur) return STY_E_POINTER;
+        return STY_E_POINTER;
+    }
     return DMUS_E_GET_UNSUPPORTED;
 }
 
