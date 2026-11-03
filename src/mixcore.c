@@ -105,7 +105,7 @@ static inline void read_at(const rl_voice *v, uint64_t pos, uint32_t nframes, fl
     if (nxt >= nframes) { if (v->looping) nxt = 0; else have_next = 0; }
     float l0 = fetch(v, idx, 0), l1 = have_next ? fetch(v, nxt, 0) : 0.0f;
     *l = l0 + (l1 - l0) * frac;
-    if (v->channels >= 2) {
+    if (v->channels >= 2 && !(v->mono3d && v->channels > 2)) {          /* (mono3d: the mean, read once) */
         float r0 = fetch(v, idx, 1), r1 = have_next ? fetch(v, nxt, 1) : 0.0f;
         *r = r0 + (r1 - r0) * frac;
     } else {
@@ -330,7 +330,7 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
     const float *a = t->w + (size_t)(f32 >> 24) * T, *b = a + T;
     const float u = (float)(f32 & 0xFFFFFF) * (1.0f / 16777216.0f);
     const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
-    const int stereo = v->channels >= 2;
+    const int stereo = v->channels >= 2 && !(v->mono3d && v->channels > 2);   /* (mono3d: the mean, read once) */
     const int inside = base >= 0 && base + T <= (int64_t)nframes;
 #ifdef __SSE2__
     if (inside && v->sfmt == RL_S16 && v->channels <= 2) {

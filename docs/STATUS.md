@@ -160,8 +160,9 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   - a 3D buffer of any channel count from any object and descriptor (it plays as the mean of its channels while
     positioned);
   - an effects buffer of any format, object, size or flags. ALchemy has no effects (its SetFX and GetObjectInPath
-    answer DSERR_CONTROLUNAVAIL); reAL's run on the buffers Windows 7 would make (`fx_ok`), the others answer as
-    ALchemy;
+    answer DSERR_CONTROLUNAVAIL); reAL's run on the buffers Windows 7 would make (`fx_ok`: IDirectSound8, PCM 8/16 or
+    float, one or two channels, 100 to 200000 Hz, at least DSBSIZE_FX_MIN), the others answer as ALchemy. They
+    count as hardware voices in GetCaps, as every buffer not LOCSOFTWARE;
   - any rate from 1 Hz, any dwSize (the DirectX 8 fields read only from a full DSBUFFERDESC), sizes below
     DSBSIZE_MIN and above DSBSIZE_MAX (rounded up to a block), a size and a format given for the primary buffer;
   - refused, as ALchemy and Windows: WAVE_FORMAT_PCM and IEEE_FLOAT of more than two channels (reAL took them);
@@ -170,18 +171,21 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   taken (the mixer's loop wrap is now a division, so a step far longer than the buffer costs nothing).
 - Play takes any reserved value; Lock of 0 bytes locks nothing at the offset; the primary buffer can be locked below
   DSSCL_WRITEPRIMARY (what is written plays nowhere); notification positions past the end are taken (they never
-  fire); IDirectSoundNotify and IDirectSoundBuffer8 are given for any buffer, the primary too, IDirectSound3DBuffer
-  for any CTRL3D one and IDirectSound3DListener for the primary and any CTRL3D buffer; AcquireResources on a buffer
-  that isn't LOCDEFER is DS_OK; Initialize on an initialised object is DS_OK; an effects buffer can be duplicated
-  (the copy plays without effects).
+  fire), as are more than DSBNOTIFICATIONS_MAX positions (ALchemy takes 100001); IDirectSoundNotify and
+  IDirectSoundBuffer8 are given for any buffer, the primary too, IDirectSound3DBuffer for any CTRL3D one and
+  IDirectSound3DListener for the primary and any CTRL3D buffer; AcquireResources on a buffer that isn't LOCDEFER is
+  DS_OK; Initialize on an initialised object is DS_OK; an effects buffer can be duplicated (the copy plays without
+  effects).
 - GetStatus reports no location (reAL reported LOCHARDWARE / LOCSOFTWARE).
 - SetMinDistance(0) is refused with or without the fixes (ALchemy refuses it; a maximum of 0 only with the fixes).
-  SetAllParameters (buffer and listener) takes any values and applies the ones their own methods take; its dwSize
-  must be exact.
+  SetAllParameters (buffer and listener) takes any values and applies the ones their own methods take. The buffer's
+  dwSize must be exact; the listener's, not measured, at least its size, as before.
 - EAX: EAX 2, 3 and 4 matched value for value (every property's default, the 27 environments, edge values of each
   property). Changed:
   - EAX 1: a NaN refused (the old NaN test folded away under fast math), decay time clamped to 0.1..20, damping to
-    0..2, the reverb mix above 1 taken as 1;
+    0..2, volume to 0..1, alone or in the all-parameters set (ALchemy reads back the all-parameters set clamped
+    too: an infinite volume as 1, a tiny decay as 0.1; reAL took them as given, and an infinite or negative decay
+    made the reverb blow up), the reverb mix above 1 taken as 1;
   - QuerySupport answers on any buffer, GET | SET for a known set's id, E_NOTIMPL for an id the set lacks (support
     untouched), S_OK with no support for a set it doesn't know; an EAX 4 slot's ids are its effect's 0..25 and
     0x10000..0x10005; Get and Set answer E_INVALIDARG for anything refused, and write *pcbReturned only on success.

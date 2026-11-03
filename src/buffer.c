@@ -470,7 +470,7 @@ static ULONG buf_release(rl_buffer *b, int k)
     list_remove_all(dev, This);
     if (!This->is_primary) {
         dev->n_buffers--;
-        if (!(This->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers--;
+        if (!(This->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers--;
     }
     LeaveCriticalSection(&dev->lock);
 
@@ -511,11 +511,11 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
 static DWORD write_lead_bytes(rl_buffer *This)
 {
     /* how far ahead of the play cursor the "write" cursor sits: ~15 ms + one mix period */
-    DWORD rate = This->voice.rate ? This->voice.rate : orig_rate(This);
-    DWORD frames = rate * 15 / 1000;
-    if (This->dev->out_rate)
-        frames += (DWORD)((unsigned long long)This->dev->period_frames * rate / This->dev->out_rate);
-    return frames * This->voice.block;
+    unsigned long long rate = This->voice.rate ? This->voice.rate : orig_rate(This);
+    unsigned long long frames = rate * 15 / 1000;
+    if (This->dev->out_rate) frames += (unsigned long long)This->dev->period_frames * rate / This->dev->out_rate;
+    unsigned long long bytes = frames * This->voice.block;    /* (64-bit: any frequency is taken; at most the buffer) */
+    return bytes < This->voice.size ? (DWORD)bytes : This->voice.size;
 }
 
 /* effects: a fresh start at the play cursor (Play, SetCurrentPosition call Discontinuity).  DirectSound's mixer then
@@ -981,7 +981,9 @@ static HRESULT WINAPI dsb_AcquireResources(IDirectSoundBuffer8 *iface, DWORD fla
     EnterCriticalSection(&This->dev->lock);
     HRESULT hr = DS_OK;
     if (!(This->desc.dwFlags & DSBCAPS_LOCDEFER)) {
-        /* not a deferred buffer: nothing to place (ALchemy DS_OK, tests/alprobe.c misc; Windows refuses) */
+        /* not a deferred buffer: nothing to place (ALchemy DS_OK, tests/alprobe.c misc; Windows refuses); the
+         * effects' status still given when asked for in full */
+        if (count && results && count == rl_fxchain_count(This->fx)) rl_fxchain_status(This->fx, results, count);
     } else if (count != rl_fxchain_count(This->fx) || (count && !results)) hr = DSERR_INVALIDPARAM;
     else {
         if (This->fx) { rl_fxchain_place(This->fx, TRUE); This->fx_placed = TRUE; }
@@ -1023,7 +1025,11 @@ static HRESULT WINAPI ntf_SetNotificationPositions(IDirectSoundNotify *iface, DW
 {
     rl_buffer *This = NOTIFY(iface);
     if (count && !pos) return DSERR_INVALIDPARAM;
-    /* (offsets past the end: ALchemy takes them, tests/alprobe.c notify; they never fire) */
+    /* more than DSBNOTIFICATIONS_MAX taken, as ALchemy (tests/alprobe.c notify; Windows refuses them), but none
+     * whose size overflows the allocation below */
+    if (count > MAXDWORD / sizeof(rl_notify)) return DSERR_INVALIDPARAM;
+    /* (offsets past the end: ALchemy takes them, tests/alprobe.c notify; past the end never fires, at the end
+     * fires as the end) */
 
     rl_notify *n = NULL;
     if (count) {
@@ -1714,9 +1720,9 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
                     hr = DSERR_INVALIDPARAM; break;   /* ALchemy rejects NaNs (this test used to fold away) */
                 }
                 dev->eax1_env = r->environment > 25 ? 25 : r->environment;
-                dev->eax1_volume = r->volume;
-                dev->eax1_decay = r->decay;
-                dev->eax1_damping = r->damping;
+                dev->eax1_volume = clampf(r->volume, 0.0f, 1.0f);    /* (clamped as each value alone) */
+                dev->eax1_decay = clampf(r->decay, 0.1f, 20.0f);
+                dev->eax1_damping = clampf(r->damping, 0.0f, 2.0f);
                 break;
             }
             case EAX1_L_ENVIRONMENT: {
@@ -1998,12 +2004,14 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     if (SUCCEEDED(hr) && (desc->dwFlags & DSBCAPS_CTRLFX)) {
         /* effects buffers: ALchemy makes any (it has no effects: its SetFX answers DSERR_CONTROLUNAVAIL); reAL's
          * effects work on the ones Windows 7 makes - IDirectSound8 only, not hardware, not static, PCM 8/16 or float,
-         * at most two channels, at least DSBSIZE_FX_MIN ms - and SetFX on the others answers as ALchemy */
+         * at most two channels, 100 to 200000 Hz, at least DSBSIZE_FX_MIN ms - and SetFX on the others answers as
+         * ALchemy */
         const WAVEFORMATEX *w = &b->fmt.Format;
         HRESULT why = DS_OK;
         if (owner && !owner->is_ds8) why = DSERR_DS8_REQUIRED;
         else if (desc->dwFlags & DSBCAPS_LOCHARDWARE) why = E_NOTIMPL;
         else if ((desc->dwFlags & DSBCAPS_STATIC) || w->nChannels > 2 ||
+                 w->nSamplesPerSec < DSBFREQUENCY_MIN || w->nSamplesPerSec > DSBFREQUENCY_MAX ||
                  (sfmt != RL_U8 && sfmt != RL_S16 && sfmt != RL_F32)) why = DSERR_INVALIDPARAM;
         else if ((unsigned long long)desc->dwBufferBytes * 1000 < (unsigned long long)DSBSIZE_FX_MIN * w->nAvgBytesPerSec)
             why = DSERR_BUFFERTOOSMALL;
@@ -2078,7 +2086,7 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
     EnterCriticalSection(&dev->lock);
     list_add_all(dev, b);
     dev->n_buffers++;
-    if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
+    if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;
     rl_buffer_update_gains(b);
     b->lost = device_writeprimary(dev);     /* (made while an object writes the primary buffer) */
     LeaveCriticalSection(&dev->lock);
@@ -2128,7 +2136,7 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     b->lost = device_writeprimary(dev);
     list_add_all(dev, b);
     dev->n_buffers++;
-    if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers++;
+    if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers++;
     LeaveCriticalSection(&dev->lock);
     rl_device_addref(dev);
 
@@ -2199,7 +2207,7 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
         list_remove_all(dev, b);
         if (!b->is_primary) {
             dev->n_buffers--;
-            if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) dev->n_hw_buffers--;
+            if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers--;
         }
         b->next_playing = gone;
         gone = b;
@@ -2213,7 +2221,7 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
         list_add_all(grave, b);
         if (!b->is_primary) {
             grave->n_buffers++;
-            if (!(b->desc.dwFlags & (DSBCAPS_LOCSOFTWARE | DSBCAPS_CTRLFX))) grave->n_hw_buffers++;
+            if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) grave->n_hw_buffers++;
         }
         rl_device_addref(grave);
         b->dev = grave;
