@@ -270,7 +270,7 @@ Run with `WINEDLLOVERRIDES=dsound=n,b`. The output is `dstrace.log` next to the 
 
 Logs what a game asks DirectMusic to do (it's how reDM started). DirectMusic is a set of COM classes, so dmtrace is installed as their server for the current user instead of going into the game's folder:
 
-1. Put `dmtrace.dll` somewhere permanent, such as `C:\dmtrace\`.
+1. `./build.sh` builds it as `build/dmtrace/dmtrace.dll`, with `dmtest.exe` and `test.mid` beside it. Put `dmtrace.dll` somewhere permanent, such as `C:\dmtrace\`.
 2. Run `regsvr32 C:\dmtrace\dmtrace.dll`. No administrator rights are needed: it only writes to `HKCU\Software\Classes\CLSID`, so Windows' own registration is untouched. (Under Wine, whose COM ignores per-user classes, it also redirects the machine-wide entries and keeps the originals to restore.)
 3. Run the game, not as administrator. The log is `dmtrace.log` next to the game's exe.
 4. `regsvr32 /u C:\dmtrace\dmtrace.dll` uninstalls it.

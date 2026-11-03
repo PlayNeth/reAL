@@ -110,7 +110,7 @@ static int w_stop(void *c, void *v, rtime_t rt) { fprintf(g_out, "W stop v%d rt 
 static void w_free(void *c, void *v) {}
 static dm_wave *getwave(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
-    static struct { char name[256]; dm_wave *w; } cache[64];
+    static struct { char name[1200]; dm_wave *w; } cache[64];
     static int n;
     if (!file) return NULL;
     char path[1200];
@@ -124,14 +124,14 @@ static dm_wave *getwave(void *ctx, const dm_guid *g, const char *file, const cha
     fclose(f);
     dm_wave *w = dm_wave_load(b, sz);
     free(b);
-    if (w && n < 64) { snprintf(cache[n].name, 256, "%s", path); cache[n++].w = w; dm_wave_addref(w); }
+    if (w && n < 64) { snprintf(cache[n].name, sizeof(cache[n].name), "%s", path); cache[n++].w = w; dm_wave_addref(w); }
     return w;
 }
 
 /* style references: the file next to the segment ('DMST' form), loaded once */
 static dms_style *getstyle(void *ctx, const dm_guid *g, const char *file, const char *name)
 {
-    static struct { char name[256]; dms_style *s; } cache[16];
+    static struct { char name[1200]; dms_style *s; } cache[16];
     static int n;
     if (!file) return NULL;
     char path[1200];
@@ -146,7 +146,7 @@ static dms_style *getstyle(void *ctx, const dm_guid *g, const char *file, const 
     int32_t hr;
     dms_style *s = dms_style_load(b + 12, (size_t)sz - 12, getcoll, NULL, &hr);
     free(b);
-    if (s && n < 16) { snprintf(cache[n].name, 256, "%s", path); cache[n++].s = s; dms_style_addref(s); }
+    if (s && n < 16) { snprintf(cache[n].name, sizeof(cache[n].name), "%s", path); cache[n++].s = s; dms_style_addref(s); }
     return s;
 }
 
