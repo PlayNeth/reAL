@@ -22,3 +22,9 @@ and which ALchemy dsound.dll was used. The reAL in the kit runs with fixes=false
 ALchemy's twin.
 
 If a run crashes or hangs, dsfuzz.exe notes it in the results and the script goes on with the next batch.
+
+Two more passes, if asked for them (ALchemy only, nothing is compared on your PC):
+- run2.bat runs the same calls one seed per process, so a crash loses one seed and not 25. It takes an hour or more
+  and writes results2.zip.
+- run3.bat runs alprobe.exe, DirectSound and EAX case by case, in a few minutes, and writes results3.zip.
+Each pass writes its own folder and zip, so running one doesn't touch another's results.

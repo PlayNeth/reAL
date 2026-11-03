@@ -632,7 +632,8 @@ Smaller items still open:
   ALchemy only.
   - `tools/alchemy-kit` (run.bat, README.txt, reAL.ini with `fixes=false`; add `dsfuzz.exe` and reAL's
     `dsound.dll`) runs dsfuzz on a Windows PC, under ALchemy's dsound.dll and under reAL's: 600 seeds of plain
-    calls, 600 of EAX calls, and the format sweep.
+    calls, 600 of EAX calls, and the format sweep. `run2.bat` runs ALchemy alone, one seed per process (a crash
+    loses one seed); `run3.bat` runs `alprobe.exe` (tests/alprobe.c, DirectSound and EAX case by case) under ALchemy.
   - `tests/fuzzcmp.py --files ALchemy_ds.txt reAL_ds.txt` compares what comes back.
   - A crash or hang (`DSFUZZ_TIMEOUT`) is printed and ends the batch without a dialog.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and

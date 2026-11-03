@@ -258,7 +258,7 @@ static void sec_ctrl(void)
             CASE("primary SetPan(%ld) %08lx get %08lx %ld\n", pans[k], a, c, g);
         }
         DWORD g = 12345; HRESULT a = IDirectSoundBuffer_SetFrequency(p, 22050), c = IDirectSoundBuffer_GetFrequency(p, &g);
-        CASE("primary SetFrequency(22050) %08lx get %08lx\n", a, c);
+        CASE("primary SetFrequency(22050) %08lx get %08lx %lu\n", a, c, g);
         IDirectSoundBuffer_Release(p);
     }
 }
@@ -370,8 +370,13 @@ static void sec_notify(void)
             hr = IDirectSoundNotify_SetNotificationPositions(n, c[k].n, c[k].nullptr ? NULL : p);
             CASE("ctl %d notify %s: %08lx\n", ctl, c[k].what, hr);
         }
-        hr = IDirectSoundNotify_SetNotificationPositions(n, 100001, p);
-        CASE("ctl %d notify 100001 positions: %08lx\n", ctl, hr);
+        DSBPOSITIONNOTIFY *many = calloc(100001, sizeof(*many));     /* (a real array: an implementation may read it all) */
+        if (many) {
+            for (int i = 0; i < 100001; i++) { many[i].dwOffset = 4 * (DWORD)(i % 2048); many[i].hEventNotify = ev; }
+            hr = IDirectSoundNotify_SetNotificationPositions(n, 100001, many);
+            CASE("ctl %d notify 100001 positions: %08lx\n", ctl, hr);
+            free(many);
+        }
         IDirectSoundBuffer_Play(b, 0, 0, DSBPLAY_LOOPING);
         p[0].dwOffset = 100; p[0].hEventNotify = ev;
         hr = IDirectSoundNotify_SetNotificationPositions(n, 1, p);
@@ -411,7 +416,7 @@ static void sec_misc(void)
     IDirectSound8_SetCooperativeLevel(s_ds8, GetDesktopWindow(), DSSCL_PRIORITY);
     P(" at PRIORITY %08lx\n", IDirectSound8_Compact(s_ds8));
     /* speaker config */
-    DWORD orig = 0; IDirectSound8_GetSpeakerConfig(s_ds8, &orig);
+    DWORD orig = 0; HRESULT hsc = IDirectSound8_GetSpeakerConfig(s_ds8, &orig);
     static const DWORD sc[] = { DSSPEAKER_HEADPHONE, DSSPEAKER_MONO, DSSPEAKER_QUAD, DSSPEAKER_STEREO, DSSPEAKER_SURROUND,
                                 DSSPEAKER_5POINT1, DSSPEAKER_7POINT1, 9, 10, 0xff, DSSPEAKER_COMBINED(DSSPEAKER_STEREO, 5),
                                 DSSPEAKER_COMBINED(DSSPEAKER_STEREO, 181), 0 };
@@ -421,7 +426,7 @@ static void sec_misc(void)
         HRESULT h2 = IDirectSound8_GetSpeakerConfig(s_ds8, &g);
         CASE("SetSpeakerConfig(%lx) %08lx get %08lx %s\n", sc[k], hr, h2, g == orig ? "unchanged" : g == sc[k] ? "as set" : "other");
     }
-    IDirectSound8_SetSpeakerConfig(s_ds8, orig);      /* (back as it was: Windows 7's DirectSound keeps it in the registry) */
+    if (SUCCEEDED(hsc)) IDirectSound8_SetSpeakerConfig(s_ds8, orig);   /* (back as it was: Windows 7's DirectSound keeps it in the registry) */
     /* caps sizes */
     static const DWORD cs[] = { 0, sizeof(DSCAPS) - 1, sizeof(DSCAPS), sizeof(DSCAPS) + 1 };
     for (unsigned k = 0; k < 4; k++) {
@@ -518,7 +523,7 @@ static void sec_d3(void)
     if (FAILED(mk((IDirectSound *)s_ds8, DSBCAPS_CTRL3D, &e, 44100, sizeof(DSBUFFERDESC), &b))) return;
     IDirectSound3DBuffer *d = NULL;
     IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&d);
-    if (!d) return;
+    if (!d) { IDirectSoundBuffer_Release(b); return; }
     char s1[32], s2[32];
     static const float dv[] = { -1.0f, 0.0f, 1e-30f, 0.5f, 1.0f, 1e9f, 1e30f, FLT_MAX };
     for (unsigned k = 0; k < sizeof(dv) / sizeof(dv[0]); k++) {
@@ -676,7 +681,7 @@ static void sec_eax(void)
     /* environments: EAX1 (id 1), EAX2 (id 11), EAX3 (id 2), EAX4 slot 0 (id 2), each read back whole */
     IKsPropertySet *ks;
     IDirectSoundBuffer *b = eax_buffer(DSBCAPS_CTRL3D, &ks);
-    if (!ks) return;
+    if (!ks) { if (b) IDirectSoundBuffer_Release(b); return; }
     static const struct { unsigned set; ULONG env, all, len; } ev[] = { { 0, 1, 0, 16 }, { 2, 11, 1, 256 }, { 4, 2, 1, 256 }, { 8, 2, 1, 256 } };
     for (unsigned k = 0; k < 4; k++)
         for (DWORD env = 0; env <= 27; env++) {
@@ -694,7 +699,7 @@ static void sec_eaxval(void)
 {
     IKsPropertySet *ks;
     IDirectSoundBuffer *b = eax_buffer(DSBCAPS_CTRL3D, &ks);
-    if (!ks) { CASE("no IKsPropertySet\n"); return; }
+    if (!ks) { CASE("no IKsPropertySet\n"); if (b) IDirectSoundBuffer_Release(b); return; }
     static const LONG iv[] = { -10001, -10000, -9999, -100, -1, 0, 1, 99, 100, 1000, 1001, 10000, 0x7fffffff };
     static const float fv[] = { -1.0f, 0.0f, 0.001f, 0.1f, 0.5f, 0.99f, 1.0f, 1.01f, 2.0f, 5.0f, 10.0f, 20.0f, 100.0f,
                                 1000.0f, 20000.0f, 20001.0f, 1e30f };
