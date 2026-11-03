@@ -126,7 +126,7 @@ void rl_hrtf_voice_set(rl_hrtf_voice *v, const rl_hrtf_filter *f)
     for (int ch = 0; ch < 2; ch++)
         for (int k = 0; k < RL_HRTF_MAX_TAPS; k++)
             v->target.coef[ch][RL_HRTF_MAX_TAPS - 1 - k] = f->coef[ch][k];
-    if (!v->have_cur) { v->cur = *f; v->have_cur = 1; v->dirty = 0; }
+    if (!v->have_cur) { v->cur = v->target; v->have_cur = 1; v->dirty = 0; }
     else v->dirty = 1;
 }
 
