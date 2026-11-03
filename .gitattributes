@@ -1,0 +1,4 @@
+# Windows files: CRLF in the working tree
+tools/alchemy-kit/*.bat text eol=crlf
+tools/alchemy-kit/*.txt text eol=crlf
+tools/alchemy-kit/*.ini text eol=crlf

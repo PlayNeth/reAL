@@ -4,6 +4,11 @@ the first call whose result differs.  After a first difference the two runs may 
 only), so only the first one per seed counts; many seeds give many first differences, grouped by call.
 
     tests/fuzzcmp.py <first seed> <seeds> [ops per seed] [--raw] [--show N]
+    tests/fuzzcmp.py --files <reference.txt> <real.txt> [--name NAME] [--show N]
+
+--files compares two outputs already made, such as dsfuzz.exe run on a Windows machine under ALchemy and under reAL
+(tools/alchemy-kit): every seed in the first file, and no Windows-specific filtering (--raw); --name names the first
+side (default ALchemy).
 
 Known differences, where reAL keeps ALchemy's answers on purpose (docs/STATUS.md), are taken out first:
 the LOCHARDWARE / LOCSOFTWARE bits of GetCaps and GetStatus.  --raw keeps them.
@@ -44,8 +49,10 @@ def severity(l1, l2):
     if fa and fb: return 4
     return 2
 
-LABEL = { 1: 'reAL refuses, Windows accepts', 2: 'different answers', 3: 'Windows refuses, reAL accepts (lenient)',
-          4: 'both refuse, other codes (not counted as a first difference)' }
+REF = 'Windows'
+def labels():
+    return { 1: 'reAL refuses, %s accepts' % REF, 2: 'different answers', 3: '%s refuses, reAL accepts (lenient)' % REF,
+             4: 'both refuse, other codes (not counted as a first difference)' }
 
 def is_primary(line):
     m = re.match(r'\d+ (?:p\d+ |ds\d CreateSoundBuffer\(size \d+ flags ([0-9a-f]+))', line)
@@ -62,17 +69,28 @@ def seeds(text):
 
 def sig(line):
     """the call, without its arguments' values: '<object kind> <method>'"""
-    m = re.match(r'\d+ (ds\d|[bp]\d+) ([A-Za-z.]+)', line)
+    m = re.match(r'\d+ (ds\d|[bp]\d+) ([A-Za-z.]+)(?:\((set \d+))?', line)
     if not m:
         return line.split(' ')[0]
-    return ('p ' if m.group(1).startswith('p') else 'ds ' if m.group(1).startswith('ds') else 'b ') + m.group(2)
+    return ('p ' if m.group(1).startswith('p') else 'ds ' if m.group(1).startswith('ds') else 'b ') + m.group(2) + \
+           (' ' + m.group(3) if m.group(3) else '')
 
 def main():
-    a = [x for x in sys.argv[1:] if not x.startswith('--')]
-    raw = '--raw' in sys.argv
+    global REF
+    argv = sys.argv[1:]
     show = 3
-    if '--show' in sys.argv:
-        show = int(sys.argv[sys.argv.index('--show') + 1]); a.remove(str(show))
+    if '--show' in argv:
+        k = argv.index('--show'); show = int(argv[k + 1]); del argv[k:k + 2]
+    if '--name' in argv:
+        k = argv.index('--name'); REF = argv[k + 1]; del argv[k:k + 2]
+    if '--files' in argv:
+        k = argv.index('--files')
+        if '--name' not in sys.argv: REF = 'ALchemy'
+        ms = seeds(open(argv[k + 1], errors='replace').read())
+        rl = seeds(open(argv[k + 2], errors='replace').read())
+        return report(ms, rl, sorted(ms), True, show)
+    a = [x for x in argv if not x.startswith('--')]
+    raw = '--raw' in argv
     first, n = int(a[0]), int(a[1])
     ops = a[2] if len(a) > 2 else '200'
     comcmp = os.environ.get('COMCMP', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'comcmp.sh'))
@@ -87,12 +105,16 @@ def main():
         rl.update(seeds(open(os.path.join(wd, 'real.txt'), errors='replace').read()))
         if '--progress' in sys.argv:
             print('seeds %d-%d done' % (c, c + k - 1), file=sys.stderr)
+    report(ms, rl, range(first, first + n), raw, show)
+
+def report(ms, rl, seedlist, raw, show):
     groups = defaultdict(list)
     same = 0
-    for s in range(first, first + n):
+    n = len(seedlist)
+    for s in seedlist:
         x, y = ms.get(s), rl.get(s)
         if x is None or y is None:
-            groups[(0, '(seed missing: %s)' % ('both' if x is None and y is None else 'Windows' if x is None else 'reAL'))].append((s, '', ''))
+            groups[(0, '(seed missing: %s)' % ('both' if x is None and y is None else REF if x is None else 'reAL'))].append((s, '', ''))
             continue
         # matched by operation number (an operation may print on one side only, when the two went apart)
         def byop(lines):
@@ -127,11 +149,12 @@ def main():
         else:
             same += 1
     print('%d of %d seeds the same' % (same, n))
+    LABEL = labels()
     LABEL[0] = 'missing'; LABEL[5] = 'primary buffer (known: ALchemy\'s)'; LABEL[6] = 'non-finite 3D value refused (known: ALchemy\'s)'
     for g, v in sorted(groups.items(), key=lambda kv: (kv[0][0], -len(kv[1]))):
         print('\n== [%s] %s: %d seed%s' % (LABEL[g[0]], g[1], len(v), '' if len(v) == 1 else 's'))
         for s, l1, l2 in v[:show]:
-            print('  seed %d\n    Windows: %s\n    reAL:    %s' % (s, l1, l2))
+            print('  seed %d\n    %-8s %s\n    reAL:    %s' % (s, REF + ':', l1, l2))
 
 if __name__ == '__main__':
     main()

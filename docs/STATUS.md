@@ -580,6 +580,15 @@ Smaller items still open:
   chunks of 25 seeds) and lists each seed's first difference by risk; `dsfuzz.exe formats` sweeps CreateSoundBuffer
   over a grid of formats. Windows 7's DirectSound divides by zero on some CTRLFX formats (24-bit, more than two
   channels, WAVE_FORMAT_EXTENSIBLE), which the sweep leaves out.
+- **Against ALchemy:** `dsfuzz.exe <first> <seeds> [ops] eax` adds IKsPropertySet calls: QuerySupport, Get and Set
+  of the EAX 1-5 sets and the voice manager's, with edge sizes, ids and values. Half the Sets start from what the
+  property holds, with one value changed, and every Set is read back. Windows has no EAX, so this mode is for
+  ALchemy only.
+  - `tools/alchemy-kit` (run.bat, README.txt, reAL.ini with `fixes=false`; add `dsfuzz.exe` and reAL's
+    `dsound.dll`) runs dsfuzz on a Windows PC, under ALchemy's dsound.dll and under reAL's: 600 seeds of plain
+    calls, 600 of EAX calls, and the format sweep.
+  - `tests/fuzzcmp.py --files ALchemy_ds.txt reAL_ds.txt` compares what comes back.
+  - A crash or hang (`DSFUZZ_TIMEOUT`) is printed and ends the batch without a dialog.
 - `comcmp.sh` uses `/tmp/real/sp/com` (`COMCMP_DIR`), the Microsoft prefix `/tmp/real/sp/msprefix` and
   the reAL prefix `/tmp/real/sp/realprefix` (`REAL_PREFIX`).
 - `build/lockstress.exe <seconds> <segments...> [script.spt]` (Wine) runs four threads on one loader and one

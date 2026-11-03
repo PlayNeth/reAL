@@ -1,6 +1,7 @@
 /* dsfuzz - random DirectSound calls, the same on any DLL, to compare reAL with Microsoft's line by line
  *
- *   dsfuzz.exe <first seed> <seeds> [ops per seed]
+ *   dsfuzz.exe <first seed> <seeds> [ops per seed] [eax]
+ *   dsfuzz.exe formats
  *
  * Each seed makes an IDirectSound8 (and an IDirectSound), then does random calls on it and on the buffers, 3D
  * buffers, listeners and notifies it makes, with values drawn mostly from the edges (sizes a byte off a block, rates
@@ -9,7 +10,14 @@
  *
  * Only what doesn't depend on timing is printed: a playing buffer's position, Lock from the write cursor while
  * playing and the PLAYING bit of a buffer playing once are left out.  Pointers given are NULL or valid (a call with a
- * bad pointer may crash either DLL); a DirectSound object is released only after its buffers. */
+ * bad pointer may crash either DLL); a DirectSound object is released only after its buffers.
+ *
+ * `eax` adds IKsPropertySet calls on every kind of buffer: QuerySupport, Get and Set of the EAX 1-5 property sets (and
+ * the voice manager's), with sizes, ids and values from the edges, each Set read back.  Windows' DirectSound has no EAX,
+ * so this mode is for comparing reAL with ALchemy (tests/fuzzcmp.py --files).
+ *
+ * A crash prints "CRASH <code> at op <n>" and ends the process; DSFUZZ_TIMEOUT=<seconds> ends a hung run with
+ * "TIMEOUT".  Neither shows a dialog, so a script running chunks goes on with the next. */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -676,11 +684,148 @@ static void op_ds(void)
 }
 
 typedef void (*opfn)(void);
+/* ------------------------------------------------------------------ EAX through IKsPropertySet (`eax` mode) */
+static const GUID k_eax_sets[] = {
+    { 0x4a4e6fc1, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } },   /* EAX 1 listener (reverb) */
+    { 0x4a4e6fc0, 0xc341, 0x11d1, { 0xb7, 0x3a, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 } },   /* EAX 1 buffer */
+    { 0x0306a6a8, 0xb224, 0x11d2, { 0x99, 0xe5, 0x00, 0x00, 0xe8, 0xd8, 0xc7, 0x22 } },   /* EAX 2 listener */
+    { 0x0306a6a7, 0xb224, 0x11d2, { 0x99, 0xe5, 0x00, 0x00, 0xe8, 0xd8, 0xc7, 0x22 } },   /* EAX 2 buffer */
+    { 0xa8fa6882, 0xb476, 0x11d3, { 0xbd, 0xb9, 0x00, 0xc0, 0xf0, 0x2d, 0xdf, 0x87 } },   /* EAX 3 listener */
+    { 0xa8fa6881, 0xb476, 0x11d3, { 0xbd, 0xb9, 0x00, 0xc0, 0xf0, 0x2d, 0xdf, 0x87 } },   /* EAX 3 buffer */
+    { 0x1d4870ad, 0x0def, 0x43c0, { 0xa4, 0x0c, 0x52, 0x36, 0x32, 0x29, 0x63, 0x42 } },   /* EAX 4 context */
+    { 0x1b86b823, 0x22df, 0x4eae, { 0x8b, 0x3c, 0x12, 0x78, 0xce, 0x54, 0x42, 0x27 } },   /* EAX 4 source */
+    { 0xc4d79f1e, 0xf1ac, 0x436b, { 0xa8, 0x1d, 0xa7, 0x38, 0xe7, 0x04, 0x54, 0x69 } },   /* EAX 4 FX slot 0 */
+    { 0x08c00e96, 0x74be, 0x4491, { 0x93, 0xaa, 0xe8, 0xad, 0x35, 0xa4, 0x91, 0x17 } },   /* slot 1 */
+    { 0x1d433b88, 0xf0f6, 0x4637, { 0x91, 0x9f, 0x60, 0xe7, 0xe0, 0x6b, 0x5e, 0xdd } },   /* slot 2 */
+    { 0xefff08ea, 0xc7d8, 0x44ab, { 0x93, 0xad, 0x6d, 0xbd, 0x5f, 0x91, 0x00, 0x64 } },   /* slot 3 */
+    { 0x57e13437, 0xb932, 0x4ab2, { 0xb8, 0xbd, 0x52, 0x66, 0xc1, 0xa8, 0x87, 0xee } },   /* EAX 5 context */
+    { 0x5edf82f0, 0x24a7, 0x4f38, { 0x8e, 0x64, 0x2f, 0x09, 0xca, 0x05, 0xde, 0xe1 } },   /* EAX 5 source */
+    { 0x62a69bae, 0xdf9d, 0x11d1, { 0x99, 0xa6, 0x00, 0xc0, 0x4f, 0xc9, 0x9d, 0x46 } },   /* voice manager */
+    { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } },
+};
+/* GUIDs some properties take as values: slots, the primary slot, effects */
+static const GUID k_eax_values[] = {
+    { 0xf317866d, 0x924c, 0x450c, { 0x86, 0x1b, 0xe6, 0xda, 0xa2, 0x5e, 0x7c, 0x20 } },   /* EAX 4 primary slot */
+    { 0xc4d79f1e, 0xf1ac, 0x436b, { 0xa8, 0x1d, 0xa7, 0x38, 0xe7, 0x04, 0x54, 0x69 } },
+    { 0x08c00e96, 0x74be, 0x4491, { 0x93, 0xaa, 0xe8, 0xad, 0x35, 0xa4, 0x91, 0x17 } },
+    { 0x1d433b88, 0xf0f6, 0x4637, { 0x91, 0x9f, 0x60, 0xe7, 0xe0, 0x6b, 0x5e, 0xdd } },
+    { 0xefff08ea, 0xc7d8, 0x44ab, { 0x93, 0xad, 0x6d, 0xbd, 0x5f, 0x91, 0x00, 0x64 } },
+    { 0x0cf95c8f, 0xa3cc, 0x4849, { 0xb0, 0xb6, 0x83, 0x2e, 0xcc, 0x18, 0x22, 0xdf } },   /* reverb */
+    { 0x0e9f1bc0, 0xac82, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } },   /* echo */
+    { 0xde6d6fe0, 0xac79, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } },   /* chorus */
+    { 0x975a4ce0, 0xac7e, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } },   /* distortion */
+    { 0xbfb7a01e, 0x7825, 0x4039, { 0x92, 0x7f, 0x03, 0xaa, 0xbd, 0xa0, 0xc5, 0x60 } },   /* AGC compressor */
+    { 0xe7905100, 0xafb2, 0x11d2, { 0x88, 0xdd, 0x00, 0xa0, 0x24, 0xd1, 0x3c, 0xe1 } },   /* pitch shifter */
+    { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } },
+};
+static const ULONG k_eax_sizes[] = { 0, 1, 3, 4, 4, 4, 8, 12, 16, 16, 20, 24, 28, 36, 40, 44, 56, 60, 64, 92, 100, 104, 128 };
+
+static void eax_fill(DWORD *w, unsigned n)
+{
+    static const DWORD k_int[] = { 0, 0, 1, 2, 3, 4, 25, 26, 100, 0x3f, 0xffffffff, 0x80000000, 0x7fffffff,
+                                   (DWORD)-10001, (DWORD)-10000, (DWORD)-9999, (DWORD)-1000, (DWORD)-100 };
+    for (unsigned k = 0; k < n; k++) {
+        unsigned r = rn(100);
+        if (r < 40) w[k] = PICK(k_int);
+        else if (r < 85) { float f = fval(); memcpy(&w[k], &f, 4); }
+        else w[k] = rnd() ^ rnd() << 16;
+    }
+    if (n >= 4 && chance(15)) {
+        unsigned at = chance(70) ? 0 : 4 * rn(n / 4);
+        memcpy(&w[at], &PICK(k_eax_values), 16);
+    }
+}
+
+static void eax_dump(const DWORD *w, ULONG bytes)
+{
+    if (bytes > 128) bytes = 128;
+    P(" [");
+    for (ULONG k = 0; k < bytes / 4; k++) P(k ? " %08lx" : "%08lx", w[k]);
+    for (ULONG k = bytes & ~3u; k < bytes; k++) P(" .%02x", ((const BYTE *)w)[k]);
+    P("]");
+}
+
+static void op_eax(void)
+{
+    int i = any_buf();
+    if (i < 0) return;
+    if (chance(70)) {                               /* mostly a 3D buffer's, where EAX lives */
+        int n = 0, idx[NBUF];
+        for (int k = 0; k < NBUF; k++) if (s_buf[k].b && s_buf[k].d3) idx[n++] = k;
+        if (n) i = idx[rn(n)];
+    }
+    IKsPropertySet *ks = NULL;
+    HRESULT hr = IDirectSoundBuffer_QueryInterface(s_buf[i].b, &IID_IKsPropertySet, (void **)&ks);
+    if (FAILED(hr) || !ks) { P("%d %c%d qiks %08lx\n", s_op, BL(i), i, hr); return; }
+    unsigned set = rn(sizeof(k_eax_sets) / sizeof(k_eax_sets[0]));
+    const GUID *g = &k_eax_sets[set];
+    ULONG id = rn(100) < 85 ? rn(32) : PICK(((ULONG[]){ 0x7fffffff, 0xffffffff, 100, 1000 }));
+    if (chance(20)) id |= 0x80000000;               /* EAX 2-3: the deferred flag */
+    DWORD w[64];                                    /* 256 bytes: room to see a write past the length given */
+    switch (rn(10)) {
+    case 0: case 1: {                               /* QuerySupport */
+        ULONG sup = 0xdead;
+        hr = IKsPropertySet_QuerySupport(ks, g, id, &sup);
+        P("%d %c%d Ks.QuerySupport(set %u id %lx) %08lx %lx\n", s_op, BL(i), i, set, id, hr, sup);
+        break;
+    }
+    case 2: case 3: case 4: {                       /* Get */
+        ULONG len = PICK(k_eax_sizes), got = 0xdead;
+        memset(w, 0xcd, sizeof(w));
+        hr = IKsPropertySet_Get(ks, g, id, NULL, 0, len ? w : NULL, len, chance(95) ? &got : NULL);
+        P("%d %c%d Ks.Get(set %u id %lx len %lu) %08lx got %lx", s_op, BL(i), i, set, id, len, hr, got);
+        eax_dump(w, len);
+        {   /* bytes written past the length given: their first and last offset */
+            const BYTE *by = (const BYTE *)w;
+            ULONG lo = sizeof(w), hi = 0;
+            for (ULONG k = len; k < sizeof(w); k++) if (by[k] != 0xcd) { if (lo == sizeof(w)) lo = k; hi = k + 1; }
+            if (hi) P(" overrun %lu-%lu", lo, hi);
+        }
+        P("\n");
+        break;
+    }
+    default: {                                      /* Set, and read back what it holds */
+        ULONG len = PICK(k_eax_sizes);
+        eax_fill(w, 32);
+        if (chance(50)) {
+            /* half the time from what the property holds, one value changed: most of it valid */
+            DWORD cur[64]; ULONG n = 0;
+            memset(cur, 0, sizeof(cur));
+            if (SUCCEEDED(IKsPropertySet_Get(ks, g, id & 0x7fffffff, NULL, 0, cur, 128, &n)) && n >= 4 && n <= 128) {
+                DWORD one = w[0];
+                memcpy(w, cur, n);
+                if (chance(85)) w[rn(n / 4)] = one;
+                len = chance(90) ? n : PICK(k_eax_sizes);
+            }
+        }
+        hr = IKsPropertySet_Set(ks, g, id, NULL, 0, len ? w : NULL, len);
+        P("%d %c%d Ks.Set(set %u id %lx len %lu", s_op, BL(i), i, set, id, len);
+        eax_dump(w, len);
+        P(") %08lx", hr);
+        ULONG got = 0xdead, rid = id & 0x7fffffff;
+        memset(w, 0xcd, sizeof(w));
+        hr = IKsPropertySet_Get(ks, g, rid, NULL, 0, w, 128, &got);
+        P(" | get(id %lx) %08lx got %lx", rid, hr, got);
+        if (SUCCEEDED(hr)) eax_dump(w, got < 128 ? got : 128);
+        P("\n");
+    }
+    }
+    IKsPropertySet_Release(ks);
+}
+
+static const struct { opfn f; int w; } k_eax_ops[] = {
+    { op_create, 14 }, { op_duplicate, 3 }, { op_release, 3 }, { op_qi, 1 }, { op_volpanfreq, 3 }, { op_play, 4 },
+    { op_stop, 2 }, { op_3d, 6 }, { op_listener, 4 }, { op_eax, 30 },
+};
+
 static const struct { opfn f; int w; } k_ops[] = {
     { op_create, 14 }, { op_duplicate, 4 }, { op_release, 5 }, { op_refs, 2 }, { op_qi, 3 }, { op_caps, 2 },
     { op_getformat, 3 }, { op_setformat, 4 }, { op_volpanfreq, 8 }, { op_play, 6 }, { op_stop, 4 }, { op_position, 6 },
     { op_lock, 10 }, { op_status_misc, 4 }, { op_fx, 4 }, { op_notify, 4 }, { op_3d, 10 }, { op_listener, 6 }, { op_ds, 5 },
 };
+
+static int s_eax_mode;
+static int s_kind = -1;                 /* the running op's index in its table (for CRASH / TIMEOUT) */
 
 static void run_seed(unsigned seed, int ops)
 {
@@ -694,16 +839,20 @@ static void run_seed(unsigned seed, int ops)
     P("DirectSoundCreate %08lx\n", hr);
     for (int k = 0; k < 2; k++)
         if (s_ds[k]) IDirectSound8_SetCooperativeLevel(s_ds[k], GetDesktopWindow(), chance(80) ? DSSCL_PRIORITY : DSSCL_NORMAL);
+    const struct { opfn f; int w; } *tab = s_eax_mode ? (const void *)k_eax_ops : (const void *)k_ops;
+    unsigned ntab = s_eax_mode ? sizeof(k_eax_ops) / sizeof(k_eax_ops[0]) : sizeof(k_ops) / sizeof(k_ops[0]);
     int total = 0;
-    for (unsigned k = 0; k < sizeof(k_ops) / sizeof(k_ops[0]); k++) total += k_ops[k].w;
+    for (unsigned k = 0; k < ntab; k++) total += tab[k].w;
     for (s_op = 0; s_op < ops; s_op++) {
         int r = rn(total);
         unsigned k = 0;
-        while (r >= k_ops[k].w) r -= k_ops[k].w, k++;
+        while (r >= tab[k].w) r -= tab[k].w, k++;
         if (s_trace) { fprintf(stderr, "op %d: %u\n", s_op, k); fflush(stderr); }
-        k_ops[k].f();
+        s_kind = (int)k;
+        tab[k].f();
         fflush(stdout);
     }
+    s_kind = -2;                        /* the cleanup: buffers, then the DirectSound objects */
     for (int i = 0; i < NBUF; i++) if (s_buf[i].b) drop(i);
     for (int k = 0; k < 2; k++) if (s_ds[k]) { P("ds%d Release %lu\n", k, IDirectSound8_Release(s_ds[k])); s_ds[k] = NULL; }
     fflush(stdout);
@@ -793,11 +942,56 @@ static void formats(void)
     for (int k = 0; k < 2; k++) IDirectSound8_Release(s_ds[k]);
 }
 
+/* where: module and offset, and the op running (its index in the op table; -2 the cleanup) */
+static void where(const void *addr)
+{
+    HMODULE m = NULL;
+    char path[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)addr, &m) && m)
+        GetModuleFileNameA(m, path, MAX_PATH);
+    const char *base = strrchr(path, '\\');
+    P(" in %s+%lx kind %d", base ? base + 1 : path, (unsigned long)((const char *)addr - (const char *)m), s_kind);
+}
+
+static LONG WINAPI on_crash(EXCEPTION_POINTERS *e)
+{
+    P("CRASH %08lx at op %d", e->ExceptionRecord->ExceptionCode, s_op);
+    where(e->ExceptionRecord->ExceptionAddress);
+    if (e->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && e->ExceptionRecord->NumberParameters >= 2)
+        P(" (%s %08lx)", e->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
+          (unsigned long)e->ExceptionRecord->ExceptionInformation[1]);
+    P("\n");
+    fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 3);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static DWORD WINAPI watchdog(LPVOID arg)
+{
+    Sleep((DWORD)(UINT_PTR)arg * 1000);
+    P("TIMEOUT at op %d kind %d\n", s_op, s_kind);
+    fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 4);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    SetUnhandledExceptionFilter(on_crash);
+    const char *to = getenv("DSFUZZ_TIMEOUT");
+    if (to && atoi(to) > 0) CreateThread(NULL, 0, watchdog, (LPVOID)(UINT_PTR)atoi(to), 0, NULL);
+    if (getenv("DSFUZZ_WHICH")) {
+        /* which dsound.dll this run uses (before the first seed, so the comparison skips it) */
+        char path[MAX_PATH] = "";
+        HMODULE m = LoadLibraryA("dsound.dll");
+        if (m) GetModuleFileNameA(m, path, MAX_PATH);
+        P("dsound: %s\n", m ? path : "(none)");
+    }
     if (argc > 1 && !strcmp(argv[1], "formats")) { CoInitialize(NULL); formats(); P("END\n"); return 0; }
     unsigned first = argc > 1 ? (unsigned)atoi(argv[1]) : 1, n = argc > 2 ? (unsigned)atoi(argv[2]) : 20;
     int ops = argc > 3 ? atoi(argv[3]) : 200;
+    s_eax_mode = argc > 4 && !strcmp(argv[4], "eax");
     CoInitialize(NULL);
     s_trace = getenv("DSFUZZ_TRACE") != NULL;
     for (int k = 0; k < 4; k++) s_event[k] = CreateEventA(NULL, FALSE, FALSE, NULL);
