@@ -32,6 +32,14 @@ resampler=sinc
 ;cmss=off
 ;cmssintensity=0
 
+; HRTF for 3D sounds on headphones:
+;   auto    (default) a reAL_hrtf.bin next to dsound.dll or in the Windows folder, if there is one; otherwise
+;           stereo panning, as ALchemy without HRTF data
+;   builtin the built-in set: the MIT KEMAR dummy head (Gardner and Martin, MIT Media Lab, 1994). Not ALchemy's
+;           sound, but needs no measurement
+;   <path>  a reAL_hrtf.bin elsewhere;  off  panning always
+;hrtf=auto
+
 ; fixes: where ALchemy lets through what Windows refuses and it does harm (a zero 3D distance, a Doppler shift or
 ; gain that overflows), reAL refuses or tames it, and reAL's effects fix dsdmo's flaws. fixes=false (or REAL_NOFIXES
 ; in the environment) behaves as ALchemy and dsdmo do.

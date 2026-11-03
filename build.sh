@@ -16,7 +16,7 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/refused.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/virt.c src/alrv.c src/hrtf.c"
+SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/refused.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/virt.c src/alrv.c src/hrtf.c src/hrtf_builtin.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/speakers.c src/cmss3.c src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reDM: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
@@ -102,8 +102,8 @@ $CC -O1 -Wno-format -o build/porttest.exe tests/porttest.c -ldsound -lole32 -luu
 $CC -O1 -Wno-format -o build/dx6test.exe tests/dx6test.c -ldsound -lole32 -luuid -ldxguid
 # the primary buffer and DSSCL_WRITEPRIMARY against Windows' DirectSound (tests/comcmp.sh primtest.exe)
 $CC -O1 -Wno-format -o build/primtest.exe tests/primtest.c -ldsound -lole32 -luuid -ldxguid
-# what the mixer's stages cost (wine build/bench_mix.exe [seconds] [reAL_hrtf.bin])
-$CC $CFLAGS -o build/bench_mix.exe tests/bench_mix.c src/mixcore.c src/reverb.c src/alrv.c src/hrtf.c src/virt.c build/obj/speakers.o build/obj/cmss3.o build/obj/alrv_params.o
+# what the mixer's stages cost (wine build/bench_mix.exe [seconds] [reAL_hrtf.bin | builtin])
+$CC $CFLAGS -o build/bench_mix.exe tests/bench_mix.c src/mixcore.c src/reverb.c src/alrv.c src/hrtf.c src/hrtf_builtin.c src/virt.c build/obj/speakers.o build/obj/cmss3.o build/obj/alrv_params.o
 # random DirectSound calls, the same on any DLL (tests/fuzzcmp.py compares reAL with Windows' DirectSound)
 $CC -O1 -Wno-format -o build/dsfuzz.exe tests/dsfuzz.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/dx7test.exe tests/dx7test.c -ldsound -lole32 -luuid -ldxguid
@@ -136,6 +136,9 @@ if command -v cc >/dev/null 2>&1; then
     # inaudible voices skipped against the same voices mixed in full
     cc -O1 -g -std=gnu11 -Wall -o build/test_idle tests/test_idle.c src/mixcore.c src/speakers.c src/cmss3.c src/virt.c src/hrtf.c -lm
     ./build/test_idle
+    # the built-in HRTF set (hrtf=builtin)
+    cc -O1 -g -std=gnu11 -Wall -o build/test_hrtf tests/test_hrtf.c src/hrtf.c src/hrtf_builtin.c -lm
+    ./build/test_hrtf
     cc -O1 -g -std=gnu11 -Wall -o build/test_speakers tests/test_speakers.c src/speakers.c -lm
     ./build/test_speakers tests/gt/speakers_gt.txt
     cc -O1 -g -std=gnu11 -Wall -o build/test_cmss3 tests/test_cmss3.c src/cmss3.c -lm

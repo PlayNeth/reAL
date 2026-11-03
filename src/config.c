@@ -103,6 +103,7 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "hrtf")) {
         if (!_stricmp(val, "off") || !_stricmp(val, "false") || !_stricmp(val, "0")) g_cfg.hrtf_mode = 0;
         else if (!_stricmp(val, "auto") || !_stricmp(val, "on") || !_stricmp(val, "true") || !_stricmp(val, "1")) g_cfg.hrtf_mode = 1;
+        else if (!_stricmp(val, "builtin")) { g_cfg.hrtf_mode = 2; g_cfg.hrtf_path[0] = 0; }
         else { g_cfg.hrtf_mode = 1; lstrcpynA(g_cfg.hrtf_path, val, MAX_PATH); }
     }
 }
@@ -198,7 +199,7 @@ void rl_config_load(void)
     for (int i = 0; i < n; i++) LOG_INFO("  config: %s", s_loaded[i]);
     LOG_INFO("  enabled=%d latency=%dms maxvoicecount=%d disabledirectmusic=%d hrtf=%s resampler=%s log=%d",
              g_cfg.enabled, g_cfg.latency_ms, g_cfg.max_voices, g_cfg.disable_dmusic,
-             !g_cfg.hrtf_mode ? "off" : g_cfg.hrtf_path[0] ? g_cfg.hrtf_path : "auto",
+             !g_cfg.hrtf_mode ? "off" : g_cfg.hrtf_mode == 2 ? "builtin" : g_cfg.hrtf_path[0] ? g_cfg.hrtf_path : "auto",
              g_cfg.resampler == RL_INTERP_SINC ? "sinc" : "linear", g_cfg.log_level);
     {
         char self[MAX_PATH];

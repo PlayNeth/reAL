@@ -424,10 +424,27 @@ static BOOL read_file(const char *path, BYTE **data, DWORD *size)
     return TRUE;
 }
 
+static void set_hrtf(rl_device *dev, rl_hrtf_set *set)
+{
+    EnterCriticalSection(&dev->lock);
+    rl_hrtf_free(&dev->hrtf);
+    dev->hrtf = *set;
+    for (rl_buffer *b = dev->all; b; b = b->next_all) rl_buffer_update_gains(b);
+    LeaveCriticalSection(&dev->lock);
+}
+
 static void load_hrtf(rl_device *dev, UINT32 rate)
 {
     char cand[3][MAX_PATH + 32];
     int n = 0;
+    if (g_cfg.hrtf_mode == 2) {
+        rl_hrtf_set set;
+        if (!rl_hrtf_load_builtin(&set, rate)) { LOG_INFO("HRTF: the built-in set could not be loaded, using stereo panning for 3D sounds"); return; }
+        set_hrtf(dev, &set);
+        LOG_INFO("HRTF: built-in (MIT KEMAR, %lu directions, %lu taps, %lu Hz)", (unsigned long)set.n_dirs,
+                 (unsigned long)set.taps, (unsigned long)set.rate);
+        return;
+    }
     if (g_cfg.hrtf_path[0]) lstrcpynA(cand[n++], g_cfg.hrtf_path, MAX_PATH);
     else {
         GetModuleFileNameA(g_self, cand[n], MAX_PATH);
@@ -442,16 +459,12 @@ static void load_hrtf(rl_device *dev, UINT32 rate)
         int ok = rl_hrtf_load(&set, data, size, rate);
         HeapFree(GetProcessHeap(), 0, data);
         if (!ok) { LOG_INFO("HRTF: %s is not a valid reAL_hrtf.bin", cand[i]); continue; }
-        EnterCriticalSection(&dev->lock);
-        rl_hrtf_free(&dev->hrtf);
-        dev->hrtf = set;
-        for (rl_buffer *b = dev->all; b; b = b->next_all) rl_buffer_update_gains(b);
-        LeaveCriticalSection(&dev->lock);
+        set_hrtf(dev, &set);
         LOG_INFO("HRTF: %s (%lu directions, %lu taps, %lu Hz)", cand[i], (unsigned long)set.n_dirs,
                  (unsigned long)set.taps, (unsigned long)set.rate);
         return;
     }
-    LOG_INFO("HRTF: no reAL_hrtf.bin found, using stereo panning for 3D sounds");
+    LOG_INFO("HRTF: no reAL_hrtf.bin found, using stereo panning for 3D sounds (hrtf=builtin for the built-in set)");
 }
 
 /* ---------------------------------------------------------------- WASAPI */

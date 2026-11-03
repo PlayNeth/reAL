@@ -33,7 +33,7 @@ typedef struct rl_config {
     int  log_eax;
     char log_file[MAX_PATH];
     char real_dsound[MAX_PATH];
-    int  hrtf_mode;             /* 0 off, 1 auto (use reAL_hrtf.bin if found) */
+    int  hrtf_mode;             /* 0 off, 1 auto (use reAL_hrtf.bin if found), 2 builtin (MIT KEMAR) */
     char hrtf_path[MAX_PATH];   /* explicit file, overrides the search */
     int  resampler;             /* RL_INTERP_* (default sinc) */
     uint32_t speakers;          /* output layout (RL_LAYOUT_*); 0 = the device's (ALchemy: Windows' speaker setup) */

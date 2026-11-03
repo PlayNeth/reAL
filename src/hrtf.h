@@ -1,5 +1,6 @@
 /* reAL - HRTF rendering for 3D voices (headphones).
- * Data comes from reAL_hrtf.bin (built by tools/hrtf_build.py from an hrtfprobe measurement).
+ * Data comes from reAL_hrtf.bin (built by tools/hrtf_build.py from an hrtfprobe measurement), or from the built-in
+ * MIT KEMAR set (hrtf_builtin.c).
  * Platform independent. */
 #ifndef REAL_HRTF_H
 #define REAL_HRTF_H
@@ -34,6 +35,8 @@ typedef struct rl_hrtf_voice {
 
 /* load from memory (file contents); resamples to out_rate if needed. returns 0 on error */
 int  rl_hrtf_load(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out_rate);
+/* the built-in set (MIT KEMAR, hrtf_builtin.c), resampled to out_rate. returns 0 on error */
+int  rl_hrtf_load_builtin(rl_hrtf_set *set, uint32_t out_rate);
 void rl_hrtf_free(rl_hrtf_set *set);
 
 /* interpolated filter for a direction: az degrees clockwise from front (0..360), el degrees up */

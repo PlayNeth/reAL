@@ -43,6 +43,33 @@ What the rest costs, from the same benchmark: a heavy scene (64 3D voices with E
 reverb) about 10% of one core, 15% with HRTF; the reverb 0.5%; CMSS-3D about 1.4% per voice (off by default). The
 HRTF convolution is already vectorised by the compiler.
 
+**Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
+default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.
+- The data: the MIT KEMAR compact set, diffuse-field equalised, at 48 kHz (mit-hrtf-lib's tables). It has 14 rings
+  from -40 to +90 degrees and 710 directions; the right half is stored and the left half mirrored, ears swapped.
+- Each ear's response is split into a whole-sample onset delay and 64 taps, as `hrtf_build.py` does for a measured
+  set; 64 taps keep 98.7% of the energy on average.
+- The level is one factor for the whole set: the horizontal ring's mean energy, both ears, is 0.82, as in the
+  ALchemy measurement. A source on the right then plays as loud as panned hard right (within 0.4 dB).
+- It is unfolded into the `reAL_hrtf.bin` format at load and goes through the same loader, resampling and renderer.
+  The DLL grows by about 95 KB.
+- `tests/test_hrtf.c` (native) checks that:
+  - it loads at 44.1, 48, 88.2, 96 and 192 kHz, with the response at 1 kHz within 0.5 dB of 48 kHz's;
+  - the left half mirrors the right through the interpolation;
+  - 90 degrees is on the right (ear levels 15 dB apart, the far ear 30 samples later);
+  - the level is as above, and a voice renders from its first direction.
+- Under Wine through reAL (`hrtf=builtin`, headphones, 44.1 kHz device), white noise was recorded from four positions:
+  - on the right: 13 dB between the ears, the left ear 31 samples (0.7 ms) late;
+  - in front and behind: centred, and behind is 6.5 dB darker at 8-16 kHz than in front;
+  - the cost is the same as a measured set (`bench_mix ... builtin`).
+- A fix found on the way (`src/hrtf.c`): a voice's first direction was stored unreversed, so a voice given its
+  first direction while already playing was silent on HRTF until its next change of direction. That happens when
+  HRTF is loaded after the sound started, or when a playing sound becomes 3D. The bug came with the vectorised
+  convolution, and Play's restart hid it in other cases. The first direction is now stored as every later one is.
+- Not done: resampling the filters for devices below 44.1 kHz uses linear interpolation without a low-pass, which
+  aliases (0.6 dB at 1 kHz at 22.05 kHz). This applies to measured sets too. Shared-mode WASAPI devices run at
+  44.1 kHz or more.
+
 **Primary buffer** (`src/buffer.c`, `tests/primtest.c`)
 - DSSCL_WRITEPRIMARY, which ALchemy does not do (its primary buffer plays nothing), as Windows 7's DirectSound does
   it: the primary buffer holds 32768 bytes (GetCaps) in the primary format, Lock / Unlock / GetCurrentPosition work
@@ -547,7 +574,7 @@ Smaller items still open:
   that way of playing against the other threads.
 - `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay]` compares what changes with the interface asked for
   (each section as DirectX 6, 7 and 8 where it differs): all match.
-- `wine build/bench_mix.exe [seconds] [reAL_hrtf.bin]` times the mixer's stages (voices of each kind and format, the
+- `wine build/bench_mix.exe [seconds] [reAL_hrtf.bin | builtin]` times the mixer's stages (voices of each kind and format, the
   reverb, a heavy scene) per 10 ms block, built as the DLL is.
 - `tests/fuzzcmp.py <first seed> <seeds> [ops]` runs `dsfuzz.exe` under both DirectSounds (through comcmp.sh, in
   chunks of 25 seeds) and lists each seed's first difference by risk; `dsfuzz.exe formats` sweeps CreateSoundBuffer

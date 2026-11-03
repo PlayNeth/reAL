@@ -2,7 +2,7 @@
  * voices of each kind through rl_voice_mix_n, then the EAX reverb.  48 kHz output, 10 ms blocks; each line is the
  * time per block and the share of the block's real time (one core).
  *
- *   bench_mix [seconds per case] [reAL_hrtf.bin]
+ *   bench_mix [seconds per case] [reAL_hrtf.bin | builtin]
  *
  * Built like the DLL (32-bit, SSE2, the same fast-math split) and run under Wine, whose arithmetic runs native. */
 #include "../src/mixcore.h"
@@ -146,7 +146,8 @@ static void line(const char *what, double per_block)
 int main(int argc, char **argv)
 {
     if (argc > 1) s_secs = atof(argv[1]);
-    if (argc > 2) {
+    if (argc > 2 && !strcmp(argv[2], "builtin")) s_have_hrtf = rl_hrtf_load_builtin(&s_hrtf, RATE);
+    else if (argc > 2) {
         FILE *f = fopen(argv[2], "rb");
         if (f) {
             fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
