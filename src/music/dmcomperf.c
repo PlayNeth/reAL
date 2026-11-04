@@ -171,6 +171,7 @@ static HRESULT WINAPI pf_init(IDirectMusicPerformance8 *i, IDirectMusic **pdm, L
     dm_host_lock(p->host);
     p->added[0] = 0;                        /* (the DirectX 6 way: AddPort, then AssignPChannelBlock) */
     dm_host_port_enable(p->host, 0, p->host, 0);   /* (no port: no latency, nothing played, until AddPort) */
+    dm_host_set_dx7port(p->host, 1);        /* (its AddPort(NULL) port: DMUS_PORTPARAMS, no waves) */
     dm_host_unlock(p->host);
     hand_out_dmusic(p, pdm);
     return S_OK;

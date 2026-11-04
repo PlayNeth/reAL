@@ -2,7 +2,8 @@
  * created, 7 after a QueryInterface for IDirectMusicPerformance2, 8 after one for IDirectMusicPerformance8, each
  * QueryInterface setting it again) and answers DirectX 6/7 applications as DirectX 6/7 did; and the performance after
  * CloseDown; and Segment::InitPlay.  Prints every HRESULT and out-parameter.  Run with tests/comcmp.sh dx7test.exe
- * [6|7|8|qi|noport|stopall|closed|notify|initplay]. */
+ * [6|7|8|qi|noport|stopall|closed|notify|initplay|trackplay [segment files]]; trackplay (each of a segment
+ * file's tracks played by the application on Segment::InitPlay's state) only when named. */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -512,6 +513,229 @@ out:;
     IDirectMusicPerformance8_Release(pf);
 }
 
+/* ------------------------------------------------------------------ trackplay: each of a segment file's tracks
+ * played by the application on the state Segment::InitPlay gives (InitPlay, Play over the segment, EndPlay), what
+ * every call answers and the messages that reach the performance's graph */
+typedef struct {
+    IDirectMusicTool IDirectMusicTool_iface;
+    LONG ref;
+    CRITICAL_SECTION cs;
+    IUnknown *state;                /* the state the tracks play on: a notification's punkUser compared to it */
+    DWORD vid;                      /* the virtual track id played: messages from others (segments it starts) left out */
+    int n;
+    struct { DWORD type, pch; MUSIC_TIME mt; DWORD a, b, c; } m[512];
+} logtool;
+static logtool *lt(IDirectMusicTool *i) { return (logtool *)i; }
+static HRESULT WINAPI lt_qi(IDirectMusicTool *i, REFIID r, void **o)
+{
+    if (IsEqualIID(r, &IID_IUnknown) || IsEqualIID(r, &IID_IDirectMusicTool)) { *o = i; InterlockedIncrement(&lt(i)->ref); return S_OK; }
+    *o = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI lt_addref(IDirectMusicTool *i) { return InterlockedIncrement(&lt(i)->ref); }
+static ULONG WINAPI lt_release(IDirectMusicTool *i) { return InterlockedDecrement(&lt(i)->ref); }
+static HRESULT WINAPI lt_init(IDirectMusicTool *i, IDirectMusicGraph *g) { return S_OK; }
+static HRESULT WINAPI lt_deliv(IDirectMusicTool *i, DWORD *d) { *d = DMUS_PMSGF_TOOL_IMMEDIATE; return S_OK; }
+static HRESULT WINAPI lt_nt(IDirectMusicTool *i, DWORD *n) { *n = 0; return S_OK; }
+static HRESULT WINAPI lt_types(IDirectMusicTool *i, DWORD **a, DWORD n) { return E_NOTIMPL; }
+static HRESULT WINAPI lt_process(IDirectMusicTool *i, IDirectMusicPerformance *p, DMUS_PMSG *m)
+{
+    logtool *t = lt(i);
+    EnterCriticalSection(&t->cs);
+    if (t->n < 512 && m->dwVirtualTrackID == t->vid) {
+        int k = t->n++;
+        t->m[k].type = m->dwType; t->m[k].pch = m->dwPChannel; t->m[k].mt = m->mtTime; t->m[k].a = t->m[k].b = t->m[k].c = 0;
+        if (m->dwType == DMUS_PMSGT_SCRIPTLYRIC) t->m[k].mt = 0;       /* (stamped "now" when the routine runs) */
+        if (m->dwType == DMUS_PMSGT_NOTE) {
+            DMUS_NOTE_PMSG *n = (DMUS_NOTE_PMSG *)m;
+            t->m[k].a = n->bMidiValue; t->m[k].b = n->bVelocity; t->m[k].c = (DWORD)n->mtDuration;
+        } else if (m->dwType == DMUS_PMSGT_MIDI) {
+            DMUS_MIDI_PMSG *n = (DMUS_MIDI_PMSG *)m;
+            t->m[k].a = n->bStatus; t->m[k].b = n->bByte1; t->m[k].c = n->bByte2;
+        } else if (m->dwType == DMUS_PMSGT_PATCH) {
+            DMUS_PATCH_PMSG *n = (DMUS_PATCH_PMSG *)m;
+            t->m[k].a = n->byInstrument; t->m[k].b = n->byMSB; t->m[k].c = n->byLSB;
+        } else if (m->dwType == DMUS_PMSGT_TEMPO) {
+            t->m[k].a = (DWORD)((DMUS_TEMPO_PMSG *)m)->dblTempo;
+        } else if (m->dwType == DMUS_PMSGT_TRANSPOSE) {
+            t->m[k].a = (DWORD)(LONG)((DMUS_TRANSPOSE_PMSG *)m)->nTranspose;
+        } else if (m->dwType == DMUS_PMSGT_NOTIFICATION) {
+            DMUS_NOTIFICATION_PMSG *n = (DMUS_NOTIFICATION_PMSG *)m;
+            t->m[k].a = !m->punkUser ? 0 : m->punkUser == t->state ? 1 : 2;
+            t->m[k].b = n->guidNotificationType.Data1; t->m[k].c = n->dwNotificationOption;
+        } else if (m->dwType == DMUS_PMSGT_CURVE) {
+            DMUS_CURVE_PMSG *n = (DMUS_CURVE_PMSG *)m;
+            t->m[k].a = n->bType; t->m[k].b = n->bCCData; t->m[k].c = (DWORD)n->nEndValue;
+        }
+    }
+    LeaveCriticalSection(&t->cs);
+    return DMUS_S_FREE;
+}
+static HRESULT WINAPI lt_flush(IDirectMusicTool *i, IDirectMusicPerformance *p, DMUS_PMSG *m, REFERENCE_TIME rt) { return DMUS_S_FREE; }
+static IDirectMusicToolVtbl lt_vtbl = { lt_qi, lt_addref, lt_release, lt_init, lt_deliv, lt_nt, lt_types, lt_process, lt_flush };
+static int cmp_msg(const void *x, const void *y)
+{
+    const DWORD *a = x, *b = y;     /* (type, pch, mt, a, b, c) */
+    if ((LONG)a[2] != (LONG)b[2]) return (LONG)a[2] < (LONG)b[2] ? -1 : 1;
+    for (int k = 0; k < 6; k++) if (k != 2 && a[k] != b[k]) return a[k] < b[k] ? -1 : 1;
+    return 0;
+}
+
+/* time() fixed in dmstyle, dmime and dmcompos (their srand(time(NULL)) seeds), as trktest does; reDM takes REDM_TIME */
+#define FIXTIME 1234567
+static long __cdecl fixed_time(long *t) { if (t) *t = FIXTIME; return FIXTIME; }
+static void patch_import_name(HMODULE m, const char *dll, const char *name, void *fn)
+{
+    BYTE *base = (BYTE *)m;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_DATA_DIRECTORY *dd = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    for (IMAGE_IMPORT_DESCRIPTOR *d = (void *)(base + dd->VirtualAddress); dd->VirtualAddress && d->Name; d++) {
+        if (lstrcmpiA((char *)base + d->Name, dll)) continue;
+        IMAGE_THUNK_DATA *on = (void *)(base + d->OriginalFirstThunk);
+        void **slot = (void **)(base + d->FirstThunk);
+        for (; on->u1.AddressOfData; on++, slot++) {
+            if (IMAGE_SNAP_BY_ORDINAL(on->u1.Ordinal)) continue;
+            IMAGE_IMPORT_BY_NAME *ibn = (void *)(base + on->u1.AddressOfData);
+            if (strcmp((char *)ibn->Name, name)) continue;
+            DWORD old;
+            VirtualProtect(slot, sizeof(void *), PAGE_READWRITE, &old);
+            *slot = fn;
+            VirtualProtect(slot, sizeof(void *), old, &old);
+        }
+    }
+}
+
+static void trackplay(int nfiles, char **names)
+{
+    static const char *const dlls[] = { "dmstyle.dll", "dmime.dll", "dmcompos.dll" };
+    for (int k = 0; k < 3; k++) {
+        HMODULE m = LoadLibraryA(dlls[k]);
+        if (m) patch_import_name(m, "msvcrt.dll", "time", (void *)fixed_time);
+    }
+    IDirectMusicPerformance8 *pf = NULL;
+    IDirectMusicLoader8 *ld = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    CoCreateInstance(&CLSID_DirectMusicLoader, NULL, CLSCTX_INPROC, &IID_IDirectMusicLoader8, (void **)&ld);
+    if (!pf || !ld) { P("  no objects\n"); return; }
+    if (getenv("TP_INITAUDIO"))
+        P("  InitAudio %08lx\n", IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL));
+    else {
+        P("  Init %08lx\n", IDirectMusicPerformance8_Init(pf, NULL, NULL, NULL));
+        P("  AddPort(NULL) %08lx\n", IDirectMusicPerformance8_AddPort(pf, NULL));
+        IDirectMusicPerformance8_AssignPChannelBlock(pf, 0, NULL, 1);
+    }
+    static logtool lg;
+    lg.IDirectMusicTool_iface.lpVtbl = &lt_vtbl; lg.ref = 1;
+    InitializeCriticalSection(&lg.cs);
+    IDirectMusicGraph *g = NULL;
+    CoCreateInstance(&CLSID_DirectMusicGraph, NULL, CLSCTX_INPROC, &IID_IDirectMusicGraph, (void **)&g);
+    if (g) {
+        IDirectMusicGraph_InsertTool(g, &lg.IDirectMusicTool_iface, NULL, 0, 0);
+        P("  SetGraph %08lx\n", IDirectMusicPerformance8_SetGraph(pf, g));
+    }
+    WCHAR dir[MAX_PATH];
+    GetCurrentDirectoryW(MAX_PATH, dir);
+    IDirectMusicLoader8_SetSearchDirectory(ld, &GUID_DirectMusicAllTypes, dir, FALSE);
+    static const GUID *nt[] = { &GUID_NOTIFICATION_MEASUREANDBEAT, &GUID_NOTIFICATION_SEGMENT, &GUID_NOTIFICATION_COMMAND,
+                                &GUID_NOTIFICATION_CHORD, &GUID_NOTIFICATION_RECOMPOSE, &GUID_NOTIFICATION_PERFORMANCE };
+    for (unsigned k = 0; k < sizeof(nt) / sizeof(nt[0]); k++) IDirectMusicPerformance8_AddNotificationType(pf, nt[k]);
+    static char *dflt[] = { "bells1.sgt", "fe_hard_04.sgt" };
+    if (!nfiles) { nfiles = 2; names = dflt; }
+    for (int f = 0; f < nfiles; f++) {
+        IDirectMusicSegment *file = NULL;
+        WCHAR wn[MAX_PATH];
+        /* ("8:name": the file asked for as IDirectMusicSegment8) */
+        int as8 = !strncmp(names[f], "8:", 2);
+        MultiByteToWideChar(CP_ACP, 0, names[f] + (as8 ? 2 : 0), -1, wn, MAX_PATH);
+        HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, as8 ? &IID_IDirectMusicSegment8 : &IID_IDirectMusicSegment,
+                                                            wn, (void **)&file);
+        P("  %s: load %08lx\n", names[f], hr);
+        srand(1);                           /* (the application thread's rand() the same on both sides) */
+        if (!file) continue;
+        IDirectMusicSegment8 *f8 = NULL;
+        IDirectMusicSegment_QueryInterface(file, &IID_IDirectMusicSegment8, (void **)&f8);
+        if (f8) P("  Download %08lx\n", IDirectMusicSegment8_Download(f8, (IUnknown *)pf));
+        MUSIC_TIME len = 0;
+        IDirectMusicSegment_GetLength(file, &len);
+        if (len > DMUS_PPQ * 16) len = DMUS_PPQ * 16;
+        for (DWORD k = 0; k < 16; k++) {
+            IDirectMusicTrack *t = NULL;
+            { static const GUID any = { 0 }; hr = IDirectMusicSegment_GetTrack(file, &any, 0xffffffff, k, &t); }
+            if (FAILED(hr)) { P("  track %lu: GetTrack %08lx\n", k, hr); break; }
+            IPersist *ps = NULL;
+            CLSID c = { 0 };
+            if (SUCCEEDED(IDirectMusicTrack_QueryInterface(t, &IID_IPersist, (void **)&ps))) { IPersist_GetClassID(ps, &c); IPersist_Release(ps); }
+            /* a fresh segment's InitPlay state: no engine state behind it */
+            IDirectMusicSegment *seg = NULL;
+            CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment, (void **)&seg);
+            IDirectMusicSegmentState *st = NULL;
+            if (seg) IDirectMusicSegment_SetLength(seg, len);
+            hr = seg ? IDirectMusicSegment_InitPlay(seg, &st, (IDirectMusicPerformance *)pf, 0) : E_FAIL;
+            static const struct { const GUID *g; const char *n; } kinds[] = {
+                { &CLSID_DirectMusicSeqTrack, "seq" }, { &CLSID_DirectMusicSysExTrack, "sysex" },
+                { &CLSID_DirectMusicTempoTrack, "tempo" }, { &CLSID_DirectMusicTimeSigTrack, "timesig" },
+                { &CLSID_DirectMusicBandTrack, "band" }, { &CLSID_DirectMusicChordTrack, "chord" },
+                { &CLSID_DirectMusicCommandTrack, "command" }, { &CLSID_DirectMusicStyleTrack, "style" },
+                { &CLSID_DirectMusicMotifTrack, "motif" }, { &CLSID_DirectMusicSignPostTrack, "signpost" },
+                { &CLSID_DirectMusicChordMapTrack, "chordmap" }, { &CLSID_DirectMusicMuteTrack, "mute" },
+                { &CLSID_DirectMusicMarkerTrack, "marker" }, { &CLSID_DirectMusicLyricsTrack, "lyrics" },
+                { &CLSID_DirectMusicSegmentTriggerTrack, "segtrig" }, { &CLSID_DirectMusicParamControlTrack, "paramctl" },
+                { &CLSID_DirectMusicWaveTrack, "wave" }, { &CLSID_DirectMusicScriptTrack, "script" },
+                { &CLSID_DirectMusicPatternTrack, "pattern" }, { &CLSID_DirectMusicMelodyFormulationTrack, "melform" },
+            };
+            const char *kind = "?";
+            for (unsigned q = 0; q < sizeof(kinds) / sizeof(kinds[0]); q++)
+                for (DWORD j = 0; j < 8; j++) {
+                    IDirectMusicTrack *t2 = NULL;
+                    if (FAILED(IDirectMusicSegment_GetTrack(file, kinds[q].g, 0xffffffff, j, &t2))) break;
+                    IDirectMusicTrack_Release(t2);
+                    if (t2 == t) kind = kinds[q].n;
+                }
+            P("  track %lu %s {%08lx}: state %08lx", k, kind, c.Data1, hr);
+            lg.state = (IUnknown *)st;
+            if (st) {
+                void *d = (void *)(ULONG_PTR)1;
+                EnterCriticalSection(&lg.cs); lg.n = 0; lg.vid = k + 1; LeaveCriticalSection(&lg.cs);
+                hr = IDirectMusicTrack_InitPlay(t, st, (IDirectMusicPerformance *)pf, &d, k + 1, 0);
+                P(" InitPlay %08lx data %s", hr, d == (void *)(ULONG_PTR)1 ? "untouched" : d ? "set" : "NULL");
+                if (SUCCEEDED(hr)) {
+                    MUSIC_TIME now = 0;
+                    IDirectMusicPerformance8_GetTime(pf, NULL, &now);
+                    MUSIC_TIME off = now + DMUS_PPQ * 2;
+                    HRESULT a = IDirectMusicTrack_Play(t, d, 0, len / 2, off, DMUS_TRACKF_START | DMUS_TRACKF_SEEK, (IDirectMusicPerformance *)pf, st, k + 1);
+                    HRESULT b = IDirectMusicTrack_Play(t, d, len / 2, len, off, 0, (IDirectMusicPerformance *)pf, st, k + 1);
+                    P(" Play %08lx %08lx", a, b);
+                    Sleep(300);
+                    P(" EndPlay %08lx", IDirectMusicTrack_EndPlay(t, d));
+                    EnterCriticalSection(&lg.cs);
+                    int n = lg.n;
+                    for (int i = 0; i < n; i++) if (lg.m[i].type != DMUS_PMSGT_SCRIPTLYRIC) lg.m[i].mt -= off;
+                    qsort(lg.m, n, sizeof(lg.m[0]), cmp_msg);
+                    P(" messages %d\n", n);
+                    for (int i = 0; i < n; i++)
+                        P("    type %lu pch %lu mt %ld %lu %lu %ld\n", lg.m[i].type, lg.m[i].pch, (long)lg.m[i].mt, lg.m[i].a,
+                          lg.m[i].b, (long)lg.m[i].c);
+                    lg.n = 0; lg.vid = 0;
+                    LeaveCriticalSection(&lg.cs);
+                    IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);       /* (segments the track started) */
+                    Sleep(50);
+                } else P("\n");
+                IDirectMusicSegmentState_Release(st);
+            } else P("\n");
+            if (seg) IDirectMusicSegment_Release(seg);
+            IDirectMusicTrack_Release(t);
+        }
+        if (f8) { IDirectMusicSegment8_Unload(f8, (IUnknown *)pf); IDirectMusicSegment8_Release(f8); }
+        IDirectMusicSegment_Release(file);
+    }
+    IDirectMusicPerformance8_Stop(pf, NULL, NULL, 0, 0);
+    Sleep(100);
+    IDirectMusicPerformance8_CloseDown(pf);
+    if (g) IDirectMusicGraph_Release(g);
+    IDirectMusicLoader8_Release(ld);
+    IDirectMusicPerformance8_Release(pf);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -536,6 +760,7 @@ int main(int argc, char **argv)
         P("initplay, no Init:\n"); initplay(0);
         P("initplay, after Init:\n"); initplay(1);
     }
+    if (only && !strcmp(only, "trackplay")) { P("trackplay:\n"); trackplay(argc - 2, argv + 2); }
     CoUninitialize();
     return 0;
 }

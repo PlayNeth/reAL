@@ -58,7 +58,8 @@ static void seq_tscache(dm_segstate *ss, sstrack *e, seqstate *S, mtime_t t)
     if (t >= S->tsnext || t < S->tsstart) {
         timesig ts;
         mtime_t next = 0;
-        int hr = seg_getparam(ss->seg, PRM_TIMESIG, e->group, 0, t, &next, &ts);
+        /* (the state's segment: Segment::InitPlay's state has none, and GetSegment fails there) */
+        int hr = ss && ss->seg ? seg_getparam(ss->seg, PRM_TIMESIG, e->group, 0, t, &next, &ts) : DMUS_E_NOT_FOUND;
         if (hr >= 0) {
             mtime_t ns = ts.t + t;
             S->mbase = S->measlen ? (int32_t)((uint32_t)(ns - S->tsstart) / (uint32_t)S->measlen) : 0;

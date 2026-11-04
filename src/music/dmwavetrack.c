@@ -134,16 +134,19 @@ static int wt_unload_item(dm_perf *pf, dm_waveitem *it, uint32_t pch, dm_audiopa
 /* SetParam(GUID_Download / GUID_DownloadToAudioPath) 773277ab: every item of every part */
 static int wt_download(dm_perf *pf, dm_wavetrack *T, dm_audiopath *ap, int unload)
 {
-    int hr = DM_OK, ok = 0;
+    /* the answer is the last part's (its last item's that was not S_OK: S_FALSE for a wave downloaded already), or
+     * S_FALSE when one part failed and another did not */
+    int hr = DM_OK, err = DM_OK, ok = 0;
     for (dm_wavepart *p = T->parts; p; p = p->next) {
         int r = 0;
         for (dm_waveitem *it = p->items; it; it = it->next) {
             int x = unload ? wt_unload_item(pf, it, p->pch, ap) : wt_download_item(pf, it, p->pch, ap);
             if (x) r = x;
         }
-        if (r >= 0) ok++; else hr = r;
+        hr = r;
+        if (r >= 0) ok++; else err = r;
     }
-    if (hr < 0 && ok) hr = DM_FALSE;
+    if (err < 0 && ok) hr = DM_FALSE;
     return unload ? DM_OK : hr;
 }
 

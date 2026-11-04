@@ -101,6 +101,15 @@ void dm_perf_end_states(dm_perf *pf)
 }
 void dm_segstate_release(dm_segstate *ss) { if (ss && !ss->released) { ss->released = 1; ss_unref(ss); } }
 void dm_segstate_addref(dm_segstate *ss) { ss->refs++; }
+/* the state Segment::InitPlay gives, for tracks the application plays on it: no segment, no audiopath, no graph,
+ * so a message is stamped by the performance and a track asking for the segment finds none, as dmime's */
+dm_segstate *dm_segstate_bare(dm_perf *pf, void *wrapper)
+{
+    dm_segstate *ss = calloc(1, sizeof(*ss));
+    if (!ss) return NULL;
+    ss->refs = 1; ss->perf = pf; ss->wrapper = wrapper;
+    return ss;
+}
 void dm_segstate_unref(dm_segstate *ss) { ss_unref(ss); }
 void **dm_segstate_wrapper(dm_segstate *ss) { return &ss->wrapper; }
 dm_segment *dm_segstate_segment(dm_segstate *ss) { return ss->seg; }

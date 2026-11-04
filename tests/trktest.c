@@ -437,6 +437,7 @@ static void track_show(IDirectMusicTrack *t, const char *what)
     printf("  qi track8 %08lx", IDirectMusicTrack_QueryInterface(t, &IID_IDirectMusicTrack8, (void **)&u)); if (u) { IUnknown_Release(u); u = NULL; }
     printf(" persist %08lx", IDirectMusicTrack_QueryInterface(t, &IID_IPersistStream, (void **)&u));
     if (u) { CLSID c; HRESULT h = IPersistStream_GetClassID((IPersistStream *)u, &c); printf(" classid %08lx %s", h, SUCCEEDED(h) ? track_name(&c) : "-"); IUnknown_Release(u); u = NULL; }
+    printf(" ipersist %08lx", IDirectMusicTrack_QueryInterface(t, &IID_IPersist, (void **)&u)); if (u) { IUnknown_Release(u); u = NULL; }
     printf(" object %08lx\n", IDirectMusicTrack_QueryInterface(t, &IID_IDirectMusicObject, (void **)&u)); if (u) { IUnknown_Release(u); u = NULL; }
     printf("  params");
     for (size_t k = 0; k < sizeof(ps) / sizeof(*ps); k++) {

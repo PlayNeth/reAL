@@ -33,7 +33,16 @@ static ULONG WINAPI st_release(IDirectMusicSegmentState8 *i)
     LONG r = InterlockedDecrement(&s->ref);
     LOG_CALL("music: SegmentState::Release(%p) -> %ld", (void *)i, (long)r);
     if (!r) {
-        if (!s->ss) { rm_auto_free(s->autod); free(s); return 0; }  /* (from Segment::InitPlay: holds nothing) */
+        if (!s->ss) {                       /* (from Segment::InitPlay: holds nothing but its tracks' engine state) */
+            if (s->bare) {
+                dm_engine_lock();
+                void **w = dm_segstate_wrapper(s->bare);
+                if (*w == s) *w = NULL;
+                dm_segstate_unref(s->bare);
+                dm_engine_unlock();
+            }
+            rm_auto_free(s->autod); free(s); return 0;
+        }
         if (s->perf->host) {
             dm_host_lock(s->perf->host);
             void **w = dm_segstate_wrapper(s->ss);

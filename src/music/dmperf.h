@@ -104,6 +104,7 @@ void dm_segstate_release(dm_segstate *ss);
 /* references for other holders (the COM layer's wrapper object, kept in *dm_segstate_wrapper()) */
 void dm_segstate_addref(dm_segstate *ss);
 void dm_segstate_unref(dm_segstate *ss);
+dm_segstate *dm_segstate_bare(dm_perf *pf, void *wrapper);     /* Segment::InitPlay's state, for its tracks */
 void **dm_segstate_wrapper(dm_segstate *ss);
 dm_segment *dm_segstate_segment(dm_segstate *ss);   /* NULL once the state has left the performance */
 int dm_segstate_start_time(dm_segstate *ss, mtime_t *mt);

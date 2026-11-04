@@ -101,6 +101,8 @@ typedef struct {
 
 struct dm_host {
     dm_perf *pf;
+    int dx7port;            /* a DirectX 7 synth port (dmusic's for DMUS_PORTPARAMS without the audiopath feature, and
+                             * Init's): no waves (DownloadWave, AllocVoice E_NOTIMPL, 7718c7fe / 7718c858) */
     msynth *syn;
     dls_port *dls;
     wavesrev *rev;
@@ -232,6 +234,7 @@ static void *port_wave_download(void *ctx, dm_wave *w, rtime_t hint, int *hr)
 {
     dm_host *h = ctx;
     (void)hint;
+    if (h->dx7port) { *hr = (int)0x80004001; return NULL; }
     if (!w->streaming)
         for (hwdl *d = h->wdls; d; d = d->next) if (d->w == w) { d->refs++; *hr = 0; return d; }
     if (w->channels == 0 || w->channels > 8) { *hr = (int)0x8878112a; return NULL; }
@@ -282,6 +285,7 @@ static void *port_voice_alloc(void *ctx, void *dl, uint32_t chan, uint32_t group
 {
     dm_host *h = ctx;
     hwdl *d = dl;
+    if (h->dx7port) { *hr = (int)0x80004001; return NULL; }
     hvoice *v = calloc(1, sizeof(*v));
     if (!v) { *hr = (int)0x8007000e; return NULL; }
     v->dl = d; d->refs++;
@@ -670,6 +674,7 @@ void *dm_host_ins_download(dm_host *h, dm_collection *c, uint32_t patch, uint32_
 }
 void dm_host_ins_unload(dm_host *h, void *handle) { port_unload(h, handle); }
 int dm_host_port_add(dm_host *h, dm_host *port) { return dm_perf_add_port(h->pf, &s_portops, port); }
+void dm_host_set_dx7port(dm_host *h, int on) { h->dx7port = on; }
 void dm_host_port_enable(dm_host *h, int idx, dm_host *port, int on) { dm_perf_port_set_ops(h->pf, idx, on ? &s_portops : &s_offops, port, !on); }
 int dm_host_raw_download(dm_host *h, const void *buf, uint32_t size, void **handle) { return msynth_download(h->syn, buf, size, handle); }
 void dm_host_raw_unload(dm_host *h, void *handle) { sink_ul(h, handle); }

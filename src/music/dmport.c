@@ -1012,6 +1012,10 @@ HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort *
     DWORD sgroups = pp.dwChannelGroups < 64 ? 64 : pp.dwChannelGroups;
     dm_host *h = dm_host_new_ex(pp.dwSampleRate, pp.dwVoices, sgroups, (int)pp.dwAudioChannels);
     if (!h) return E_OUTOFMEMORY;
+    /* dmusic makes a DirectX 8 synth port (IDirectMusicSynth8: waves) only for DMUS_PORTPARAMS8 with the audiopath
+     * feature asked for (771885dd), a DirectX 7 one otherwise */
+    dm_host_set_dx7port(h, !(params->dwSize == sizeof(DMUS_PORTPARAMS8) && (pp.dwValidParams & DMUS_PORTPARAMS_FEATURES) &&
+                             (((DMUS_PORTPARAMS8 *)params)->dwFeatures & DMUS_PORT_FEATURE_AUDIOPATH)));
     if (!(pp.dwEffectFlags & DMUS_EFFECT_REVERB)) dm_host_set_reverb(h, 0);
     rm_port *p = rm_port_new(h);
     if (!p) { dm_host_free(h); return E_OUTOFMEMORY; }

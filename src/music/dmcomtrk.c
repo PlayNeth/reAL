@@ -40,11 +40,14 @@ static rm_track *unsafe_track(IUnknown *u)
 static HRESULT WINAPI trk_qi(IDirectMusicTrack8 *i, REFIID riid, void **out)
 {
     if (!out) return E_POINTER;
-    /* dmime's tracks: IDirectMusicTrack8 except the time signature and marker tracks' (7731cc26); IPersist only on dmband's */
+    /* dmime's tracks: IDirectMusicTrack8 except the time signature and marker tracks' (7731cc26); IPersist on dmband's
+     * and on dmime's lyrics, segment trigger, parameter control and script tracks (tests/trktest.c standalone) */
     int kind = trk(i)->t->kind;
     if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IDirectMusicTrack) ||
         (IsEqualIID(riid, &IID_IDirectMusicTrack8) && kind != TRK_TIMESIG && kind != TRK_MARKER)) *out = i;
-    else if (IsEqualIID(riid, &IID_IPersistStream) || (IsEqualIID(riid, &IID_IPersist) && kind == TRK_BAND))
+    else if (IsEqualIID(riid, &IID_IPersistStream) ||
+             (IsEqualIID(riid, &IID_IPersist) && (kind == TRK_BAND || kind == TRK_LYRICS || kind == TRK_SEGTRIG ||
+                                                   kind == TRK_PARAMCTL || kind == TRK_SCRIPT)))
         *out = &trk(i)->IPersistStream_iface;
     else if (IsEqualIID(riid, &IID_IDirectMusicPatternTrack) && kind == TRK_PATTERN)     /* 77413466 */
         *out = &trk(i)->IDirectMusicPatternTrack_iface;
@@ -74,32 +77,50 @@ static HRESULT WINAPI trk_init(IDirectMusicTrack8 *i, IDirectMusicSegment *s) { 
 static rm_state *unsafe_state(IUnknown *u);
 static rm_perf *perf_from_unknown(IUnknown *u);
 static BYTE s_nostate;                      /* (what a failed motif InitPlay leaves: never played or ended) */
+static int stateless(const dm_track *t)
+{
+    return t->kind == TRK_CHORDMAP || t->kind == TRK_SIGNPOST || t->kind == TRK_MUTE || t->kind == TRK_MARKER;
+}
+/* the engine state a track plays on: the segment state's, or for a state from Segment::InitPlay (none behind it) a
+ * bare one it gets on first use (host lock held) */
+static dm_segstate *engine_state(rm_state *st, rm_perf *pf)
+{
+    if (st->ss) return st->ss;
+    if (!st->bare) st->bare = dm_segstate_bare(dm_host_perf(pf->host), st);
+    return st->bare;
+}
 static HRESULT WINAPI trk_initplay(IDirectMusicTrack8 *i, IDirectMusicSegmentState *ss, IDirectMusicPerformance *p, void **d, DWORD id, DWORD f)
 {
     dm_track *t = trk(i)->t;
     if (!d || IsBadWritePtr(d, sizeof(*d))) return E_POINTER;
-    *d = NULL;
+    /* the chord map, signpost, mute and marker tracks hand out no state: *d stays as it was (tests/dx7test.c
+     * trackplay), and Play and EndPlay take no notice of it */
+    const int nostate = stateless(t);
+    if (!nostate) *d = NULL;
     dm_engine_lock();
     int ok = dm_track_can_play(t);
     dm_engine_unlock();
-    if (ok == DM_E_FAIL) *d = &s_nostate;
+    if (ok == DM_E_FAIL && !nostate) *d = &s_nostate;
     if (ok < 0) return ok;
     rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
     rm_perf *pf = p ? perf_from_unknown((IUnknown *)p) : NULL;
-    if (!st || !st->ss || !pf || !pf->host) return rm_notimpl("Track::InitPlay (a state or performance not made by reDM)");
+    if (!st || !pf || !pf->host) return rm_notimpl("Track::InitPlay (a state or performance not made by reDM)");
     dm_host_lock(pf->host);
+    dm_segstate *es = engine_state(st, pf);
+    if (!es) { dm_host_unlock(pf->host); return E_OUTOFMEMORY; }
     if ((ok = dm_track_can_play(t)) < 0) {          /* (again: a Load on another thread may have replaced the data) */
         dm_host_unlock(pf->host);
-        if (ok == DM_E_FAIL) *d = &s_nostate;
+        if (ok == DM_E_FAIL && !nostate) *d = &s_nostate;
         return ok;
     }
     int ihr;
-    void *x = dm_track_direct_init(dm_host_perf(pf->host), st->ss, t, f, id, &ihr);
-    if (x && (t->kind == TRK_CHORDMAP || t->kind == TRK_SIGNPOST || t->kind == TRK_MUTE || t->kind == TRK_MARKER)) {
+    void *x = dm_track_direct_init(dm_host_perf(pf->host), es, t, f, id, &ihr);
+    if (x && nostate) {                 /* (its InitPlay done: a signpost track's composer seeds rand()) */
         dm_track_direct_end(x);
         x = NULL;
     } else if (!x) { dm_host_unlock(pf->host); return E_OUTOFMEMORY; }
     dm_host_unlock(pf->host);
+    if (nostate) return ihr;
     *d = x;
     /* (dmime's wave track hands out its state even so; nothing ever ends it, and it keeps the track) */
     if (ihr < 0) trk_addref(i);
@@ -107,7 +128,7 @@ static HRESULT WINAPI trk_initplay(IDirectMusicTrack8 *i, IDirectMusicSegmentSta
 }
 static HRESULT WINAPI trk_endplay(IDirectMusicTrack8 *i, void *d)
 {
-    if (!d || d == &s_nostate) return S_OK;
+    if (!d || d == &s_nostate || stateless(trk(i)->t)) return S_OK;
     dm_engine_lock();
     dm_track_direct_end(d);             /* (on the performance it started on) */
     dm_engine_unlock();
@@ -117,11 +138,14 @@ static HRESULT trk_play_any(IDirectMusicTrack8 *i, void *d, int64_t a, int64_t b
                             IDirectMusicSegmentState *ss, int clock)
 {
     if (d == &s_nostate) return E_POINTER;
+    if (stateless(trk(i)->t)) d = NULL;
     rm_state *st = ss ? unsafe_state((IUnknown *)ss) : NULL;
     rm_perf *pf = p ? perf_from_unknown((IUnknown *)p) : NULL;
-    if (!st || !st->ss || !pf || !pf->host) return rm_notimpl("Track::Play (a state or performance not made by reDM)");
+    if (!st || !pf || !pf->host) return rm_notimpl("Track::Play (a state or performance not made by reDM)");
     dm_host_lock(pf->host);
-    int hr = dm_track_direct_play(dm_host_perf(pf->host), st->ss, d, trk(i)->t, a, b, o, f, clock);
+    dm_segstate *es = engine_state(st, pf);
+    if (!es) { dm_host_unlock(pf->host); return E_OUTOFMEMORY; }
+    int hr = dm_track_direct_play(dm_host_perf(pf->host), es, d, trk(i)->t, a, b, o, f, clock);
     dm_host_unlock(pf->host);
     return hr;
 }

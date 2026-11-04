@@ -358,6 +358,7 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
         dm_host_unlock(p->host);
     } else hr = ensure_host(p, rate, voices);
     if (FAILED(hr)) return hr;
+    PERF_LOCKED(p, dm_host_set_dx7port(p->host, 0));   /* (InitAudio's port: DMUS_PORTPARAMS8, the audiopath feature) */
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {
         params->dwValidData |= DMUS_AUDIOPARAMS_SAMPLERATE | DMUS_AUDIOPARAMS_VOICES;
         params->dwSampleRate = rate; params->dwVoices = voices;

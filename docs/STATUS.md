@@ -531,9 +531,24 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   0x88781150, and the wave track at its first item's reference, as their DLLs do.
 - InitPlay / Play / PlayEx / EndPlay on a state and performance of the application's choosing: the engine keeps the
   track's state as a segment state would, with every group bit and on the application thread's rand(). The chord
-  map, signpost, mute and marker tracks hand out no state; a style or pattern track without a style fails with
-  E_POINTER, a motif track without a motif with E_FAIL; the wave track fails with DMUS_E_NOT_INIT when an item's
-  wave is not downloaded to its port (and, as dmime's, keeps the track: its state is never ended).
+  map, signpost, mute and marker tracks hand out no state and leave the state pointer as it was (Play and EndPlay
+  take no notice of it); a style or pattern track without a style fails with E_POINTER, a motif track without a
+  motif with E_FAIL; the wave track fails with DMUS_E_NOT_INIT when an item's wave is not downloaded to its port
+  (and, as dmime's, keeps the track: its state is never ended).
+- The state Segment::InitPlay gives works for that too (it used to be E_NOTIMPL): its tracks play on an engine state
+  with no segment, no audiopath and no graph, so their messages are stamped by the performance and a track asking
+  the state for its segment finds none (the sequence track's time signature cache then keeps its default), as on
+  dmime's. `tests/comcmp.sh dx7test.exe trackplay <files>` plays every track of segment files that way (each in
+  turn, the messages reaching the performance's graph from that track compared): bells1, fe_hard_04 and 24 of
+  `tools/sty`'s files (styles, patterns, chord maps and signposts, lyrics, triggers, parameter control, scripts,
+  markers, mute, waves) match.
+- Found on the way:
+  - dmime's lyrics, segment trigger, parameter control and script tracks answer IPersist (only the band track did);
+  - a wave track's download answers what its last part's did (S_FALSE when its waves were downloaded already),
+    and so does Segment::Download: it was S_OK;
+  - a DirectX 7 synth port, what CreatePort makes without DMUS_PORTPARAMS8 and the audiopath feature, and the
+    port Init's AddPort(NULL) adds, takes no waves (DownloadWave and AllocVoice E_NOTIMPL, as dmusic's 7718c7fe,
+    so a wave track's InitPlay fails with DMUS_E_NOT_INIT); reDM played them.
 - A segment made with CoCreateInstance has a length of 1 and no tracks, and plays (it used to refuse).
 - Found on the way: the performance's time signature when no track gives one is the newest one in its time
   signature list (dmime 77304559), not 4/4 from time 0, so a segment without a time signature track aligns
@@ -628,8 +643,6 @@ Smaller items still open:
   segment's load, as on Microsoft's). A working case needs a tool class registered in both Wine prefixes.
 - dmime's Init asks a DirectMusic it made for IDirectMusic2 when the version is above 6; reDM's DirectMusic does not
   depend on that.
-- A track's InitPlay / Play with the state Segment::InitPlay gives (it has no engine state behind it) returns
-  E_NOTIMPL.
 
 ## Testing
 
@@ -643,7 +656,9 @@ Smaller items still open:
   methods, PlayBuffer, the clocks' Advise calls): all match. `multiperf`'s `dx6` thread (MP_THREADS bit 0x40) runs
   that way of playing against the other threads.
 - `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay]` compares what changes with the interface asked for
-  (each section as DirectX 6, 7 and 8 where it differs): all match.
+  (each section as DirectX 6, 7 and 8 where it differs): all match. `dx7test.exe trackplay [files]` (with
+  `REDM_TIME=1234567`, run where the files are, `COMCMP_DIR`) plays each track of the files on Segment::InitPlay's
+  state; `TP_INITAUDIO=1` sets the performance up with InitAudio instead of Init and AddPort.
 - `wine build/bench_mix.exe [seconds] [reAL_hrtf.bin | builtin]` times the mixer's stages (voices of each kind and format, the
   reverb, a heavy scene) per 10 ms block, built as the DLL is.
 - `tests/fuzzcmp.py <first seed> <seeds> [ops]` runs `dsfuzz.exe` under both DirectSounds (through comcmp.sh, in

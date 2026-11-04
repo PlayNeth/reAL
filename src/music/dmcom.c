@@ -80,6 +80,8 @@ typedef struct {
     IDirectMusicAudioPath *path;            /* the audiopath it plays on (the default one when none was given) */
     int xref;                               /* further engine references it drops when it goes */
     IDispatch *autod;                       /* its automation (made on first QueryInterface) */
+    dm_segstate *bare;                      /* Segment::InitPlay's: the engine state tracks play on (no segment, no
+                                             * audiopath, no graph: the performance's), made on a track's first use */
 } rm_state;
 
 typedef struct {
