@@ -11,6 +11,7 @@
 static int s_fail;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); s_fail++; } } while (0)
 
+static int cmp_double(const void *x, const void *y) { double a = *(const double *)x, b = *(const double *)y; return a < b ? -1 : a > b; }
 static double energy(const float *h, uint32_t n) { double e = 0; for (uint32_t k = 0; k < n; k++) e += (double)h[k] * h[k]; return e; }
 /* |H(f)| in dB */
 static double mag_db(const float *h, uint32_t n, double f, double rate)
@@ -63,20 +64,28 @@ int main(void)
     printf("horizontal ring mean energy %.4f\n", e0);
     CHECK(fabs(e0 - 0.82) < 0.01, "level %.4f", e0);
 
-    /* the other rates: the filters resampled, their response at 1 kHz kept (both ears) */
-    rl_hrtf_lookup(&s, 30.0f, 10.0f, &a);
-    double m48[2] = { mag_db(a.coef[0], s.taps, 1000, 48000), mag_db(a.coef[1], s.taps, 1000, 48000) };
-    static const uint32_t rates[] = { 44100, 88200, 96000, 192000 };
+    /* the other rates: the filters resampled band-limited, their response kept up to 40% of the lower rate (both
+     * ears, a grid of directions; notches aside, so the 95th percentile of the differences) */
+    static const uint32_t rates[] = { 22050, 32000, 44100, 88200, 96000, 192000 };
+    static double dif[40000];
     for (unsigned i = 0; i < sizeof(rates) / sizeof(rates[0]); i++) {
         rl_hrtf_set r;
         int ok = rl_hrtf_load_builtin(&r, rates[i]);
         CHECK(ok && r.rate == rates[i] && r.taps <= RL_HRTF_MAX_TAPS, "load at %u", rates[i]);
         if (!ok) continue;
-        rl_hrtf_lookup(&r, 30.0f, 10.0f, &b);
-        for (int ch = 0; ch < 2; ch++) {
-            double m = mag_db(b.coef[ch], r.taps, 1000, rates[i]);
-            CHECK(fabs(m - m48[ch]) < 0.5, "%u Hz: ear %d at 1 kHz %.2f dB, 48 kHz %.2f dB", rates[i], ch, m, m48[ch]);
-        }
+        const double lim = 0.4 * (rates[i] < 48000 ? rates[i] : 48000);
+        int n = 0;
+        for (float az = 0.0f; az < 360.0f; az += 30.0f)
+            for (float el = -30.0f; el <= 60.0f; el += 30.0f) {
+                rl_hrtf_lookup(&s, az, el, &a);
+                rl_hrtf_lookup(&r, az, el, &b);
+                for (int ch = 0; ch < 2; ch++)
+                    for (double f = 200.0; f < lim && n < 40000; f *= 1.1)
+                        dif[n++] = fabs(mag_db(b.coef[ch], r.taps, f, rates[i]) - mag_db(a.coef[ch], s.taps, f, 48000));
+            }
+        qsort(dif, n, sizeof(double), cmp_double);
+        printf("%6u Hz: response within %.2f dB of 48 kHz's (95%% of %d points to %.0f Hz)\n", rates[i], dif[n * 95 / 100], n, lim);
+        CHECK(dif[n * 95 / 100] < 0.5, "%u Hz: 95th percentile %.2f dB", rates[i], dif[n * 95 / 100]);
         rl_hrtf_free(&r);
     }
 

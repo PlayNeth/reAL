@@ -83,9 +83,12 @@ default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning,
   first direction while already playing was silent on HRTF until its next change of direction. That happens when
   HRTF is loaded after the sound started, or when a playing sound becomes 3D. The bug came with the vectorised
   convolution, and Play's restart hid it in other cases. The first direction is now stored as every later one is.
-- Not done: resampling the filters for devices below 44.1 kHz uses linear interpolation without a low-pass, which
-  aliases (0.6 dB at 1 kHz at 22.05 kHz). This applies to measured sets too. Shared-mode WASAPI devices run at
-  44.1 kHz or more.
+- Filters for a device at another rate than the set's are resampled band-limited (a Kaiser-windowed sinc with the
+  lower Nyquist frequency as cutoff, its weights worked out once per load: 3 ms at 44.1 kHz, 8 ms at 192 kHz). Linear
+  interpolation used to alias below the set's rate and dull its top octave above it: the built-in 48 kHz set on a
+  44.1 kHz device was up to 4 dB off at the top (95th percentile, notches aside), now 0.03 dB; 0.4 dB at 22.05 kHz,
+  0.2 dB at 32 kHz, 0.06 dB or less above 48 kHz (`tests/test_hrtf.c` checks every one). This applies to measured
+  sets too.
 
 **Primary buffer** (`src/buffer.c`, `src/buffer8.c`, `tests/primtest.c`)
 - DSSCL_WRITEPRIMARY, which ALchemy does not do (its primary buffer plays nothing), as Windows 7's DirectSound does

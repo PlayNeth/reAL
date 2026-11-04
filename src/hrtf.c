@@ -6,6 +6,21 @@
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 static float rdf(const uint8_t *p) { uint32_t u = rd32(p); float f; memcpy(&f, &u, 4); return f; }
 
+/* the resampling kernel: sinc windowed by a Kaiser window (beta 8), RS_HALF zero crossings either side */
+#define RS_HALF 12
+static double bessel_i0(double x)
+{
+    double s = 1.0, t = 1.0;
+    for (int k = 1; k < 40; k++) { t *= (x / (2 * k)) * (x / (2 * k)); s += t; }
+    return s;
+}
+static double rs_kernel(double x)
+{
+    if (x <= -RS_HALF || x >= RS_HALF) return 0.0;
+    const double r = x / RS_HALF, w = bessel_i0(8.0 * sqrt(1.0 - r * r)) / bessel_i0(8.0);
+    return x == 0.0 ? 1.0 : sin(M_PI * x) / (M_PI * x) * w;
+}
+
 int rl_hrtf_load(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out_rate)
 {
     const uint8_t *p = data, *end = p + size;
@@ -33,6 +48,27 @@ int rl_hrtf_load(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out
     uint32_t otaps = (uint32_t)ceil(taps * ratio);
     if (otaps > RL_HRTF_MAX_TAPS) otaps = RL_HRTF_MAX_TAPS;
     float tmp[RL_HRTF_MAX_TAPS];
+    /* band-limited resampling: each output tap is the response at k / ratio through a Kaiser-windowed sinc whose
+     * cutoff is the lower of the two Nyquist frequencies (linear interpolation aliased below the measured rate and
+     * dulled the top octave above it), scaled by 1 / ratio to keep the gain.  The weights are the same for every
+     * filter: worked out once. */
+    double *rw = NULL;
+    uint32_t rw_n = 0, rw_j0[RL_HRTF_MAX_TAPS], rw_len[RL_HRTF_MAX_TAPS];
+    if (ratio != 1.0) {
+        const double c = ratio < 1.0 ? ratio : 1.0, half = RS_HALF / c;
+        rw_n = (uint32_t)(2.0 * half) + 2;
+        rw = malloc((size_t)otaps * rw_n * sizeof(double));
+        if (!rw) { free(set->dirs); set->dirs = NULL; return 0; }
+        for (uint32_t k = 0; k < otaps; k++) {
+            const double t = k / ratio;
+            long j0 = (long)ceil(t - half), j1 = (long)floor(t + half);
+            if (j0 < 0) j0 = 0;
+            if (j1 > (long)taps - 1) j1 = (long)taps - 1;
+            rw_j0[k] = (uint32_t)j0;
+            rw_len[k] = j1 >= j0 ? (uint32_t)(j1 - j0 + 1) : 0;
+            for (uint32_t j = 0; j < rw_len[k]; j++) rw[(size_t)k * rw_n + j] = rs_kernel((t - (double)(j0 + j)) * c) * c / ratio;
+        }
+    }
     for (uint32_t i = 0; i < n; i++) {
         rl_hrtf_filter *f = &set->dirs[i];
         f->delay[0] = rdf(p) * (float)ratio;
@@ -44,17 +80,16 @@ int rl_hrtf_load(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out
             if (ratio == 1.0) {
                 memcpy(f->coef[ch], tmp, taps * sizeof(float));
             } else {
-                /* linear interpolation of the impulse response, scaled to keep the gain */
                 for (uint32_t k = 0; k < otaps; k++) {
-                    double t = k / ratio;
-                    uint32_t i0 = (uint32_t)t;
-                    double fr = t - i0;
-                    float a = i0 < taps ? tmp[i0] : 0.0f, b = i0 + 1 < taps ? tmp[i0 + 1] : 0.0f;
-                    f->coef[ch][k] = (float)((a + (b - a) * fr) / ratio);
+                    const double *w = rw + (size_t)k * rw_n;
+                    double acc = 0.0;
+                    for (uint32_t j = 0; j < rw_len[k]; j++) acc += tmp[rw_j0[k] + j] * w[j];
+                    f->coef[ch][k] = (float)acc;
                 }
             }
         }
     }
+    free(rw);
     set->rate = out_rate ? out_rate : rate;
     set->taps = ratio == 1.0 ? taps : otaps;
     set->n_rings = nr;
