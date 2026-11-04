@@ -22,18 +22,7 @@ void rl_pan_gains(int32_t pan, float out[2])
     out[1] = pan < 0 ? rl_db100_to_gain(pan) : 1.0f;
 }
 
-static inline float fetch1(const rl_voice *v, uint32_t frame, int ch);
-/* channel ch of a frame; a positioned voice of more than two channels (mono3d) gives the mean of them all */
-static inline float fetch(const rl_voice *v, uint32_t frame, int ch)
-{
-    if (v->mono3d && v->channels > 2) {
-        float s = 0.0f;
-        for (int c = 0; c < v->channels; c++) s += fetch1(v, frame, c);
-        return s / (float)v->channels;
-    }
-    return fetch1(v, frame, ch);
-}
-
+/* channel ch of a frame */
 static inline float fetch1(const rl_voice *v, uint32_t frame, int ch)
 {
     if (ch >= v->channels) ch = v->channels - 1;
@@ -48,6 +37,19 @@ static inline float fetch1(const rl_voice *v, uint32_t frame, int ch)
     case RL_F32: { float f; memcpy(&f, p + ch * 4, 4); return f; }
     }
     return 0.0f;
+}
+
+/* a positioned voice of more than two channels (mono3d) plays the mean of them all: out of line, as the rare case,
+ * so the common reads stay small enough to inline */
+static __attribute__((noinline)) float fetch_mean(const rl_voice *v, uint32_t frame)
+{
+    float s = 0.0f;
+    for (int c = 0; c < v->channels; c++) s += fetch1(v, frame, c);
+    return s / (float)v->channels;
+}
+static inline float fetch(const rl_voice *v, uint32_t frame, int ch)
+{
+    return __builtin_expect(v->mono3d && v->channels > 2, 0) ? fetch_mean(v, frame) : fetch1(v, frame, ch);
 }
 
 static void fire_range(const rl_voice *v, uint32_t lo, uint32_t hi, int incl_lo, rl_signal_fn signal)
@@ -330,7 +332,6 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
     const float *a = t->w + (size_t)(f32 >> 24) * T, *b = a + T;
     const float u = (float)(f32 & 0xFFFFFF) * (1.0f / 16777216.0f);
     const int64_t base = (int64_t)(pos >> 32) - t->half + 1;
-    const int stereo = v->channels >= 2 && !(v->mono3d && v->channels > 2);   /* (mono3d: the mean, read once) */
     const int inside = base >= 0 && base + T <= (int64_t)nframes;
 #ifdef __SSE2__
     if (inside && v->sfmt == RL_S16 && v->channels <= 2) {
@@ -361,6 +362,7 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
         }
     }
 #endif
+    const int stereo = v->channels >= 2 && !(v->mono3d && v->channels > 2);   /* (mono3d: the mean, read once) */
     float w[SINC_MAXT];
     for (int k = 0; k < T; k++) w[k] = a[k] + u * (b[k] - a[k]);
 
@@ -450,6 +452,15 @@ void rl_voice_start(rl_voice *v)
 
 #define MIXCHUNK 256
 
+/* the rest of a loop wrap when the step is more than a buffer (a frequency far above the buffer's rate): a division,
+ * out of line, as the rare case */
+static __attribute__((noinline)) void wrap_more(uint64_t *pos, uint64_t end, uint32_t *wraps)
+{
+    uint64_t w = *pos / end;
+    *pos -= w * end;
+    *wraps += (uint32_t)w;
+}
+
 /* source frames at pos, pos + step, ... into l[] and r[] (mono sources: r = l); a one-shot that reaches its
  * end stops after that frame (*ended set) */
 static uint32_t render_src(const rl_voice *v, const sinc_tab *kt, uint64_t *ppos, uint64_t step, uint64_t end,
@@ -464,10 +475,8 @@ static uint32_t render_src(const rl_voice *v, const sinc_tab *kt, uint64_t *ppos
         pos += step;
         if (pos >= end) {
             if (!v->looping) { *ended = 1; break; }
-            /* (a division: the step can be many times a short buffer, at a frequency far above its rate) */
-            uint64_t w = pos / end;
-            pos -= w * end;
-            *wraps += (uint32_t)w;
+            pos -= end; (*wraps)++;
+            if (__builtin_expect(pos >= end, 0)) wrap_more(&pos, end, wraps);
         }
     }
     *ppos = pos;
