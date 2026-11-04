@@ -48,6 +48,14 @@ linear and sinc, stereo and 5.1 output, HRTF and CMSS-3D, and of the 11 EAX 4 ef
 effects are compared by `tests/test_fx.c`):
 - the EAX 4 effects' delay taps rounded with one SSE2 instruction instead of a call to `nearbyint` per sample: chorus,
   flanger, echo and pitch shifter 10-14 times cheaper (EAX 4 loads a chorus into slot 1, run every block).
+- the mixer (`bench_mix`, best of three, before -> after): the sinc kernel of each format called from a loop of its
+  own instead of through the per-sample dispatch (16-bit stereo 431 -> 316 us a block, 8-bit mono 325 -> 192, 32-bit
+  mono 308 -> 165); 24-bit samples loaded 32 bits at a time from the byte before each (817 -> 359 us, now as cheap as
+  16-bit; a window at the buffer's first frame keeps the bytewise loads, so nothing before the buffer is read); gains
+  and speaker-routing weights stepped only when they move (5.1 3D 463 -> 304 us); CMSS-3D's virtualizer skips the
+  side filters while they read only zeros; an HRTF voice given the filter it already has doesn't crossfade. The heavy
+  scene: 8.9% -> 6.8% of a core, 14.2% -> 12.3% with HRTF. (Signed zeros and NaN gains can come out differently,
+  never a finite sample.)
 
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.

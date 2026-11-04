@@ -16,6 +16,7 @@ typedef struct rl_virt {                 /* stereo virtualizer state */
     uint32_t hist_cap, hist_len;
     float   bq[10][2];                   /* biquad states w1 w2 */
     float   dly[2][16]; uint32_t dpos;   /* crossfeed delay (<= 12 samples) */
+    uint32_t side_quiet;                 /* frames the side sum and difference have been 0 (to VIRT_MAXLEN) */
     struct rl_virt_hp *hp;               /* headphones (modes 0..2): early reflections; NULL = speakers */
 } rl_virt;
 

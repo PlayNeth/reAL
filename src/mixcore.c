@@ -273,9 +273,15 @@ static inline float   rd_f32(const uint8_t *q) { float f; memcpy(&f, q, 4); retu
 #define LOAD_F32(q, k, C, c) ((C) == 1 ? _mm_loadu_ps((const float *)(const void *)(q) + (k)) : \
     _mm_setr_ps(rd_f32((q) + ((k) * (C) + (c)) * 4), rd_f32((q) + (((k) + 1) * (C) + (c)) * 4), \
                 rd_f32((q) + (((k) + 2) * (C) + (c)) * 4), rd_f32((q) + (((k) + 3) * (C) + (c)) * 4)))
-#define LOAD_S24(q, k, C, c) _mm_cvtepi32_ps(_mm_setr_epi32(rd_s24((q) + ((k) * (C) + (c)) * 3), \
+/* 24-bit: one 32-bit load from the byte before each sample, its top three bytes the sample (shifted down, sign
+ * kept): the value rd_s24 gives.  That reads the byte before the frame, so a window starting at the buffer's first
+ * frame takes the bytewise loads (LOAD_S24B, the same values) */
+#define LOAD_S24B(q, k, C, c) _mm_cvtepi32_ps(_mm_setr_epi32(rd_s24((q) + ((k) * (C) + (c)) * 3), \
     rd_s24((q) + (((k) + 1) * (C) + (c)) * 3), rd_s24((q) + (((k) + 2) * (C) + (c)) * 3), \
     rd_s24((q) + (((k) + 3) * (C) + (c)) * 3)))
+#define LOAD_S24(q, k, C, c) _mm_cvtepi32_ps(_mm_srai_epi32(_mm_setr_epi32(rd_s32((q) + ((k) * (C) + (c)) * 3 - 1), \
+    rd_s32((q) + (((k) + 1) * (C) + (c)) * 3 - 1), rd_s32((q) + (((k) + 2) * (C) + (c)) * 3 - 1), \
+    rd_s32((q) + (((k) + 3) * (C) + (c)) * 3 - 1)), 8))
 #define LOAD_S32(q, k, C, c) _mm_cvtepi32_ps(_mm_setr_epi32(rd_s32((q) + ((k) * (C) + (c)) * 4), \
     rd_s32((q) + (((k) + 1) * (C) + (c)) * 4), rd_s32((q) + (((k) + 2) * (C) + (c)) * 4), \
     rd_s32((q) + (((k) + 3) * (C) + (c)) * 4)))
@@ -320,6 +326,8 @@ static inline void sinc_u8_stereo(const float *a, const float *b, float u, const
 }
 SINC_KERNEL_MONO(sinc_s24_mono, uint8_t, LOAD_S24)
 SINC_KERNEL_STEREO(sinc_s24_stereo, uint8_t, LOAD_S24)
+SINC_KERNEL_MONO(sinc_s24b_mono, uint8_t, LOAD_S24B)
+SINC_KERNEL_STEREO(sinc_s24b_stereo, uint8_t, LOAD_S24B)
 SINC_KERNEL_MONO(sinc_s32_mono, uint8_t, LOAD_S32)
 SINC_KERNEL_STEREO(sinc_s32_stereo, uint8_t, LOAD_S32)
 #endif
@@ -354,7 +362,9 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
         case RL_U8:  if (st) sinc_u8_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_u8_mono(a, b, u, p, T);
                      /* weights sum to 1: the 128 offset taken off once, as below */
                      *l = (x - 128.0f) * (1.0f / 128.0f); *r = (y - 128.0f) * (1.0f / 128.0f); return;
-        case RL_S24: if (st) sinc_s24_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_s24_mono(a, b, u, p, T);
+        case RL_S24: if (base)                  /* (see LOAD_S24) */
+                         { if (st) sinc_s24_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_s24_mono(a, b, u, p, T); }
+                     else if (st) sinc_s24b_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_s24b_mono(a, b, u, p, T);
                      *l = x * (1.0f / 8388608.0f); *r = y * (1.0f / 8388608.0f); return;
         case RL_S32: if (st) sinc_s32_stereo(a, b, u, p, T, &x, &y); else x = y = sinc_s32_mono(a, b, u, p, T);
                      *l = x * (1.0f / 2147483648.0f); *r = y * (1.0f / 2147483648.0f); return;
@@ -468,6 +478,59 @@ static uint32_t render_src(const rl_voice *v, const sinc_tab *kt, uint64_t *ppos
 {
     uint64_t pos = *ppos;
     uint32_t i = 0;
+#ifdef __SSE2__
+    /* sinc on a mono or stereo source: the format chosen once, the frames whose taps lie inside the buffer read by
+     * its kernel directly (the arithmetic read_sinc does for them), the others by read_sinc */
+#define SINC_RUN(...) do { \
+        const int T = kt->taps; \
+        const int64_t lo = v->sfmt == RL_S24, hi = (int64_t)nframes - T;   /* (S24 at 0: read_sinc, LOAD_S24) */ \
+        while (i < n) { \
+            const int64_t base = (int64_t)(pos >> 32) - kt->half + 1; \
+            if (base >= lo && base <= hi) { \
+                const uint32_t f32 = (uint32_t)pos; \
+                const float *a = kt->w + (size_t)(f32 >> 24) * T, *b = a + T; \
+                const float u = (float)(f32 & 0xFFFFFF) * (1.0f / 16777216.0f); \
+                const uint8_t *p = v->data + (size_t)base * v->block; \
+                __VA_ARGS__; \
+            } else read_sinc(v, kt, pos, nframes, &l[i], &r[i]); \
+            i++; \
+            pos += step; \
+            if (pos >= end) { \
+                if (!v->looping) { *ended = 1; break; } \
+                pos -= end; (*wraps)++; \
+                if (__builtin_expect(pos >= end, 0)) wrap_more(&pos, end, wraps); \
+            } \
+        } \
+        *ppos = pos; \
+        return i; \
+    } while (0)
+    if (kt && v->channels <= 2) {
+        const int st = v->channels == 2;
+        switch (v->sfmt) {
+        case RL_S16:
+            if (st) SINC_RUN(float x, y; sinc_s16_stereo(a, b, u, p, T, &x, &y);
+                             l[i] = x * (1.0f / 32768.0f); r[i] = y * (1.0f / 32768.0f));
+            else SINC_RUN(l[i] = r[i] = sinc_s16_mono(a, b, u, p, T) * (1.0f / 32768.0f));
+        case RL_F32:
+            if (st) SINC_RUN(sinc_f32_stereo(a, b, u, p, T, &l[i], &r[i]));
+            else SINC_RUN(l[i] = r[i] = sinc_f32_mono(a, b, u, p, T));
+        case RL_U8:
+            if (st) SINC_RUN(float x, y; sinc_u8_stereo(a, b, u, p, T, &x, &y);
+                             l[i] = (x - 128.0f) * (1.0f / 128.0f); r[i] = (y - 128.0f) * (1.0f / 128.0f));
+            else SINC_RUN(l[i] = r[i] = (sinc_u8_mono(a, b, u, p, T) - 128.0f) * (1.0f / 128.0f));
+        case RL_S24:
+            if (st) SINC_RUN(float x, y; sinc_s24_stereo(a, b, u, p, T, &x, &y);
+                             l[i] = x * (1.0f / 8388608.0f); r[i] = y * (1.0f / 8388608.0f));
+            else SINC_RUN(l[i] = r[i] = sinc_s24_mono(a, b, u, p, T) * (1.0f / 8388608.0f));
+        case RL_S32:
+            if (st) SINC_RUN(float x, y; sinc_s32_stereo(a, b, u, p, T, &x, &y);
+                             l[i] = x * (1.0f / 2147483648.0f); r[i] = y * (1.0f / 2147483648.0f));
+            else SINC_RUN(l[i] = r[i] = sinc_s32_mono(a, b, u, p, T) * (1.0f / 2147483648.0f));
+        default: break;
+        }
+    }
+#undef SINC_RUN
+#endif
     while (i < n) {
         if (kt) read_sinc(v, kt, pos, nframes, &l[i], &r[i]);
         else read_at(v, pos, nframes, &l[i], &r[i]);
@@ -584,6 +647,13 @@ static void resume_filter(const rl_voice *v, const sinc_tab *kt, uint64_t step, 
  * start), then held at t: the same sequence the per-frame loop produced */
 static inline void gain_run(float *gv, float g, float d, float t, uint32_t ramp, uint32_t i0, uint32_t n, float *out_g)
 {
+    if (d == 0.0f || i0 >= ramp) {      /* nothing to step: g held for the rest of the ramp, then t (the same values) */
+        uint32_t k = i0 >= ramp ? 0 : ramp - i0 > n ? n : ramp - i0;
+        for (uint32_t i = 0; i < k; i++) gv[i] = g;
+        for (uint32_t i = k; i < n; i++) gv[i] = t;
+        *out_g = k == n ? g : t;
+        return;
+    }
     for (uint32_t i = 0; i < n; i++) {
         if (i0 + i < ramp) g += d; else g = t;
         gv[i] = g;
@@ -984,7 +1054,9 @@ int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, 
             float t = v->route_on ? v->rt[k][c] : w[k][c];
             dw[k][c] = (t - w[k][c]) / (float)ramp;
         }
-    uint32_t left = ramp;
+    /* the weights ramp only when a target moved (an unchanged one would step by 0 for the whole ramp) */
+    uint32_t left = 0;
+    for (int k = 0; k < 3; k++) for (uint32_t c = 0; c < no; c++) if (dw[k][c] != 0.0f) left = ramp;
     while (done < frames) {
         uint32_t n = frames - done > ROUTE_CHUNK ? ROUTE_CHUNK : frames - done;
         int src_silent = 1;             /* (the voice rendered nothing: idle, or stopped) */
@@ -1013,11 +1085,14 @@ int rl_voice_mix_n(rl_voice *v, float *out, uint32_t nout, float *const *sends, 
         } else if (!hrtf) {
             for (uint32_t i = 0; i < n; i++) mono[i] = 0.5f * (pair[2 * i] + pair[2 * i + 1]);
         }
-        for (uint32_t i = 0; i < n; i++) {
-            if (left) {
-                for (int k = 0; k < 3; k++) for (uint32_t c = 0; c < no; c++) w[k][c] += dw[k][c];
-                left--;
-            }
+        uint32_t i = 0;
+        for (; i < n && left; i++, left--) {                /* the ramp */
+            for (int k = 0; k < 3; k++) for (uint32_t c = 0; c < no; c++) w[k][c] += dw[k][c];
+            float *o = out + (size_t)(done + i) * nout;
+            const float l = pair[2 * i], r = pair[2 * i + 1], m = mono[i];
+            for (uint32_t c = 0; c < no; c++) o[c] += l * w[0][c] + r * w[1][c] + m * w[2][c];
+        }
+        for (; i < n; i++) {                               /* the weights held */
             float *o = out + (size_t)(done + i) * nout;
             const float l = pair[2 * i], r = pair[2 * i + 1], m = mono[i];
             for (uint32_t c = 0; c < no; c++) o[c] += l * w[0][c] + r * w[1][c] + m * w[2][c];

@@ -169,14 +169,20 @@ int rl_virt_process(rl_virt *v, float *const ch[ALRV_NOUT], float *out, uint32_t
     float *u[NHIST];
     for (int s = 0; s < NHIST; s++) u[s] = v->hist + s * v->hist_cap + VIRT_MAXLEN;
     if (v->hp) return hp_process(v, ch, out, frames, tmp, u);
+    int sides_zero = 1;
     for (uint32_t n = 0; n < frames; n++) {
         u[0][n] = ch[ALRV_SL][n] + ch[ALRV_SR][n]; u[1][n] = ch[ALRV_SL][n] - ch[ALRV_SR][n];
         u[2][n] = ch[ALRV_BL][n] + ch[ALRV_BR][n]; u[3][n] = ch[ALRV_BL][n] - ch[ALRV_BR][n];
+        if (u[0][n] != 0.0f || u[1][n] != 0.0f) sides_zero = 0;
     }
     float *S = tmp, *D = tmp + frames;
     memset(tmp, 0, 2 * frames * sizeof(float));
-    fir_add(S, u[0], t->side_s, t->side_len, frames);
-    fir_add(D, u[1], t->side_d, t->side_len, frames);
+    /* side filters reading only zeros (CMSS-3D's quad has no sides) would add +0: skipped */
+    if (!sides_zero || v->side_quiet < t->side_len) {
+        fir_add(S, u[0], t->side_s, t->side_len, frames);
+        fir_add(D, u[1], t->side_d, t->side_len, frames);
+    }
+    v->side_quiet = !sides_zero ? 0 : v->side_quiet + frames > VIRT_MAXLEN ? VIRT_MAXLEN : v->side_quiet + frames;
     fir_add(S, u[2], t->back_s, t->back_len, frames);
     fir_add(D, u[3], t->back_d, t->back_len, frames);
     for (int s = 0; s < 4; s++)       /* keep history */
@@ -204,6 +210,7 @@ void rl_virt_reset(rl_virt *v)
     memset(v->bq, 0, sizeof v->bq);
     memset(v->dly, 0, sizeof v->dly);
     v->dpos = 0;
+    v->side_quiet = 0;
     if (v->hp) {
         memset(v->hp->ring, 0, sizeof v->hp->ring);
         memset(v->hp->pos, 0, sizeof v->hp->pos);

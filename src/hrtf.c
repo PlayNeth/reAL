@@ -127,7 +127,7 @@ void rl_hrtf_voice_set(rl_hrtf_voice *v, const rl_hrtf_filter *f)
         for (int k = 0; k < RL_HRTF_MAX_TAPS; k++)
             v->target.coef[ch][RL_HRTF_MAX_TAPS - 1 - k] = f->coef[ch][k];
     if (!v->have_cur) { v->cur = v->target; v->have_cur = 1; v->dirty = 0; }
-    else v->dirty = 1;
+    else if (v->dirty || memcmp(&v->target, &v->cur, sizeof(v->cur))) v->dirty = 1;   /* (the same filter: no fade) */
 }
 
 static inline void conv(const rl_hrtf_voice *v, const rl_hrtf_filter *f, uint32_t taps, uint32_t w, float *l, float *r)
