@@ -200,6 +200,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 - **Microsoft's DirectMusic under Wine** (`winetricks directmusic`) needs two private DirectSound interfaces that Wine's dsound lacks. reAL passes them to the real dsound, so point `realdsound=` at Microsoft's `dsound.dll` for those games, or use reDM instead.
 - **No MIDI music** in an older game: try `midi=true`.
 - **Crackling or stutter:** raise `latency=`, or `buffers` / `duration` for that game.
+- **Unreal / Unreal Gold, a low rumble and scratches with `Use3dHardware=True`:** in its hardware 3D mode the game plays a loud low-frequency loop, which its software mode does not. ALchemy sounds the same, so reAL keeps it. Set `Use3dHardware=False` in the `[Galaxy.GalaxyAudioSubsystem]` section of `Unreal.ini`: the game then mixes and pans its sounds itself, without DirectSound 3D or EAX.
 - **To compare with ALchemy:** `fixes=false` and `resampler=linear`.
 
 ## HRTF data
