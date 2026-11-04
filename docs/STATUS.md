@@ -87,7 +87,7 @@ default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning,
   aliases (0.6 dB at 1 kHz at 22.05 kHz). This applies to measured sets too. Shared-mode WASAPI devices run at
   44.1 kHz or more.
 
-**Primary buffer** (`src/buffer.c`, `tests/primtest.c`)
+**Primary buffer** (`src/buffer.c`, `src/buffer8.c`, `tests/primtest.c`)
 - DSSCL_WRITEPRIMARY, which ALchemy does not do (its primary buffer plays nothing), as Windows 7's DirectSound does
   it: the primary buffer holds 32768 bytes (GetCaps) in the primary format, Lock / Unlock / GetCurrentPosition work
   on it, Play wants DSBPLAY_LOOPING, Stop keeps the position, SetFormat may change the format while it plays (at
@@ -109,7 +109,7 @@ default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning,
   0), the listener without DSBCAPS_CTRL3D, Unlock not checked against the Lock, and the primary buffer once its
   DirectSound object is released (Windows answers E_INVALIDARG to everything then).
 
-**Reference counts** (`src/buffer.c`): each interface of a buffer (IDirectSoundBuffer, IDirectSound3DBuffer,
+**Reference counts** (`src/buffer8.c`, `src/buffer.c`): each interface of a buffer (IDirectSoundBuffer, IDirectSound3DBuffer,
 IDirectSoundNotify, IKsPropertySet, the primary's listener) counts its own references and answers them from AddRef /
 Release, as ALchemy and Windows do (`primtest refs` matches Windows 7); the buffer goes when all are released. With
 one count for all, Fallout 3 and Fallout: New Vegas, which release a buffer until Release answers 0 while holding its
@@ -118,7 +118,7 @@ often than referenced still goes (ALchemy's and Windows' count), but, as Windows
 every call on them is E_INVALIDARG and AddRef / Release answer 0xffffffff (`primtest overrelease` matches Windows 7).
 Fallout's later calls on such a buffer used to land in freed memory and corrupt the heap.
 
-**Listener orientation** (`src/buffer.c`): SetOrientation refuses, as ALchemy (0x10043740), a front or top vector
+**Listener orientation** (`src/buffer3d.c`): SetOrientation refuses, as ALchemy (0x10043740), a front or top vector
 that is all zero or has an infinite / NaN component (DSERR_INVALIDPARAM, the orientation kept). Fallout 3 sets
 0,0,0 / 0,0,0 hundreds of times before the player has one; Windows refuses those too. reAL took them and its 3D
 math went NaN. Microsoft's DLL also refuses parallel vectors and keeps them normalised; ALchemy doesn't, and nor

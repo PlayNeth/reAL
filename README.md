@@ -238,7 +238,8 @@ pip install ziglang     # or have zig in PATH
 
 ```
 src/        the DLL (C11, Win32 COM by hand)
-  dsound.c, buffer.c   IDirectSound8, buffers, 3D buffers and listener, notifications, property sets
+  dsound.c, buffer*.c  IDirectSound8; buffers: creation (buffer.c), IDirectSoundBuffer8 and notifications
+                       (buffer8.c), 3D buffers and listener (buffer3d.c), property sets and EAX (bufferprop.c)
   device.c             the WASAPI output thread
   mixcore.*            the platform-independent voice mixer (unit tested natively)
   spatial.*            the DirectSound 3D model (distance, cones, Doppler)
