@@ -1,6 +1,6 @@
 /* dx6test - the DirectX 6/7 way of driving DirectMusic: Performance::Init with IDirectMusic::CreatePort and AddPort,
  * IDirectMusic::CreateMusicBuffer with Port::PlayBuffer, and the clocks' AdviseTime / AdvisePeriodic.  Prints every
- * HRESULT and out-parameter.  Run with tests/comcmp.sh dx6test.exe [port|buffer|play|clock]. */
+ * HRESULT and out-parameter.  Run with tests/comcmp.sh dx6test.exe [port|buffer|play|clock|dmversion]. */
 #define COBJMACROS
 #define INITGUID
 #include <windows.h>
@@ -668,6 +668,64 @@ static void clocks(void)
     close_perf();
 }
 
+/* ------------------------------------------------------------------ IDirectMusic's own version: 7, 8 once asked for
+ * IDirectMusic8 (dmusic 77189995).  IDirectMusic::Activate activates every port it made; GetDefaultPort */
+static void dmversion(void)
+{
+    for (int how = 0; how < 4; how++) {
+        static const char *const what[] = { "CoCreateInstance(IDirectMusic)", "CoCreateInstance, then IDirectMusic8",
+                                            "Performance::Init's (performance as DirectX 6)", "Performance::Init's (as DirectX 8)" };
+        IDirectMusic *d = NULL;
+        IDirectMusicPerformance8 *pf = NULL;
+        if (how < 2) CoCreateInstance(&CLSID_DirectMusic, NULL, CLSCTX_INPROC, &IID_IDirectMusic, (void **)&d);
+        else {
+            IDirectMusicPerformance *p6 = NULL;
+            CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance, (void **)&p6);
+            if (p6 && how == 3) IDirectMusicPerformance_QueryInterface(p6, &IID_IDirectMusicPerformance8, (void **)&pf);
+            if (p6) { P("  %s Init %08lx\n", what[how], IDirectMusicPerformance_Init(p6, &d, NULL, NULL)); }
+            if (!pf) pf = (IDirectMusicPerformance8 *)p6; else IDirectMusicPerformance_Release(p6);
+        }
+        P("  %s: %s\n", what[how], d ? "made" : "none");
+        if (!d) { if (pf) IDirectMusicPerformance8_Release(pf); continue; }
+        IDirectMusic8 *d8 = NULL;
+        if (how == 1) IDirectMusic_QueryInterface(d, &IID_IDirectMusic8, (void **)&d8);
+        GUID g = GUID_random_;
+        HRESULT hr = IDirectMusic_GetDefaultPort(d, &g);
+        P("    GetDefaultPort %08lx %s\n", hr, IsEqualGUID(&g, &CLSID_DirectMusicSynth) ? "the synth" : "another");
+        if (how < 2) P("    SetDirectSound %08lx\n", IDirectMusic_SetDirectSound(d, NULL, NULL));
+        DMUS_PORTPARAMS pp;
+        memset(&pp, 0, sizeof(pp)); pp.dwSize = sizeof(pp);
+        IDirectMusicPort *p = NULL;
+        hr = IDirectMusic_CreatePort(d, &GUID_NULL_, &pp, &p, NULL);
+        P("    CreatePort %08lx\n", hr);
+        DMUS_BUFFERDESC bd;
+        memset(&bd, 0, sizeof(bd)); bd.dwSize = sizeof(bd); bd.cbBuffer = 64;
+        IDirectMusicBuffer *b = NULL;
+        IDirectMusic_CreateMusicBuffer(d, &bd, &b, NULL);
+        if (p && b) {
+            IReferenceClock *ck = NULL;
+            REFERENCE_TIME now = 0;
+            IDirectMusicPort_GetLatencyClock(p, &ck);
+            if (ck) { IReferenceClock_GetTime(ck, &now); IReferenceClock_Release(ck); }
+            IDirectMusicBuffer_PackStructured(b, now, 1, 0x00403c90);
+            P("    PlayBuffer inactive %08lx\n", IDirectMusicPort_PlayBuffer(p, b));
+            P("    IDirectMusic::Activate(TRUE) %08lx\n", IDirectMusic_Activate(d, TRUE));
+            P("    PlayBuffer %08lx\n", IDirectMusicPort_PlayBuffer(p, b));
+            P("    IDirectMusic::Activate(TRUE) again %08lx\n", IDirectMusic_Activate(d, TRUE));
+            P("    Port::Activate(TRUE) %08lx\n", IDirectMusicPort_Activate(p, TRUE));
+            P("    IDirectMusic::Activate(FALSE) %08lx\n", IDirectMusic_Activate(d, FALSE));
+            P("    PlayBuffer %08lx\n", IDirectMusicPort_PlayBuffer(p, b));
+            P("    IDirectMusic::Activate(FALSE) again %08lx\n", IDirectMusic_Activate(d, FALSE));
+            P("    Port::Activate(FALSE) %08lx\n", IDirectMusicPort_Activate(p, FALSE));
+        }
+        if (b) IDirectMusicBuffer_Release(b);
+        if (p) IDirectMusicPort_Release(p);
+        if (d8) IDirectMusic8_Release(d8);
+        IDirectMusic_Release(d);
+        if (pf) { IDirectMusicPerformance8_CloseDown(pf); IDirectMusicPerformance8_Release(pf); }
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -677,6 +735,7 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "buffer")) { P("buffer:\n"); buffers(); }
     if (!only || !strcmp(only, "play")) { P("play:\n"); play(); }
     if (!only || !strcmp(only, "clock")) { P("clock:\n"); clocks(); }
+    if (!only || !strcmp(only, "dmversion")) { P("dmversion:\n"); dmversion(); }
     CoUninitialize();
     return 0;
 }

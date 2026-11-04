@@ -220,7 +220,12 @@ static HRESULT WINAPI dmu_qi(IDirectMusic8 *i, REFIID riid, void **out)
     return rm_noiface(__func__, riid, out);
 }
 static ULONG WINAPI dmu_addref(IDirectMusic8 *i) { return InterlockedIncrement(&dmu(i)->ref); }
-static ULONG WINAPI dmu_release(IDirectMusic8 *i) { LONG r = InterlockedDecrement(&dmu(i)->ref); if (!r) free(dmu(i)); return r; }
+static ULONG WINAPI dmu_release(IDirectMusic8 *i)
+{
+    LONG r = InterlockedDecrement(&dmu(i)->ref);
+    if (!r) { rm_ports_disown(dmu(i)); free(dmu(i)); }
+    return r;
+}
 static HRESULT WINAPI dmu_enumport(IDirectMusic8 *i, DWORD n, LPDMUS_PORTCAPS c)
 {
     if (n || !c) return S_FALSE;
@@ -241,7 +246,7 @@ static HRESULT WINAPI dmu_createbuffer(IDirectMusic8 *i, LPDMUS_BUFFERDESC d, LP
 /* a synth port of its own each time (dmport.c), as dmusic's; GUID_NULL is the default port, the synth */
 static HRESULT WINAPI dmu_createport(IDirectMusic8 *i, REFCLSID c, LPDMUS_PORTPARAMS p, LPDIRECTMUSICPORT *port, LPUNKNOWN o)
 {
-    return rm_port_create(c, p, port, o);
+    return rm_port_create(dmu(i), c, p, port, o);
 }
 static HRESULT WINAPI dmu_enumclock(IDirectMusic8 *i, DWORD n, LPDMUS_CLOCKINFO c) { return n ? S_FALSE : E_NOTIMPL; }
 static HRESULT WINAPI dmu_getclock(IDirectMusic8 *i, LPGUID g, IReferenceClock **c)
@@ -251,7 +256,7 @@ static HRESULT WINAPI dmu_getclock(IDirectMusic8 *i, LPGUID g, IReferenceClock *
     return S_OK;
 }
 static HRESULT WINAPI dmu_setclock(IDirectMusic8 *i, REFGUID g) { return S_OK; }
-static HRESULT WINAPI dmu_activate(IDirectMusic8 *i, BOOL on) { return S_OK; }
+static HRESULT WINAPI dmu_activate(IDirectMusic8 *i, BOOL on) { return rm_ports_activate(dmu(i), on); }
 static HRESULT WINAPI dmu_defport(IDirectMusic8 *i, LPGUID g) { if (!g) return E_POINTER; *g = CLSID_DirectMusicSynth; return S_OK; }
 static HRESULT WINAPI dmu_setds(IDirectMusic8 *i, LPDIRECTSOUND ds, HWND w) { return S_OK; }
 static HRESULT WINAPI dmu_setext(IDirectMusic8 *i, IReferenceClock *c) { return S_OK; }

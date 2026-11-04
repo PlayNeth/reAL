@@ -17,7 +17,9 @@ rm_port *rm_port_of(IDirectMusicPort *i);   /* one of reDM's ports, or NULL */
 dm_host *rm_port_own_host(rm_port *p);      /* a CreatePort'ed port's own synth; NULL for a performance's */
 DWORD rm_port_groups(rm_port *p);           /* GetNumChannelGroups */
 /* IDirectMusic::CreatePort and CreateMusicBuffer */
-HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort **out, IUnknown *outer);
+HRESULT rm_port_create(const void *maker, REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort **out, IUnknown *outer);
+HRESULT rm_ports_activate(const void *maker, BOOL on);      /* IDirectMusic::Activate: the ports it made */
+void rm_ports_disown(const void *maker);
 HRESULT rm_mbuf_create(const DMUS_BUFFERDESC *d, IDirectMusicBuffer **out, IUnknown *outer);
 /* (dmcom.c) one of reDM's instrument objects: its collection (a reference), its patch there, the patch it downloads
  * as and its serial; 0 for another object */

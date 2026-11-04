@@ -73,7 +73,10 @@ struct rm_port {
     WORD chans;                         /* GetFormat's channels */
     rm_dlrec *dls;                      /* the application's downloads (under the engine lock) */
     struct rm_dlins *ins;               /* its DownloadInstrument downloads, each a reference (engine lock) */
+    const void *maker;                  /* the IDirectMusic that made it (CreatePort), whose Activate activates it */
+    rm_port *mnext;                     /* (the list of CreatePort'ed ports, engine lock) */
 };
+static rm_port *s_made;                 /* every CreatePort'ed port alive */
 
 /* a DownloadInstrument download (dmusic's CDownloadedInstrument): an IUnknown the application unloads with
  * UnloadInstrument.  Downloading the same instrument object with the same patch and no key ranges again hands out
@@ -141,6 +144,9 @@ static ULONG port_release(rm_port *p)
     LONG r = InterlockedDecrement(&p->ref);
     if (!r) {
         dm_host *h = p->own ? p->host : NULL;
+        dm_engine_lock();
+        for (rm_port **q = &s_made; *q; q = &(*q)->mnext) if (*q == p) { *q = p->mnext; break; }
+        dm_engine_unlock();
         if (h) rm_port_detach(p);       /* (its downloads go with its synth) */
         dlrecs_free(p->dls); dlins_free_list(p->ins);
         free(p);
@@ -393,7 +399,25 @@ static HRESULT WINAPI dp_GetNumChannelGroups(IDirectMusicPort *i, LPDWORD n)
     *n = port_groups(pt(i));
     return S_OK;
 }
-static HRESULT WINAPI dp_Activate(IDirectMusicPort *i, WINBOOL on) { InterlockedExchange(&pt(i)->active, on != 0); return S_OK; }
+/* S_FALSE when it was so already (dmusic's) */
+static HRESULT WINAPI dp_Activate(IDirectMusicPort *i, WINBOOL on) { return InterlockedExchange(&pt(i)->active, on != 0) == (on != 0) ? S_FALSE : S_OK; }
+
+/* IDirectMusic::Activate (77189c75): every port that IDirectMusic made, activated or not; a DirectMusic never asked for
+ * IDirectMusic8 answers S_OK whatever they did, an IDirectMusic8 the first failure (a port's Activate cannot fail) */
+HRESULT rm_ports_activate(const void *maker, BOOL on)
+{
+    dm_engine_lock();
+    for (rm_port *p = s_made; p; p = p->mnext) if (p->maker == maker) InterlockedExchange(&p->active, on != 0);
+    dm_engine_unlock();
+    return S_OK;
+}
+/* the IDirectMusic is gone: its ports stay as they are */
+void rm_ports_disown(const void *maker)
+{
+    dm_engine_lock();
+    for (rm_port *p = s_made; p; p = p->mnext) if (p->maker == maker) p->maker = NULL;
+    dm_engine_unlock();
+}
 static HRESULT priority(rm_port *p, DWORD g, DWORD c, DWORD *prio, int set)
 {
     if (!g || g > port_groups(p) || c > 15) return E_INVALIDARG;
@@ -994,7 +1018,7 @@ static HRESULT port_params(DMUS_PORTPARAMS8 *pp, DWORD *groups)
 }
 /* a synth port of its own, as each of dmusic's CreatePort is: a host (its synth and sink) that lives as long as the
  * port; a performance plays through it once AddPort'ed.  Created inactive (PlayBuffer wants Activate). */
-HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort **out, IUnknown *outer)
+HRESULT rm_port_create(const void *maker, REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort **out, IUnknown *outer)
 {
     static const GUID null_guid;
     if (!params || IsBadReadPtr(params, sizeof(DWORD))) return E_INVALIDARG;
@@ -1024,6 +1048,10 @@ HRESULT rm_port_create(REFCLSID cls, DMUS_PORTPARAMS *params, IDirectMusicPort *
     p->groups = groups;
     p->sgroups = pp.dwChannelGroups;
     p->chans = (WORD)pp.dwAudioChannels;
+    p->maker = maker;
+    dm_engine_lock();
+    p->mnext = s_made; s_made = p;
+    dm_engine_unlock();
     *out = &p->IDirectMusicPort_iface;
     LOG_INFO("music: IDirectMusic::CreatePort: %lu Hz, %lu voices, %lu channel groups, %s -> %08lx", (unsigned long)pp.dwSampleRate,
              (unsigned long)pp.dwVoices, (unsigned long)groups, pp.dwEffectFlags ? "reverb" : "no reverb", (unsigned long)hr);

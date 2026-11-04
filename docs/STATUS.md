@@ -298,6 +298,13 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   for its header, DMUS_E_UNKNOWNDOWNLOAD for a type there is none of, an instrument without articulation refused,
   Unload of a buffer not downloaded S_OK). It used to be stubbed with E_NOTIMPL, and the game crashed on the buffer
   it never got.
+- IDirectMusic's own version (dmusic 77189995): 7, and 8 once asked for IDirectMusic8 (IDirectMusic2 leaves it, so
+  dmime's Init asking for IDirectMusic2 changes nothing). It only decides IDirectMusic::Activate's answer and, with
+  no default port set, which port GetDefaultPort picks among hardware ones; reDM has its synth only.
+- IDirectMusic::Activate activates or deactivates every port that IDirectMusic made (77189c75); it activated none,
+  so a DirectX 6 application that activates its ports that way played nothing. A port's Activate answers S_FALSE
+  when it was so already. `tests/comcmp.sh dx6test.exe dmversion` (IDirectMusic from CoCreateInstance, as
+  IDirectMusic8, from Init as DirectX 6 and 8) matches.
 - `tests/comcmp.sh porttest.exe` matches (`COMCMP_DIR=/tmp/real/sp/port`), its `download` and `inst` sections too.
 - Instruments one at a time, the DirectX 6/7 way: Collection::GetInstrument hands out an IDirectMusicInstrument
   (GetPatch / SetPatch, any value; the same object while it lives; DMUS_E_INVALIDPATCH for a patch the collection
@@ -641,8 +648,6 @@ Smaller items still open:
   Microsoft's in every test so far).
 - Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the
   segment's load, as on Microsoft's). A working case needs a tool class registered in both Wine prefixes.
-- dmime's Init asks a DirectMusic it made for IDirectMusic2 when the version is above 6; reDM's DirectMusic does not
-  depend on that.
 
 ## Testing
 
