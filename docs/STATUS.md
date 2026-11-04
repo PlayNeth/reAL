@@ -56,6 +56,9 @@ effects are compared by `tests/test_fx.c`):
   side filters while they read only zeros; an HRTF voice given the filter it already has doesn't crossfade. The heavy
   scene: 8.9% -> 6.8% of a core, 14.2% -> 12.3% with HRTF. (Signed zeros and NaN gains can come out differently,
   never a finite sample.)
+- a listener change recomputes the playing 3D buffers (and DirectMusic's sink buffers, whose Doppler pitch the
+  synth reads while they are stopped), not every 3D buffer loaded: Play works a stopped one's gains out again.
+  At 300 loaded buffers an immediate listener Set went from 98 to 11 us, under the lock the mixer takes.
 
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.

@@ -75,7 +75,9 @@ void rl_device_commit_3d(rl_device *dev)
             b->src3d = b->src3d_pending;
             b->src3d_dirty = FALSE;
             rl_buffer_update_gains(b);
-        } else if (all) {
+        } else if (all && (b->in_play_list || b->sink)) {
+            /* (a stopped buffer's gains are worked out again on Play; a DirectMusic sink buffer's Doppler pitch is
+             * read by the synth even while it is stopped) */
             rl_buffer_update_gains(b);
         }
     }
