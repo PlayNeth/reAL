@@ -840,7 +840,26 @@ End Sub
              (CFG, 0, 'Cfg', audiopath_config([('11111111-2222-3333-4444-555566667711', 2, [])], guid='8f6d1a10-1600-4000-8000-000000000003', name='cfg'))]
     return {'auto.spt': script('8f6d1a10-1600-4000-8000-000000000010', 'auto', src, items, flags=3)}
 
-CASES = {'scripttrack': case_scripttrack, 'scriptauto': case_scriptauto, 'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
+def case_toolgraph(out):
+    """a segment file's tool graph ('DMTG') with two tools of tests/testtool.c's class (tooltest filetool): one
+    loading from a chunk ('tdat': transpose by 12) on PChannel 0 at index 0, one from a LIST form ('tlst': 5) on
+    every PChannel appended"""
+    tool = '8f6d1a10-7001-4000-8000-000000000001'
+    def tolh(index, pchs, ckid, fcc):
+        return chunk('tolh', guid_bytes(tool) + struct.pack('<iI', index, len(pchs)) + (ckid or b'\0\0\0\0') +
+                     (fcc or b'\0\0\0\0') + b''.join(struct.pack('<I', p) for p in (pchs or [0])))
+    a = RIFF('DMTL', tolh(0, [0], b'tdat', None), chunk('tdat', struct.pack('<i', 12)))
+    b = RIFF('DMTL', tolh(-1, [], None, b'tlst'), LIST('tlst', chunk('bdat', struct.pack('<i', 5))))
+    graph = RIFF('DMTG', chunk('guid', guid_bytes('8f6d1a10-7001-4000-8000-000000000002')),
+                 chunk('vers', struct.pack('<II', 0x10000, 0)), unfo('file graph'), LIST('toll', a, b))
+    seg = Segment('8f6d1a10-7001-4000-8000-000000000003', 'tgraph', 2 * BAR)
+    seg.tempo([(0, 120.0)])
+    seg.timesig([(0, 4, 4, 4)])
+    seg.seq([(t, 200, (t // 384) % 3, 0x90, 60 + (t // 384) % 4, 100) for t in range(0, 2 * BAR, 384)])
+    seg.extra = [graph]
+    return {'tgraph.sgt': seg.build()}
+
+CASES = {'toolgraph': case_toolgraph, 'scripttrack': case_scripttrack, 'scriptauto': case_scriptauto, 'script': case_script, 'container': case_container, 'paramctl': case_paramctl, 'compose2': case_compose2, 'tracks': case_tracks, 'regen': case_regen, 'align': case_align, 'pattrack': case_pattrack, 'compose': case_compose, 'pattern': case_pattern, 'patmark': lambda o: case_pattern(o, 14, [1, 3, 2, 1, 0, 3]),
          'wavemute': case_wavemute, 'seqmute': case_seqmute, 'comstyle': case_comstyle, 'loop': case_loop, 'markers': case_markers, 'dx7': case_dx7, 'twostyles': case_twostyles, 'twots': case_twots, 'mute': case_mute, 'long': case_long,
 'basic': case_basic, 'params': case_params, 'mix1': lambda o: case_mix(o, 1), 'mix2': lambda o: case_mix(o, 2),
          'mix3': lambda o: case_mix(o, 3)}

@@ -95,7 +95,9 @@ $CC -O1 -o build/notiftest.exe tests/notiftest.c -ldsound -lole32 -luuid -ldxgui
 $CC -O1 -o build/aptest.exe tests/aptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/dopptest.exe tests/dopptest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -o build/comtest.exe tests/comtest.c -ldsound -lole32 -luuid -ldxguid
-$CC -O1 -o build/tooltest.exe tests/tooltest.c -ldsound -lole32 -luuid -ldxguid
+$CC -O1 -o build/tooltest.exe tests/tooltest.c -ldsound -lole32 -luuid -ldxguid -ladvapi32
+# a tool class of its own for tooltest's file tool graph (put it next to tooltest.exe)
+$CC -O1 -shared -o build/testtool.dll tests/testtool.c tests/testtool.def -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/fxtest.exe tests/fxtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/cfgtest.exe tests/cfgtest.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/porttest.exe tests/porttest.c -ldsound -lole32 -luuid -ldxguid

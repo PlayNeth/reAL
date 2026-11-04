@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 #include <dsound.h>
 
 static IDirectMusicPerformance8 *perf;
@@ -817,6 +818,91 @@ static void graphload(void)
     DeleteFileA("tg_bells.sgt");
 }
 
+/* ------------------------------------------------------------------ a segment file's tool graph with tools of a class
+ * of their own (tests/testtool.c, registered while this runs): tools/sty's tgraph.sgt (cases.py
+ * toolgraph); what each tool was asked (made, Load with its chunk, Init, Clone) and every message it processed */
+typedef struct { LONG tool; DWORD what; DWORD a, b, c, d; } tt_entry;
+static int cmp_tt(const void *x, const void *y)
+{
+    const tt_entry *a = x, *b = y;
+    if (a->tool != b->tool) return a->tool < b->tool ? -1 : 1;
+    if (a->what != b->what) return a->what < b->what ? -1 : 1;
+    if ((LONG)a->c != (LONG)b->c) return (LONG)a->c < (LONG)b->c ? -1 : 1;
+    if (a->a != b->a) return a->a < b->a ? -1 : 1;
+    return a->b < b->b ? -1 : a->b > b->b;
+}
+static void filetool(void)
+{
+    WCHAR path[MAX_PATH];
+    GetModuleFileNameW(NULL, path, MAX_PATH);
+    WCHAR *slash = wcsrchr(path, L'\\');
+    if (slash) lstrcpyW(slash + 1, L"testtool.dll");
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES) return;       /* (only with build/testtool.dll there) */
+    printf("file tool\n");
+    static const WCHAR key[] = L"CLSID\\{8f6d1a10-7001-4000-8000-000000000001}\\InprocServer32";
+    HKEY k;         /* (HKEY_CLASSES_ROOT: Wine's COM reads the machine's classes only) */
+    if (RegCreateKeyExW(HKEY_CLASSES_ROOT, key, 0, NULL, 0, KEY_WRITE, NULL, &k, NULL) == ERROR_SUCCESS) {
+        RegSetValueExW(k, NULL, 0, REG_SZ, (const BYTE *)path, (lstrlenW(path) + 1) * sizeof(WCHAR));
+        RegSetValueExW(k, L"ThreadingModel", 0, REG_SZ, (const BYTE *)L"Both", 10);
+        RegCloseKey(k);
+    }
+    HMODULE m = LoadLibraryW(path);
+    int (__cdecl *ttlog)(const tt_entry **) = m ? (void *)GetProcAddress(m, "tt_log") : NULL;
+    void (__cdecl *ttclear)(void) = m ? (void *)GetProcAddress(m, "tt_clear") : NULL;
+    if (!ttlog || !ttclear) { printf("  no log\n"); return; }
+    static const char *const kind[] = { "made", "init", "load", "clone", "msg", "flush" };
+    #define SHOWLOG(label) do { \
+        const tt_entry *e; int n = ttlog(&e); \
+        static tt_entry cp[2048]; memcpy(cp, e, n * sizeof(*e)); qsort(cp, n, sizeof(*cp), cmp_tt); \
+        printf("  %s: %d\n", label, n); \
+        for (int q = 0; q < n; q++) printf("    tool %ld %s %lx %lx %ld %lx\n", cp[q].tool, kind[cp[q].what], cp[q].a, cp[q].b, \
+                                          (long)cp[q].c, cp[q].d); \
+        ttclear(); } while (0)
+    IDirectMusicSegment8 *s = NULL;
+    HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(loader, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, L"tgraph.sgt", (void **)&s);
+    printf("  load %08lx\n", hr);
+    SHOWLOG("loading");
+    if (s) {
+        IDirectMusicGraph *g = NULL;
+        hr = IDirectMusicSegment8_GetGraph(s, &g);
+        printf("  GetGraph %08lx\n", hr);
+        if (g) {
+            for (DWORD i = 0; i < 4; i++) {
+                IDirectMusicTool *t = NULL;
+                hr = IDirectMusicGraph_GetTool(g, i, &t);
+                printf("  GetTool(%lu) %08lx", i, hr);
+                if (t) {
+                    IPersist *ps = NULL;
+                    CLSID c = { 0 };
+                    if (SUCCEEDED(IDirectMusicTool_QueryInterface(t, &IID_IPersist, (void **)&ps))) { IPersist_GetClassID(ps, &c); IPersist_Release(ps); }
+                    printf(" class %08lx", c.Data1);
+                    IDirectMusicTool_Release(t);
+                }
+                printf("\n");
+            }
+            IDirectMusicGraph_Release(g);
+        }
+        IDirectMusicSegmentState *st = NULL;
+        hr = IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)s, NULL, NULL, 0, 0, &st, NULL, NULL);
+        printf("  PlaySegmentEx %08lx\n", hr);
+        Sleep(4600);
+        IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+        Sleep(200);
+        MUSIC_TIME st0 = 0;
+        if (st) { IDirectMusicSegmentState_GetStartTime(st, &st0); IDirectMusicSegmentState_Release(st); }
+        {   /* message times from the state's start */
+            const tt_entry *e; int n = ttlog(&e);
+            for (int q = 0; q < n; q++) if (e[q].what == 4) ((tt_entry *)e)[q].c -= (DWORD)st0;
+        }
+        SHOWLOG("playing");
+        IDirectMusicSegment8_Release(s);
+    }
+    IDirectMusicLoader8_ClearCache(loader, &GUID_DirectMusicAllTypes);
+    SHOWLOG("released");
+    RegDeleteKeyW(HKEY_CLASSES_ROOT, key);
+    RegDeleteKeyW(HKEY_CLASSES_ROOT, L"CLSID\\{8f6d1a10-7001-4000-8000-000000000001}");
+}
+
 int main(int argc, char **argv)
 {
     void *volatile keep = (void *)DirectSoundCreate; (void)keep;
@@ -843,6 +929,7 @@ int main(int argc, char **argv)
     actions();
     flushes();
     graphload();
+    filetool();
     if (perfgraph) IDirectMusicGraph_Release(perfgraph);
     if (perftool) IDirectMusicTool_Release(perftool);
     IDirectMusicPerformance8_CloseDown(perf);

@@ -578,6 +578,13 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   performance also answers IDirectMusicTool (the output tool).
 - GetObjectInPath stages 0x1200/0x1300 (segment graph and tools), 0x2200/0x2300 (audiopath) and 0x3200/0x3300
   (performance), with the graphs made on demand where Microsoft makes them.
+- A segment file's 'DMTG' form with working tools: `build/testtool.dll` (tests/testtool.c) is a tool class of its
+  own, which tooltest registers while it runs when the DLL is next to it; tools/sty's `tgraph.sgt` (cases.py
+  toolgraph) has two of them, one loading from a chunk on PChannel 0, one from a LIST form on every PChannel.
+  `COMCMP_DIR=/tmp/real/sty tests/comcmp.sh tooltest.exe 'Z:\tmp\real\sty'` (testtool.dll and tgraph.sgt there)
+  matches: each tool made, given the stream at its chunk's header and Init'ed in the file's order, GetTool, the
+  clones a segment state's graph makes (IDirectMusicTool8), and every message each one processed while the segment
+  played.
 - Application tools in the message pipeline: ProcessPMsg with DMUS_S_REQUEUE / DMUS_S_FREE / S_OK, the delivery
   types (immediate, queue, at time), Flush on invalidation, DMUS_PMSGT_DIRTY at a segment's start, end and abort, and
   DMUS_PCHANNEL_BROADCAST_SEGMENT.
@@ -646,8 +653,6 @@ Smaller items still open:
 - The sink object does not answer dsound's {182ea05a} interface (the synth's sources and buses).
 - Standard audiopaths still use the host's fixed buffers rather than the configuration machinery (they match
   Microsoft's in every test so far).
-- Tool graphs: a segment file's 'DMTG' form is only tested on the failure path (an unregistered tool fails the
-  segment's load, as on Microsoft's). A working case needs a tool class registered in both Wine prefixes.
 
 ## Testing
 

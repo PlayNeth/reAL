@@ -1,0 +1,6 @@
+LIBRARY testtool.dll
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
+    tt_log
+    tt_clear
