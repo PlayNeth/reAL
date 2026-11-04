@@ -228,6 +228,8 @@ struct rl_buffer {
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out);
 void rl_buffer_set_sink(rl_buffer *b, DWORD caps);
 int32_t rl_buffer_sink_cents(rl_buffer *b);
+/* where the buffer's mix is (bytes): its play cursor is up to the resampler's taps behind it (rl_voice_cursor_bytes) */
+DWORD rl_buffer_position_bytes(rl_buffer *b);
 HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl_buffer **out);
 void    rl_buffers_orphan(rl_device *dev, rl_dsound *owner);   /* owner released */
 /* SetCooperativeLevel: the owner's level, and what it does to its buffers (DSSCL_WRITEPRIMARY) */

@@ -109,6 +109,7 @@ static void prim_format(rl_buffer *b)
     b->voice.rate = f.Format.nSamplesPerSec;
     b->voice.size = PRIMARY_BYTES - PRIMARY_BYTES % b->voice.block;
     if ((b->voice.pos >> 32) >= rl_voice_frames(&b->voice)) b->voice.pos = 0;
+    b->voice.hist = 0;
     rl_buffer_update_gains(b);
 }
 void rl_buffer_update_gains(rl_buffer *b)
@@ -494,6 +495,13 @@ void rl_buffer_set_sink(rl_buffer *b, DWORD caps)
     LeaveCriticalSection(&b->dev->lock);
 }
 int32_t rl_buffer_sink_cents(rl_buffer *b) { return b->sink ? b->sink_cents : 0; }
+DWORD rl_buffer_position_bytes(rl_buffer *b)
+{
+    EnterCriticalSection(&b->dev->lock);
+    DWORD p = rl_voice_play_bytes(&b->voice);
+    LeaveCriticalSection(&b->dev->lock);
+    return p;
+}
 
 HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc, rl_buffer **out)
 {
@@ -650,6 +658,7 @@ HRESULT rl_buffer_duplicate(rl_device *dev, rl_dsound *owner, rl_buffer *src, rl
     b->voice = src->voice;
     b->voice.data = b->shared->data;           /* (the source's may be its effects' output) */
     b->voice.pos = 0;
+    b->voice.hist = 0;
     b->voice.playing = 0;
     b->voice.looping = 0;
     b->voice.notifies = NULL;

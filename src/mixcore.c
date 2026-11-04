@@ -427,6 +427,43 @@ static inline void read_sinc(const rl_voice *v, const sinc_tab *t, uint64_t pos,
     *r = stereo ? ar : al;
 }
 
+/* after a mix: how far back of the position the next one reads (its sinc taps, as far as it has played since a
+ * jump; the copy and linear interpolation read from the position on).  At this mix's step: a rate or Doppler change
+ * that widens the kernel reads further back for one mix */
+static void voice_hist(rl_voice *v, uint64_t step, uint32_t frames, int stopped)
+{
+    uint32_t h = 0;
+    if (!stopped && v->interp == RL_INTERP_SINC &&      /* (mix_inner's use_sinc, for the next mix) */
+        !(step == (1ull << 32) && (uint32_t)v->pos == 0 && (!v->xfade_left || (uint32_t)v->xfade_pos == 0))) {
+        const sinc_tab *t = sinc_for_step(step);
+        if (t && t->half > 1) h = (uint32_t)t->half - 1;
+    }
+    uint64_t adv = (step >> 32) * frames + (((step & 0xffffffffu) * frames) >> 32);
+    v->hist = (uint64_t)v->hist + adv >= h ? h : v->hist + (uint32_t)adv;
+}
+
+/* the cursor GetCurrentPosition reported for position p0 (bytes) h0 frames behind it, in bytes */
+static uint32_t cursor_at(const rl_voice *v, uint32_t p0, uint32_t h0)
+{
+    const uint32_t n = rl_voice_frames(v), f = v->block ? p0 / v->block : 0;
+    if (!n || h0 >= n) return p0;
+    return (f >= h0 ? f - h0 : f + n - h0) * v->block;
+}
+/* a mix's notifications, by the play cursor GetCurrentPosition reports (hist frames behind the position, so a
+ * notification never fires before that cursor reaches its offset, as on Windows): from the cursor at the mix's
+ * start (position p0 in bytes, h0 frames behind) to the cursor now; the position wrapped `wraps` times */
+static void fire_mix(const rl_voice *v, uint32_t p0, uint32_t h0, uint32_t wraps, rl_signal_fn signal)
+{
+    const uint32_t n = rl_voice_frames(v), blk = v->block;
+    if (!v->n_notifies || !signal || !n) return;
+    const uint32_t h1 = v->hist < n ? v->hist : 0;
+    int64_t a = (int64_t)(p0 / blk) - (h0 < n ? h0 : 0);
+    int64_t b = (int64_t)(v->pos >> 32) + (int64_t)wraps * n - h1;
+    if (a < 0) { a += n; b += n; }
+    if (b < a) b = a;
+    rl_fire_notifies(v, (uint32_t)(a % n) * blk, (uint32_t)(b % n) * blk, (uint32_t)(b / n - a / n), signal);
+}
+
 void rl_voice_jump(rl_voice *v, uint64_t newpos)
 {
     /* (the frames before the jump are not on the way to the new position: nothing to replay; the crossfade the
@@ -437,6 +474,7 @@ void rl_voice_jump(rl_voice *v, uint64_t newpos)
         v->xfade_left = RL_XFADE_PENDING;
     }
     v->pos = newpos;
+    v->hist = 0;
 }
 
 void rl_voice_start(rl_voice *v)
@@ -589,17 +627,19 @@ static int voice_advance(rl_voice *v, uint64_t step, uint64_t end, uint32_t fram
 static int mix_idle(rl_voice *v, uint64_t step, uint64_t end, uint32_t frames, uint32_t p0, rl_signal_fn signal)
 {
     uint32_t wraps = 0, played;
+    const uint32_t h0 = v->hist;
     if (!v->idle) v->idle_frames = 0;
     v->idle = 1;
     int stopped = voice_advance(v, step, end, frames, &wraps, &played);
     v->idle_frames = v->idle_frames > 0x7fffffffu - played ? 0x7fffffffu : v->idle_frames + played;
+    voice_hist(v, step, stopped ? 0 : frames, stopped);
     if (stopped) {
         v->pos = 0;                             /* DirectSound rewinds a finished buffer to 0 */
         v->playing = 0;
-        fire_range(v, p0, v->size, 0, signal);
+        fire_range(v, cursor_at(v, p0, h0), v->size, 0, signal);
         rl_fire_stop(v, signal);
     } else {
-        rl_fire_notifies(v, p0, rl_voice_play_bytes(v), wraps, signal);
+        fire_mix(v, p0, h0, wraps, signal);
     }
     return stopped;
 }
@@ -670,7 +710,7 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
     const uint64_t step = (v->pitch > 0.0f && v->pitch != 1.0f)
         ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
         : ((uint64_t)v->rate << 32) / out_rate;
-    const uint32_t p0 = rl_voice_play_bytes(v);
+    const uint32_t p0 = rl_voice_play_bytes(v), h0 = v->hist;
     if (voice_inaudible(v, sends, mono != NULL)) {
         if (mono) v->cur_gain[1] = v->gain[1];  /* (not heard on this path; where a mix would have ramped it) */
         return mix_idle(v, step, end, frames, p0, signal);
@@ -775,13 +815,14 @@ static int mix_inner(rl_voice *v, float *out, uint32_t ostride, float *mono, flo
     v->cur_gain[0] = gl; v->cur_gain[1] = gr;
     for (int j = 0; j < ns; j++) { v->cur_send[sk[j]] = gs[j]; v->send_z[sk[j]] = zs[j]; }
     v->lp_z[0] = z0; v->lp_z[1] = z1;
+    voice_hist(v, step, frames, stopped);
 
     if (stopped) {
         v->xfade_left = 0;
-        fire_range(v, p0, v->size, 0, signal);
+        fire_range(v, cursor_at(v, p0, h0), v->size, 0, signal);
         rl_fire_stop(v, signal);
     } else {
-        rl_fire_notifies(v, p0, rl_voice_play_bytes(v), wraps, signal);
+        fire_mix(v, p0, h0, wraps, signal);
     }
     return stopped;
 }
@@ -881,7 +922,7 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
     const uint64_t step = (v->pitch > 0.0f && v->pitch != 1.0f)
         ? (uint64_t)((double)v->rate * v->pitch * 4294967296.0 / out_rate)
         : ((uint64_t)v->rate << 32) / out_rate;
-    const uint32_t p0 = rl_voice_play_bytes(v);
+    const uint32_t p0 = rl_voice_play_bytes(v), h0 = v->hist;
     /* (gain[0] is the level of every channel here.  A source whose LFE goes through the bass limiter is never idle:
      * the limiter follows the source whatever its level, and an envelope held while idle would limit the bass wrongly
      * once it is heard again) */
@@ -968,12 +1009,13 @@ static int mix_inner_mc(rl_voice *v, float *out, uint32_t nout, float *const *se
     }
     v->cur_gain[0] = v->cur_gain[1] = g;
     for (int j = 0; j < ns; j++) v->cur_send[sk[j]] = gs[j];
+    voice_hist(v, step, frames, stopped);
     if (stopped) {
         v->xfade_left = 0;
-        fire_range(v, p0, v->size, 0, signal);
+        fire_range(v, cursor_at(v, p0, h0), v->size, 0, signal);
         rl_fire_stop(v, signal);
     } else {
-        rl_fire_notifies(v, p0, rl_voice_play_bytes(v), wraps, signal);
+        fire_mix(v, p0, h0, wraps, signal);
     }
     return stopped;
 }

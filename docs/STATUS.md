@@ -39,6 +39,15 @@ and stereo) four taps at a time with SSE, as it did 16-bit ones; before, they we
 `tests/bench_mix.c` (32 voices, 48 kHz, 10 ms blocks, under Wine; one core): float stereo 12.6% -> 3.9%, 24-bit
 stereo 18.4% -> 7.1%, 32-bit mono 9.7% -> 2.6%, 8-bit stereo 6.2% -> 3.8%, 8-bit mono 3.2% -> 2.8%; 16-bit
 unchanged (bit for bit). The output differs from the per-sample path by rounding only (at most 8.3e-7).
+- The play cursor is the first frame the next mix still reads: with sinc, the kernel's half
+  width less one behind the position (15 frames for a source at or below the output rate, 63 at 4x faster; none
+  for the same-rate copy), since its taps reach back there. DirectSound lets an application write anywhere before
+  the play cursor, and Unreal's Galaxy clears what was just played: the taps read its zeros, a scratch every 20 ms
+  in the music (linear interpolation and Wine's dsound read nothing behind). Position notifications fire as that
+  cursor passes their offsets, as on Windows. Stopped, the play and write cursors are both that cursor, and Play
+  goes on from it (it never goes back, and no notification is skipped); the write cursor while playing is
+  unchanged. The DirectMusic sink lines its new buffers up
+  with the dry buffer's position, not its play cursor.
 What the rest costs, from the same benchmark: a heavy scene (64 3D voices with EAX sends, 8 2D streams, the
 reverb) about 10% of one core, 15% with HRTF; the reverb 0.5%; CMSS-3D about 1.4% per voice (off by default). The
 HRTF convolution is already vectorised by the compiler.

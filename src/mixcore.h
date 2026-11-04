@@ -86,12 +86,24 @@ typedef struct rl_voice {
     int      idle;
     uint32_t idle_frames;   /* frames idle since it went idle (or since a jump while idle) */
     uint32_t quiet;
+
+    /* frames before the position the next mix reads again (the sinc kernel's taps behind it; owned by the mixer).
+     * The play cursor an application sees stays behind them: DirectSound lets it write anywhere before the play
+     * cursor, and Unreal's Galaxy clears what was just played (rl_voice_cursor_bytes) */
+    uint32_t hist;
 } rl_voice;
 
 typedef void (*rl_signal_fn)(void *event);
 
 static inline uint32_t rl_voice_frames(const rl_voice *v) { return v->block ? v->size / v->block : 0; }
 static inline uint32_t rl_voice_play_bytes(const rl_voice *v) { return (uint32_t)(v->pos >> 32) * v->block; }
+/* the play cursor GetCurrentPosition reports: the first frame a mix still reads */
+static inline uint32_t rl_voice_cursor_bytes(const rl_voice *v)
+{
+    uint32_t n = rl_voice_frames(v), p = (uint32_t)(v->pos >> 32), h = v->hist;
+    if (!n || h >= n) return p * v->block;
+    return (p >= h ? p - h : p + n - h) * v->block;
+}
 
 /* Accumulate `frames` stereo float frames into `out` (interleaved L,R) at out_rate.
  * Advances the voice, fires notifications through `signal`.

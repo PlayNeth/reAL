@@ -917,8 +917,8 @@ HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
         }
     }
     if (!d->noplay) {
-        DWORD play = 0, wr = 0;
-        IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr);
+        /* (the dry buffer's position, not its play cursor, which is behind it by the resampler's taps) */
+        DWORD play = rl_buffer_position_bytes(h->dry);
         IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
         IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
     }

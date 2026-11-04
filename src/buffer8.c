@@ -205,13 +205,15 @@ static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD
         if (write) *write = 0;
         return DS_OK;
     }
-    DWORD p = rl_voice_play_bytes(&This->voice);
+    /* the play cursor is the first frame a mix still reads (the sinc resampler's taps reach back of the position),
+     * playing or stopped: Play goes on from it, the notifications between it and the position still to come */
+    DWORD at = rl_voice_play_bytes(&This->voice), p = rl_voice_cursor_bytes(&This->voice);
     DWORD w = p;
     if (This->voice.playing) {
         DWORD lead = write_lead_bytes(This);
         /* with effects, the cursor is past what is processed already (DirectSound's write-ahead) */
         if (This->fx && This->fx_lead * This->voice.block > lead) lead = This->fx_lead * This->voice.block;
-        w = p + lead;
+        w = at + lead;
         if (This->voice.size) w %= This->voice.size;
     }
     LeaveCriticalSection(&This->dev->lock);
