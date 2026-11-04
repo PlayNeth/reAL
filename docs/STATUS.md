@@ -255,7 +255,18 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 
 **DirectMusic: notifications and audiopaths**
 - Notifications.
-- Standard audiopaths: shared stereo + reverb, dynamic 3D, mono and stereo.
+- Standard audiopaths: shared stereo + reverb, dynamic 3D, mono and stereo, made as dmime makes them (773211f9): a
+  configuration of one port (the default synth, drums on 10, the audiopath feature) and the type's defined buffers,
+  built by CreateAudioPath's code below. The shared stereo and reverb are the sink's own first two buffers.
+- The performance's state as dmime keeps it (+0x108: not set up, Init's, InitAudio's; CloseDown sets it back,
+  AddPort and AssignPChannel(Block) make it Init's): CreateStandardAudioPath is InitAudio's only
+  (DMUS_E_AUDIOPATHS_NOT_VALID otherwise, before any argument is looked at), CreateAudioPath and
+  Get/SetDefaultAudioPath answer DMUS_E_NOT_INIT when not set up and DMUS_E_AUDIOPATHS_NOT_VALID after Init, and
+  AddPort, AssignPChannelBlock and AssignPChannel answer DMUS_E_AUDIOPATHS_IN_USE after InitAudio (reDM did them).
+  Without DMUS_AUDIOF_BUFFERS a standard path fails with E_POINTER (dmime makes it with no buffers, which
+  CreateAudioPath refuses), and so does InitAudio with a default path, leaving the performance not set up; reDM
+  made them with buffers. `tests/comcmp.sh dx7test.exe stdpath` matches.
+- The shared reverb's DMO is one object while anyone holds it, as dsound's buffer gives its effect.
 - The 3D path's Doppler and pitch, matching Windows dsound.
 
 **DirectMusic: audiopath configurations** (`src/music/dmapcfg.c`, `dmcom.c`'s cfg_path, `dmhost.c`)
@@ -316,6 +327,8 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   when it was so already. `tests/comcmp.sh dx6test.exe dmversion` (IDirectMusic from CoCreateInstance, as
   IDirectMusic8, from Init as DirectX 6 and 8) matches.
 - `tests/comcmp.sh porttest.exe` matches (`COMCMP_DIR=/tmp/real/sp/port`), its `download` and `inst` sections too.
+  GetRunningStats' CPU is measured time (milliseconds of synth work in the last second, as dmsynth), so on a busy
+  machine reDM's can read 10 or 20 where Microsoft's read 0.
 - Instruments one at a time, the DirectX 6/7 way: Collection::GetInstrument hands out an IDirectMusicInstrument
   (GetPatch / SetPatch, any value; the same object while it lives; DMUS_E_INVALIDPATCH for a patch the collection
   lacks), Port::DownloadInstrument downloads it with the engine's DLS code (key ranges included) as an
@@ -659,9 +672,7 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 (EAX 5 dropped: games used it through OpenAL, which OpenAL Soft covers; the EAX 5 property set stays
 reported unsupported so games fall back to EAX 4.)
 
-Smaller items still open:
-- Standard audiopaths still use the host's fixed buffers rather than the configuration machinery (they match
-  Microsoft's in every test so far).
+Smaller items still open: none.
 
 ## Testing
 
@@ -674,7 +685,7 @@ Smaller items still open:
   parameters, AddPort / AssignPChannelBlock / RemovePort with several ports, CreateMusicBuffer and the buffer's
   methods, PlayBuffer, the clocks' Advise calls): all match. `multiperf`'s `dx6` thread (MP_THREADS bit 0x40) runs
   that way of playing against the other threads.
-- `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay]` compares what changes with the interface asked for
+- `tests/comcmp.sh dx7test.exe [6|7|8|qi|noport|stopall|closed|notify|initplay|stdpath]` compares what changes with the interface asked for
   (each section as DirectX 6, 7 and 8 where it differs): all match. `dx7test.exe trackplay [files]` (with
   `REDM_TIME=1234567`, run where the files are, `COMCMP_DIR`) plays each track of the files on Segment::InitPlay's
   state; `TP_INITAUDIO=1` sets the performance up with InitAudio instead of Init and AddPort.

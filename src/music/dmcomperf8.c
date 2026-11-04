@@ -66,6 +66,8 @@ static int perf_slot(rm_perf *p, rm_port *rp)
 static HRESULT WINAPI pf_addport(IDirectMusicPerformance8 *i, IDirectMusicPort *port)
 {
     rm_perf *p = prf(i);
+    if (p->apstate == 2) return DMUS_E_AUDIOPATHS_IN_USE;     /* 7730a674: not with audiopaths; the DirectX 7 way now */
+    p->apstate = 1;
     if (!p->host || p->closed) return DMUS_E_NOT_INIT;
     rm_port *rp = port ? rm_port_of(port) : p->port;
     dm_host *own = rp ? rm_port_own_host(rp) : NULL;
@@ -118,6 +120,8 @@ static HRESULT WINAPI pf_remport(IDirectMusicPerformance8 *i, IDirectMusicPort *
 static HRESULT perf_assign(rm_perf *p, IDirectMusicPort *port, DWORD first, DWORD n, DWORD g, DWORD c)
 {
     if (!port) return E_POINTER;
+    if (p->apstate == 2) return DMUS_E_AUDIOPATHS_IN_USE;     /* 7730b12b / 7730b20b, as AddPort */
+    p->apstate = 1;
     if (!p->host) return DMUS_E_NOT_INIT;
     rm_port *rp = rm_port_of(port);
     HRESULT hr;
@@ -371,12 +375,13 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
             else IDirectSound8_Release(ds);
         }
     }
-    if (type) {
+    p->apstate = 2;
+    if (type) {     /* (its failure fails InitAudio, the performance left not set up: dmime's 7730f6a2) */
         IDirectMusicAudioPath *a;
-        if (SUCCEEDED(pf_createstdpath(i, type, npch, TRUE, &a))) {
-            p->defpath = apt(a);
-            PERF_LOCKED(p, dm_perf_set_default_audiopath(dm_host_perf(p->host), p->defpath->ap));
-        }
+        hr = pf_createstdpath(i, type, npch, TRUE, &a);
+        if (FAILED(hr)) { pf_closedown(p); return hr; }
+        p->defpath = apt(a);
+        PERF_LOCKED(p, dm_perf_set_default_audiopath(dm_host_perf(p->host), p->defpath->ap));
     }
     return S_OK;
 }
@@ -524,7 +529,7 @@ static rm_buf *path_find(rm_path *a, const rm_pcfg *pc, const GUID *g)
     for (DWORD k = 0; k < a->nports; k++)
         for (DWORD i = 0; i < a->ports[k].nbufs; i++)
             if (IsEqualGUID(&a->ports[k].bufs[i].b->guid, g)) { a->ports[k].bufs[i].b->refs++; return a->ports[k].bufs[i].b; }
-    return buf_find(a->perf, g, FALSE);
+    return buf_find(a->perf, g, FALSE, 0);
 }
 
 /* 77320f10: an audiopath from a configuration: the top-level buffers, then each port configuration's buffers and
@@ -635,9 +640,10 @@ static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
 static HRESULT WINAPI pf_createpath(IDirectMusicPerformance8 *i, IUnknown *cfg, BOOL act, IDirectMusicAudioPath **out)
 {
     rm_perf *p = prf(i);
+    if (!p->apstate) return DMUS_E_NOT_INIT;                    /* 77304b26's state: Init's has no audiopaths */
+    if (p->apstate != 2) return DMUS_E_AUDIOPATHS_NOT_VALID;
     if (!out) return E_POINTER;
     *out = NULL;
-    if (!p->host) return DMUS_E_NOT_INIT;
     IUnknown *holder = NULL;
     const apc *c = rm_apcfg_data(cfg, &holder);
     if (!c) {
@@ -651,27 +657,57 @@ static HRESULT WINAPI pf_createpath(IDirectMusicPerformance8 *i, IUnknown *cfg, 
     if (SUCCEEDED(hr)) *out = &a->IDirectMusicAudioPath_iface;
     return hr;
 }
+/* 773211f9: a standard audiopath is a configuration dmime makes and plays as CreateAudioPath does: one port
+ * configuration (the default synth, PChannels 0 .. npch - 1, drums on 10, the audiopath feature, a channel group per
+ * 16 PChannels) whose buffers are the type's defined ones (the shared stereo and reverb, a 3D dry, a mono, a stereo),
+ * all PChannels on all of them */
 static HRESULT WINAPI pf_createstdpath(IDirectMusicPerformance8 *i, DWORD type, DWORD npch, BOOL act, IDirectMusicAudioPath **out)
 {
+    static const GUID gstereo = { 0x186cc545, 0xdb29, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
+    static const GUID greverb = { 0x186cc541, 0xdb29, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
+    static const GUID g3d = { 0x186cc546, 0xdb29, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
+    static const GUID gmono = { 0x186cc547, 0xdb29, 0x11d3, { 0x9b, 0xd1, 0x00, 0x80, 0xc7, 0x15, 0x0a, 0x74 } };
     rm_perf *p = prf(i);
-    if (!out) return E_POINTER;
-    *out = NULL;
-    if (!p->host) return DMUS_E_NOT_INIT;
-    CLOSED_RET(p, DMUS_E_AUDIOPATHS_NOT_VALID);
+    if (out) *out = NULL;
+    if (p->apstate != 2 || !p->host) return DMUS_E_AUDIOPATHS_NOT_VALID;     /* 77304a8b: InitAudio's only */
     if (!npch) npch = 16;
-    int idx[2], nidx;
-    uint32_t buses[4], nbuses;
-    if (dm_host_path_open(p->host, type, idx, &nidx, buses, &nbuses) < 0) {
+    apc_buffer bufs[2];
+    GUID guids[2];
+    memset(bufs, 0, sizeof(bufs));
+    DWORD nb = 0;
+    switch (type) {             /* 7731e7b3: the defined buffers' GUIDs and flags */
+    case DMUS_APATH_SHARED_STEREOPLUSREVERB:
+        bufs[0].type = 8; bufs[0].guid = gstereo; bufs[0].flags = DMUS_BUFFERF_DEFINED | DMUS_BUFFERF_SHARED;
+        bufs[1].type = 1; bufs[1].guid = greverb; bufs[1].flags = DMUS_BUFFERF_DEFINED | DMUS_BUFFERF_SHARED;
+        nb = 2;
+        break;
+    case DMUS_APATH_DYNAMIC_3D: bufs[0].type = 4; bufs[0].guid = g3d; bufs[0].flags = DMUS_BUFFERF_DEFINED; nb = 1; break;
+    case DMUS_APATH_DYNAMIC_MONO: bufs[0].type = 6; bufs[0].guid = gmono; bufs[0].flags = DMUS_BUFFERF_DEFINED; nb = 1; break;
+    case DMUS_APATH_DYNAMIC_STEREO: bufs[0].type = 7; bufs[0].guid = gstereo; bufs[0].flags = DMUS_BUFFERF_DEFINED; nb = 1; break;
+    default:
         LOG_INFO("music: CreateStandardAudioPath(type %lu): not a standard type", (unsigned long)type);
         return E_INVALIDARG;
     }
-    dm_audiopath *ap;
-    PERF_LOCKED(p, ap = dm_perf_create_audiopath(dm_host_perf(p->host), npch, act, buses, nbuses));
-    if (!ap) { dm_host_path_close(p->host, idx, nidx); return E_OUTOFMEMORY; }
-    rm_path *a = new_path(p, ap);
-    if (!a) { PERF_LOCKED(p, dm_audiopath_release(ap)); dm_host_path_close(p->host, idx, nidx); return E_OUTOFMEMORY; }
-    a->type = type; a->npch = npch; a->nbuf = nidx;
-    for (int k = 0; k < nidx; k++) a->buf[k] = idx[k];
+    /* without DMUS_AUDIOF_BUFFERS dmime makes the configuration of type 0, which CreateAudioPath refuses with
+     * E_POINTER (dx7test stdpath) */
+    if (!(p->audioflags & DMUS_AUDIOF_BUFFERS) || !out) return E_POINTER;
+    for (DWORD k = 0; k < nb; k++) guids[k] = bufs[k].guid;
+    apc_map map = { 0, npch, nb, 0, guids };
+    apc_port port;
+    memset(&port, 0, sizeof(port));
+    port.h.guidPort = GUID_Synth_Default;                           /* 7731f9e3 */
+    port.h.dwPChannelBase = 0; port.h.dwPChannelCount = npch; port.h.dwFlags = DMUS_PORTCONFIGF_DRUMSON10;
+    port.pp.dwSize = sizeof(DMUS_PORTPARAMS8);
+    port.pp.dwValidParams = DMUS_PORTPARAMS_CHANNELGROUPS | DMUS_PORTPARAMS_FEATURES;
+    port.pp.dwChannelGroups = (npch + 15) >> 4;
+    port.pp.dwFeatures = DMUS_PORT_FEATURE_AUDIOPATH | DMUS_PORT_FEATURE_STREAMING;
+    port.bufs = bufs; port.nbufs = nb;
+    port.maps = &map; port.nmaps = 1;
+    apc c = { NULL, 0, &port, 1, NULL };
+    rm_path *a = NULL;
+    HRESULT hr = cfg_path(p, &c, act, &a);
+    if (FAILED(hr)) return hr;
+    a->type = type;
     LOG_CALL("music: CreateStandardAudioPath(type %lu, %lu pchannels) -> %p", (unsigned long)type, (unsigned long)npch, (void *)a);
     *out = &a->IDirectMusicAudioPath_iface;
     return S_OK;
@@ -679,7 +715,8 @@ static HRESULT WINAPI pf_createstdpath(IDirectMusicPerformance8 *i, DWORD type, 
 static HRESULT WINAPI pf_setdefpath(IDirectMusicPerformance8 *i, IDirectMusicAudioPath *path)
 {
     rm_perf *p = prf(i);
-    CLOSED_RET(p, DMUS_E_AUDIOPATHS_NOT_VALID);
+    if (!p->apstate) return DMUS_E_NOT_INIT;                    /* 77304919 */
+    if (p->apstate != 2) return DMUS_E_AUDIOPATHS_NOT_VALID;
     rm_path *a = path ? unsafe_path((IUnknown *)path) : NULL;
     if (path && !a) return E_INVALIDARG;
     if (a) IDirectMusicAudioPath_AddRef(path);
@@ -692,8 +729,10 @@ static HRESULT WINAPI pf_getdefpath(IDirectMusicPerformance8 *i, IDirectMusicAud
 {
     rm_perf *p = prf(i);
     if (!out) return E_POINTER;
-    if (p->closed) { *out = NULL; return DMUS_E_AUDIOPATHS_NOT_VALID; }
-    if (!p->defpath) { *out = NULL; return DMUS_E_NOT_FOUND; }
+    *out = NULL;
+    if (!p->apstate) return DMUS_E_NOT_INIT;                    /* 77304a01 */
+    if (p->apstate != 2) return DMUS_E_AUDIOPATHS_NOT_VALID;
+    if (!p->defpath) return DMUS_E_NOT_FOUND;
     *out = &p->defpath->IDirectMusicAudioPath_iface;
     IDirectMusicAudioPath_AddRef(*out);
     return S_OK;

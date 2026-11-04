@@ -54,7 +54,6 @@ void dm_host_midi_at(dm_host *h, rtime_t rt, uint32_t group, const uint8_t *msg,
 int dm_host_download_all(dm_host *h, dm_collection *c);     /* returns how many instruments went in */
 void dm_host_set_reverb(dm_host *h, int on);
 /* audiopath buffers (see dmhost.c) */
-int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t buses[4], uint32_t *nbuses);
 void dm_host_path_close(dm_host *h, const int *idx, int nidx);
 HRESULT dm_host_buffer_query(dm_host *h, int idx, REFIID iid, void **out);
 /* a buffer an audiopath configuration describes (see dmhost.c); released with dm_host_path_close */

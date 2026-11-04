@@ -2135,24 +2135,6 @@ dm_audiopath *dm_perf_create_audiopath_ex(dm_perf *pf, int activate, uint32_t n,
     return ap;
 }
 
-/* a standard audiopath: npch virtual PChannels 0..npch-1, all on the same buses */
-dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate, const uint32_t *buses, uint32_t nb)
-{
-    uint32_t *virt = malloc((npch + 1) * sizeof(uint32_t)), *nbus = malloc((npch + 1) * sizeof(uint32_t));
-    uint32_t *bl = calloc(npch + 1, 32 * sizeof(uint32_t));
-    dm_audiopath *ap = NULL;
-    if (virt && nbus && bl) {
-        for (uint32_t i = 0; i < npch; i++) {
-            virt[i] = i;
-            nbus[i] = buses ? (nb > 32 ? 32 : nb) : 0;
-            if (buses) memcpy(bl + 32 * i, buses, nbus[i] * sizeof(uint32_t));
-        }
-        ap = dm_perf_create_audiopath_ex(pf, activate, npch, virt, NULL, nbus, bl);
-    }
-    free(virt); free(nbus); free(bl);
-    return ap;
-}
-
 void dm_audiopath_addref(dm_audiopath *ap) { ap->refs++; }
 void dm_audiopath_release(dm_audiopath *ap)
 {

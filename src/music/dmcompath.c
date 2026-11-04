@@ -1,6 +1,7 @@
 /* reDM, included by dmcom.c: the shared reverb's DMO interface, the buffer manager and audiopaths. */
 /* ------------------------------------------------------------------ the shared reverb's DMO interface */
 typedef struct { IDirectSoundFXWavesReverb8 iface; LONG ref; rm_perf *perf; } rm_reverb;
+static SRWLOCK s_revlock = SRWLOCK_INIT;     /* rm_perf.revobj */
 static rm_reverb *rvb(IDirectSoundFXWavesReverb8 *i) { return impl_from(i, rm_reverb, iface); }
 static HRESULT WINAPI rv_qi(IDirectSoundFXWavesReverb8 *i, REFIID riid, void **out)
 {
@@ -12,7 +13,13 @@ static ULONG WINAPI rv_release(IDirectSoundFXWavesReverb8 *i)
 {
     rm_reverb *r = rvb(i);
     LONG n = InterlockedDecrement(&r->ref);
-    if (!n) { IDirectMusicPerformance8_Release(&r->perf->IDirectMusicPerformance8_iface); free(r); }
+    if (!n) {
+        AcquireSRWLockExclusive(&s_revlock);
+        if (r->perf->revobj == r) r->perf->revobj = NULL;
+        ReleaseSRWLockExclusive(&s_revlock);
+        IDirectMusicPerformance8_Release(&r->perf->IDirectMusicPerformance8_iface);
+        free(r);
+    }
     return n;
 }
 static HRESULT WINAPI rv_set(IDirectSoundFXWavesReverb8 *i, LPCDSFXWavesReverb p)
@@ -31,12 +38,19 @@ static HRESULT WINAPI rv_get(IDirectSoundFXWavesReverb8 *i, LPDSFXWavesReverb p)
     return S_OK;
 }
 static IDirectSoundFXWavesReverbVtbl rv_vtbl = { rv_qi, rv_addref, rv_release, rv_set, rv_get };
+/* the shared reverb buffer's DMO: the same object to every caller while one holds it, as dsound's buffer gives its
+ * effect (a second path, the default path and a configuration's shared reverb all see one) */
 static HRESULT reverb_object(rm_perf *p, REFIID iid, void **out)
 {
-    rm_reverb *r = calloc(1, sizeof(*r));
-    if (!r) return E_OUTOFMEMORY;
-    r->iface.lpVtbl = &rv_vtbl; r->ref = 1; r->perf = p;
-    IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
+    AcquireSRWLockExclusive(&s_revlock);
+    rm_reverb *r = p->revobj;
+    if (!r || !ref_if_alive(&r->ref)) {
+        if (!(r = calloc(1, sizeof(*r)))) { ReleaseSRWLockExclusive(&s_revlock); return E_OUTOFMEMORY; }
+        r->iface.lpVtbl = &rv_vtbl; r->ref = 1; r->perf = p;
+        IDirectMusicPerformance8_AddRef(&p->IDirectMusicPerformance8_iface);
+        p->revobj = r;
+    }
+    ReleaseSRWLockExclusive(&s_revlock);
     HRESULT hr = rv_qi(&r->iface, iid, out);
     rv_release(&r->iface);
     return hr;
@@ -76,14 +90,15 @@ static const GUID RM_DS3DALG_NO_VIRTUALIZATION = { 0xc241333f, 0x1c1b, 0x11d2, {
 static const GUID RM_GUID_DSFX_WAVES = { 0x87fc0268, 0x9a55, 0x4360, { 0x95, 0xaa, 0x00, 0x4a, 0x1d, 0x9d, 0xe2, 0x6c } };
 static const GUID RM_GUID_DSFX_I3DL2 = { 0xef985e71, 0xd5c7, 0x42d4, { 0xba, 0x4d, 0x2d, 0x07, 0x3e, 0x2e, 0x96, 0xf4 } };
 
-/* 7731e70c (any) / 773208c7 (a shared one): a buffer by GUID; the standard path's shared stereo and reverb buffers
- * count as the manager's while a path holds them */
-static rm_buf *buf_find(rm_perf *p, const GUID *g, BOOL shared)
+/* 7731e70c (any) / 773208c7 (a shared one): a buffer by GUID.  The standard stereo and reverb buffers are the host's
+ * own first two, made before any path as dmime's first standard path makes them: a shared one of their defined type
+ * (type: 8 the stereo, 1 the reverb) takes them, other lookups find them only once a path holds them */
+static rm_buf *buf_find(rm_perf *p, const GUID *g, BOOL shared, int type)
 {
     for (rm_buf *b = p->bufs; b; b = b->next)
         if ((!shared || (b->flags & DMUS_BUFFERF_SHARED)) && IsEqualGUID(&b->guid, g)) { b->refs++; return b; }
     int std = IsEqualGUID(g, &RM_GUID_Buffer_Stereo) ? 0 : IsEqualGUID(g, &RM_GUID_Buffer_Reverb) ? 1 : -1;
-    if (std < 0 || !p->host || !dm_host_buffer_inuse(p->host, std)) return NULL;
+    if (std < 0 || !p->host || (type != (std ? 1 : 8) && !dm_host_buffer_inuse(p->host, std))) return NULL;
     rm_buf *b = calloc(1, sizeof(*b));
     if (!b) return NULL;
     b->guid = *g; b->flags = DMUS_BUFFERF_SHARED | DMUS_BUFFERF_DEFINED; b->host = std; b->refs = 1;
@@ -99,7 +114,8 @@ static HRESULT buf_make(rm_perf *p, apc_buffer *c, rm_bref *ref)
     memset(ref, 0, sizeof(*ref));
     if (!(p->audioflags & DMUS_AUDIOF_BUFFERS)) return (HRESULT)0x8878122a;
     ref->flags = c->flags;
-    if ((c->flags & DMUS_BUFFERF_SHARED) && (ref->b = buf_find(p, &c->guid, TRUE))) return S_OK;
+    if ((c->flags & DMUS_BUFFERF_SHARED) &&
+        (ref->b = buf_find(p, &c->guid, TRUE, (c->flags & DMUS_BUFFERF_DEFINED) ? c->type : 0))) return S_OK;
     dm_hostbuf d;
     memset(&d, 0, sizeof(d));
     d.guid = c->guid;
@@ -199,7 +215,6 @@ static ULONG WINAPI ap_release(IDirectMusicAudioPath *i)
             if (*w == a) *w = NULL;
             dm_audiopath_release(a->ap);
             dm_host_unlock(a->perf->host);
-            if (a->nbuf) dm_host_path_close(a->perf->host, a->buf, a->nbuf);
         }
         path_free_config(a);
         IDirectMusicPerformance8_Release(&a->perf->IDirectMusicPerformance8_iface);
@@ -288,20 +303,9 @@ static HRESULT ap_getobj_do(IDirectMusicAudioPath *i, DWORD pch, DWORD stage, DW
         return cfg_getobj(a, pch, stage, buf, g, n, iid, o);
     if (stage == DMUS_PATH_PERFORMANCE) return n || pch ? DMUS_E_NOT_FOUND : IDirectMusicPerformance8_QueryInterface(&a->perf->IDirectMusicPerformance8_iface, iid, o);
     if (stage == DMUS_PATH_AUDIOPATH) return n || pch ? DMUS_E_NOT_FOUND : ap_qi(i, iid, o);
-    if (stage == DMUS_PATH_BUFFER) {
-        /* the path's buffers for its PChannels (DMUS_PCHANNEL_ALL: any), dwBuffer counting them in order */
-        if (n || !a->perf->host || (pch != DMUS_PCHANNEL_ALL && pch >= a->npch) || buf >= (DWORD)a->nbuf) return DMUS_E_NOT_FOUND;
-        return dm_host_buffer_query(a->perf->host, a->buf[buf], iid, o);
-    }
     if (stage == DMUS_PATH_PRIMARY_BUFFER) {
         if (n || pch || !a->perf->host) return DMUS_E_NOT_FOUND;
         return dm_host_primary_query(a->perf->host, iid, o);
-    }
-    if (stage == DMUS_PATH_BUFFER_DMO) {
-        if (!a->perf->host || (pch != DMUS_PCHANNEL_ALL && pch >= a->npch) || buf >= (DWORD)a->nbuf) return DMUS_E_NOT_FOUND;
-        if (a->buf[buf] == 1 && n == 0 && (IsEqualGUID(g, &GUID_All_Objects) || IsEqualGUID(g, &GUID_DSFX_WAVES_REVERB)))
-            return reverb_object(a->perf, iid, o);
-        return DMUS_E_NOT_FOUND;
     }
     if (stage == DMUS_PATH_AUDIOPATH_GRAPH || stage == DMUS_PATH_AUDIOPATH_TOOL) {
         /* its graph: made empty for the graph stage if it has none, not for the tool stage */
@@ -340,7 +344,9 @@ static HRESULT ap_getobj_do(IDirectMusicAudioPath *i, DWORD pch, DWORD stage, DW
         return port_object(a->perf, g, n, iid, o);
     }
     if (stage == 0x5000) return n || pch || !a->perf->port ? DMUS_E_NOT_FOUND : rm_port_sink(a->perf->port, iid, o);
-    switch (stage) {        /* stages an audiopath knows that are not here (mix-in buffers of a standard path) */
+    switch (stage) {        /* the buffer stages of a path object with no configuration (one a tool graph's owner made
+                             * again for a path the application let go of): nothing there */
+    case DMUS_PATH_BUFFER: case DMUS_PATH_BUFFER_DMO:
     case DMUS_PATH_MIXIN_BUFFER: case DMUS_PATH_MIXIN_BUFFER_DMO: {
         char b1[64];
         LOG_INFO("music: AudioPath::GetObjectInPath(stage %lx, %s) not supported", (unsigned long)stage, guidstr(iid, b1));

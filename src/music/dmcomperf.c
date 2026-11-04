@@ -53,6 +53,7 @@ static HRESULT WINAPI pf_qi(IDirectMusicPerformance8 *i, REFIID riid, void **out
 static ULONG WINAPI pf_addref(IDirectMusicPerformance8 *i) { return InterlockedIncrement(&prf(i)->ref); }
 static void pf_closedown(rm_perf *p)
 {
+    p->apstate = 0;                         /* (77308c70: not set up, whether closed down already or not) */
     if (p->closed) return;
     p->closed = TRUE;
     if (p->defpath) { rm_path *a = p->defpath; p->defpath = NULL; IDirectMusicAudioPath_Release(&a->IDirectMusicAudioPath_iface); }
@@ -173,6 +174,7 @@ static HRESULT WINAPI pf_init(IDirectMusicPerformance8 *i, IDirectMusic **pdm, L
     dm_host_port_enable(p->host, 0, p->host, 0);   /* (no port: no latency, nothing played, until AddPort) */
     dm_host_set_dx7port(p->host, 1);        /* (its AddPort(NULL) port: DMUS_PORTPARAMS, no waves) */
     dm_host_unlock(p->host);
+    p->apstate = 1;
     hand_out_dmusic(p, pdm);
     return S_OK;
 }

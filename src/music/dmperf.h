@@ -82,10 +82,8 @@ uint32_t dm_perf_realtime(dm_perf *pf);
 
 int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm_audiopath *ap, dm_segstate **out);
 
-/* audiopaths: standard ones only (virtual PChannels 0..n-1 on new performance PChannels of port 0) */
-dm_audiopath *dm_perf_create_audiopath(dm_perf *pf, uint32_t npch, int activate, const uint32_t *buses, uint32_t nbuses);
-/* a configured one: n virtual PChannels virt[], drum[] (NULL: none; 1 drums on 10, 3 the drum channel), nbus[i] buses
- * at buses + 32 * i (NULL / 0: the channel keeps its buses) */
+/* audiopaths (standard ones are configurations too): n virtual PChannels virt[], drum[] (NULL: none; 1 drums on 10,
+ * 3 the drum channel), nbus[i] buses at buses + 32 * i (NULL / 0: the channel keeps its buses) */
 dm_audiopath *dm_perf_create_audiopath_ex(dm_perf *pf, int activate, uint32_t n, const uint32_t *virt, const int *drum,
                                           const uint32_t *nbus, const uint32_t *buses);
 void dm_audiopath_addref(dm_audiopath *ap);

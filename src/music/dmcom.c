@@ -91,7 +91,6 @@ typedef struct {
     dm_audiopath *ap;
     rm_perf *perf;
     DWORD type, npch;
-    int buf[2], nbuf;                       /* the host's sink buffers, in the path's buffer order */
     /* a path made from a configuration (77320f10): its buffers (+0x58 the top-level ones, +0x54 the ports') */
     BOOL cfg;
     struct rm_bref *top; DWORD ntop;
@@ -113,8 +112,10 @@ struct rm_perf {
     LONG ref;
     dm_host *host;
     DSFXWavesReverb revparams;              /* the shared reverb's parameters as last set */
+    void *revobj;                           /* its DMO interface while one is out (one object, as the buffer's DMO) */
     rm_path *defpath;
     DWORD audioflags;                       /* InitAudio's (DMUS_AUDIOF_*) */
+    int apstate;                            /* +0x108: 0 not set up (or closed down), 1 Init's, 2 InitAudio's (audiopaths) */
     rm_port *port;                          /* the synth port (dmport.c) */
     /* reAL: the port behind each of the engine's port indices: [0] the synth port, the others CreatePort'ed ones
      * (references); and whether each is AddPort'ed (under the engine lock) */

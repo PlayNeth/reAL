@@ -736,6 +736,70 @@ static void trackplay(int nfiles, char **names)
     IDirectMusicPerformance8_Release(pf);
 }
 
+/* standard audiopaths by how the performance was set up: after Init (no audiopaths), after InitAudio without
+ * DMUS_AUDIOF_BUFFERS (dmime then makes them with no buffers) and with it; what each path has at its stages */
+static void stdpath_stages(IDirectMusicAudioPath *ap)
+{
+    static const DWORD st[] = { DMUS_PATH_BUFFER, DMUS_PATH_BUFFER_DMO, DMUS_PATH_PORT, DMUS_PATH_PRIMARY_BUFFER };
+    for (int k = 0; k < 4; k++) for (DWORD b = 0; b < 2; b++) {
+        IUnknown *u = NULL;
+        HRESULT hr = IDirectMusicAudioPath_GetObjectInPath(ap, DMUS_PCHANNEL_ALL, st[k], b, &GUID_All_Objects, 0, &IID_IUnknown, (void **)&u);
+        P("    stage %lx buffer %lu: %08lx\n", st[k], b, hr);
+        if (u) IUnknown_Release(u);
+    }
+}
+static void stdpath(int how)
+{
+    static const DWORD types[] = { DMUS_APATH_SHARED_STEREOPLUSREVERB, DMUS_APATH_DYNAMIC_3D, DMUS_APATH_DYNAMIC_MONO,
+                                   DMUS_APATH_DYNAMIC_STEREO, 2 };
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    if (!pf) { P("  no performance\n"); return; }
+    HRESULT hr = how == 4 ? S_FALSE : how == 0 ? IDirectMusicPerformance8_Init(pf, NULL, NULL, NULL)
+               : IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, how == 3 ? 0 : DMUS_APATH_SHARED_STEREOPLUSREVERB, 16,
+                                                    how & 1 ? DMUS_AUDIOF_3D | DMUS_AUDIOF_ENVIRON : DMUS_AUDIOF_ALL, NULL);
+    P("  %s %08lx\n", how == 4 ? "no Init" : how ? "InitAudio" : "Init", hr);
+    IDirectMusicAudioPath *dp = NULL;
+    P("  GetDefaultAudioPath %08lx\n", IDirectMusicPerformance8_GetDefaultAudioPath(pf, &dp));
+    if (dp) { stdpath_stages(dp); IDirectMusicAudioPath_Release(dp); }
+    for (int t = 0; t < 5; t++) {
+        IDirectMusicAudioPath *ap = NULL;
+        HRESULT h2 = IDirectMusicPerformance8_CreateStandardAudioPath(pf, types[t], 16, TRUE, &ap);
+        P("  CreateStandardAudioPath(%lu) %08lx%s\n", types[t], h2, ap ? " (a path)" : "");
+        if (SUCCEEDED(h2) && ap) { stdpath_stages(ap); IDirectMusicAudioPath_Release(ap); }
+    }
+    IDirectMusicAudioPath *ap = NULL;
+    P("  CreateStandardAudioPath(NULL out) %08lx\n", IDirectMusicPerformance8_CreateStandardAudioPath(pf, DMUS_APATH_DYNAMIC_MONO, 16, TRUE, NULL));
+    ap = NULL;
+    hr = IDirectMusicPerformance8_CreateStandardAudioPath(pf, DMUS_APATH_DYNAMIC_MONO, 0, TRUE, &ap);
+    P("  CreateStandardAudioPath(0 pchannels) %08lx%s\n", hr, ap ? " (a path)" : "");
+    if (SUCCEEDED(hr) && ap) IDirectMusicAudioPath_Release(ap);
+    ap = NULL;
+    P("  SetDefaultAudioPath(NULL) %08lx\n", IDirectMusicPerformance8_SetDefaultAudioPath(pf, NULL));
+    {   /* the DirectX 7 way of setting up ports, against audiopaths */
+        IDirectMusicPort *port = NULL; DWORD gr = 0, ch = 0;
+        IDirectMusicPerformance8_PChannelInfo(pf, 0, &port, &gr, &ch);
+        P("  AddPort(NULL) %08lx\n", IDirectMusicPerformance8_AddPort(pf, NULL));
+        if (port) {
+            P("  AssignPChannelBlock %08lx\n", IDirectMusicPerformance8_AssignPChannelBlock(pf, 0, port, 1));
+            P("  AssignPChannel %08lx\n", IDirectMusicPerformance8_AssignPChannel(pf, 0, port, 1, 0));
+            IDirectMusicPort_Release(port);
+        }
+        IDirectMusicAudioPath *d3 = NULL;
+        P("  GetDefaultAudioPath %08lx\n", IDirectMusicPerformance8_GetDefaultAudioPath(pf, &d3));
+        if (d3) IDirectMusicAudioPath_Release(d3);
+    }
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    IDirectMusicAudioPath *dp2 = NULL;
+    P("  GetDefaultAudioPath %08lx\n", IDirectMusicPerformance8_GetDefaultAudioPath(pf, &dp2));
+    if (dp2) IDirectMusicAudioPath_Release(dp2);
+    P("  SetDefaultAudioPath(NULL) %08lx\n", IDirectMusicPerformance8_SetDefaultAudioPath(pf, NULL));
+    hr = IDirectMusicPerformance8_CreateStandardAudioPath(pf, DMUS_APATH_DYNAMIC_MONO, 16, TRUE, &ap);
+    P("  CreateStandardAudioPath(7) %08lx%s\n", hr, ap ? " (a path)" : "");
+    if (SUCCEEDED(hr) && ap) IDirectMusicAudioPath_Release(ap);
+    IDirectMusicPerformance8_Release(pf);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -759,6 +823,13 @@ int main(int argc, char **argv)
     if (!only || !strcmp(only, "initplay")) {
         P("initplay, no Init:\n"); initplay(0);
         P("initplay, after Init:\n"); initplay(1);
+    }
+    if (!only || !strcmp(only, "stdpath")) {
+        P("stdpath, after Init:\n"); stdpath(0);
+        P("stdpath, InitAudio without buffers:\n"); stdpath(1);
+        P("stdpath, InitAudio:\n"); stdpath(2);
+        P("stdpath, InitAudio without buffers or a default path:\n"); stdpath(3);
+        P("stdpath, no Init:\n"); stdpath(4);
     }
     if (only && !strcmp(only, "trackplay")) { P("trackplay:\n"); trackplay(argc - 2, argv + 2); }
     CoUninitialize();

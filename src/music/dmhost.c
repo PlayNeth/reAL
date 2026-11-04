@@ -82,8 +82,9 @@ static void drain_deferred(void)
 #define BUF_MS 1000
 
 /* the sink's buffers: [0] the shared stereo (dry) buffer, [1] the shared reverb buffer, then the audiopaths' own
- * (3D, mono, stereo).  Each takes one bus per channel (DirectX 8 sink: IDirectSoundSource::Read into the bus buffers) */
-enum { HB_DRY, HB_REVERB, HB_3D, HB_MONO, HB_STEREO, HB_CFG };
+ * (their configurations', standard paths' included).  Each takes one bus per channel (DirectX 8 sink:
+ * IDirectSoundSource::Read into the bus buffers) */
+enum { HB_DRY, HB_REVERB, HB_CFG };
 #define MAXHB 64
 #define BLOCK 256           /* frames a sink pass renders at a time */
 /* HB_CFG: a buffer an audiopath configuration describes (dm_host_buffer_new): its buses (none: a mix-in, fed by the
@@ -425,7 +426,7 @@ static void sink_pass(dm_host *h)
         hbuf *x = &h->hb[k];
         first[k] = nb;
         if (!x->b) continue;
-        int32_t pc = x->kind >= HB_3D ? rl_buffer_sink_cents(x->b) : 0;
+        int32_t pc = x->kind == HB_CFG ? rl_buffer_sink_cents(x->b) : 0;
         int nbus = x->kind == HB_CFG ? x->nbus : x->nch;
         for (int c = 0; c < nbus; c++) { ids[nb] = x->bus[c]; fn[nb] = x->func[c]; pitch[nb] = pc; bufs[nb] = tmp[nb]; nb++; }
     }
@@ -469,9 +470,9 @@ static void sink_pass(dm_host *h)
                 b2 = NULL;
                 break;
             }
-            case HB_DRY: case HB_STEREO:            /* two buses interleaved (a mono host's one bus, twice) */
+            case HB_DRY:                            /* two buses interleaved (a mono host's one bus, twice) */
                 for (uint32_t i = 0; i < n; i++) { out[2 * i] = a[i]; out[2 * i + 1] = b2 ? b2[i] : a[i]; }
-                if (x->kind == HB_DRY) memcpy(dry, out, n * 4);
+                memcpy(dry, out, n * 4);
                 write_buffer(x->b, at, out, n, 2);
                 break;
             case HB_REVERB:                         /* the mono send to both channels, then the Waves reverb */
@@ -479,9 +480,6 @@ static void sink_pass(dm_host *h)
                 if (h->noreverb) memset(v, 0, n * 4);
                 else wavesrev_stereo16(h->rev, v, n);
                 write_buffer(x->b, at, v, n, 2);
-                break;
-            default:                                /* 3D and mono buffers: the bus as it is */
-                write_buffer(x->b, at, a, n, 1);
                 break;
             }
             if (h->buslog && x->kind != HB_CFG) for (uint32_t i = 0; i < n * x->nch; i++) {
@@ -837,56 +835,8 @@ int dm_host_ds_buffer_buses(dm_host *h, IDirectSoundBuffer *b, uint32_t *ids, ui
 int dm_host_fixes(dm_host *h) { return h->fixes; }
 
 /* ------------------------------------------------------------------ audiopath buffers
- * A standard audiopath's buffers (dmime 773211f9 / 7732084b): shared stereo + reverb (DMUS_APATH_SHARED_STEREOPLUSREVERB),
- * a 3D mono buffer (DYNAMIC_3D, no virtualization asked), a mono one (DYNAMIC_MONO) or a stereo one (DYNAMIC_STEREO).
- * The path's buses are written to buses[] (up to 4); the buffers' indices to idx[] (up to 2). */
-static const GUID DS3DALG_NO_VIRTUALIZATION_ = { 0xc241333f, 0x1c1b, 0x11d2, { 0x94, 0xf5, 0x00, 0xc0, 0x4f, 0xc2, 0x8a, 0xca } };
-int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t buses[4], uint32_t *nbuses)
-{
-    *nidx = 0; *nbuses = 0;
-    host_enter(h);
-    int r = -1;
-    if (type == 1) {        /* DMUS_APATH_SHARED_STEREOPLUSREVERB */
-        h->hb[0].refs++; h->hb[1].refs++;
-        idx[0] = 0; idx[1] = 1; *nidx = 2;
-        buses[0] = 0; buses[1] = 1; buses[2] = 0x40; *nbuses = 3;
-        r = 0;
-    } else if (type == 6 || type == 7 || type == 8) {
-        int k;
-        for (k = 2; k < MAXHB && h->hb[k].b; k++) ;
-        if (k < MAXHB) {
-            hbuf *x = &h->hb[k];
-            rl_buffer *b;
-            if (type == 6) b = make_buffer_ex(h, 1, DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_GLOBALFOCUS |
-                                              DSBCAPS_MUTE3DATMAXDISTANCE, &DS3DALG_NO_VIRTUALIZATION_);
-            else if (type == 7) b = make_buffer_ex(h, 1, DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_GLOBALFOCUS, NULL);
-            else b = make_buffer_ex(h, 2, DSBCAPS_CTRLPAN | DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLFREQUENCY | DSBCAPS_GLOBALFOCUS, NULL);
-            if (b) {
-                rl_buffer_set_sink(b, type == 6 ? 0x682b0 : 0x482e0);      /* 7732084b's flags | CTRLFX */
-                x->b = b; x->refs = 1;
-                x->kind = type == 6 ? HB_3D : type == 7 ? HB_MONO : HB_STEREO;
-                x->nch = type == 8 ? 2 : 1;
-                for (int c = 0; c < x->nch; c++) {
-                    x->bus[c] = h->nextbus++;
-                    x->func[c] = type == 6 ? 0x200 : (uint32_t)c;     /* DSBUSID_DYNAMIC_0 / LEFT, RIGHT */
-                    buses[c] = x->bus[c];
-                }
-                *nbuses = x->nch;
-                ds_number(h, x);
-                idx[0] = k; *nidx = 1;
-                /* in step with the shared buffers: same frame position, playing */
-                DWORD play = 0, wr = 0;
-                IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr);
-                IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
-                IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
-                r = 0;
-            }
-        }
-    }
-    host_leave(h);
-    return r;
-}
-
+ * A path's references on the host's buffers (dm_host_buffer_new's, dm_host_buffer_addref's) are dropped here; the
+ * host's own two stay. */
 void dm_host_path_close(dm_host *h, const int *idx, int nidx)
 {
     host_enter(h);
