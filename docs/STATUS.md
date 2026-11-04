@@ -43,6 +43,12 @@ What the rest costs, from the same benchmark: a heavy scene (64 3D voices with E
 reverb) about 10% of one core, 15% with HRTF; the reverb 0.5%; CMSS-3D about 1.4% per voice (off by default). The
 HRTF convolution is already vectorised by the compiler.
 
+**Costs cut, the output the same** (a hash of every sample over each format, mono and stereo, 2D, 3D and one-shot,
+linear and sinc, stereo and 5.1 output, HRTF and CMSS-3D, and of the 11 EAX 4 effects, is unchanged; ALchemy's
+effects are compared by `tests/test_fx.c`):
+- the EAX 4 effects' delay taps rounded with one SSE2 instruction instead of a call to `nearbyint` per sample: chorus,
+  flanger, echo and pitch shifter 10-14 times cheaper (EAX 4 loads a chorus into slot 1, run every block).
+
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.
 - The data: the MIT KEMAR compact set, diffuse-field equalised, at 48 kHz (mit-hrtf-lib's tables). It has 14 rings

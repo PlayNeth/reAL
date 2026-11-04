@@ -2,6 +2,7 @@
  * ALchemy stores; the rest in double (ALchemy runs the FPU at 53-bit precision). */
 #include "eax4dsp.h"
 #include "eax.h"
+#include <emmintrin.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -816,7 +817,9 @@ void fxw_process(fx_autowah *w, float *const ch[2], uint32_t n)   /* fn 0x1005a3
 static uint32_t rnd_samples(float v)                          /* x87 "-0.5 + 1.5e-8, + 1.5*2^52" rounding */
 {
     double t = v < 0.0f ? ((double)v + 0.5) - 1.4999999464748726e-08 : ((double)v - 0.5) + 1.4999999464748726e-08;
-    return (uint32_t)(int64_t)nearbyint(t);
+    /* cvtsd2si: round to nearest even under the default MXCSR, as nearbyint, without its library call per sample
+     * (taps are far inside the int32 range) */
+    return (uint32_t)_mm_cvtsd_si32(_mm_set_sd(t));
 }
 
 static void echo_tap2(fx_echo *o)                              /* fn 0x10055db0 */
