@@ -67,13 +67,21 @@ typedef struct {
     const GUID *alg; const DS3DBUFFER *ds3d;
     GUID guid;                          /* sends find it by this */
     DWORD nfx; const rl_fxsrc *fx;      /* the effects (the configuration's, cloned) */
+    int noplay;                         /* made stopped (IDirectSoundConnect::CreateSoundBuffer's) */
 } dm_hostbuf;
 HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx);
 DWORD dm_host_buffer_buses(dm_host *h, int idx, uint32_t *out, DWORD max);
 void dm_host_buffer_addref(dm_host *h, int idx);
+void dm_host_buffer_give(dm_host *h, int idx);     /* the application's (holding a reference): gone when it lets go */
 int dm_host_buffer_inuse(dm_host *h, int idx);     /* held by a path (the shared buffers: beyond the host's own) */
 HRESULT dm_host_buffer_dmo(dm_host *h, int idx, REFGUID g, DWORD n, REFIID iid, void **out);
 HRESULT dm_host_primary_query(dm_host *h, REFIID iid, void **out);
+/* the sink as IDirectSoundConnect sees it (dsound's bus ids and buffer order) */
+DWORD dm_host_ds_buses(dm_host *h, uint32_t *ids, uint32_t *funcs, DWORD max);
+int dm_host_ds_func(dm_host *h, uint32_t bus, uint32_t *func);
+IDirectSoundBuffer *dm_host_ds_bus_buffer(dm_host *h, uint32_t bus);
+int dm_host_ds_buffer_buses(dm_host *h, IDirectSoundBuffer *b, uint32_t *ids, uint32_t *funcs, DWORD max);
+int dm_host_fixes(dm_host *h);
 int dm_host_priority(dm_host *h, uint32_t group, uint32_t chan, uint32_t *prio, int set);     /* get / set */
 /* the synth's running statistics (IDirectMusicPort::GetRunningStats) */
 void dm_host_stats(dm_host *h, msynth_stats *st);

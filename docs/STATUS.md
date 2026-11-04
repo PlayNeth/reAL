@@ -290,8 +290,18 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - The sink stage (0x5000): an object with IReferenceClock (the master clock; GetLatencyClock's gives the latency
   clock), IKsControl and dsound's private IDirectSoundSynthSink (6efc7dcc): GetLatencyClock (the sink's own clock),
   SampleToRefTime / RefToSampleTime (the sink's sample clock in dsound's steps: whole 1/10000 s, then ms), GetFormat
-  (16-bit mono at the synth's rate, 18 bytes) and Activate. Microsoft's sink also answers {182ea05a-5de3-4405-8589-
-  f0aadf3b6ac5} (dsound's interface for the synth's sources and buses), which reDM does not offer.
+  (16-bit mono at the synth's rate, 18 bytes) and Activate.
+- And dsound's IDirectSoundConnect ({182ea05a-5de3-4405-8589-f0aadf3b6ac5}, 6efc7dec): the buses numbered as
+  dsound's sink numbers them (1, 2, ... as its buffers are made, the reverb buffer's first) and listed newest buffer
+  first; GetBusCount, GetBusIDs, GetFunctionalID, GetSoundBufferBusIDs; CreateSoundBuffer, a buffer on new buses
+  made stopped (GetCaps: the description's flags and LOCSOFTWARE; always 16-bit at the synth's rate, the
+  description's channels only), gone with its buses once the application lets go of it; AddSource (a source at another rate refused with
+  E_NOTIMPL, one whose GetFormat fails kept with its failure), RemoveSource, SetMasterClock. GetSoundBuffer looks
+  the bus up and then calls the buffer's GetFormat where it means QueryInterface (6efd748c), so it always fails with
+  E_INVALIDARG; with the fixes on, reDM's gives the buffer. Not as dsound: an outside source and master clock are
+  held but not used (the port's synth plays, on the sink's own time), and CreateSoundBufferFromConfig refuses
+  everything (reDM reads buffer configurations in its audiopath configurations; it has no object to take one from).
+  `tests/comcmp.sh porttest.exe connect` matches.
 - IDirectMusicPortDownload for an application's own downloads (Pro Evolution Soccer 6 builds its instruments that
   way): AllocateBuffer and the buffer object, GetDLId from the port's counter (the one its collections use),
   Download straight to the synth, GetBuffer by id, Unload, with dmusic's results (E_POINTER for a buffer too small
@@ -650,7 +660,6 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 reported unsupported so games fall back to EAX 4.)
 
 Smaller items still open:
-- The sink object does not answer dsound's {182ea05a} interface (the synth's sources and buses).
 - Standard audiopaths still use the host's fixed buffers rather than the configuration machinery (they match
   Microsoft's in every test so far).
 

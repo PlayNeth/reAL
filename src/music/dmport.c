@@ -74,6 +74,8 @@ struct rm_port {
     rm_dlrec *dls;                      /* the application's downloads (under the engine lock) */
     struct rm_dlins *ins;               /* its DownloadInstrument downloads, each a reference (engine lock) */
     const void *maker;                  /* the IDirectMusic that made it (CreatePort), whose Activate activates it */
+    IUnknown *source;                   /* IDirectSoundConnect::AddSource's (held, not read: the synth plays) */
+    IReferenceClock *mclock;            /* IDirectSoundConnect::SetMasterClock's (held) */
     rm_port *mnext;                     /* (the list of CreatePort'ed ports, engine lock) */
 };
 static rm_port *s_made;                 /* every CreatePort'ed port alive */
@@ -97,6 +99,7 @@ typedef struct {
     IReferenceClock IReferenceClock_iface;
     IKsControl IKsControl_iface;
     struct dssink { const struct dssinkvtbl *lpVtbl; } IDirectSoundSynthSink_iface;
+    struct dsconn { const struct dsconnvtbl *lpVtbl; } IDirectSoundConnect_iface;
     LONG ref;
     rm_port *port;
     int latency;                        /* a latency clock (GetLatencyClock) rather than the sink */
@@ -113,6 +116,23 @@ typedef struct dssinkvtbl {
     HRESULT (WINAPI *GetFormat)(struct dssink *, WAVEFORMATEX *, DWORD, DWORD *);
 } dssinkvtbl;
 static const GUID s_IID_IDirectSoundSynthSink = { 0x73a6a85a, 0x493e, 0x4c87, { 0xb4, 0xa5, 0xbe, 0x53, 0xeb, 0x92, 0x74, 0x4b } };
+/* IDirectSoundConnect (dsound's sink, 6efc7dec: its sources, buses and buffers), as Windows 7's dsound has it */
+typedef struct dsconnvtbl {
+    HRESULT (WINAPI *QueryInterface)(struct dsconn *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(struct dsconn *);
+    ULONG (WINAPI *Release)(struct dsconn *);
+    HRESULT (WINAPI *AddSource)(struct dsconn *, IUnknown *);
+    HRESULT (WINAPI *RemoveSource)(struct dsconn *, IUnknown *);
+    HRESULT (WINAPI *SetMasterClock)(struct dsconn *, IReferenceClock *);
+    HRESULT (WINAPI *CreateSoundBuffer)(struct dsconn *, LPCDSBUFFERDESC, LPDWORD, DWORD, REFGUID, LPDIRECTSOUNDBUFFER *);
+    HRESULT (WINAPI *CreateSoundBufferFromConfig)(struct dsconn *, IUnknown *, LPDIRECTSOUNDBUFFER *);
+    HRESULT (WINAPI *GetSoundBuffer)(struct dsconn *, DWORD, LPDIRECTSOUNDBUFFER *);
+    HRESULT (WINAPI *GetBusCount)(struct dsconn *, LPDWORD);
+    HRESULT (WINAPI *GetBusIDs)(struct dsconn *, LPDWORD, LPDWORD, DWORD);
+    HRESULT (WINAPI *GetFunctionalID)(struct dsconn *, DWORD, LPDWORD);
+    HRESULT (WINAPI *GetSoundBufferBusIDs)(struct dsconn *, LPDIRECTSOUNDBUFFER, LPDWORD, LPDWORD, LPDWORD);
+} dsconnvtbl;
+static const GUID s_IID_IDirectSoundConnect = { 0x182ea05a, 0x5de3, 0x4405, { 0x85, 0x89, 0xf0, 0xaa, 0xdf, 0x3b, 0x6a, 0xc5 } };
 
 static rm_port *pt(IDirectMusicPort *i) { return impl_from(i, rm_port, IDirectMusicPort_iface); }
 static rm_port *pdl(IDirectMusicPortDownload *i) { return impl_from(i, rm_port, IDirectMusicPortDownload_iface); }
@@ -148,6 +168,8 @@ static ULONG port_release(rm_port *p)
         for (rm_port **q = &s_made; *q; q = &(*q)->mnext) if (*q == p) { *q = p->mnext; break; }
         dm_engine_unlock();
         if (h) rm_port_detach(p);       /* (its downloads go with its synth) */
+        if (p->source) IUnknown_Release(p->source);
+        if (p->mclock) IReferenceClock_Release(p->mclock);
         dlrecs_free(p->dls); dlins_free_list(p->ins);
         free(p);
         dm_host_free(h);
@@ -667,6 +689,7 @@ static HRESULT sink_qi(rm_sink *s, REFIID riid, void **out)
     else if (IsEqualIID(riid, &IID_IReferenceClock)) *out = &s->IReferenceClock_iface;
     else if (!s->latency && IsEqualIID(riid, &s_IID_IKsControl)) *out = &s->IKsControl_iface;
     else if (!s->latency && IsEqualIID(riid, &s_IID_IDirectSoundSynthSink)) *out = &s->IDirectSoundSynthSink_iface;
+    else if (!s->latency && IsEqualIID(riid, &s_IID_IDirectSoundConnect)) *out = &s->IDirectSoundConnect_iface;
     else { *out = NULL; return E_NOINTERFACE; }
     InterlockedIncrement(&s->ref);
     return S_OK;
@@ -760,6 +783,162 @@ static HRESULT WINAPI ss_GetFormat(struct dssink *i, WAVEFORMATEX *w, DWORD size
 static const dssinkvtbl ss_vtbl = { ss_QueryInterface, ss_AddRef, ss_Release, ss_GetLatencyClock, ss_Activate,
     ss_SampleToRefTime, ss_RefToSampleTime, ss_GetFormat };
 
+/* ------------------------------------------------------------------ IDirectSoundConnect (6efc7dec) */
+static rm_sink *sx(struct dsconn *i) { return impl_from(i, rm_sink, IDirectSoundConnect_iface); }
+static HRESULT WINAPI sx_QueryInterface(struct dsconn *i, REFIID riid, void **out) { return sink_qi(sx(i), riid, out); }
+static ULONG WINAPI sx_AddRef(struct dsconn *i) { return InterlockedIncrement(&sx(i)->ref); }
+static ULONG WINAPI sx_Release(struct dsconn *i) { return sink_release(sx(i)); }
+/* 6efd629f: the source the sink reads (the one before let go of), its format asked for: a source at another rate
+ * (its 30 ms in samples not the sink's) is refused with E_NOTIMPL.  reDM's sink holds it as dsound's does, but it
+ * renders the port's own synth whatever is added */
+static HRESULT WINAPI sx_AddSource(struct dsconn *i, IUnknown *src)
+{
+    rm_port *p = sx(i)->port;
+    dm_host *h = port_hold(p);
+    DWORD rate = h ? dm_host_rate(h) : 22050;
+    if (src) IUnknown_AddRef(src);
+    IUnknown *old = p->source;
+    p->source = src;
+    if (h) port_drop();
+    if (old) IUnknown_Release(old);
+    if (!src) return S_OK;
+    /* IDirectSoundSource::GetFormat (its fifth method) */
+    WAVEFORMATEX f;
+    DWORD got = 0;
+    memset(&f, 0, sizeof(f));
+    HRESULT hr = ((HRESULT (WINAPI *)(IUnknown *, WAVEFORMATEX *, DWORD, DWORD *))((void **)src->lpVtbl)[4])(src, &f, sizeof(f), &got);
+    if (SUCCEEDED(hr) && rate * 30 / 1000 != f.nSamplesPerSec * 30 / 1000) {
+        h = port_hold(p);
+        if (p->source == src) p->source = NULL;
+        if (h) port_drop();
+        IUnknown_Release(src);
+        return E_NOTIMPL;
+    }
+    return hr;
+}
+/* 6efd720d: let go of the source if it is that one */
+static HRESULT WINAPI sx_RemoveSource(struct dsconn *i, IUnknown *src)
+{
+    rm_port *p = sx(i)->port;
+    IUnknown *old = NULL;
+    dm_host *h = port_hold(p);
+    if (p->source && p->source == src) { old = p->source; p->source = NULL; }
+    if (h) port_drop();
+    if (old) IUnknown_Release(old);
+    return S_OK;
+}
+/* 6efd6387: the master clock, held (reDM's sink keeps its own time) */
+static HRESULT WINAPI sx_SetMasterClock(struct dsconn *i, IReferenceClock *c)
+{
+    rm_port *p = sx(i)->port;
+    if (c) IReferenceClock_AddRef(c);
+    dm_host *h = port_hold(p);
+    IReferenceClock *old = p->mclock;
+    p->mclock = c;
+    if (h) port_drop();
+    if (old) IReferenceClock_Release(old);
+    return S_OK;
+}
+/* 6efd9f36: a buffer of the sink's on new buses, one per function given, made stopped; the description's flags with
+ * LOCSOFTWARE are what GetCaps reports */
+static HRESULT WINAPI sx_CreateSoundBuffer(struct dsconn *i, LPCDSBUFFERDESC d, LPDWORD funcs, DWORD n, REFGUID g, LPDIRECTSOUNDBUFFER *out)
+{
+    if ((!funcs && (n & 0x3fffffff)) || !d || IsBadReadPtr(d, sizeof(DWORD)) || d->dwSize < sizeof(DSBUFFERDESC1) ||
+        !d->lpwfxFormat || !g || !out)
+        return E_INVALIDARG;
+    *out = NULL;
+    const WAVEFORMATEX *w = d->lpwfxFormat;
+    if (w->nChannels < 1 || w->nChannels > 2 || n > 2) return E_INVALIDARG;
+    dm_host *h = port_hold(sx(i)->port);
+    if (!h) return E_FAIL;
+    dm_hostbuf hb;
+    memset(&hb, 0, sizeof(hb));
+    hb.nch = w->nChannels; hb.flags = d->dwFlags; hb.caps = d->dwFlags | DSBCAPS_LOCSOFTWARE;
+    hb.nfunc = n; hb.func = funcs; hb.guid = *g; hb.noplay = 1;
+    hb.alg = d->dwSize >= sizeof(DSBUFFERDESC) ? &d->guid3DAlgorithm : NULL;
+    int idx = -1;
+    HRESULT hr = dm_host_buffer_new(h, &hb, &idx);
+    if (SUCCEEDED(hr)) {
+        hr = dm_host_buffer_query(h, idx, &IID_IDirectSoundBuffer, (void **)out);
+        if (SUCCEEDED(hr)) dm_host_buffer_give(h, idx);
+        else dm_host_path_close(h, &idx, 1);
+    }
+    port_drop();
+    return hr;
+}
+/* 6efda036: from a DirectSound buffer configuration object; reDM reads those in its audiopath configurations, and
+ * has no such object to take one from */
+static HRESULT WINAPI sx_CreateSoundBufferFromConfig(struct dsconn *i, IUnknown *cfg, LPDIRECTSOUNDBUFFER *out)
+{
+    if (!cfg || IsBadReadPtr(cfg, sizeof(void *)) || !out) return E_INVALIDARG;
+    *out = NULL;
+    return E_INVALIDARG;
+}
+/* 6efd748c: the buffer a bus is in.  dsound looks the bus up and then calls the buffer's GetFormat (its fifth method)
+ * where it means QueryInterface, so it always fails with E_INVALIDARG; with the fixes on, reDM gives the buffer */
+static HRESULT WINAPI sx_GetSoundBuffer(struct dsconn *i, DWORD bus, LPDIRECTSOUNDBUFFER *out)
+{
+    if (!out) return E_INVALIDARG;
+    *out = NULL;
+    dm_host *h = port_hold(sx(i)->port);
+    if (!h) return E_INVALIDARG;
+    IDirectSoundBuffer *b = dm_host_ds_bus_buffer(h, bus);
+    int fixes = dm_host_fixes(h);
+    port_drop();
+    if (!b) return E_INVALIDARG;
+    if (!fixes) { IDirectSoundBuffer_Release(b); return E_INVALIDARG; }
+    *out = b;
+    return S_OK;
+}
+/* 6efd7528 / 6efd6488: the buses of every buffer */
+static HRESULT WINAPI sx_GetBusCount(struct dsconn *i, LPDWORD n)
+{
+    if (!n) return E_INVALIDARG;
+    dm_host *h = port_hold(sx(i)->port);
+    *n = h ? dm_host_ds_buses(h, NULL, NULL, 0) : 0;
+    if (h) port_drop();
+    return S_OK;
+}
+/* 6efd7589 / 6efd64cf: the buses' ids and functions, newest buffer first, as many as asked for and there are */
+static HRESULT WINAPI sx_GetBusIDs(struct dsconn *i, LPDWORD ids, LPDWORD funcs, DWORD n)
+{
+    if ((!ids && (n & 0x3fffffff)) || (!funcs && (n & 0x3fffffff))) return E_INVALIDARG;
+    dm_host *h = port_hold(sx(i)->port);
+    if (h) { dm_host_ds_buses(h, (uint32_t *)ids, (uint32_t *)funcs, n); port_drop(); }
+    return S_OK;
+}
+/* 6efd7693 / 6efd6532 */
+static HRESULT WINAPI sx_GetFunctionalID(struct dsconn *i, DWORD bus, LPDWORD f)
+{
+    if (!f) return E_INVALIDARG;
+    dm_host *h = port_hold(sx(i)->port);
+    if (!h) return E_INVALIDARG;
+    uint32_t v = 0;
+    int ok = dm_host_ds_func(h, bus, &v);
+    port_drop();
+    if (!ok) return E_INVALIDARG;
+    *f = v;
+    return S_OK;
+}
+/* 6efd760e / 6efd65a0: a buffer of the sink's: its buses (at most *n), *n set to how many; the functions too when
+ * asked for */
+static HRESULT WINAPI sx_GetSoundBufferBusIDs(struct dsconn *i, LPDIRECTSOUNDBUFFER b, LPDWORD ids, LPDWORD funcs, LPDWORD n)
+{
+    if (!n || (!ids && (*n & 0x3fffffff)) || !b) return E_INVALIDARG;
+    dm_host *h = port_hold(sx(i)->port);
+    if (!h) return E_INVALIDARG;
+    uint32_t bi[2], bf[2];
+    int got = dm_host_ds_buffer_buses(h, b, bi, bf, *n < 2 ? *n : 2);
+    port_drop();
+    if (got < 0) return E_INVALIDARG;
+    for (int k = 0; k < got; k++) { if (ids) ids[k] = bi[k]; if (funcs) funcs[k] = bf[k]; }  /* (*n's top bits pass the check with no ids) */
+    *n = (DWORD)got;
+    return S_OK;
+}
+static const dsconnvtbl sx_vtbl = { sx_QueryInterface, sx_AddRef, sx_Release, sx_AddSource, sx_RemoveSource, sx_SetMasterClock,
+    sx_CreateSoundBuffer, sx_CreateSoundBufferFromConfig, sx_GetSoundBuffer, sx_GetBusCount, sx_GetBusIDs, sx_GetFunctionalID,
+    sx_GetSoundBufferBusIDs };
+
 static HRESULT sink_new(rm_port *p, int latency, REFIID riid, void **out)
 {
     *out = NULL;
@@ -769,6 +948,7 @@ static HRESULT sink_new(rm_port *p, int latency, REFIID riid, void **out)
     s->IReferenceClock_iface.lpVtbl = &sc_vtbl;
     s->IKsControl_iface.lpVtbl = &sk_vtbl;
     s->IDirectSoundSynthSink_iface.lpVtbl = &ss_vtbl;
+    s->IDirectSoundConnect_iface.lpVtbl = &sx_vtbl;
     s->ref = 1; s->port = p; s->latency = latency;
     InterlockedIncrement(&p->ref);
     HRESULT hr = sink_qi(s, riid, out);

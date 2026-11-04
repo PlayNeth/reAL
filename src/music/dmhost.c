@@ -91,14 +91,19 @@ enum { HB_DRY, HB_REVERB, HB_3D, HB_MONO, HB_STEREO, HB_CFG };
 typedef struct {
     rl_buffer *b; int kind, nch, refs; uint32_t bus[2], func[2];
     int nbus;
+    int app;                        /* IDirectSoundConnect::CreateSoundBuffer's: gone once the application lets go */
     rl_fxchain *fx;
     int mixin;
     GUID guid;
     uint32_t seq;
+    uint32_t dsbus[2], dsorder;     /* the buses' ids as dsound's sink numbers them (1, 2, ... as buffers are made: the
+                                     * reverb buffer's first) and the buffer's place in its list (IDirectSoundConnect) */
     int hasacc;                     /* +0x124: a send wrote to acc this block */
     int16_t acc[BLOCK * 2];         /* +0x120 */
 } hbuf;
 
+struct dm_host;
+static void ds_number(struct dm_host *h, hbuf *x);
 struct dm_host {
     dm_perf *pf;
     int dx7port;            /* a DirectX 7 synth port (dmusic's for DMUS_PORTPARAMS without the audiopath feature, and
@@ -111,6 +116,8 @@ struct dm_host {
     rl_buffer *dry, *wet;
     hbuf hb[MAXHB];
     uint32_t nextbus, nextseq;
+    uint32_t nextdsbus, nextdsorder;    /* IDirectSoundConnect's bus ids and buffer order */
+    int fixes;                          /* REDM_NOFIXES unset */
     rl_buffer *primary;
     int buslog, peak[MAXHB];        /* REDM_BUSLOG: each sink buffer's peak, once a second */
     uint32_t bufframes;
@@ -377,9 +384,27 @@ static void write_buffer(rl_buffer *b, uint32_t frame, const int16_t *src, uint3
     IDirectSoundBuffer8_Unlock(&b->IDirectSoundBuffer8_iface, p1, n1, p2, n2);
 }
 
+/* the buffers IDirectSoundConnect::CreateSoundBuffer made that the application has let go of: dsound's sink drops a
+ * buffer of its own when the buffer goes (only the host's reference left: nobody else can take one) */
+static void hb_reap(dm_host *h)
+{
+    for (int k = 2; k < MAXHB; k++) {
+        hbuf *x = &h->hb[k];
+        if (!x->b || !x->app) continue;
+        IDirectSoundBuffer8 *b = &x->b->IDirectSoundBuffer8_iface;
+        IDirectSoundBuffer8_AddRef(b);
+        if (IDirectSoundBuffer8_Release(b) != 1) continue;
+        rl_fxchain *fx = x->fx;
+        memset(x, 0, sizeof(*x));
+        rl_fxchain_free(fx);
+        IDirectSoundBuffer8_Stop(b);
+        IDirectSoundBuffer8_Release(b);
+    }
+}
 static void sink_pass(dm_host *h)
 {
     DWORD play = 0, wr = 0;
+    hb_reap(h);
     if (FAILED(IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr))) return;
     play /= 4;
     uint32_t delta = (play + h->bufframes - h->lastcur) % h->bufframes;
@@ -571,11 +596,15 @@ dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int cha
     h->hb[0] = mono ? (hbuf){ h->dry, HB_DRY, 1, 1, { 0 }, { 0 } } : (hbuf){ h->dry, HB_DRY, 2, 1, { 0, 1 }, { 0, 1 } };
     h->hb[1] = (hbuf){ h->wet, HB_REVERB, 1, 1, { 0x40 }, { 0x40 } };
     h->nextbus = 0x1000;
+    h->nextdsbus = 1; h->nextdsorder = 1;
+    ds_number(h, &h->hb[1]);            /* (dmime makes the reverb buffer first, then the stereo one) */
+    ds_number(h, &h->hb[0]);
     dm_hostops ho = { host_clock, host_msec, host_signal };
     h->pf = dm_perf_new(&ho, h);
     if (!h->pf) { dm_host_free(h); return NULL; }
     /* fixes of Microsoft's flaws: on, except for comparison runs (REDM_NOFIXES in the environment) */
     int fixes = !GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0);
+    h->fixes = fixes;
     if (h->pf && fixes) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER | DM_FIX_WAVE_SEEK |
                                           DM_FIX_WAVE_SYNCVAR | DM_FIX_STATE_TRACKCONFIG);
     if (!fixes) msynth_set_fixes(h->syn, 0);
@@ -728,6 +757,85 @@ int dm_host_download_all(dm_host *h, dm_collection *c)
     return n;
 }
 
+/* ------------------------------------------------------------------ IDirectSoundConnect's view of the sink
+ * dsound's sink numbers buses 1, 2, ... in the order its buffers are made, and lists its buffers newest first
+ * (6efd6488 / 6efd64cf / 6efd6532 / 6efd65a0) */
+static int hb_nbus(const hbuf *x) { return x->kind == HB_CFG ? x->nbus : x->kind == HB_REVERB ? 1 : x->nch; }
+static void ds_number(dm_host *h, hbuf *x)
+{
+    for (int c = 0; c < hb_nbus(x); c++) x->dsbus[c] = h->nextdsbus++;
+    x->dsorder = h->nextdsorder++;
+}
+/* the buffers in dsound's order: newest first */
+static int ds_list(dm_host *h, int *out)
+{
+    int n = 0;
+    for (int k = 0; k < MAXHB; k++) if (h->hb[k].b) out[n++] = k;
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && h->hb[out[j]].dsorder > h->hb[out[j - 1]].dsorder; j--) { int t = out[j]; out[j] = out[j - 1]; out[j - 1] = t; }
+    return n;
+}
+/* GetBusCount and GetBusIDs: every bus, ids and functions, at most max of them; the number there are */
+DWORD dm_host_ds_buses(dm_host *h, uint32_t *ids, uint32_t *funcs, DWORD max)
+{
+    int order[MAXHB];
+    DWORD total = 0, n = 0;
+    host_enter(h);
+    hb_reap(h);
+    int nb = ds_list(h, order);
+    for (int i = 0; i < nb; i++) {
+        const hbuf *x = &h->hb[order[i]];
+        for (int c = 0; c < hb_nbus(x); c++, total++)
+            if (n < max) { if (ids) ids[n] = x->dsbus[c]; if (funcs) funcs[n] = x->func[c]; n++; }
+    }
+    host_leave(h);
+    return total;
+}
+/* GetFunctionalID: the bus's function; 0 when there is no such bus */
+int dm_host_ds_func(dm_host *h, uint32_t bus, uint32_t *func)
+{
+    int r = 0;
+    host_enter(h);
+    hb_reap(h);
+    for (int k = 0; k < MAXHB && !r; k++) {
+        const hbuf *x = &h->hb[k];
+        if (x->b) for (int c = 0; c < hb_nbus(x); c++) if (x->dsbus[c] == bus) { *func = x->func[c]; r = 1; break; }
+    }
+    host_leave(h);
+    return r;
+}
+/* GetSoundBuffer's buffer (a reference) for a bus, NULL for none */
+IDirectSoundBuffer *dm_host_ds_bus_buffer(dm_host *h, uint32_t bus)
+{
+    IDirectSoundBuffer *r = NULL;
+    host_enter(h);
+    hb_reap(h);
+    for (int k = 0; k < MAXHB && !r; k++) {
+        const hbuf *x = &h->hb[k];
+        if (x->b) for (int c = 0; c < hb_nbus(x); c++)
+            if (x->dsbus[c] == bus) { r = (IDirectSoundBuffer *)&x->b->IDirectSoundBuffer8_iface; IDirectSoundBuffer_AddRef(r); break; }
+    }
+    host_leave(h);
+    return r;
+}
+/* GetSoundBufferBusIDs: the buffer's buses (at most max), -1 when it is not one of the sink's */
+int dm_host_ds_buffer_buses(dm_host *h, IDirectSoundBuffer *b, uint32_t *ids, uint32_t *funcs, DWORD max)
+{
+    int r = -1;
+    host_enter(h);
+    hb_reap(h);
+    for (int k = 0; k < MAXHB; k++) {
+        const hbuf *x = &h->hb[k];
+        if (!x->b || (IDirectSoundBuffer *)&x->b->IDirectSoundBuffer8_iface != b) continue;
+        r = 0;
+        for (int c = 0; c < hb_nbus(x) && (DWORD)r < max; c++, r++) { ids[r] = x->dsbus[c]; if (funcs) funcs[r] = x->func[c]; }
+        break;
+    }
+    host_leave(h);
+    return r;
+}
+int dm_host_fixes(dm_host *h) { return h->fixes; }
+
 /* ------------------------------------------------------------------ audiopath buffers
  * A standard audiopath's buffers (dmime 773211f9 / 7732084b): shared stereo + reverb (DMUS_APATH_SHARED_STEREOPLUSREVERB),
  * a 3D mono buffer (DYNAMIC_3D, no virtualization asked), a mono one (DYNAMIC_MONO) or a stereo one (DYNAMIC_STEREO).
@@ -764,6 +872,7 @@ int dm_host_path_open(dm_host *h, uint32_t type, int idx[2], int *nidx, uint32_t
                     buses[c] = x->bus[c];
                 }
                 *nbuses = x->nch;
+                ds_number(h, x);
                 idx[0] = k; *nidx = 1;
                 /* in step with the shared buffers: same frame position, playing */
                 DWORD play = 0, wr = 0;
@@ -824,6 +933,7 @@ HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
     *idx = -1;
     if (d->nch < 1 || d->nch > 2) return E_INVALIDARG;
     host_enter(h);
+    hb_reap(h);
     int k;
     for (k = 2; k < MAXHB && h->hb[k].b; k++) ;
     if (k == MAXHB) { host_leave(h); return E_OUTOFMEMORY; }
@@ -844,6 +954,7 @@ HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
     x->nbus = d->nfunc > 2 ? 2 : (int)d->nfunc;
     x->mixin = x->nbus == 0;
     for (int c = 0; c < x->nbus; c++) { x->bus[c] = h->nextbus++; x->func[c] = d->func[c]; }
+    ds_number(h, x);
     if (d->flags & DSBCAPS_CTRLVOLUME) IDirectSoundBuffer8_SetVolume(&b->IDirectSoundBuffer8_iface, d->vol);
     if (d->flags & DSBCAPS_CTRLPAN) IDirectSoundBuffer8_SetPan(&b->IDirectSoundBuffer8_iface, d->pan);
     if (d->ds3d && (d->flags & DSBCAPS_CTRL3D)) {
@@ -855,10 +966,12 @@ HRESULT dm_host_buffer_new(dm_host *h, const dm_hostbuf *d, int *idx)
             IDirectSound3DBuffer_Release(b3);
         }
     }
-    DWORD play = 0, wr = 0;
-    IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr);
-    IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
-    IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
+    if (!d->noplay) {
+        DWORD play = 0, wr = 0;
+        IDirectSoundBuffer8_GetCurrentPosition(&h->dry->IDirectSoundBuffer8_iface, &play, &wr);
+        IDirectSoundBuffer8_SetCurrentPosition(&b->IDirectSoundBuffer8_iface, play / 4 * 2 * x->nch);
+        IDirectSoundBuffer8_Play(&b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
+    }
     *idx = k;
     host_leave(h);
     return S_OK;
@@ -882,6 +995,13 @@ int dm_host_buffer_inuse(dm_host *h, int idx)
     int r = idx >= 0 && idx < MAXHB && h->hb[idx].b && h->hb[idx].refs > (idx < 2 ? 1 : 0);
     host_leave(h);
     return r;
+}
+/* the buffer is the application's from now on (it holds a reference): its slot goes when that is let go of */
+void dm_host_buffer_give(dm_host *h, int idx)
+{
+    host_enter(h);
+    if (idx >= 2 && idx < MAXHB && h->hb[idx].b) h->hb[idx].app = 1;
+    host_leave(h);
 }
 void dm_host_buffer_addref(dm_host *h, int idx)
 {

@@ -523,6 +523,196 @@ static void get_port(IDirectMusicAudioPath *ap, const char *what)
     IDirectMusicPort_Release(p);
 }
 
+/* ------------------------------------------------------------------ the sink's IDirectSoundConnect {182ea05a} (dsound
+ * 6efc7dec: the synth's sources and the sink's buses and buffers) */
+DEFINE_GUID(IID_IDirectSoundConnect8_, 0x182ea05a, 0x5de3, 0x4405, 0x85, 0x89, 0xf0, 0xaa, 0xdf, 0x3b, 0x6a, 0xc5);
+typedef struct dsconnect dsconnect;
+typedef struct {
+    HRESULT (WINAPI *QueryInterface)(dsconnect *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(dsconnect *);
+    ULONG (WINAPI *Release)(dsconnect *);
+    HRESULT (WINAPI *AddSource)(dsconnect *, IUnknown *);
+    HRESULT (WINAPI *RemoveSource)(dsconnect *, IUnknown *);
+    HRESULT (WINAPI *SetMasterClock)(dsconnect *, IReferenceClock *);
+    HRESULT (WINAPI *CreateSoundBuffer)(dsconnect *, LPCDSBUFFERDESC, LPDWORD, DWORD, REFGUID, LPDIRECTSOUNDBUFFER *);
+    HRESULT (WINAPI *CreateSoundBufferFromConfig)(dsconnect *, IUnknown *, LPDIRECTSOUNDBUFFER *);
+    HRESULT (WINAPI *GetSoundBuffer)(dsconnect *, DWORD, LPDIRECTSOUNDBUFFER *);
+    HRESULT (WINAPI *GetBusCount)(dsconnect *, LPDWORD);
+    HRESULT (WINAPI *GetBusIDs)(dsconnect *, LPDWORD, LPDWORD, DWORD);
+    HRESULT (WINAPI *GetFunctionalID)(dsconnect *, DWORD, LPDWORD);
+    HRESULT (WINAPI *GetSoundBufferBusIDs)(dsconnect *, LPDIRECTSOUNDBUFFER, LPDWORD, LPDWORD, LPDWORD);
+} dsconnectvtbl;
+struct dsconnect { const dsconnectvtbl *lpVtbl; };
+
+/* an IDirectSoundSource of the test's own for AddSource: GetFormat answers fmt_hr with fmt_rate */
+typedef struct { const void *lpVtbl; LONG ref; HRESULT fmt_hr; DWORD fmt_rate; } fakesrc;
+static HRESULT WINAPI fs_qi(fakesrc *f, REFIID r, void **o) { *o = NULL; if (IsEqualIID(r, &IID_IUnknown)) { *o = f; f->ref++; return S_OK; } return E_NOINTERFACE; }
+static ULONG WINAPI fs_addref(fakesrc *f) { return ++f->ref; }
+static ULONG WINAPI fs_release(fakesrc *f) { return --f->ref; }
+static HRESULT WINAPI fs_setsink(fakesrc *f, void *s) { return S_OK; }
+static HRESULT WINAPI fs_format(fakesrc *f, WAVEFORMATEX *w, DWORD n, DWORD *got)
+{
+    if (FAILED(f->fmt_hr)) return f->fmt_hr;
+    WAVEFORMATEX x = { WAVE_FORMAT_PCM, 1, f->fmt_rate, f->fmt_rate * 2, 2, 16, 0 };
+    if (w && n >= sizeof(x)) memcpy(w, &x, sizeof(x));
+    if (got) *got = sizeof(x);
+    return S_OK;
+}
+static HRESULT WINAPI fs_size(fakesrc *f, ULONGLONG *n) { return E_NOTIMPL; }
+static HRESULT WINAPI fs_read(fakesrc *f, void **b, DWORD *ids, DWORD *fn, LONG *pb, DWORD nb, ULONGLONG *n) { return E_FAIL; }
+static const void *fs_vtbl[] = { fs_qi, fs_addref, fs_release, fs_setsink, fs_format, fs_size, fs_read };
+
+static const char *bufname(IDirectSoundBuffer *b, IDirectSoundBuffer **known, int nknown)
+{
+    static char t[32];
+    if (!b) return "NULL";
+    for (int k = 0; k < nknown; k++) if (known[k] == b) { sprintf(t, "path buffer %d", k); return t; }
+    return "another";
+}
+static void buses(dsconnect *c, IDirectSoundBuffer **known, int nknown)
+{
+    DWORD n = 0xdead;
+    HRESULT hr = c->lpVtbl->GetBusCount(c, &n);
+    printf("  GetBusCount %08lx %lu\n", hr, n);
+    DWORD ids[64], fn[64];
+    memset(ids, 0xcd, sizeof(ids)); memset(fn, 0xcd, sizeof(fn));
+    DWORD m = n < 64 ? n : 64;
+    hr = c->lpVtbl->GetBusIDs(c, ids, fn, m);
+    printf("  GetBusIDs(%lu) %08lx:", m, hr);
+    for (DWORD k = 0; k < m + 1 && k < 64; k++) printf(" %lx/%lx", ids[k], fn[k]);
+    printf("\n");
+    for (DWORD k = 0; k < m; k++) {
+        DWORD f = 0xdead;
+        HRESULT a = c->lpVtbl->GetFunctionalID(c, ids[k], &f);
+        IDirectSoundBuffer *b = NULL;
+        HRESULT g = c->lpVtbl->GetSoundBuffer(c, ids[k], &b);
+        printf("    bus %lx: GetFunctionalID %08lx %lx GetSoundBuffer %08lx %s\n", ids[k], a, f, g, bufname(b, known, nknown));
+        if (b) IDirectSoundBuffer_Release(b);
+    }
+}
+static void sink_connect(void)
+{
+    printf("connect:\n");
+    IDirectMusicAudioPath *ap = NULL, *ap3 = NULL;
+    IDirectMusicPerformance8_GetDefaultAudioPath(perf, &ap);
+    IDirectMusicPerformance8_CreateStandardAudioPath(perf, DMUS_APATH_DYNAMIC_3D, 16, TRUE, &ap3);
+    if (!ap) return;
+    IDirectSoundBuffer *known[8] = { 0 };
+    int nknown = 0;
+    for (int k = 0; k < 2; k++) {
+        IDirectSoundBuffer *b = NULL;
+        IDirectMusicAudioPath_GetObjectInPath(ap, DMUS_PCHANNEL_ALL, DMUS_PATH_BUFFER, k, &GUID_All_Objects, 0, &IID_IDirectSoundBuffer, (void **)&b);
+        if (b) known[nknown++] = b;
+    }
+    if (ap3) {
+        IDirectSoundBuffer *b = NULL;
+        IDirectMusicAudioPath_GetObjectInPath(ap3, DMUS_PCHANNEL_ALL, DMUS_PATH_BUFFER, 0, &GUID_All_Objects, 0, &IID_IDirectSoundBuffer, (void **)&b);
+        if (b) known[nknown++] = b;
+    }
+    printf("  path buffers %d\n", nknown);
+    for (int k = 0; k < nknown; k++) {
+        DSBCAPS cp; memset(&cp, 0, sizeof(cp)); cp.dwSize = sizeof(cp);
+        IDirectSoundBuffer_GetCaps(known[k], &cp);
+        DWORD st = 0;
+        IDirectSoundBuffer_GetStatus(known[k], &st);
+        printf("    path buffer %d: caps flags %lx bytes %lu, status %lx\n", k, cp.dwFlags, cp.dwBufferBytes, st);
+    }
+    IUnknown *s = NULL;
+    HRESULT hr = IDirectMusicAudioPath_GetObjectInPath(ap, 0, 0x5000, 0, &GUID_All_Objects, 0, &IID_IUnknown, (void **)&s);
+    dsconnect *c = NULL;
+    if (s) hr = IUnknown_QueryInterface(s, &IID_IDirectSoundConnect8_, (void **)&c);
+    printf("  QueryInterface(IDirectSoundConnect) %08lx\n", hr);
+    if (c) {
+        IUnknown *u = NULL;
+        printf("  its IUnknown is the sink's: %s\n", SUCCEEDED(c->lpVtbl->QueryInterface(c, &IID_IUnknown, (void **)&u)) && u == s ? "yes" : "no");
+        if (u) IUnknown_Release(u);
+        printf("  GetBusCount(NULL) %08lx\n", c->lpVtbl->GetBusCount(c, NULL));
+        printf("  GetBusIDs(NULL, NULL, 0) %08lx\n", c->lpVtbl->GetBusIDs(c, NULL, NULL, 0));
+        DWORD one = 0xdead;
+        printf("  GetBusIDs(NULL, ids, 1) %08lx\n", c->lpVtbl->GetBusIDs(c, NULL, &one, 1));
+        printf("  GetFunctionalID(bus 999) %08lx\n", c->lpVtbl->GetFunctionalID(c, 999, &one));
+        printf("  GetFunctionalID(NULL) %08lx\n", c->lpVtbl->GetFunctionalID(c, 0, NULL));
+        IDirectSoundBuffer *b = (IDirectSoundBuffer *)1;
+        hr = c->lpVtbl->GetSoundBuffer(c, 999, &b);
+        printf("  GetSoundBuffer(bus 999) %08lx %s\n", hr, b == (IDirectSoundBuffer *)1 ? "untouched" : b ? "set" : "NULL");
+        if (SUCCEEDED(hr) && b) IDirectSoundBuffer_Release(b);
+        printf("  GetSoundBuffer(NULL) %08lx\n", c->lpVtbl->GetSoundBuffer(c, 0, NULL));
+        buses(c, known, nknown);
+        for (int k = 0; k < nknown; k++) {
+            DWORD ids[8], fn[8], n = 8;
+            memset(ids, 0xcd, sizeof(ids)); memset(fn, 0xcd, sizeof(fn));
+            hr = c->lpVtbl->GetSoundBufferBusIDs(c, known[k], ids, fn, &n);
+            printf("  GetSoundBufferBusIDs(path buffer %d) %08lx count %lu:", k, hr, n);
+            for (DWORD j = 0; j < n && j < 8; j++) printf(" %lx/%lx", ids[j], fn[j]);
+            printf("\n");
+            n = 0;
+            printf("    count 0 %08lx %lu\n", c->lpVtbl->GetSoundBufferBusIDs(c, known[k], ids, fn, &n), n);
+            n = 1;
+            printf("    count 1, NULL funcs %08lx %lu\n", c->lpVtbl->GetSoundBufferBusIDs(c, known[k], ids, NULL, &n), n);
+        }
+        DWORD ids[4], fn[4], n = 4;
+        printf("  GetSoundBufferBusIDs(NULL) %08lx\n", c->lpVtbl->GetSoundBufferBusIDs(c, NULL, ids, fn, &n));
+        IDirectSound8 *ds = NULL;
+        IDirectSoundBuffer *other = NULL;
+        if (SUCCEEDED(DirectSoundCreate8(NULL, &ds, NULL))) {
+            IDirectSound8_SetCooperativeLevel(ds, GetDesktopWindow(), DSSCL_PRIORITY);
+            WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 1, 22050, 44100, 2, 16, 0 };
+            DSBUFFERDESC d = { sizeof(d), 0, 4410, 0, &wf };
+            IDirectSound8_CreateSoundBuffer(ds, &d, &other, NULL);
+        }
+        if (other) { n = 4; printf("  GetSoundBufferBusIDs(an application's buffer) %08lx\n", c->lpVtbl->GetSoundBufferBusIDs(c, other, ids, fn, &n)); }
+        /* a buffer of its own: mono on one new bus (DSBUSID_LEFT), and stereo on two */
+        static const GUID mine = { 0x8f6d1a10, 0x7002, 0x4000, { 0x80, 0, 0, 0, 0, 0, 0, 1 } };
+        int nmine = nknown;
+        for (int ch = 1; ch <= 2; ch++) {
+            WAVEFORMATEX wf = { WAVE_FORMAT_PCM, (WORD)ch, 22050, 22050 * 2 * ch, (WORD)(2 * ch), 16, 0 };
+            DSBUFFERDESC d = { sizeof(d), DSBCAPS_CTRLVOLUME | DSBCAPS_CTRLPAN | DSBCAPS_CTRLFREQUENCY, 0, 0, &wf };
+            DWORD f[2] = { DSBUSID_LEFT, DSBUSID_RIGHT };
+            IDirectSoundBuffer *nb = NULL;
+            hr = c->lpVtbl->CreateSoundBuffer(c, &d, f, (DWORD)ch, &mine, &nb);
+            printf("  CreateSoundBuffer(%d channels) %08lx %s\n", ch, hr, nb ? "made" : "none");
+            if (nb) {
+                DSBCAPS cp; memset(&cp, 0, sizeof(cp)); cp.dwSize = sizeof(cp);
+                IDirectSoundBuffer_GetCaps(nb, &cp);
+                WAVEFORMATEX g; DWORD gw = 0;
+                IDirectSoundBuffer_GetFormat(nb, &g, sizeof(g), &gw);
+                DWORD st = 0;
+                IDirectSoundBuffer_GetStatus(nb, &st);
+                printf("    caps flags %lx bytes %lu, format %u ch %lu Hz %u bits, status %lx\n", cp.dwFlags, cp.dwBufferBytes, g.nChannels,
+                       g.nSamplesPerSec, g.wBitsPerSample, st);
+                DWORD bi[4], bf[4], bn = 4;
+                hr = c->lpVtbl->GetSoundBufferBusIDs(c, nb, bi, bf, &bn);
+                printf("    GetSoundBufferBusIDs %08lx count %lu:", hr, bn);
+                for (DWORD j = 0; j < bn && j < 4; j++) printf(" %lx/%lx", bi[j], bf[j]);
+                printf("\n");
+                known[nknown++] = nb;
+            }
+        }
+        printf("  CreateSoundBuffer(NULL desc) %08lx\n", c->lpVtbl->CreateSoundBuffer(c, NULL, NULL, 0, &mine, &other));
+        buses(c, known, nknown);
+        /* its own buffers let go of: their buses go with them */
+        for (int k = nmine; k < nknown; k++) IDirectSoundBuffer_Release(known[k]);
+        nknown = nmine;
+        printf("  its own buffers released:\n");
+        buses(c, known, nknown);
+        printf("  RemoveSource(another) %08lx\n", c->lpVtbl->RemoveSource(c, (IUnknown *)ds));
+        printf("  SetMasterClock(NULL) %08lx\n", c->lpVtbl->SetMasterClock(c, NULL));
+        /* (last: the synth is the sink's source until AddSource lets it go) */
+        static fakesrc fa = { fs_vtbl, 1, S_OK, 44100 }, fb = { fs_vtbl, 1, 0x80004005, 22050 };
+        printf("  AddSource(a source at 44.1 kHz) %08lx, its references %+ld\n", c->lpVtbl->AddSource(c, (IUnknown *)&fa), fa.ref - 1);
+        printf("  AddSource(one whose GetFormat fails) %08lx, its references %+ld\n", c->lpVtbl->AddSource(c, (IUnknown *)&fb), fb.ref - 1);
+        printf("  RemoveSource(it) %08lx, its references %+ld\n", c->lpVtbl->RemoveSource(c, (IUnknown *)&fb), fb.ref - 1);
+        printf("  AddSource(NULL) %08lx\n", c->lpVtbl->AddSource(c, NULL));
+        if (other) IDirectSoundBuffer_Release(other);
+        if (ds) IDirectSound8_Release(ds);
+        c->lpVtbl->Release(c);
+    }
+    if (s) IUnknown_Release(s);
+    for (int k = 0; k < nknown; k++) IDirectSoundBuffer_Release(known[k]);
+    if (ap3) IDirectMusicAudioPath_Release(ap3);
+    IDirectMusicAudioPath_Release(ap);
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -543,6 +733,7 @@ int main(int argc, char **argv)
         printf("download: PChannelInfo(0) %08lx\n", hr);
         if (pi) { download(pi); IDirectMusicPort_Release(pi); }
     }
+    if (only && !strcmp(only, "connect")) sink_connect();
     if (!only || !strcmp(only, "inst")) {
         printf("inst:\n");
         instruments();
