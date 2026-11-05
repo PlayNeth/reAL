@@ -261,14 +261,22 @@ static void mix(rl_device *dev, UINT32 frames)
         }
     }
     for (int k = 0; k < RL_SENDS; k++) if (bus[k]) memset(bus[k], 0, frames * sizeof(float));
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
     rl_buffer *b = dev->playing;
     while (b) {
         rl_buffer *next = b->next_playing;
+        const uint32_t from = b->is_primary ? rl_voice_cursor_bytes(&b->voice) : 0;
         if (b->fx) rl_buffer_fx_run(b, frames, dev->out_rate);
         if (rl_voice_mix_n(&b->voice, dev->mixbuf, nch, nbus ? bus : NULL, frames, dev->out_rate, rl_signal_event))
             rl_device_stop_voice(dev, b);
         else if (!b->voice.playing)
             rl_device_stop_voice(dev, b);
+        if (b->is_primary) {
+            b->mix_from = from;
+            b->mix_to = rl_voice_cursor_bytes(&b->voice);
+            b->mix_qpc = now.QuadPart;
+        }
         b = next;
     }
     float master = rl_db100_to_gain(dev->primary_volume);

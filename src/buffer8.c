@@ -191,6 +191,28 @@ void rl_buffer_fx_run(rl_buffer *b, UINT32 out_frames, UINT32 out_rate)
     rl_fpu_leave(cw);
 }
 
+/* (lock held) the primary buffer's play cursor p (where the last mix left it) moved back to the start of what that
+ * mix read, then on through it at the playback rate for the time since */
+static DWORD primary_cursor(const rl_buffer *b, DWORD p)
+{
+    static LONGLONG freq;
+    const DWORD size = b->voice.size, block = b->voice.block;
+    if (!size || !block) return p;
+    if (!freq) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        freq = f.QuadPart;
+    }
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    const LONGLONG ticks = now.QuadPart - b->mix_qpc;
+    const DWORD chunk = (p + size - b->mix_from) % size / block;     /* frames the last mix read */
+    if (ticks <= 0) return b->mix_from;
+    const ULONGLONG frames = (ULONGLONG)ticks * b->voice.rate / (ULONGLONG)freq;
+    if (frames >= chunk) return p;
+    return (b->mix_from + (DWORD)frames * block) % size;
+}
+
 static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD play, LPDWORD write)
 {
     rl_buffer *This = BUF(iface);
@@ -209,6 +231,12 @@ static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD
      * playing or stopped: Play goes on from it, the notifications between it and the position still to come */
     DWORD at = rl_voice_play_bytes(&This->voice), p = rl_voice_cursor_bytes(&This->voice);
     DWORD w = p;
+    /* the primary buffer a game writes itself: the play cursor moves on between mixes with the time since the last
+     * one, through the frames that mix read, as a sound card's did.  A step a mix (10 ms, Windows 7's) is too coarse
+     * for a game that mixes as far as the cursor moved: Need for Speed II's sound and videos skipped ahead.  It never
+     * passes the frames mixed already, and the write cursor stays where it was */
+    if (This->is_primary && g_cfg.fixes && This->voice.playing && This->mix_qpc && p == This->mix_to)
+        p = primary_cursor(This, p);
     if (This->voice.playing) {
         DWORD lead = write_lead_bytes(This);
         /* with effects, the cursor is past what is processed already (DirectSound's write-ahead) */
@@ -432,7 +460,8 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
         dev->primary_fmt.wFormatTag = wfx->cbSize >= 22 && IsEqualGUID(&x->SubFormat, &RL_KSDATAFORMAT_SUBTYPE_IEEE_FLOAT) ?
                                       3 /* WAVE_FORMAT_IEEE_FLOAT */ : WAVE_FORMAT_PCM;
     }
-    for (rl_buffer *b = dev->all; b; b = b->next_all) if (b->is_primary) prim_format(b);
+    for (rl_buffer *b = dev->all; b; b = b->next_all)
+        if (b->is_primary) { prim_format(b); b->mix_qpc = 0; }    /* (its last mix was in the old format) */
     LeaveCriticalSection(&dev->lock);
     LOG_CALL("Primary::SetFormat %lu Hz %u ch %u bits", (unsigned long)wfx->nSamplesPerSec, wfx->nChannels, wfx->wBitsPerSample);
     return DS_OK;

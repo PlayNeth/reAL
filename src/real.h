@@ -178,6 +178,10 @@ struct rl_buffer {
     IDirectSound3DListener IDirectSound3DListener_iface;   /* primary only */
     LONG          ref;          /* every interface's references: the object goes at 0 */
     LONG          iref[5];      /* each interface's own (RL_IREF_*), what its AddRef / Release answer (ALchemy's) */
+    /* the primary buffer's last mix (lock held): the play cursor before and after it, and when it ran
+     * (QueryPerformanceCounter), for a play cursor that moves on between mixes (GetCurrentPosition) */
+    uint32_t      mix_from, mix_to;
+    LONGLONG      mix_qpc;
     int           id;
     rl_device    *dev;
     BOOL          is_primary;

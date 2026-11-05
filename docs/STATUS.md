@@ -105,6 +105,10 @@ default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning,
   on it, Play wants DSBPLAY_LOOPING, Stop keeps the position, SetFormat may change the format while it plays (at
   most stereo). What it holds plays as a plain 2D voice: `primtest audio` recorded from Windows' and from reAL gives
   the same samples.
+- With `fixes` on, its play cursor moves on between mixes with the time since the last one, through the frames that
+  mix read, as a sound card's did (Windows 7's moves a period, 10 ms, at a time). Need for Speed II (`jnfsw.exe`)
+  mixes as far as the cursor moved, and with the steps its sound and videos skipped ahead. The cursor never passes
+  the frames mixed already, and the write cursor is unchanged; `primtest` answers the same either way.
 - The owner's secondary buffers are lost at that level: they stop, Lock / Play / Restore answer DSERR_BUFFERLOST,
   GetStatus DSBSTATUS_BUFFERLOST; after the owner leaves it, Restore finds them again. Buffers made at that level
   start lost.
@@ -164,7 +168,8 @@ by risk. What it found and what changed:
   zero cone orientation and a negative distance are refused (they made the 3D maths NaN, or a gain negative).
   SetAllParameters takes each value as its own method does and leaves a refused one as it was (see below).
 - `fixes` (reAL.ini, default on; `fixes=false` or REAL_NOFIXES turns it off, with reAL's fixes of dsdmo): a zero
-  distance is refused as Windows does, and a non-finite gain or Doppler pitch never reaches the mixer.
+  distance is refused as Windows does, and a non-finite gain or Doppler pitch never reaches the mixer. A primary
+  buffer the game writes itself has a play cursor that moves between mixes (see Primary buffer).
 
 Known differences it still shows, kept on purpose:
 - reAL answers as ALchemy's hardware device: LOCHARDWARE in GetCaps (no location in GetStatus), DirectSound GetCaps (192000 Hz at most), DS_OK for an HRTF

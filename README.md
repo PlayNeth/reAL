@@ -144,7 +144,7 @@ reAL fixes what ALchemy gets wrong:
   - the vocal morpher's reset no longer zeroes a formant;
   - the chorus and flanger work at 192 kHz;
   - a slot's volume is applied after the effect.
-- **`fixes`** (on by default): where ALchemy lets through something harmful, reAL refuses a zero 3D distance, as Windows does, and keeps a runaway Doppler shift or volume out of the mix. It also fixes flaws in Microsoft's DirectSound effects. `fixes=false` behaves exactly as ALchemy and Microsoft's effects do.
+- **`fixes`** (on by default): where ALchemy lets through something harmful, reAL refuses a zero 3D distance, as Windows does, and keeps a runaway Doppler shift or volume out of the mix. It also fixes flaws in Microsoft's DirectSound effects, and gives a game that writes the primary buffer itself a play cursor that moves smoothly instead of in 10 ms steps. `fixes=false` behaves exactly as ALchemy and Microsoft's DirectSound do.
 
 reDM fixes Microsoft's DirectMusic bugs the same way; `REDM_NOFIXES` in the environment turns those off. [`docs/STATUS.md`](docs/STATUS.md) has the details.
 
