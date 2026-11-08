@@ -833,16 +833,20 @@ static uint32_t rnd_samples(float v)                          /* x87 "-0.5 + 1.5
     return (uint32_t)_mm_cvtsd_si32(_mm_set_sd(t));
 }
 
+/* (with fixes: a tap of 0 samples is 1.  The tap is read before the sample is written, so 0 reads the oldest sample
+ * in the line, ALchemy's: a delay of 0 echoes 0.611 s late) */
+static uint32_t echo_tap(uint32_t k) { return eax4dsp_fixes && k == 0 ? 1 : k; }
+
 static void echo_tap2(fx_echo *o)                              /* fn 0x10055db0 */
 {
-    o->n2 = rnd_samples((float)((double)o->rate * ((double)o->lrdelay + o->delay)));
+    o->n2 = echo_tap(rnd_samples((float)((double)o->rate * ((double)o->lrdelay + o->delay))));
     o->xf2 = 1.0f;
 }
 
 void fxo_delay(fx_echo *o, float d)                           /* fn 0x10055c20 */
 {
     o->delay = d;
-    if (o->c1 == o->n1) { o->n1 = rnd_samples((float)((double)o->rate * d)); o->xf1 = 1.0f; }
+    if (o->c1 == o->n1) { o->n1 = echo_tap(rnd_samples((float)((double)o->rate * d))); o->xf1 = 1.0f; }
     if (o->c2 == o->n2) echo_tap2(o);
 }
 

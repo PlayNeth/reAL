@@ -190,7 +190,7 @@ static HRESULT WINAPI fxi_GetQuality(void *i, LONG *q)
     HRESULT hr = dsfx_i3dl2_get_quality(This->fx, &v);
     rl_fpu_leave(cw);
     LeaveCriticalSection(&This->cs);
-    *q = v;
+    if (SUCCEEDED(hr)) *q = v;          /* (a failure leaves the caller's value) */
     return hr;
 }
 static const fxvtbl fxi_i3dl2_vtbl = { fxi_QueryInterface, fxi_AddRef, fxi_Release, fxi_SetAllParameters,

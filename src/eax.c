@@ -1538,6 +1538,9 @@ void eax4_source_gains(const eax4_source *s, const eax4_context *c, const eax4_s
         else { int i = eax4_slot_index(&s->active[k]); if (i >= 0) mask |= 1u << i; }
     }
 
+    /* the cone's room limits: the same for every slot, worked out once (the same calls, so the same floats) */
+    const float cone_room = (b->flags & EAXB_ROOMAUTO) ? eax_cone_auto(g, 0) : 0.0f;
+    const float cone_room_hf = (b->flags & EAXB_ROOMHFAUTO) ? eax_cone_auto(g, b->outside_volume_hf) : cone_room;
     for (int i = 0; i < 4; i++) {
         const eax4_send *ss = &s->send[i];
         const eax4_slot *sl = &slots[i];
@@ -1558,7 +1561,7 @@ void eax4_source_gains(const eax4_source *s, const eax4_context *c, const eax4_s
         }
         float t = (float)(occ_max(ss->occlusion_lf, ss->occlusion_room_ratio) * ss->occlusion + rl);
         float rlev = (float)((double)ss->exclusion_lf * ss->exclusion + t);
-        float aut = (b->flags & EAXB_ROOMAUTO) ? eax_cone_auto(g, 0) : 0.0f;
+        const float aut = cone_room;
         if (!(rlev <= aut)) rlev = aut;
         float rr = rv ? rv->p.room_rolloff : 0.0f;
         rr = (float)((double)b->room_rolloff + rr);
@@ -1577,13 +1580,15 @@ void eax4_source_gains(const eax4_source *s, const eax4_context *c, const eax4_s
         }
         float rh1 = (float)((double)ss->occlusion * ss->occlusion_room_ratio + rh0);
         float rh = (float)((double)rh1 + ss->exclusion);
-        float a2 = (b->flags & EAXB_ROOMHFAUTO) ? eax_cone_auto(g, b->outside_volume_hf) : aut;
+        const float a2 = cone_room_hf;
         if (a2 <= rh) rh = a2;
         rh = (float)((double)rh - rlev);
         if (rv) {
             if (b->flags & EAXB_ROOMAUTO) {
                 float dh = (float)((double)rv->p.decay_hf_ratio * rv->p.decay_time);
-                if (rv->p.flags & EAXL_DECAYHFLIMIT) {
+                /* (with fixes: no air absorption, no limit, as the listener's decay HF (line 87).  ALchemy divides
+                 * by it here: a limit of -inf, and the distance term of the room HF goes) */
+                if ((rv->p.flags & EAXL_DECAYHFLIMIT) && !(eax_fixes && rv->p.air_absorption_hf == 0.0f)) {
                     double lim = -6000.0 / ((double)rv->p.air_absorption_hf * 342.3800048828125);
                     if (!((double)dh < lim)) dh = (float)lim;
                 }
