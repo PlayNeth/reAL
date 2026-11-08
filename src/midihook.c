@@ -809,6 +809,16 @@ void rl_midi_hook(int can_load)
     if (!mm && can_load) mm = LoadLibraryA("winmm.dll");
     if (!mm) return;
     if (InterlockedExchange(&done, 1)) return;     /* hook once: a second patch would wrap our own hooks */
+    {   /* and only one copy of reAL in a process (another dsound.dll of ours loaded too), as the COM hooks */
+        char name[64];
+        snprintf(name, sizeof(name), "Local\\reAL.midi.%lu", (unsigned long)GetCurrentProcessId());
+        HANDLE m = CreateMutexA(NULL, FALSE, name);
+        if (m && GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(m);
+            LOG_INFO("midi: another reAL in this process already hooks winmm");
+            return;
+        }
+    }
     HMODULE pin;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_midi_hook, &pin);
     InitializeCriticalSection(&s_mcs);
