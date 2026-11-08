@@ -30,4 +30,6 @@ More passes, if asked for them:
 - run4.bat runs applyprobe.exe under ALchemy, reAL and Windows' own DirectSound: a tone through a 3D buffer, moved
   away with each dwApply value, the level the speakers get recorded (the default output's loopback). Leave the
   volume up and nothing else playing; it takes about three minutes and writes results4.zip.
+- run5.bat runs levelprobe.exe the same way: how loud a tone comes out on each channel for 2D buffers at several
+  pans and 3D buffers in several places, about two minutes, results5.zip.
 Each pass writes its own folder and zip, so running one doesn't touch another's results.

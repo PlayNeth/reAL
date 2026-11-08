@@ -112,6 +112,8 @@ $CC -O1 -Wno-format -o build/dsfuzz.exe tests/dsfuzz.c -ldsound -lole32 -luuid -
 $CC -O1 -Wno-format -o build/alprobe.exe tests/alprobe.c -ldsound -lole32 -luuid -ldxguid
 # each dwApply value's effect, measured from the output (WASAPI loopback): tools/alchemy-kit run4.bat
 $CC -O1 -Wno-format -o build/applyprobe.exe tests/applyprobe.c -ldsound -lole32 -luuid -ldxguid
+# each channel's level for 2D and 3D buffers in the usual placements (WASAPI loopback): tools/alchemy-kit run5.bat
+$CC -O1 -Wno-format -o build/levelprobe.exe tests/levelprobe.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/dx7test.exe tests/dx7test.c -ldsound -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/theorytest.exe tests/theorytest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/styletest.exe tests/styletest.c -lole32 -luuid -ldxguid
