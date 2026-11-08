@@ -61,6 +61,9 @@ void *dms_msort(void *head, size_t off, int (*cmp)(const void *, const void *))
 #undef NEXT
 
 /* a list appended to (dmstyle's AddTail) */
+/* appending in a loop: a tail kept (APPEND walks the list each time, quadratic in a long track) */
+#define TAIL_INIT(tail, head) do { (tail) = &(head); while (*(tail)) (tail) = &(*(tail))->next; } while (0)
+#define TAIL_ADD(tail, e) do { *(tail) = (e); (tail) = &(e)->next; } while (0)
 #define APPEND(head, e) do { if (!(head)) (head) = (e); else { __typeof__(e) _p = (head); while (_p->next) _p = _p->next; \
                              _p->next = (e); } } while (0)
 
@@ -164,11 +167,13 @@ dms_chordtrack *dms_chordtrack_load(const uint8_t *p, size_t n, int32_t *hr)
     if (T->root > 23) T->root %= 24;
     T->scale = h & 0xffffff;
     int64_t left = (int64_t)n - 8 - size;              /* (the list size counts its type: size - 12 - crdh) */
+    dms_chord **tail;
+    TAIL_INIT(tail, T->chords);
     while (left > 0 && next_chunk(&r, &id, &c, &size)) {
         if (id == FCC('c','r','d','b')) {
             dms_chord *ch = load_crdb(T, c);
             if (!ch) break;
-            APPEND(T->chords, ch);
+            TAIL_ADD(tail, ch);
         }
         left -= 8 + (int64_t)size;
     }
@@ -274,6 +279,8 @@ dms_chordtrack *dms_chordtrack_clone(const dms_chordtrack *T, mtime_t start, mti
     const dms_chord *before = NULL;
     uint16_t m0 = 0;
     int first = 0;
+    dms_chord **tail;
+    TAIL_INIT(tail, C->chords);
     for (const dms_chord *s = T->chords; s; s = s->next) {
         if (s->t < start) { before = s; continue; }
         if (end <= s->t) break;
@@ -283,7 +290,7 @@ dms_chordtrack *dms_chordtrack_clone(const dms_chordtrack *T, mtime_t start, mti
         if (!c) continue;
         c->t = s->t - start;
         c->measure = (uint16_t)(s->measure - m0);
-        APPEND(C->chords, c);
+        TAIL_ADD(tail, c);
     }
     if (before) {
         dms_chord *c = chord_copy(before);
@@ -407,6 +414,8 @@ dms_cmdtrack *dms_cmdtrack_clone(const dms_cmdtrack *T, mtime_t start, mtime_t e
     const dms_command *before = NULL;
     uint16_t m0 = 0;
     int first = 0;
+    dms_command **tail;
+    TAIL_INIT(tail, C->cmds);
     for (const dms_command *s = T->cmds; s; s = s->next) {
         if (s->t < start) { before = s; continue; }
         if (end <= s->t) break;
@@ -418,7 +427,7 @@ dms_cmdtrack *dms_cmdtrack_clone(const dms_cmdtrack *T, mtime_t start, mtime_t e
         c->next = NULL;
         c->t = s->t - start;
         c->measure = (uint16_t)(s->measure - m0);
-        APPEND(C->cmds, c);
+        TAIL_ADD(tail, c);
     }
     if (before) {
         dms_command *c = calloc(1, sizeof(*c));
@@ -527,6 +536,8 @@ dms_mutetrack *dms_mutetrack_clone(const dms_mutetrack *T, mtime_t start, mtime_
         if (!q) break;
         q->pch = p->pch;
         const dms_muteitem *before = NULL;
+        dms_muteitem **tail;
+        TAIL_INIT(tail, q->items);
         for (const dms_muteitem *i = p->items; i; i = i->next) {
             if (i->t < start) { before = i; continue; }
             if (end <= i->t) break;
@@ -534,7 +545,7 @@ dms_mutetrack *dms_mutetrack_clone(const dms_mutetrack *T, mtime_t start, mtime_
             dms_muteitem *c = calloc(1, sizeof(*c));
             if (!c) continue;
             c->t = i->t - start; c->map = i->map; c->mute = i->mute;
-            APPEND(q->items, c);
+            TAIL_ADD(tail, c);
         }
         if (before) {
             dms_muteitem *c = calloc(1, sizeof(*c));

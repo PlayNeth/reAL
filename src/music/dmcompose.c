@@ -769,8 +769,11 @@ static cnode *compose_chords(composer *cp, const uint8_t *ts0, dmc_chordmap *cm,
                     if (q->flags & 4) add_chord(cp, &list, &q->cadence[1], (int16_t)(meas - 1), (q->flags & 2) ? half : 0);
                 }
             }
-            if (getenv("DMC_DEBUG")) {
-                FILE *f = fopen(getenv("DMC_DEBUG"), "a");
+            static const char *dbg;         /* (read once: a getenv per span of every composition) */
+            static int dbg_read;
+            if (!dbg_read) { dbg = getenv("DMC_DEBUG"); dbg_read = 1; }
+            if (dbg) {
+                FILE *f = fopen(dbg, "a");
                 if (f) {
                     fprintf(f, "range %ld..%ld\n", (long)start, (long)at);
                     for (cnode *n = list; n; n = n->next) {

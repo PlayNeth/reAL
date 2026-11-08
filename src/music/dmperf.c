@@ -600,8 +600,14 @@ static int ss_fold(dm_segstate *ss, mtime_t *t, mtime_t *off, uint32_t *loops)
             o = (mtime_t)(uint32_t)((uint32_t)o + (uint32_t)len * n);
             s = (mtime_t)(uint32_t)((uint32_t)s - (uint32_t)len * n);
         }
-    } else
-        while (ss->loopend <= s && n < ss->repeats) { o += len; s -= len; n++; }
+    } else if (ss->loopend <= s && ss->repeats) {
+        /* the loop's count at once: one step a repeat was billions of steps for an endless loop (repeats 0xffffffff)
+         * asked about far ahead.  The same count and the same wrapped sums */
+        uint64_t k = (uint64_t)((int64_t)s - ss->loopend) / (uint64_t)len + 1;
+        n = k < ss->repeats ? (uint32_t)k : ss->repeats;
+        o = (mtime_t)(uint32_t)((uint32_t)o + (uint32_t)len * n);
+        s = (mtime_t)(uint32_t)((uint32_t)s - (uint32_t)len * n);
+    }
     *t = s; *off = o; *loops = n;
     return (s < 0 || ss->length <= s) ? 1 : 0;
 }

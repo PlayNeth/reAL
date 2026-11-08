@@ -812,7 +812,7 @@ static int st_play_parts(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, m
     for (const dms_partref *pr = S->pattern->prefs; pr; pr = pr->next, idx++) {
         S->mflag[idx] = 0;
         mtime_t stop = end;
-        memset(C, 0, sizeof(*C));
+        if (rep && seek) memset(C, 0, sizeof(*C));    /* (3 KB a part: only a seek's pass reads it) */
         const dms_part *part = pr->part;
         if (!part) continue;
         const uint8_t *ts = part->ts[1] ? part->ts : st_ts(S);
@@ -1198,7 +1198,8 @@ static int32_t st_choose(dm_perf *pf, const dms_style *s, int force, mtime_t t, 
     if (!F.c) return DM_E_OUTOFMEMORY;
     for (int i = 0; i < F.n; i++) F.c[i].p = s->patterns[i];
     stycache *cache = NULL, *node = NULL;
-    int ci = 0;
+    int ci = 0, sty_asked = 0, sty_ok = 0;
+    mtime_t sty_next = 0;
     do {
         if (ci > 2 && !(s->flags & 1)) break;
         mtime_t at = t + off;
@@ -1214,12 +1215,17 @@ static int32_t st_choose(dm_perf *pf, const dms_style *s, int force, mtime_t t, 
                 const uint8_t *ts = p0 ? pat_ts(p0, s) : s->ts;
                 int32_t ml = sty_beat(ts) * ts[0];
                 f_measlen(&F, ml);
-                mtime_t sn = 0;
-                dms_style *cs = NULL;
-                if (perf_getparam(pf, PRM_STYLE, group, DM_SEG_ANYTRACK, at, &sn, &cs) >= 0) {
+                /* the style at `at` and when it next changes: the same on every pass of these loops (asked once) */
+                if (!sty_asked) {
+                    dms_style *cs = NULL;
+                    sty_asked = 1;
+                    sty_ok = perf_getparam(pf, PRM_STYLE, group, DM_SEG_ANYTRACK, at, &sty_next, &cs) >= 0;
+                    if (sty_ok) dms_style_release(cs);
+                }
+                if (sty_ok) {
+                    mtime_t sn = sty_next;
                     if (sn && ml && !(nq = sn / ml)) nq = 1;
                     if (maxm < nq) nq = maxm;
-                    dms_style_release(cs);
                 }
                 F.nq = nq;
                 for (node = cache; node && node->measlen != ml; node = node->next) {}

@@ -901,12 +901,23 @@ void dm_perf_invalidate(dm_perf *pf, mtime_t mt, uint32_t flags)
 /* StopEx with an audiopath: every state playing on it */
 int dm_perf_stop_audiopath(dm_perf *pf, dm_audiopath *ap, mtime_t mt, uint32_t flags)
 {
-    dm_segstate *v[256];
-    int n = 0;
+    /* collected first (stopping one changes the lists); every one of them, not the first 256 */
+    dm_segstate *stack[256], **v = stack;
+    int n = 0, cap = 256;
     for (int k = 0; k < 9; k++)
-        for (dm_segstate *s = pf->lists[k]; s && n < 256; s = s->lnext)
-            if (s->audiopath == ap) v[n++] = s;
+        for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) {
+            if (s->audiopath != ap) continue;
+            if (n == cap) {
+                dm_segstate **nv = v == stack ? malloc((size_t)cap * 2 * sizeof(*v)) : realloc(v, (size_t)cap * 2 * sizeof(*v));
+                if (!nv) goto full;             /* (out of memory: the ones collected) */
+                if (v == stack) memcpy(nv, stack, sizeof(stack));
+                v = nv; cap *= 2;
+            }
+            v[n++] = s;
+        }
+full:
     for (int i = 0; i < n; i++) dm_perf_stop(pf, NULL, v[i], mt, flags);
+    if (v != stack) free(v);
     return DM_OK;
 }
 

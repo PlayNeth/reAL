@@ -63,12 +63,28 @@ static void get_guid(dm_guid *g, const uint8_t *p)
 static int guid_eq(const dm_guid *a, const dm_guid *b) { return !memcmp(a, b, sizeof(*a)); }
 
 /* ------------------------------------------------------------------ sequence track (dmime 7731af00) */
-static dm_seqpart *seq_part(dm_seqtrack *t, uint32_t pch, int *last)
+/* (the loaders' arrays grow by doubling, with the capacity kept here: one realloc a record copied the whole array
+ * each time, quadratic in a long track.  0 when out of memory) */
+static int grow(void *pp, int n, int need, int *cap, size_t sz)
+{
+    if (n + need <= *cap) return 1;
+    int c = *cap ? *cap : 8;
+    while (c < n + need) { if (c > 0x3fffffff / 2) return 0; c *= 2; }
+    if ((size_t)c > SIZE_MAX / sz) return 0;
+    void *q = realloc(*(void **)pp, (size_t)c * sz);
+    if (!q) return 0;
+    *(void **)pp = q; *cap = c;
+    return 1;
+}
+
+static dm_seqpart *seq_part(dm_seqtrack *t, uint32_t pch, int *last, int *cap)
 {
     if (*last >= 0 && t->parts[*last].pch == pch) return &t->parts[*last];
     for (int i = 0; i < t->nparts; i++) if (t->parts[i].pch == pch) { *last = i; return &t->parts[i]; }
-    t->parts = realloc(t->parts, (t->nparts + 1) * sizeof(*t->parts));
-    t->pchs = realloc(t->pchs, (t->npchs + 1) * sizeof(*t->pchs));
+    int pc = *cap;
+    if (!grow(&t->parts, t->nparts, 1, cap, sizeof(*t->parts))) return NULL;
+    *cap = pc;                          /* (the PChannel list beside it, the same size) */
+    if (!grow(&t->pchs, t->npchs, 1, cap, sizeof(*t->pchs))) return NULL;
     memset(&t->parts[t->nparts], 0, sizeof(*t->parts));
     t->parts[t->nparts].pch = pch;
     t->pchs[t->npchs++] = pch;
@@ -79,8 +95,9 @@ static dm_seqpart *seq_part(dm_seqtrack *t, uint32_t pch, int *last)
 static dm_seqtrack *load_seq(rd r)
 {
     dm_seqtrack *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
     uint32_t id; rd c;
-    int last = -1;
+    int last = -1, pcap = 0;
     /* parts are kept here in creation order; the original pushes them at the list head, reversed below */
     while (next_chunk(&r, &id, &c, NULL)) {
         if (id != FCC('e','v','t','l') && id != FCC('c','u','r','l')) continue;
@@ -96,14 +113,14 @@ static dm_seqtrack *load_seq(rd r)
             memcpy(buf, c.p, rsz);
             c.p = (size_t)(c.e - c.p) < isz ? c.e : c.p + isz;     /* (a huge size must not wrap a 32-bit pointer) */
             if (!curl) {
-                dm_seqpart *p = seq_part(t, u32(buf + 8), &last);
-                p->ev = realloc(p->ev, (p->nev + 1) * sizeof(*p->ev));
+                dm_seqpart *p = seq_part(t, u32(buf + 8), &last, &pcap);
+                if (!p || !grow(&p->ev, p->nev, 1, &p->evcap, sizeof(*p->ev))) continue;
                 dm_seqitem *e = &p->ev[p->nev++];
                 e->mt = (int32_t)u32(buf); e->dur = (int32_t)u32(buf + 4); e->pch = u32(buf + 8);
                 e->off = (int16_t)u16(buf + 12); e->status = buf[14]; e->b1 = buf[15]; e->b2 = buf[16];
             } else {
-                dm_seqpart *p = seq_part(t, u32(buf + 12), &last);
-                p->cv = realloc(p->cv, (p->ncv + 1) * sizeof(*p->cv));
+                dm_seqpart *p = seq_part(t, u32(buf + 12), &last, &pcap);
+                if (!p || !grow(&p->cv, p->ncv, 1, &p->cvcap, sizeof(*p->cv))) continue;
                 dm_curveitem *e = &p->cv[p->ncv++];
                 e->start = (int32_t)u32(buf); e->dur = (int32_t)u32(buf + 4); e->resetdur = (int32_t)u32(buf + 8);
                 e->pch = u32(buf + 12); e->off = (int16_t)u16(buf + 16); e->sval = (int16_t)u16(buf + 18);
@@ -121,6 +138,8 @@ static dm_seqtrack *load_seq(rd r)
 static dm_tempotrack *load_tempo(rd c)
 {
     dm_tempotrack *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    int cap = 0;
     t->active = 1;
     if (c.e - c.p < 4) return t;
     uint32_t isz = u32(c.p);
@@ -131,7 +150,7 @@ static dm_tempotrack *load_tempo(rd c)
     while (c.e - c.p >= (ptrdiff_t)rsz) {
         memcpy(buf, c.p, rsz);
         c.p = (size_t)(c.e - c.p) < isz ? c.e : c.p + isz;         /* (a huge size must not wrap a 32-bit pointer) */
-        t->items = realloc(t->items, (t->n + 1) * sizeof(*t->items));
+        if (!grow(&t->items, t->n, 1, &cap, sizeof(*t->items))) break;
         t->items[t->n].mt = (int32_t)u32(buf);
         memcpy(&t->items[t->n].tempo, buf + 8, 8);
         t->n++;
@@ -147,6 +166,7 @@ static void load_tims(dm_tstrack *t, rd c)
     c.p += 4;
     if (!isz) return;
     uint32_t rsz = isz < 8 ? isz : 8;
+    int cap = 0;                        /* (what this call allocated: the first growth reallocates) */
     while (c.e - c.p >= (ptrdiff_t)rsz) {
         uint8_t buf[8] = { 0 };
         memcpy(buf, c.p, rsz);
@@ -155,7 +175,7 @@ static void load_tims(dm_tstrack *t, rd c)
         if (!it.bpm) it.bpm = 4;
         if (!it.beat) it.beat = 4;
         if (!it.grids) it.grids = 4;
-        t->items = realloc(t->items, (t->n + 2) * sizeof(*t->items));
+        if (!grow(&t->items, t->n, 2, &cap, sizeof(*t->items))) break;    /* (room for the copy at 0 too) */
         t->items[t->n++] = it;
     }
     if (t->n && t->items[0].mt > 0) {        /* a copy of the first signature at time 0 */
@@ -310,14 +330,17 @@ static dm_bandtrack *load_band(rd r, dm_getcoll_fn getcoll, void *ctx)
 static dm_sysextrack *load_sysex(rd c)
 {
     dm_sysextrack *t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+    int cap = 0;
     while (c.e - c.p >= 12) {
         int32_t mt = (int32_t)u32(c.p);
         uint32_t len = u32(c.p + 8);
         c.p += 12;
         if ((uint32_t)(c.e - c.p) < len) break;
-        t->items = realloc(t->items, (t->n + 1) * sizeof(*t->items));
+        uint8_t *data = malloc(len ? len : 1);
+        if (!data || !grow(&t->items, t->n, 1, &cap, sizeof(*t->items))) { free(data); break; }
         dm_sysexitem *it = &t->items[t->n++];
-        it->mt = mt; it->len = len; it->data = malloc(len ? len : 1);
+        it->mt = mt; it->len = len; it->data = data;
         memcpy(it->data, c.p, len);
         c.p += len;
     }
@@ -1044,8 +1067,8 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
             t.config = u32(c.p); t.priority = u32(c.p + 4);
         } else if (have_hdr && (((id == FCC('R','I','F','F') || id == FCC('L','I','S','T')) && type == fcc && fcc) ||
                                 (id == ckid && ckid))) {
-            if (guid_eq(&t.clsid, &CLSID_SeqTrack) && id == FCC('s','e','q','t')) { t.kind = TRK_SEQ; t.data = load_seq(c); }
-            else if (guid_eq(&t.clsid, &CLSID_TempoTrack) && id == FCC('t','e','t','r')) { t.kind = TRK_TEMPO; t.data = load_tempo(c); }
+            if (guid_eq(&t.clsid, &CLSID_SeqTrack) && id == FCC('s','e','q','t')) { t.data = load_seq(c); t.kind = t.data ? TRK_SEQ : TRK_OTHER; }
+            else if (guid_eq(&t.clsid, &CLSID_TempoTrack) && id == FCC('t','e','t','r')) { t.data = load_tempo(c); t.kind = t.data ? TRK_TEMPO : TRK_OTHER; }
             else if (guid_eq(&t.clsid, &CLSID_TimeSigTrack)) {
                 dm_tstrack *ts = calloc(1, sizeof(*ts));
                 if (!ts) return;
@@ -1054,7 +1077,7 @@ static void load_track(dm_segment *s, rd r, const dm_loadcb *cb)
                 else { rd x; uint32_t xid; while (next_chunk(&c, &xid, &x, NULL)) if (xid == FCC('t','i','m','s')) load_tims(ts, x); }
                 t.kind = TRK_TIMESIG; t.data = ts;
             } else if (guid_eq(&t.clsid, &CLSID_BandTrack)) { t.data = load_band(c, getcoll, ctx); t.kind = t.data ? TRK_BAND : TRK_OTHER; }
-            else if (guid_eq(&t.clsid, &CLSID_SysExTrack) && id == FCC('s','y','e','x')) { t.kind = TRK_SYSEX; t.data = load_sysex(c); }
+            else if (guid_eq(&t.clsid, &CLSID_SysExTrack) && id == FCC('s','y','e','x')) { t.data = load_sysex(c); t.kind = t.data ? TRK_SYSEX : TRK_OTHER; }
             else if (guid_eq(&t.clsid, &CLSID_WaveTrack) && id == FCC('L','I','S','T') && type == FCC('w','a','v','t')) {
                 t.kind = TRK_WAVE; t.data = load_wavetrack(c, getwave, ctx);
                 if (!t.data) t.kind = TRK_OTHER;
@@ -1606,7 +1629,6 @@ void dm_markertrack_free(dm_markertrack *T)
     markers_free(T->starts); markers_free(T->plays);
     free(T);
 }
-static void markers_append(dm_marker **l, dm_marker *m) { while (*l) l = &(*l)->next; *l = m; }
 /* 77321a28 / 77321958: the record size, then a time a record (a short record fills the time's first bytes) */
 static int32_t markers_load(dm_marker **l, rd c)
 {
@@ -1616,6 +1638,7 @@ static int32_t markers_load(dm_marker **l, rd c)
     int32_t left = (int32_t)(c.e - c.p), hr = DM_OK;
     if (!rs) return (int32_t)0x88781133;
     uint32_t take = rs < 5 ? rs : 4, skip = rs < 5 ? 0 : rs - 4;
+    while (*l) l = &(*l)->next;         /* (appended at a kept tail: a walk per record was quadratic) */
     while (left > 0) {
         dm_marker *m = calloc(1, sizeof(*m));
         if (!m) { hr = DM_E_OUTOFMEMORY; break; }
@@ -1624,7 +1647,7 @@ static int32_t markers_load(dm_marker **l, rd c)
         memcpy(b, c.p, take);
         c.p += take;
         m->t = (int32_t)u32(b);
-        markers_append(l, m);           /* (prepended, then the list reversed: file order) */
+        *l = m; l = &m->next;           /* (prepended, then the list reversed: file order) */
         left -= (int32_t)take;
         if (skip) {
             if ((uint32_t)(c.e - c.p) < skip) { hr = (int32_t)0x88781115; break; }
@@ -1652,7 +1675,7 @@ dm_markertrack *dm_markertrack_load(const uint8_t *p, size_t n, int32_t *hr)
 /* 77321e28: the markers in [start, end) moved to 0, in order; the last one before `start` (none at it) put first, at 0 */
 static dm_marker *markers_clone(const dm_marker *m, mtime_t start, mtime_t end)
 {
-    dm_marker *out = NULL;
+    dm_marker *out = NULL, **tail = &out;
     const dm_marker *before = NULL;
     for (; m; m = m->next) {
         const dm_marker *keep = m;
@@ -1660,7 +1683,7 @@ static dm_marker *markers_clone(const dm_marker *m, mtime_t start, mtime_t end)
             if (end <= m->t) break;
             if (m->t == start) before = NULL;
             dm_marker *x = calloc(1, sizeof(*x));
-            if (x) { x->t = m->t - start; markers_append(&out, x); }
+            if (x) { x->t = m->t - start; *tail = x; tail = &x->next; }
             keep = before;
         }
         before = keep;

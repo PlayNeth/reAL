@@ -558,7 +558,7 @@ static int inst_download(dm_perf *pf, dm_inst *in, int mode)
     /* the collection's GetInstrument answers DMUS_E_INVALIDPATCH for a patch it does not have */
     if (!h) return hr == DMUS_E_NOT_FOUND ? (int32_t)0x88781114 : hr < 0 ? hr : DM_E_FAIL;
     dm_dlrec *r = calloc(1, sizeof(*r));
-    if (!r) { po->ops.unload(po->ctx, h); return DM_E_OUTOFMEMORY; }
+    if (!r) { if (po->ops.unload) po->ops.unload(po->ctx, h); return DM_E_OUTOFMEMORY; }
     r->dl = h; r->port = po->id; r->refs = 1; r->next = in->dl; in->dl = r;
     return DM_OK;
 }

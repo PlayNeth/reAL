@@ -192,7 +192,8 @@ void dm_mutes_free(dm_mutenode *n);
 typedef struct { mtime_t mt, dur; uint32_t pch; int16_t off; uint8_t status, b1, b2; } dm_seqitem;
 typedef struct { mtime_t start, dur, resetdur; uint32_t pch; int16_t off, sval, eval, rval;
                  uint8_t type, shape, cc, flags; uint16_t param, merge; } dm_curveitem;
-typedef struct { uint32_t pch; dm_seqitem *ev; int nev; dm_curveitem *cv; int ncv; } dm_seqpart;
+typedef struct { uint32_t pch; dm_seqitem *ev; int nev; dm_curveitem *cv; int ncv;
+                 int evcap, cvcap; } dm_seqpart;     /* (caps: the arrays' sizes while load_seq grows them) */
 typedef struct {
     dm_seqpart *parts; int nparts;     /* in part-list order (reverse of first appearance) */
     uint32_t *pchs; int npchs;         /* first-appearance order (SetPChannelsUsed) */
