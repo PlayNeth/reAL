@@ -21,6 +21,12 @@ float alrv_coef_hp(float g, float f)
     float B = c - 2.0f * c * G - 1.0f;
     float S = sqrtf(B * B - A * A);
     float r = (-B - S) / A;
+    /* (where A goes through 0 this is 0 / 0, or inf as the rounding falls: its limit there is r = 0.  By its bits,
+     * fast math or not; finite values are as before) */
+    uint32_t u;
+    memcpy(&u, &r, 4);
+    __asm__("" : "+r"(u));             /* (kept from fast math's folding) */
+    if ((u & 0x7f800000u) == 0x7f800000u) r = 0.0f;
     return 0.5f * r + 0.5f;
 }
 

@@ -73,6 +73,14 @@ int rl_hrtf_load(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out
         rl_hrtf_filter *f = &set->dirs[i];
         f->delay[0] = rdf(p) * (float)ratio;
         f->delay[1] = rdf(p + 4) * (float)ratio;
+        for (int ch = 0; ch < 2; ch++) {    /* (a file's delay inside the history the convolution reads) */
+            const float dmax = (float)(RL_HRTF_HIST - RL_HRTF_MAX_TAPS - 1);
+            uint32_t u;                     /* (NaN by its bits: fast math folds the comparisons) */
+            memcpy(&u, &f->delay[ch], 4);
+            __asm__("" : "+r"(u));
+            if ((u & 0x7fffffffu) > 0x7f800000u || f->delay[ch] < 0.0f) f->delay[ch] = 0.0f;
+            else if (f->delay[ch] > dmax) f->delay[ch] = dmax;
+        }
         p += 8;
         for (int ch = 0; ch < 2; ch++) {
             for (uint32_t k = 0; k < taps; k++) tmp[k] = rdf(p + 4 * k);

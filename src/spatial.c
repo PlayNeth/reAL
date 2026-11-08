@@ -1,6 +1,7 @@
 #include "spatial.h"
 #include "mixcore.h"
 #include <math.h>
+#include <string.h>
 
 static rl_vec3 v3(float x, float y, float z) { rl_vec3 r = { x, y, z }; return r; }
 static rl_vec3 sub(rl_vec3 a, rl_vec3 b) { return v3(a.x - b.x, a.y - b.y, a.z - b.z); }
@@ -111,6 +112,13 @@ float rl_spatial_doppler(const rl_listener3d *l, const rl_source3d *s, float fac
     float df = l->distance_factor > 0.0f ? l->distance_factor : 1.0f;
     float c = (float)(342.3800048828125 / df);
     float r = (float)((c + factor * vl) / (factor * vs + c));
+    {   /* (inf / inf, from a distance factor too small for c: no shift.  By its bits: x != x folds away under fast
+         * math) */
+        uint32_t u;
+        memcpy(&u, &r, 4);
+        __asm__("" : "+r"(u));
+        if ((u & 0x7fffffffu) > 0x7f800000u) return 1.0f;
+    }
     if (r < 0.0f) return 0.0f;
     return r > 10.0f ? 10.0f : r;
 }

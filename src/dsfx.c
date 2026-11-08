@@ -1112,9 +1112,10 @@ static void record(dsfx *f, int i, float v)
 int dsfx_set_param(dsfx *f, int i, float v)
 {
     if (i < 0 || i >= s_nparams[f->kind]) return DSFX_E_INVALIDARG;
-    if (f->kind == DSFX_I3DL2) return i3dl2_set_param(f->u.i3, i, v);
-    /* the range checks let NaN through; Chorus' and Flanger's Phase would then index past their tables */
+    /* the range checks let NaN through; Chorus' and Flanger's Phase would then index past their tables, and the
+     * I3DL2 reverb (its own range checks in i3dl2.inc pass it too) would run on it for good */
     if (v != v) return DSFX_E_INVALIDARG;
+    if (f->kind == DSFX_I3DL2) return i3dl2_set_param(f->u.i3, i, v);
     int hr = apply(f, i, &v);
     if (hr >= 0) record(f, i, v);
     return hr;
@@ -1217,7 +1218,11 @@ int dsfx_set_all(dsfx *f, const void *params)
     const uint32_t *w = params;
     int hr = DSFX_OK;
     switch (f->kind) {
-    case DSFX_I3DL2: return i3dl2_set_all(f->u.i3, params);
+    case DSFX_I3DL2: {                  /* (a NaN refused, as dsfx_set_param: the struct's floats) */
+        static const int fl[] = { 2, 3, 4, 6, 8, 9, 10, 11 };
+        for (int k = 0; k < 8; k++) { float v; memcpy(&v, &w[fl[k]], 4); if (v != v) return DSFX_E_INVALIDARG; }
+        return i3dl2_set_all(f->u.i3, params);
+    }
     case DSFX_GARGLE:                   /* 10015ae0 */
         if ((hr = dsfx_set_param(f, 0, u2f(w[0]))) < 0) return hr;
         return dsfx_set_param(f, 1, u2f(w[1]));

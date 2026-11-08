@@ -676,6 +676,7 @@ static void resume_filter(const rl_voice *v, const sinc_tab *kt, uint64_t step, 
         float l, r;
         if (kt) read_sinc(v, kt, p, nframes, &l, &r);
         else read_at(v, p, nframes, &l, &r);
+        if (v->mono3d) l = r = 0.5f * (l + r);      /* (as the mix: a positioned stereo voice plays its mean) */
         *z0 += la * (l - *z0);
         *z1 += la * (r - *z1);
         p += step;

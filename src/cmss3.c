@@ -28,6 +28,16 @@ static int rnd_int(double x)
     return (int)nearbyint(x < 0 ? (x + 0.5) - 1.4999999464748726e-08 : (x - 0.5) + 1.4999999464748726e-08);
 }
 
+/* rnd_int as an index into a table of n: a NaN or an out-of-range value (application data that is not finite or
+ * huge) stays inside it rather than reading elsewhere; finite values in range are indexed as before */
+static int tab_idx(double x, int n)
+{
+    if (!(x >= 0.0)) return 0;
+    if (x > n) return n - 1;
+    int i = rnd_int(x);
+    return i < 0 ? 0 : i >= n ? n - 1 : i;
+}
+
 /* half-band polyphase filter: two chains of four first-order allpasses (fns 0x1006d610/dd70/df20) */
 typedef struct { float c[8], s[8], g; } hb;
 
@@ -574,7 +584,7 @@ static void fc_gains(rl_cmss3 *c)
     for (unsigned k = 1; k < NBIN; k++) {
         float d = !(c->pl[k] < c->pr[k]) ? c->coh[k] - 1.0f : 1.0f - c->coh[k];
         float x = (d + 1.0f) * 0.5f * 55.0f;
-        float v = k_cm3_fcbell[rnd_int(x)];
+        float v = k_cm3_fcbell[tab_idx(x, 56)];
         float s = v < c->g_fc[k] ? c->fc_s5 : c->fc_s6;
         c->g_fc[k] = s * c->g_fc[k] + (1.0f - s) * v;
     }
@@ -599,7 +609,7 @@ static void amb_gains(rl_cmss3 *c)
     }
     for (unsigned k = 0; k < NBIN; k++) {
         float fac = !(c->coh[k] < 0.5f) ? 1.0f : 0.001f;
-        float v = (fac + fac) * k_cm3_ambcurve[rnd_int((double)(c->amb[k] * 201.0f))];
+        float v = (fac + fac) * k_cm3_ambcurve[tab_idx((double)(c->amb[k] * 201.0f), 202)];
         c->amb[k] = v;
         float s = v < c->g_amb[k] ? c->am_p5 : c->am_p6;
         c->g_amb[k] = s * c->g_amb[k] + (1.0f - s) * v;
