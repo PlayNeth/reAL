@@ -61,17 +61,15 @@ static ULONG buf_release(rl_buffer *b, int k)
     ULONG ref;
     if (This->is_primary) {
         /* its owner hands it out again while it is alive (under the lock): it forgets it as it goes */
-        rl_device *d = This->dev;
-        EnterCriticalSection(&d->lock);
+        rl_device *d = rl_buffer_lock(This);
         ref = InterlockedDecrement(&This->ref);
         if (!ref && This->owner && This->owner->primary == This) This->owner->primary = NULL;
         LeaveCriticalSection(&d->lock);
     } else ref = InterlockedDecrement(&This->ref);
     if (ref) return (ULONG)own;
 
-    rl_device *dev = This->dev;
     LOG_CALL("Buffer[%d] destroyed", This->id);
-    EnterCriticalSection(&dev->lock);
+    rl_device *dev = rl_buffer_lock(This);
     if (This->in_play_list) rl_device_stop_voice(dev, This);
     list_remove_all(dev, This);
     if (!This->is_primary) {
@@ -104,7 +102,7 @@ static HRESULT WINAPI dsb_GetCaps(IDirectSoundBuffer8 *iface, LPDSBCAPS caps)
      * ALchemy 0x1001dbd0 and Windows keep it) */
     if (!(caps->dwFlags & DSBCAPS_LOCSOFTWARE)) caps->dwFlags |= DSBCAPS_LOCHARDWARE;
     if (This->is_primary) {
-        EnterCriticalSection(&This->dev->lock);
+        rl_buffer_lock(This);
         caps->dwBufferBytes = writeprimary(This) ? PRIMARY_BYTES : 4096;
         LeaveCriticalSection(&This->dev->lock);
     } else caps->dwBufferBytes = This->desc.dwBufferBytes;
@@ -170,7 +168,8 @@ void rl_buffer_fx_run(rl_buffer *b, UINT32 out_frames, UINT32 out_rate)
     uint32_t rate = orig_rate(b);
     double speed = (double)b->voice.rate * (b->voice.pitch > 0.0f ? b->voice.pitch : 1.0f) / (out_rate ? out_rate : 44100);
     /* 150 ms on from where the pre-roll started */
-    uint32_t want = rate * 150 / 1000 - FX_PREROLL, need = (uint32_t)(out_frames * speed) + 64, chunk = rate / 50;
+    uint32_t want = rate * 150 / 1000, need = (uint32_t)(out_frames * speed) + 64, chunk = rate / 50;
+    want = want > FX_PREROLL ? want - FX_PREROLL : 0;      /* (below about 210 Hz the pre-roll is longer than that) */
     if (want < need) want = need;
     if (want > frames - 1) want = frames - 1;
     if (!chunk) chunk = 1;
@@ -216,7 +215,7 @@ static DWORD primary_cursor(const rl_buffer *b, DWORD p)
 static HRESULT WINAPI dsb_GetCurrentPosition(IDirectSoundBuffer8 *iface, LPDWORD play, LPDWORD write)
 {
     rl_buffer *This = BUF(iface);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->lost) {                       /* (Windows: Lock, Play, Stop and the positions answer that) */
         LeaveCriticalSection(&This->dev->lock);
         return DSERR_BUFFERLOST;
@@ -296,7 +295,7 @@ static HRESULT WINAPI dsb_GetStatus(IDirectSoundBuffer8 *iface, LPDWORD status)
     rl_buffer *This = BUF(iface);
     if (!status) return DSERR_INVALIDPARAM;
     DWORD s = 0;
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->is_primary) {
         /* no location (ALchemy 0x1001dda0, and Windows') */
         if (This->dev->primary_playing || This->dev->playing) s = DSBSTATUS_PLAYING | DSBSTATUS_LOOPING;
@@ -336,7 +335,7 @@ static HRESULT WINAPI dsb_Lock(IDirectSoundBuffer8 *iface, DWORD offset, DWORD b
     if (p2) *p2 = NULL;
     if (b2) *b2 = 0;
     if (This->is_primary || This->lost) {
-        EnterCriticalSection(&This->dev->lock);
+        rl_buffer_lock(This);
         BOOL lost = This->lost;
         LeaveCriticalSection(&This->dev->lock);
         if (lost) return DSERR_BUFFERLOST;
@@ -347,7 +346,7 @@ static HRESULT WINAPI dsb_Lock(IDirectSoundBuffer8 *iface, DWORD offset, DWORD b
 
     DWORD size = This->voice.size;
     if (This->is_primary) {                 /* (the size GetCaps answers) */
-        EnterCriticalSection(&This->dev->lock);
+        rl_buffer_lock(This);
         size = writeprimary(This) ? PRIMARY_BYTES : 4096;
         LeaveCriticalSection(&This->dev->lock);
     }
@@ -379,7 +378,7 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
     rl_buffer *This = BUF(iface);
     (void)prio; (void)res1;                     /* (ALchemy takes any reserved value: tests/alprobe.c play) */
     LOG_TRACE("Buffer[%d]::Play flags %lx", This->id, (unsigned long)flags);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->dead) {
         LeaveCriticalSection(&This->dev->lock);
         LOG_CALL("Buffer[%d]::Play on a buffer whose DirectSound object was released", This->id);
@@ -429,7 +428,7 @@ static HRESULT WINAPI dsb_SetCurrentPosition(IDirectSoundBuffer8 *iface, DWORD p
     if (This->is_primary) return DSERR_INVALIDCALL;
     if (pos >= This->voice.size) return DSERR_INVALIDPARAM;
     LOG_TRACE("Buffer[%d]::SetCurrentPosition %lu", This->id, (unsigned long)pos);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->lost) {
         LeaveCriticalSection(&This->dev->lock);
         return DSERR_BUFFERLOST;
@@ -445,8 +444,7 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
     rl_buffer *This = BUF(iface);
     if (!This->is_primary) return DSERR_INVALIDCALL;
     if (!wfx) return DSERR_INVALIDPARAM;
-    rl_device *dev = This->dev;
-    EnterCriticalSection(&dev->lock);
+    rl_device *dev = rl_buffer_lock(This);
     if (writeprimary(This) && wfx->nChannels > 2) {     /* (Windows: at most stereo for the application's own mix) */
         LeaveCriticalSection(&dev->lock);
         return DSERR_INVALIDPARAM;
@@ -476,7 +474,7 @@ static HRESULT WINAPI dsb_SetVolume(IDirectSoundBuffer8 *iface, LONG vol)
     if (vol < DSBVOLUME_MIN) vol = DSBVOLUME_MIN;
     if (vol > DSBVOLUME_MAX) vol = DSBVOLUME_MAX;
     LOG_TRACE("Buffer[%d]::SetVolume %ld", This->id, (long)vol);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->is_primary) This->dev->primary_volume = vol;
     else { This->volume = vol; rl_buffer_update_gains(This); }
     LeaveCriticalSection(&This->dev->lock);
@@ -488,7 +486,7 @@ static HRESULT WINAPI dsb_SetPan(IDirectSoundBuffer8 *iface, LONG pan)
     rl_buffer *This = BUF(iface);
     if (pan < DSBPAN_LEFT || pan > DSBPAN_RIGHT) return DSERR_INVALIDPARAM;
     LOG_TRACE("Buffer[%d]::SetPan %ld", This->id, (long)pan);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     This->pan = pan;
     if (!This->is_primary) rl_buffer_update_gains(This);
     LeaveCriticalSection(&This->dev->lock);
@@ -501,7 +499,7 @@ static HRESULT WINAPI dsb_SetFrequency(IDirectSoundBuffer8 *iface, DWORD freq)
     /* ALchemy: any frequency (0 the original), on the primary buffer too (nothing changes there) */
     if (This->is_primary) return DS_OK;
     LOG_TRACE("Buffer[%d]::SetFrequency %lu", This->id, (unsigned long)freq);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     This->freq = freq;
     if (This->sink) rl_buffer_update_gains(This);
     else This->voice.rate = freq ? freq : orig_rate(This);
@@ -526,7 +524,7 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
 {
     rl_buffer *This = BUF(iface);
     LOG_TRACE("Buffer[%d]::Stop", This->id);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->lost) {                       /* (stopped when it was lost) */
         LeaveCriticalSection(&This->dev->lock);
         return DSERR_BUFFERLOST;
@@ -558,7 +556,7 @@ static HRESULT WINAPI dsb_Restore(IDirectSoundBuffer8 *iface)
 {
     rl_buffer *This = BUF(iface);
     HRESULT hr = DS_OK;
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->lost) {
         if (device_writeprimary(This->dev)) hr = DSERR_BUFFERLOST;
         else This->lost = FALSE;
@@ -578,7 +576,7 @@ static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFF
         if (fx[i].dwSize != sizeof(DSEFFECTDESC) || fx[i].dwReserved1 || fx[i].dwReserved2 ||
             (fx[i].dwFlags & ~(DSFX_LOCHARDWARE | DSFX_LOCSOFTWARE))) return DSERR_INVALIDPARAM;
     if (This->is_primary || !(This->desc.dwFlags & DSBCAPS_CTRLFX)) return DSERR_CONTROLUNAVAIL;
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->voice.playing || This->locks > 0) {
         LeaveCriticalSection(&This->dev->lock);
         LOG_CALL("Buffer[%d]::SetFX(%lu): playing or locked", This->id, (unsigned long)count);
@@ -602,7 +600,7 @@ static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFF
     if (!This->fxdata) This->fxdata = HeapAlloc(GetProcessHeap(), 0, This->voice.size);
     if (!This->fxdata) { rl_fxchain_free(c); return DSERR_OUTOFMEMORY; }
     memset(This->fxdata, This->voice.sfmt == RL_U8 ? 0x80 : 0, This->voice.size);
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     This->fx = c;
     This->voice.data = This->fxdata;
     This->fx_head = This->fx_last = (uint32_t)(This->voice.pos >> 32);
@@ -615,7 +613,7 @@ static HRESULT WINAPI dsb_AcquireResources(IDirectSoundBuffer8 *iface, DWORD fla
 {
     rl_buffer *This = BUF(iface);
     (void)flags;
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     HRESULT hr = DS_OK;
     if (!(This->desc.dwFlags & DSBCAPS_LOCDEFER)) {
         /* not a deferred buffer: nothing to place (ALchemy DS_OK, tests/alprobe.c misc; Windows refuses); the
@@ -635,7 +633,7 @@ static HRESULT WINAPI dsb_GetObjectInPath(IDirectSoundBuffer8 *iface, REFGUID ob
     rl_buffer *This = BUF(iface);
     if (!(This->desc.dwFlags & DSBCAPS_CTRLFX) || !This->fx_ok) return DSERR_CONTROLUNAVAIL;
     if (!obj || !iid || !out) return DSERR_INVALIDPARAM;
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     HRESULT hr = rl_fxchain_get_object(This->fx, obj, idx, iid, out);
     LeaveCriticalSection(&This->dev->lock);
     return hr;
@@ -677,7 +675,7 @@ static HRESULT WINAPI ntf_SetNotificationPositions(IDirectSoundNotify *iface, DW
             n[i].event = pos[i].hEventNotify;
         }
     }
-    EnterCriticalSection(&This->dev->lock);
+    rl_buffer_lock(This);
     if (This->voice.playing) {
         LeaveCriticalSection(&This->dev->lock);
         HeapFree(GetProcessHeap(), 0, n);

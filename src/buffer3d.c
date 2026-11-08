@@ -10,10 +10,10 @@ static ULONG WINAPI b3d_Release(IDirectSound3DBuffer *iface)
 
 static rl_vec3 to_v(D3DVALUE x, D3DVALUE y, D3DVALUE z) { rl_vec3 v = { x, y, z }; return v; }
 
-/* apply = DS3D_IMMEDIATE (0) or DS3D_DEFERRED (1) */
+/* apply: DS3D_IMMEDIATE (0), or anything else deferred (ALchemy's: alprobe's 2, 3 and ffffffff defer) */
 static void b3d_changed(rl_buffer *This, DWORD apply)
 {
-    if (apply == DS3D_DEFERRED) {
+    if (apply != DS3D_IMMEDIATE) {
         This->src3d_dirty = TRUE;
     } else {
         This->src3d = This->src3d_pending;
@@ -22,7 +22,7 @@ static void b3d_changed(rl_buffer *This, DWORD apply)
     }
 }
 
-#define B3D_SET_BEGIN(iface) rl_buffer *This = BUF3D(iface); EnterCriticalSection(&This->dev->lock)
+#define B3D_SET_BEGIN(iface) rl_buffer *This = BUF3D(iface); rl_buffer_lock(This)
 #define B3D_SET_END(apply)   b3d_changed(This, apply); LeaveCriticalSection(&This->dev->lock); return DS_OK
 
 static HRESULT WINAPI b3d_GetAllParameters(IDirectSound3DBuffer *iface, LPDS3DBUFFER p)
@@ -270,7 +270,7 @@ static HRESULT WINAPI lst_GetVelocity(IDirectSound3DListener *iface, D3DVECTOR *
     return DS_OK;
 }
 
-#define LST_SET_BEGIN(iface) rl_device *dev = LST_DEV(iface); EnterCriticalSection(&dev->lock); rl_listener3d *l = &dev->listener_pending
+#define LST_SET_BEGIN(iface) rl_device *dev = rl_buffer_lock(LISTENER(iface)); rl_listener3d *l = &dev->listener_pending
 #define LST_SET_END(apply)   lst_changed(dev, apply); LeaveCriticalSection(&dev->lock); return DS_OK
 
 static HRESULT WINAPI lst_SetAllParameters(IDirectSound3DListener *iface, LPCDS3DLISTENER p, DWORD apply)
@@ -354,9 +354,8 @@ static HRESULT WINAPI lst_SetVelocity(IDirectSound3DListener *iface, D3DVALUE x,
 
 static HRESULT WINAPI lst_CommitDeferredSettings(IDirectSound3DListener *iface)
 {
-    rl_device *dev = LST_DEV(iface);
     LOG_3D("Listener::CommitDeferredSettings");
-    EnterCriticalSection(&dev->lock);
+    rl_device *dev = rl_buffer_lock(LISTENER(iface));
     dev->listener_dirty = TRUE;
     rl_device_commit_3d(dev);
     LeaveCriticalSection(&dev->lock);

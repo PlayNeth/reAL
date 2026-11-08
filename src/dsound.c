@@ -27,9 +27,13 @@ static HRESULT WINAPI ds_QueryInterface(IDirectSound8 *iface, REFIID riid, void 
         if (!This->real_ds && rl_real_dsound()) {
             HRESULT (WINAPI *create8)(LPCGUID, LPDIRECTSOUND8 *, LPUNKNOWN) =
                 (void *)GetProcAddress(rl_real_dsound(), "DirectSoundCreate8");
-            if (create8 && SUCCEEDED(create8(NULL, &This->real_ds, NULL)))
-                IDirectSound8_SetCooperativeLevel(This->real_ds, GetForegroundWindow(),
+            IDirectSound8 *ds = NULL;
+            if (create8 && SUCCEEDED(create8(NULL, &ds, NULL))) {
+                IDirectSound8_SetCooperativeLevel(ds, GetForegroundWindow(),
                                                   This->coop_level ? This->coop_level : DSSCL_PRIORITY);
+                /* (two threads asking at once: one system DirectSound kept, the other let go) */
+                if (InterlockedCompareExchangePointer((void **)&This->real_ds, ds, NULL)) IDirectSound8_Release(ds);
+            }
         }
         if (This->real_ds) hr = IDirectSound8_QueryInterface(This->real_ds, riid, out);
         else *out = NULL;
@@ -141,7 +145,9 @@ static HRESULT WINAPI ds_DuplicateSoundBuffer(IDirectSound8 *iface, LPDIRECTSOUN
     if (!This->dev) return DSERR_UNINITIALIZED;
     if (!src || !out) return DSERR_INVALIDPARAM;
     *out = NULL;
-    rl_buffer *s = impl_from(src, rl_buffer, IDirectSoundBuffer8_iface);
+    /* (a buffer released already is a zombie, its memory mostly given back: nothing to copy) */
+    rl_buffer *s = rl_buffer_from_iface(src);
+    if (!s) return DSERR_INVALIDPARAM;
     if (s->is_primary) return DSERR_INVALIDCALL;
     rl_buffer *b;
     HRESULT hr = rl_buffer_duplicate(This->dev, This, s, &b);

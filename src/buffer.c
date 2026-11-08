@@ -434,6 +434,13 @@ _Static_assert(sizeof(z_b3d) == sizeof(IDirectSound3DBufferVtbl), "b3d");
 _Static_assert(sizeof(z_ntf) == sizeof(IDirectSoundNotifyVtbl), "ntf");
 _Static_assert(sizeof(z_ks) == sizeof(IKsPropertySetVtbl), "ks");
 _Static_assert(sizeof(z_lst) == sizeof(IDirectSound3DListenerVtbl), "lst");
+/* one of reAL's live buffers (not one released, nor another implementation's), or NULL */
+rl_buffer *rl_buffer_from_iface(IDirectSoundBuffer *i)
+{
+    if (!i || i->lpVtbl != (void *)&dsb_vtbl) return NULL;
+    return impl_from(i, rl_buffer, IDirectSoundBuffer8_iface);
+}
+
 static void zombify(rl_buffer *b)
 {
     b->IDirectSoundBuffer8_iface.lpVtbl = (void *)z_dsb;
@@ -489,7 +496,7 @@ static void flags_str(DWORD f, char *out, size_t n)
 
 void rl_buffer_set_sink(rl_buffer *b, DWORD caps)
 {
-    EnterCriticalSection(&b->dev->lock);
+    rl_buffer_lock(b);
     b->sink = TRUE; b->sink_cents = 0; b->sink_caps = caps;
     rl_buffer_update_gains(b);
     LeaveCriticalSection(&b->dev->lock);
@@ -497,7 +504,7 @@ void rl_buffer_set_sink(rl_buffer *b, DWORD caps)
 int32_t rl_buffer_sink_cents(rl_buffer *b) { return b->sink ? b->sink_cents : 0; }
 DWORD rl_buffer_position_bytes(rl_buffer *b)
 {
-    EnterCriticalSection(&b->dev->lock);
+    rl_buffer_lock(b);
     DWORD p = rl_voice_play_bytes(&b->voice);
     LeaveCriticalSection(&b->dev->lock);
     return p;
@@ -731,7 +738,6 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
 {
     int n = 0, playing = 0, moved = 0;
     rl_device *grave = rl_device_grave();
-    rl_buffer *gone = NULL;             /* (linked through next_playing, unused once out of the play list) */
     EnterCriticalSection(&dev->lock);
     if (owner->coop_level == DSSCL_WRITEPRIMARY) dev->wp_owners--;  /* (the others' buffers may be restored now) */
     for (rl_buffer *b = dev->all, *next; b; b = next) {
@@ -749,19 +755,13 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
         }
         if (b->in_play_list) rl_device_stop_voice(dev, b);
         if (!grave) continue;
+        /* moved with this device's lock held (and the graveyard's, after it): a method that took this lock, or
+         * the final Release, sees the buffer either here or there (rl_buffer_lock), never between */
         list_remove_all(dev, b);
         if (!b->is_primary) {
             dev->n_buffers--;
             if (!(b->desc.dwFlags & DSBCAPS_LOCSOFTWARE)) dev->n_hw_buffers--;
         }
-        b->next_playing = gone;
-        gone = b;
-    }
-    LeaveCriticalSection(&dev->lock);
-    while (gone) {
-        rl_buffer *b = gone;
-        gone = b->next_playing;
-        b->next_playing = NULL;
         EnterCriticalSection(&grave->lock);
         list_add_all(grave, b);
         if (!b->is_primary) {
@@ -771,9 +771,10 @@ void rl_buffers_orphan(rl_device *dev, rl_dsound *owner)
         rl_device_addref(grave);
         b->dev = grave;
         LeaveCriticalSection(&grave->lock);
-        rl_device_release(dev);         /* (the owner still holds the device: not the last reference) */
         moved++;
     }
+    LeaveCriticalSection(&dev->lock);
+    for (int k = 0; k < moved; k++) rl_device_release(dev);   /* (the owner still holds the device: not the last) */
     if (n) LOG_CALL("DirectSound released with %d buffer(s) still referenced by the game (%d playing): stopped", n, playing);
     if (moved) LOG_CALL("  %d buffer(s) moved off the device", moved);
 }

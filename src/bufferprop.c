@@ -156,7 +156,7 @@ static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         if (w4 == 45 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         uint32_t got = 0;
         int r;
-        EnterCriticalSection(&dev->lock);
+        dev = rl_buffer_lock(This);
         rl_device_eax_use(dev, 4);
         if (w4 == 40) r = eax4c_get(&dev->eax4c, id, data, data_len, &got);
         else if (w4 == 45) r = eax4s_get(&This->eax4, &dev->eax4c, id, data, data_len, &got);
@@ -173,7 +173,7 @@ static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         uint32_t got = 0;
         int r;
-        EnterCriticalSection(&dev->lock);
+        dev = rl_buffer_lock(This);
         rl_device_eax_use(dev, which % 10);
         switch (which) {
         case 2:  r = eax2l_get(&dev->eax2l, id, data, data_len, &got); break;
@@ -188,7 +188,7 @@ static HRESULT ks_get(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         return hr;
     }
 
-    EnterCriticalSection(&dev->lock);
+    dev = rl_buffer_lock(This);
     if (IsEqualGUID(set, &RL_EAX1_LISTENER)) {
         rl_device_eax_use(dev, 1);
         switch (id) {
@@ -232,7 +232,7 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
     if (w4) {
         if (w4 == 45 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         int r;
-        EnterCriticalSection(&dev->lock);
+        dev = rl_buffer_lock(This);
         rl_device_eax_use(dev, 4);
         if (w4 == 40) r = eax4c_set(&dev->eax4c, id, data, data_len);
         else if (w4 == 45) r = eax4s_set(&This->eax4, &dev->eax4c, id, data, data_len);
@@ -254,7 +254,7 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         if (which >= 12 && !(This->desc.dwFlags & DSBCAPS_CTRL3D)) return DSERR_INVALIDPARAM;
         int r;
         BOOL now = !(id & EAX_DEFERRED);
-        EnterCriticalSection(&dev->lock);
+        dev = rl_buffer_lock(This);
         rl_device_eax_use(dev, which % 10);
         switch (which) {
         case 2:  r = eax2l_set(&dev->eax2l, id, data, data_len); break;
@@ -273,7 +273,7 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         return hr;
     }
 
-    EnterCriticalSection(&dev->lock);
+    dev = rl_buffer_lock(This);
     if (IsEqualGUID(set, &RL_EAX1_LISTENER) && id < EAX1_L_COUNT) {
         rl_device_eax_use(dev, 1);
         if (!data || data_len < (id == EAX1_L_ALL ? sizeof(rl_eax1_reverb) : 4)) hr = DSERR_INVALIDPARAM;

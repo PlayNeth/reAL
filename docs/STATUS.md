@@ -109,10 +109,11 @@ default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning,
   mix read, as a sound card's did (Windows 7's moves a period, 10 ms, at a time). Need for Speed II (`jnfsw.exe`)
   mixes as far as the cursor moved, and with the steps its sound and videos skipped ahead. The cursor never passes
   the frames mixed already, and the write cursor is unchanged; `primtest` answers the same either way.
-- The owner's secondary buffers are lost at that level: they stop, Lock / Play / Restore answer DSERR_BUFFERLOST,
+- The device's secondary buffers are lost at that level (any DirectSound object's, see below): they stop, Lock /
+  Play / Restore answer DSERR_BUFFERLOST,
   GetStatus DSBSTATUS_BUFFERLOST; after the owner leaves it, Restore finds them again. Buffers made at that level
   start lost.
-- Below that level the primary buffer is as before (ALchemy's): Lock and Unlock answer DSERR_PRIOLEVELNEEDED,
+- Below that level the primary buffer is as before (ALchemy's): it can be locked (what is written plays nowhere),
   GetCurrentPosition 0, GetCaps 4096 bytes, SetFormat at any level.
 - The primary object as Windows keeps it: the DirectSound object holds no reference, CreateSoundBuffer hands out the
   same one while the game holds it and makes a new one, with the flags asked for, once the game has let go (it used
