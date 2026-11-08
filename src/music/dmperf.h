@@ -193,6 +193,8 @@ void dm_perf_set_app_precision(dm_perf *pf, int extended);
                                  * them once per start or loop (the original chooses again on every play pass) */
 #define DM_FIX_STATE_TRACKCONFIG 16  /* SegmentState::SetTrackConfig with DMUS_SEG_ALLTRACKS changes every matching track
                                  * (the original looks up the track with the unchanged index: none for ALLTRACKS) */
+#define DM_FIX_GUARDS 32        /* malformed input and bad arguments the original lets through to a hang or to bad
+                                 * arithmetic are refused or bounded (a NaN master tempo, ...) */
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
 /* the transport thread's srand(time(NULL)) (wave track variations and random volume/pitch) */
 void dm_perf_set_seed(dm_perf *pf, uint32_t seed);

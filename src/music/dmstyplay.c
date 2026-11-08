@@ -562,7 +562,8 @@ static int8_t inv_up(uint8_t note, uint8_t lower, uint32_t mask, uint8_t base)
         c = c < 0x17 ? (int8_t)(c + 1) : 0;
     } while (--n >= 0);
     if (n < 0) return 0;
-    if (lower > note) do res = (int8_t)(res + 12); while ((int)lower > res + (int)note);
+    int k = 0;                      /* (an int8 stepping by 12 repeats after 64 steps: a range it never reaches ends there) */
+    if (lower > note) do res = (int8_t)(res + 12); while ((int)lower > res + (int)note && ++k < 64);
     return res;
 }
 /* 7740744f: down from a note above the range */
@@ -575,7 +576,8 @@ static int8_t inv_down(uint8_t note, uint8_t upper, uint32_t mask, uint8_t base)
         c = c > 0 ? (int8_t)(c - 1) : 0x17;
     } while (--n >= 0);
     if (n < 0) return 0;
-    if ((int8_t)note > (int8_t)upper) do res = (int8_t)(res - 12); while (res + (int8_t)note > (int8_t)upper);
+    int k = 0;
+    if ((int8_t)note > (int8_t)upper) do res = (int8_t)(res - 12); while (res + (int8_t)note > (int8_t)upper && ++k < 64);
     return res;
 }
 /* 774074d6: the transposition that brings a note into the part's range */
@@ -584,8 +586,9 @@ static int8_t inv_range(uint8_t note, uint8_t lower, uint8_t upper, uint32_t mas
     if (note == 0 || note > 0x7f) return 0;
     if (mask >> 24) {               /* octaves only */
         int8_t r = 0;
-        if (note < lower) do r = (int8_t)(r + 12); while (r + (int)note < (int)lower);
-        while (r + (int)note > (int)upper) r = (int8_t)(r - 12);
+        int k = 0;
+        if (note < lower) do r = (int8_t)(r + 12); while (r + (int)note < (int)lower && ++k < 64);
+        for (k = 0; r + (int)note > (int)upper && k < 64; k++) r = (int8_t)(r - 12);
         return r;
     }
     if (lower > note) return inv_up(note, lower, mask, base);
@@ -1236,7 +1239,7 @@ static int32_t st_choose(dm_perf *pf, const dms_style *s, int force, mtime_t t, 
                         dms_rhythmparam rp;
                         memset(&rp, 0, sizeof(rp));
                         rp.bpm = ts[0]; rp.beat = ts[1]; rp.grids = (uint16_t)(ts[2] | ts[3] << 8);
-                        for (int16_t i = 0; i < nq; i++) {
+                        for (int32_t i = 0; i < nq; i++) {     /* (the original's 16-bit count wraps past 32767 measures: a write before the array) */
                             mtime_t tm = i * ml + t;
                             dms_cmdparam2 cp = cur;
                             uint8_t scratch;
@@ -1363,7 +1366,14 @@ static int32_t st_play(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, mti
         if (!restored) {
             hr = st_select(pf, S, tflags, t3, off, floop);
             if (S->pattern && start >= 1 && (fseek || fdirty)) {
-                while (hr >= 0 && S->pend <= start) hr = st_select(pf, S, tflags, S->pend, off, floop);
+                int still = 0;
+                while (hr >= 0 && S->pend <= start) {
+                    mtime_t was = S->pend;
+                    hr = st_select(pf, S, tflags, S->pend, off, floop);
+                    /* (patterns of no length chosen over and over: no end.  Another choice may still move on) */
+                    if (S->pend > was) still = 0;
+                    else if ((pf->fixes & DM_FIX_GUARDS) && ++still >= 256) break;
+                }
                 dochord = fdirty || floop;
             } else if (!S->pattern || start < 1) dochord = fdirty || floop;
             else dochord = floop;

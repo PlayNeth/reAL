@@ -604,7 +604,7 @@ dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int cha
     int fixes = !GetEnvironmentVariableA("REDM_NOFIXES", NULL, 0);
     h->fixes = fixes;
     if (h->pf && fixes) dm_perf_set_fixes(h->pf, DM_FIX_FIRST_TEMPO | DM_FIX_MEASURE_NUMBER | DM_FIX_WAVE_SEEK |
-                                          DM_FIX_WAVE_SYNCVAR | DM_FIX_STATE_TRACKCONFIG);
+                                          DM_FIX_WAVE_SYNCVAR | DM_FIX_STATE_TRACKCONFIG | DM_FIX_GUARDS);
     if (!fixes) msynth_set_fixes(h->syn, 0);
     dm_wave_set_fix_length(fixes);
     dm_set_clone_fix(fixes);
@@ -867,8 +867,9 @@ static int send_find(void *ctx, REFGUID g)
 static void send_mix(void *ctx, int t, const BYTE *data, DWORD bytes, uint16_t gain, int srcch)
 {
     dm_host *h = ctx;
+    if (t < 0 || t >= MAXHB) return;
     hbuf *x = &h->hb[t];
-    if (t < 0 || t >= MAXHB || !x->b) return;
+    if (!x->b) return;
     DWORD n = bytes / 2;
     BOOL dup = srcch != x->nch;
     if (dup && srcch == 2) n /= 2;              /* (stereo into mono: as many samples as fit) */

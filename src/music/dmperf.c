@@ -2273,6 +2273,7 @@ void dm_perf_set_groove(dm_perf *pf, int8_t g) { pf->groove = g; pf->hasgroove =
 void dm_perf_set_master_tempo(dm_perf *pf, float f)
 {
     if (f < 0.01f || f > 100.0f || pf->master == f) return;
+    if ((pf->fixes & DM_FIX_GUARDS) && f != f) return;                  /* (a NaN passes the range test) */
     pf->master = f;
     if (primary_at(pf, pf->prepared)) tempo_rebuild(pf, NULL, pf->prepared, 1);
 }

@@ -661,7 +661,8 @@ static dm_lyricstrack *lyricstrack_clone(const dm_lyricstrack *T, mtime_t start,
         *x = *e; x->next = NULL;
         x->logical -= start; x->physical -= start;
         x->text = malloc((e->len + 1) * 2);
-        if (x->text) memcpy(x->text, e->text, (e->len + 1) * 2); else x->len = 0;
+        if (!x->text) { free(x); break; }   /* (playing copies the text: none would be a NULL read) */
+        memcpy(x->text, e->text, (e->len + 1) * 2);
         *tail = x; tail = &x->next;
     }
     return C;

@@ -142,6 +142,7 @@ typedef struct creq {
     int16_t f_short, f_long, f_many, f_few;    /* +0x2e +0x30 +0x32 +0x34 why paths failed */
     dmc_next **path;                /* (fixes) the connection taken at each count, kept while searching */
     int pathcap, pathend;           /* (fixes) its size; the count the path ended at */
+    uint32_t visits;                /* (fixes) the entries tried in this search, bounded */
 } creq;
 /* 77282f45: a copy (the names copied, the subchord lists shared) */
 static void req_copy(creq *d, const creq *s)
@@ -186,6 +187,9 @@ static void path_took(creq *R, dmc_next *x) { if (R->path && R->count >= 0 && R-
 static int path_from(dmc_entry *e, creq *R)
 {
     if (R->maxchords < R->count) { R->f_many++; return 0; }
+    /* (fixes) the search tries every path up to the chord limit: a large, well-connected map takes exponential
+     * time (an application hang).  Bounded at twenty million entries tried, past any map that finishes in reasonable time */
+    if (g_fixes && ++R->visits > 20000000) return 0;
     for (dmc_next *x = e->nexts; x; x = x->next) x->flags &= ~6u;
     if ((e->flags & 4) && chord_alike(&e->chord, &R->end)) {
         if (R->count < R->minchords) R->f_few++;
@@ -234,6 +238,7 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
     /* (fixes) the connections taken, kept as the path is found */
     int base = R->count;
     R->path = NULL; R->pathcap = 0; R->pathend = -1;
+    R->visits = 0;
     if (g_fixes && R->maxchords >= 0) {
         R->pathcap = R->maxchords + 1;
         R->path = calloc((size_t)R->pathcap, sizeof(*R->path));

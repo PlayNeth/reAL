@@ -354,12 +354,12 @@ static ev *pair_notes(ev *list)
         cur->pair = NULL;
         uint8_t type = cur->st & 0xf0;
         if (type == 0x90) {
-            ev **q = &open[cur->ch * 128 + cur->b1];
+            ev **q = &open[cur->ch * 128 + (cur->b1 & 0x7f)];   /* (a data byte read past a status: no overrun) */
             if (!*q) *q = cur;
             else { ev *x = *q; while (x->pair) x = x->pair; x->pair = cur; }
             prev = cur;
         } else if (type == 0x80) {
-            ev **q = &open[cur->ch * 128 + cur->b1];
+            ev **q = &open[cur->ch * 128 + (cur->b1 & 0x7f)];   /* (a data byte read past a status: no overrun) */
             if (*q) { (*q)->dur = cur->t - (*q)->t; *q = (*q)->pair; }
             if (prev) prev->next = next; else list = next;
         } else prev = cur;
@@ -613,7 +613,7 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
         size_t e = open_ck(&t, FCC('e','v','t','l'));
         p32(&t, 0x14);
         for (ev *x = all; x; x = x->next) {
-            if (length < x->t + x->dur) length = x->t + x->dur;
+            if ((int64_t)length < (int64_t)x->t + x->dur) length = (int64_t)x->t + x->dur > 0x7fffffff ? 0x7fffffff : x->t + x->dur;
             p32(&t, (uint32_t)x->t); p32(&t, (uint32_t)x->dur); p32(&t, x->ch);
             uint16_t off = (uint16_t)x->off;
             put(&t, &off, 2); put(&t, &x->st, 1); put(&t, &x->b1, 1); put(&t, &x->b2, 1);
@@ -681,7 +681,8 @@ dm_segment *dm_segment_from_midi(const void *data, size_t size, dm_getcoll_fn ge
         if (m < length) {
             int32_t meas = (int32_t)(0xc00 / beat) * bpm;
             if (meas <= 0) meas = 0xc00;
-            do m += meas; while (m < length);
+            int64_t mm = (int64_t)m + ((int64_t)length - m + meas - 1) / meas * meas;  /* (as the loop did, without wrapping) */
+            m = mm > 0x7fffffff ? 0x7fffffff : (int32_t)mm;
         }
         seg->length = m;
     }
