@@ -229,6 +229,7 @@ struct rl_buffer {
     eax3_buffer   eax3;
     eax4_source   eax4;
     BOOL          eax4_pending;     /* a deferred EAX 4 source set its gains don't have yet */
+    BOOL          listener_ok;      /* the primary: made with CTRL3D (its listener is given only then) */
     BOOL          eax_commit_one;   /* recompute at the next mix (rl_device.eax_commit_some) */
 };
 

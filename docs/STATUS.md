@@ -208,7 +208,8 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   DSSCL_WRITEPRIMARY (what is written plays nowhere); notification positions past the end are taken (they never
   fire), as are more than DSBNOTIFICATIONS_MAX positions (ALchemy takes 100001); IDirectSoundNotify and
   IDirectSoundBuffer8 are given for any buffer, the primary too, IDirectSound3DBuffer for any CTRL3D one and
-  IDirectSound3DListener for the primary and any CTRL3D buffer; AcquireResources on a buffer that isn't LOCDEFER is
+  IDirectSound3DListener for any CTRL3D buffer and a primary made with CTRL3D (asked without, ALchemy and Windows
+  refuse it; Windows also to the same object asked again with CTRL3D); AcquireResources on a buffer that isn't LOCDEFER is
   DS_OK; Initialize on an initialised object is DS_OK; an effects buffer can be duplicated (the copy plays without
   effects).
 - GetStatus reports no location (reAL reported LOCHARDWARE / LOCSOFTWARE).

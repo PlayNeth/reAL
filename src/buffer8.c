@@ -19,9 +19,10 @@ static HRESULT WINAPI dsb_QueryInterface(IDirectSoundBuffer8 *iface, REFIID riid
         *out = &This->IDirectSoundNotify_iface;
     else if (IsEqualIID(riid, &IID_IKsPropertySet))
         *out = &This->IKsPropertySet_iface;
-    /* the listener: on the primary buffer (whatever its flags: one primary object serves every request), and on a
-     * CTRL3D secondary, as ALchemy */
-    else if ((This->is_primary || (This->desc.dwFlags & DSBCAPS_CTRL3D)) && IsEqualIID(riid, &IID_IDirectSound3DListener))
+    /* the listener: on a primary buffer made with CTRL3D (buffer.c listener_ok), and on a CTRL3D secondary, as
+     * ALchemy */
+    else if ((This->is_primary ? This->listener_ok : (This->desc.dwFlags & DSBCAPS_CTRL3D) != 0) &&
+             IsEqualIID(riid, &IID_IDirectSound3DListener))
         *out = &This->IDirectSound3DListener_iface;
 
     if (*out) {

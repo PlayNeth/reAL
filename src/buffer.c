@@ -528,6 +528,10 @@ HRESULT rl_buffer_create(rl_device *dev, rl_dsound *owner, LPCDSBUFFERDESC desc,
 
     if (desc->dwFlags & DSBCAPS_PRIMARYBUFFER) {
         b->is_primary = TRUE;
+        /* its listener only if it was made with CTRL3D: ALchemy refuses it to a primary asked without (the kit's fuzz
+         * runs), and Windows to the object made without, even when a later request with CTRL3D gets the same object
+         * (tests/primtest.c more, object) */
+        b->listener_ok = (desc->dwFlags & DSBCAPS_CTRL3D) != 0;
         /* what an owner at DSSCL_WRITEPRIMARY writes: silence in the primary format to start with (Windows' 0x80 for
          * its 8-bit default) */
         b->shared = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*b->shared));
