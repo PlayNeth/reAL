@@ -524,13 +524,13 @@ static void sec_d3(void)
     IDirectSound3DBuffer *d = NULL;
     IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&d);
     if (!d) { IDirectSoundBuffer_Release(b); return; }
-    char s1[32], s2[32];
+    char s1[32], s2[32], s3[32];        /* (one buffer per value a CASE prints) */
     static const float dv[] = { -1.0f, 0.0f, 1e-30f, 0.5f, 1.0f, 1e9f, 1e30f, FLT_MAX };
     for (unsigned k = 0; k < sizeof(dv) / sizeof(dv[0]); k++) {
         float g = -7, h = -7;
         HRESULT a = IDirectSound3DBuffer_SetMinDistance(d, dv[k], DS3D_IMMEDIATE); IDirectSound3DBuffer_GetMinDistance(d, &g);
         HRESULT c = IDirectSound3DBuffer_SetMaxDistance(d, dv[k], DS3D_IMMEDIATE); IDirectSound3DBuffer_GetMaxDistance(d, &h);
-        CASE("min/max %s: SetMinDistance %08lx get %s, SetMaxDistance %08lx get %s\n", fstr(dv[k], s1), a, fstr(g, s2), c, fstr(h, s1));
+        CASE("min/max %s: SetMinDistance %08lx get %s, SetMaxDistance %08lx get %s\n", fstr(dv[k], s1), a, fstr(g, s2), c, fstr(h, s3));
     }
     IDirectSound3DBuffer_SetMinDistance(d, 1.0f, DS3D_IMMEDIATE);
     IDirectSound3DBuffer_SetMaxDistance(d, 1e9f, DS3D_IMMEDIATE);
