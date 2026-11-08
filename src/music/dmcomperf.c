@@ -5,15 +5,11 @@ static rm_perf *prf(IDirectMusicPerformance8 *i) { return impl_from(i, rm_perf, 
 static rm_perf *perf_from_unknown(IUnknown *u)
 {
     if (!u) return NULL;
-    IDirectMusicPerformance8 *p = (IDirectMusicPerformance8 *)u;
-    if (p->lpVtbl == &pf_vtbl) return prf(p);
-    rm_path *a = unsafe_path(u);
+    if (*(void *const *)u == &pf_vtbl) return prf((IDirectMusicPerformance8 *)u);
+    rm_path *a = unsafe_path(u);                /* (an audiopath stands for its performance) */
     if (a) return a->perf;
-    if (SUCCEEDED(IUnknown_QueryInterface(u, &IID_IDirectMusicPerformance8, (void **)&p))) {
-        IDirectMusicPerformance8_Release(p);
-        if (p->lpVtbl == &pf_vtbl) return prf(p);
-    }
-    return NULL;
+    IDirectMusicPerformance8 *p = rm_ours(u, &IID_IDirectMusicPerformance8, &pf_vtbl);
+    return p ? prf(p) : NULL;
 }
 
 #define PERF_LOCKED(p, expr) do { if (!(p)->host) return DMUS_E_NOT_INIT; dm_host_lock((p)->host); expr; dm_host_unlock((p)->host); } while (0)

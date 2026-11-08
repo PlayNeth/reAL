@@ -5,14 +5,8 @@ static IDirectMusicGraphVtbl stg_vtbl;
 static rm_state *sst(IDirectMusicSegmentState8 *i) { return impl_from(i, rm_state, IDirectMusicSegmentState8_iface); }
 static rm_state *unsafe_state(IUnknown *u)
 {
-    if (!u) return NULL;
-    IDirectMusicSegmentState8 *s = (IDirectMusicSegmentState8 *)u;
-    if (s->lpVtbl == &st_vtbl) return sst(s);
-    if (SUCCEEDED(IUnknown_QueryInterface(u, &IID_IDirectMusicSegmentState8, (void **)&s))) {
-        IDirectMusicSegmentState8_Release(s);
-        if (s->lpVtbl == &st_vtbl) return sst(s);
-    }
-    return NULL;
+    IDirectMusicSegmentState8 *s = rm_ours(u, &IID_IDirectMusicSegmentState8, &st_vtbl);
+    return s ? sst(s) : NULL;
 }
 static HRESULT WINAPI st_qi(IDirectMusicSegmentState8 *i, REFIID riid, void **out)
 {

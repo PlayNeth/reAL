@@ -184,14 +184,8 @@ static IDirectMusicAudioPathVtbl ap_vtbl;
 static rm_path *apt(IDirectMusicAudioPath *i) { return impl_from(i, rm_path, IDirectMusicAudioPath_iface); }
 static rm_path *unsafe_path(IUnknown *u)
 {
-    if (!u) return NULL;
-    IDirectMusicAudioPath *a = (IDirectMusicAudioPath *)u;
-    if (a->lpVtbl == &ap_vtbl) return apt(a);
-    if (SUCCEEDED(IUnknown_QueryInterface(u, &IID_IDirectMusicAudioPath, (void **)&a))) {
-        IDirectMusicAudioPath_Release(a);
-        if (a->lpVtbl == &ap_vtbl) return apt(a);
-    }
-    return NULL;
+    IDirectMusicAudioPath *a = rm_ours(u, &IID_IDirectMusicAudioPath, &ap_vtbl);
+    return a ? apt(a) : NULL;
 }
 static HRESULT WINAPI ap_qi(IDirectMusicAudioPath *i, REFIID riid, void **out)
 {

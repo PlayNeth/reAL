@@ -346,13 +346,9 @@ static HRESULT WINAPI seg_initplay(IDirectMusicSegment8 *i, IDirectMusicSegmentS
     if (IsBadReadPtr(p, 4) || IsBadReadPtr(*(void **)p, 4) || IsBadCodePtr(**(FARPROC **)p) || IsBadWritePtr(s, sizeof(*s)))
         return E_POINTER;
     if (sgm(i)->ver) return E_NOTIMPL;
-    rm_perf *pf = NULL;                         /* (dmime asks for its own performance's private interface) */
-    IDirectMusicPerformance8 *q = (IDirectMusicPerformance8 *)p;
-    if (q->lpVtbl == &pf_vtbl) pf = prf(q);
-    else if (SUCCEEDED(IUnknown_QueryInterface((IUnknown *)p, &IID_IDirectMusicPerformance8, (void **)&q))) {
-        IDirectMusicPerformance8_Release(q);
-        if (q->lpVtbl == &pf_vtbl) pf = prf(q);
-    }
+    /* (dmime asks for its own performance's private interface) */
+    IDirectMusicPerformance8 *q = rm_ours((IUnknown *)p, &IID_IDirectMusicPerformance8, &pf_vtbl);
+    rm_perf *pf = q ? prf(q) : NULL;
     if (!pf) return E_FAIL;
     rm_state *st = calloc(1, sizeof(*st));
     if (!st) return E_OUTOFMEMORY;

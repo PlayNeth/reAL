@@ -273,6 +273,20 @@ static IDirectMusic8 *new_dmusic(void)
     return &d->IDirectMusic8_iface;
 }
 
+/* one of reDM's own objects, by its vtable: the interface as given, else the one it answers for iid (released at
+ * once: the caller holds the object).  Used by the unsafe_* lookups below (one per class) and the performance's */
+static void *rm_ours(IUnknown *u, REFIID iid, const void *vtbl)
+{
+    if (!u) return NULL;
+    if (*(void *const *)u == vtbl) return u;
+    void *q;
+    if (SUCCEEDED(IUnknown_QueryInterface(u, iid, &q))) {
+        IUnknown_Release((IUnknown *)q);
+        if (*(void *const *)q == vtbl) return q;
+    }
+    return NULL;
+}
+
 #include "dmcomcoll.c"
 #include "dmcomseg.c"
 #include "dmcomtrk.c"

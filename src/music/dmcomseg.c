@@ -4,14 +4,8 @@ static IDirectMusicSegment8Vtbl seg_vtbl;
 static rm_segment *sgm(IDirectMusicSegment8 *i) { return impl_from(i, rm_segment, IDirectMusicSegment8_iface); }
 static rm_segment *unsafe_segment(IUnknown *u)
 {
-    if (!u) return NULL;
-    IDirectMusicSegment8 *s = (IDirectMusicSegment8 *)u;
-    if (s->lpVtbl == &seg_vtbl) return sgm(s);
-    if (SUCCEEDED(IUnknown_QueryInterface(u, &IID_IDirectMusicSegment8, (void **)&s))) {
-        IDirectMusicSegment8_Release(s);
-        if (s->lpVtbl == &seg_vtbl) return sgm(s);
-    }
-    return NULL;
+    IDirectMusicSegment8 *s = rm_ours(u, &IID_IDirectMusicSegment8, &seg_vtbl);
+    return s ? sgm(s) : NULL;
 }
 
 static HRESULT WINAPI seg_qi(IDirectMusicSegment8 *i, REFIID riid, void **out)

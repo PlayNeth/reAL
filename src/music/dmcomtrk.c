@@ -28,14 +28,8 @@ static IDirectMusicTrack8 *track_object(dm_track *t)
 }
 static rm_track *unsafe_track(IUnknown *u)
 {
-    if (!u) return NULL;
-    IDirectMusicTrack8 *t = (IDirectMusicTrack8 *)u;
-    if (t->lpVtbl == &trk_vtbl) return trk(t);
-    if (SUCCEEDED(IUnknown_QueryInterface(u, &IID_IDirectMusicTrack8, (void **)&t))) {
-        IDirectMusicTrack8_Release(t);
-        if (t->lpVtbl == &trk_vtbl) return trk(t);
-    }
-    return NULL;
+    IDirectMusicTrack8 *t = rm_ours(u, &IID_IDirectMusicTrack8, &trk_vtbl);
+    return t ? trk(t) : NULL;
 }
 static HRESULT WINAPI trk_qi(IDirectMusicTrack8 *i, REFIID riid, void **out)
 {
