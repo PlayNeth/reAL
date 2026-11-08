@@ -140,6 +140,9 @@ int main(void)
         hr = IDirectMusicTrack8_Clone(tr[0], BAR, 3 * BAR, &cl);
         printf("chord clone2 %08lx\n", hr);
         if (cl) { chords("clone2", (IUnknown *)cl, 1); IDirectMusicTrack_Release(cl); }
+        hr = IDirectMusicTrack8_Clone(tr[0], 5 * BAR, 7 * BAR, &cl);       /* (the silent chord copied) */
+        printf("chord clone3 %08lx\n", hr);
+        if (cl) { chords("clone3", (IUnknown *)cl, 1); IDirectMusicTrack_Release(cl); }
         DMUS_CHORD_KEY k;
         memset(&k, 0, sizeof(k));
         lstrcpyW(k.wszName, L"set");

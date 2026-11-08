@@ -273,12 +273,12 @@ static int change(IDirectMusicLoader8 *ld)
     static const WCHAR *const maps[] = { L"cmapa.cdm", L"cmapd.cdm", L"cmape.cdm", L"cmapf.cdm", L"cmapb.cdm" };
     IDirectMusicChordMap *cm[5] = { 0 };
     for (int k = 0; k < 5; k++)
-        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, maps[k], (void **)&cm[k]);
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicChordMap, &IID_IDirectMusicChordMap, (WCHAR *)maps[k], (void **)&cm[k]);
     printf("maps %d %d %d %d %d\n", !!cm[0], !!cm[1], !!cm[2], !!cm[3], !!cm[4]);
     static const WCHAR *const segs[] = { L"t1.sgt", L"t2.sgt", L"t3.sgt", L"t4.sgt", L"basic.sgt", L"params.sgt" };
     for (int a = 0; a < 6; a++) {
         IDirectMusicSegment8 *tp = NULL;
-        hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, segs[a], (void **)&tp);
+        hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, (WCHAR *)segs[a], (void **)&tp);
         printf("load %d %08lx\n", a, hr);
         if (!tp) continue;
         hr = IDirectMusicComposer_ChangeChordMap(cp, (IDirectMusicSegment *)tp, TRUE, cm[1]);
@@ -552,14 +552,14 @@ static int join(IDirectMusicLoader8 *ld)
     IDirectMusicSegment *cs[6] = { 0 };
     for (int k = 0; k < 4; k++) {
         IDirectMusicSegment *tp = NULL;
-        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, tn[k], (void **)&tp);
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, (WCHAR *)tn[k], (void **)&tp);
         hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, NULL, tp, 1, NULL, &cs[k]);
         printf("composed %d %08lx\n", k, hr);
         if (tp) IDirectMusicSegment_Release(tp);
     }
     {
         IDirectMusicSegment *tp = NULL;
-        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, tn[4], (void **)&tp);
+        IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment, (WCHAR *)tn[4], (void **)&tp);
         hr = IDirectMusicComposer_ComposeSegmentFromTemplate(cp, NULL, tp, 2, NULL, &t6c);
         printf("composed t6 %08lx\n", hr);
         if (tp) IDirectMusicSegment_Release(tp);
@@ -614,7 +614,7 @@ static int join(IDirectMusicLoader8 *ld)
         for (int f = 0; f < 12; f++) {
             if ((a < 3) != (f < 7)) continue;
             IDirectMusicSegment8 *tp = NULL;
-            IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, cn[a], (void **)&tp);
+            IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, (WCHAR *)cn[a], (void **)&tp);
             if (!tp) continue;
             IDirectMusicSegment *from = ft[f][0] == 5 ? t6c : ft[f][0] >= 0 ? cs[ft[f][0]] : NULL;
             IDirectMusicSegment *to = ft[f][1] == 5 ? t6c : ft[f][1] >= 0 ? cs[ft[f][1]] : NULL;
@@ -663,7 +663,7 @@ static int recomp(IDirectMusicLoader8 *ld)
     static const WCHAR *const names[] = { L"c7.sgt", L"c8.sgt", L"c1.sgt" };
     for (int a = 0; a < 3; a++) {
         IDirectMusicSegment8 *sg = NULL;
-        hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, names[a], (void **)&sg);
+        hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, (WCHAR *)names[a], (void **)&sg);
         printf("load %d %08lx\n", a, hr);
         if (!sg) continue;
         if (a == 1) IDirectMusicSegment8_SetRepeats(sg, 2);
@@ -713,7 +713,7 @@ static int recomp(IDirectMusicLoader8 *ld)
 static IDirectMusicSegment8 *ld_seg(IDirectMusicLoader8 *ld, const WCHAR *name)
 {
     IDirectMusicSegment8 *sg = NULL;
-    HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, name, (void **)&sg);
+    HRESULT hr = IDirectMusicLoader8_LoadObjectFromFile(ld, &CLSID_DirectMusicSegment, &IID_IDirectMusicSegment8, (WCHAR *)name, (void **)&sg);
     if (FAILED(hr)) printf("load %ls %08lx\n", name, hr);
     return sg;
 }
