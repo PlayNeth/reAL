@@ -275,7 +275,7 @@ static HRESULT WINAPI seg_setpch(IDirectMusicSegment8 *i, DWORD n, DWORD *p)
 {
     if (!n) return S_OK;
     if (!p) return E_INVALIDARG;
-    if (IsBadReadPtr(p, n * sizeof(DWORD))) return E_POINTER;
+    if (n > 0x3fffffff || IsBadReadPtr(p, n * sizeof(DWORD))) return E_POINTER;    /* (a count whose size wraps) */
     if (!sgm(i)->seg) return S_OK;
     dm_engine_lock();
     HRESULT hr = dm_segment_add_pchannels(sgm(i)->seg, (const uint32_t *)p, n);
@@ -318,14 +318,16 @@ static HRESULT WINAPI seg_compose(IDirectMusicSegment8 *i, MUSIC_TIME t, IDirect
     dm_segment *g = s->seg;
     if (c) { g = dm_segment_clone(s->seg, 0, s->seg->length, &hr); if (!g) hr = E_OUTOFMEMORY; }
     if (g) hr = dmc_segment_compose_ex(g, t, fa ? fa->seg : NULL, fb ? fb->seg : NULL);
-    dm_engine_unlock();
+    /* (a failed composition still hands out its segment, as dmime's: comptest join) */
     if (c && g) {
         rm_segment *o = new_segment(g);
-        if (!o) { dm_segment_release(g); return E_OUTOFMEMORY; }
+        if (!o) dm_segment_release(g);  /* (under the lock, as the engine's other releases) */
+        dm_engine_unlock();
+        if (!o) return E_OUTOFMEMORY;
         HRESULT r = seg_qi(&o->IDirectMusicSegment8_iface, &IID_IDirectMusicSegment, (void **)c);
         seg_release(&o->IDirectMusicSegment8_iface);
         if (FAILED(r)) return r;
-    }
+    } else dm_engine_unlock();
     LOG_CALL("music: Segment::Compose -> %08x", hr);
     return hr;
 }
@@ -654,6 +656,7 @@ static int acm_decode(const uint8_t *wfx, uint32_t wfxlen, const uint8_t *in, ui
     if (!src) return 0;
     memcpy(src, wfx, wfxlen);
     if (wfxlen < 18) src->cbSize = 0;
+    else if (src->cbSize > wfxlen - 18) src->cbSize = (WORD)(wfxlen - 18);    /* (the codec reads only what the file has) */
     WAVEFORMATEX dst;
     memset(&dst, 0, sizeof(dst));
     dst.wFormatTag = WAVE_FORMAT_PCM;

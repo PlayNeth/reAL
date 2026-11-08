@@ -264,6 +264,7 @@ static HRESULT WINAPI pf_gettime(IDirectMusicPerformance8 *i, REFERENCE_TIME *rt
 typedef struct { DWORD magic, size; dm_pmsg *e; DWORD pad; } rm_pmsghdr;
 static DMUS_PMSG *pmsg_new(ULONG cb)
 {
+    if (cb > 0x7fffffff - sizeof(rm_pmsghdr)) return NULL;     /* (a size that wraps: out of memory) */
     rm_pmsghdr *h = calloc(1, sizeof(*h) + cb);
     if (!h) return NULL;
     h->magic = RM_PMSG_MAGIC; h->size = cb;
@@ -341,10 +342,10 @@ static void pm_to_com(rm_perf *p, const dm_pmsg *e, DMUS_PMSG *m)
     m->dwType = e->type; m->dwVoiceID = e->voice; m->dwGroupID = e->group;
     if (e->tool == 1) {
         if (m->pTool != &p->IDirectMusicTool_iface) {
-            if (m->pTool) IDirectMusicTool_Release(m->pTool);
+            if (m->pTool) dm_host_release_later(m->pTool);    /* (an application's tool: not released under the lock) */
             m->pTool = &p->IDirectMusicTool_iface;
         }
-    } else if (e->tool == 0 && m->pTool) { IDirectMusicTool_Release(m->pTool); m->pTool = NULL; }
+    } else if (e->tool == 0 && m->pTool) { dm_host_release_later(m->pTool); m->pTool = NULL; }
     if (!m->punkUser && e->user && e->userref) m->punkUser = state_object(p, e->user);
     if (cap < type_size(e->type) && e->type != DMUS_PMSGT_SYSEX) return;
     switch (e->type) {
