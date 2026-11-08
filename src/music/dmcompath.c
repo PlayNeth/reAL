@@ -66,7 +66,9 @@ static void buf_release(rm_perf *p, rm_buf *b)
 }
 static void path_free_config(rm_path *a)
 {
+    if (a->perf->host) dm_host_lock(a->perf->host);     /* (the buffer list: cfg_path) */
     for (DWORD i = 0; i < a->nheld; i++) buf_release(a->perf, a->held[i]);
+    if (a->perf->host) dm_host_unlock(a->perf->host);
     for (DWORD k = 0; k < a->nports; k++) {
         for (DWORD m = 0; m < a->ports[k].nmaps; m++) free(a->ports[k].maps[m].b);
         free(a->ports[k].maps); free(a->ports[k].bufs);

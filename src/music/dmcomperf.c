@@ -56,7 +56,12 @@ static void pf_closedown(rm_perf *p)
     p->apstate = 0;                         /* (77308c70: not set up, whether closed down already or not) */
     if (p->closed) return;
     p->closed = TRUE;
-    if (p->defpath) { rm_path *a = p->defpath; p->defpath = NULL; IDirectMusicAudioPath_Release(&a->IDirectMusicAudioPath_iface); }
+    if (p->defpath) {                   /* (taken off under the lock, as SetDefaultAudioPath) */
+        if (p->host) dm_host_lock(p->host);
+        rm_path *a = p->defpath; p->defpath = NULL;
+        if (p->host) dm_host_unlock(p->host);
+        if (a) IDirectMusicAudioPath_Release(&a->IDirectMusicAudioPath_iface);
+    }
     if (p->host) {
         dm_host_lock(p->host);
         dm_perf *pf = dm_host_perf(p->host);

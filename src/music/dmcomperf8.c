@@ -545,9 +545,13 @@ static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
     a->top = calloc(c->nbufs + 1, sizeof(rm_bref));
     a->ports = calloc(c->nports + 1, sizeof(rm_pcfg));
     if (!a->top || !a->ports) hr = E_OUTOFMEMORY;
+    /* the performance's buffer list and the buffers' counts, under the engine lock (another thread may be making or
+     * letting go of a path) */
+    if (p->host) dm_host_lock(p->host);
     for (DWORD i = 0; SUCCEEDED(hr) && i < c->nbufs; i++) {
         hr = buf_make(p, &c->bufs[i], &a->top[a->ntop]);
-        if (SUCCEEDED(hr)) { hold(a, a->top[a->ntop].b); a->ntop++; }
+        if (SUCCEEDED(hr) && !hold(a, a->top[a->ntop].b)) { buf_release(p, a->top[a->ntop].b); hr = E_OUTOFMEMORY; }
+        if (SUCCEEDED(hr)) a->ntop++;
     }
     for (DWORD k = 0; SUCCEEDED(hr) && k < c->nports; k++) {
         apc_port *cp = &c->ports[k];
@@ -558,7 +562,8 @@ static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
         if (!pc->bufs || !pc->maps) { hr = E_OUTOFMEMORY; break; }
         for (DWORD i = 0; SUCCEEDED(hr) && i < cp->nbufs; i++) {
             hr = buf_make(p, &cp->bufs[i], &pc->bufs[pc->nbufs]);
-            if (SUCCEEDED(hr)) { hold(a, pc->bufs[pc->nbufs].b); pc->nbufs++; }
+            if (SUCCEEDED(hr) && !hold(a, pc->bufs[pc->nbufs].b)) { buf_release(p, pc->bufs[pc->nbufs].b); hr = E_OUTOFMEMORY; }
+            if (SUCCEEDED(hr)) pc->nbufs++;
         }
         for (DWORD m = 0; SUCCEEDED(hr) && m < cp->nmaps; m++) {
             rm_pmap *pm = &pc->maps[pc->nmaps++];
@@ -566,9 +571,11 @@ static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
             if (pm->nbuf > 0xffffu) { pm->nbuf = 0; hr = E_INVALIDARG; break; }   /* (a broken count: nbuf + 1 would wrap) */
             pm->b = calloc(pm->nbuf + 1, sizeof(rm_buf *));
             if (!pm->b) { hr = E_OUTOFMEMORY; break; }
-            for (DWORD i = 0; i < pm->nbuf; i++) if ((pm->b[i] = path_find(a, pc, &cp->maps[m].bufs[i]))) hold(a, pm->b[i]);
+            for (DWORD i = 0; i < pm->nbuf; i++)        /* (a reference the path can't keep is let go: no leak) */
+                if ((pm->b[i] = path_find(a, pc, &cp->maps[m].bufs[i])) && !hold(a, pm->b[i])) { buf_release(p, pm->b[i]); pm->b[i] = NULL; }
         }
     }
+    if (p->host) dm_host_unlock(p->host);
     /* the PChannels */
     ULONGLONG total64 = 0;
     for (DWORD k = 0; k < c->nports; k++) {
@@ -611,13 +618,14 @@ static HRESULT cfg_path(rm_perf *p, apc *c, BOOL act, rm_path **out)
         }
     }
     if (SUCCEEDED(hr)) {
+        /* 7731f0f2: a clone of the configuration's graph, made before the lock (cloning calls the tools) */
+        IDirectMusicGraph *g = NULL;
+        if (c->graph && FAILED(rm_graph_clone(c->graph, &g))) g = NULL;
         dm_host_lock(p->host);
         a->ap = dm_perf_create_audiopath_ex(dm_host_perf(p->host), act, n, virt, drum, nbus, buses);
-        if (a->ap && c->graph) {                    /* 7731f0f2: a clone of the configuration's graph */
-            IDirectMusicGraph *g = NULL;
-            if (SUCCEEDED(rm_graph_clone(c->graph, &g))) dm_audiopath_set_graph(a->ap, g);
-        }
+        if (a->ap && g) { dm_audiopath_set_graph(a->ap, g); g = NULL; }
         dm_host_unlock(p->host);
+        if (g) IDirectMusicGraph_Release(g);
         if (!a->ap) hr = E_OUTOFMEMORY;
     }
     free(virt); free(nbus); free(buses); free(drum);
@@ -720,10 +728,14 @@ static HRESULT WINAPI pf_setdefpath(IDirectMusicPerformance8 *i, IDirectMusicAud
     rm_path *a = path ? unsafe_path((IUnknown *)path) : NULL;
     if (path && !a) return E_INVALIDARG;
     if (a) IDirectMusicAudioPath_AddRef(path);
-    if (p->defpath) IDirectMusicAudioPath_Release(&p->defpath->IDirectMusicAudioPath_iface);
+    /* swapped under the engine lock (a PlaySegment on another thread takes the default path there), the old one let
+     * go after it */
+    if (p->host) dm_host_lock(p->host);
+    rm_path *old = p->defpath;
     p->defpath = a;
-    PERF_LOCKED(p, dm_perf_set_default_audiopath(dm_host_perf(p->host), a ? a->ap : NULL));
-    return S_OK;
+    if (p->host) { dm_perf_set_default_audiopath(dm_host_perf(p->host), a ? a->ap : NULL); dm_host_unlock(p->host); }
+    if (old) IDirectMusicAudioPath_Release(&old->IDirectMusicAudioPath_iface);
+    return p->host ? S_OK : DMUS_E_NOT_INIT;
 }
 static HRESULT WINAPI pf_getdefpath(IDirectMusicPerformance8 *i, IDirectMusicAudioPath **out)
 {
@@ -732,10 +744,10 @@ static HRESULT WINAPI pf_getdefpath(IDirectMusicPerformance8 *i, IDirectMusicAud
     *out = NULL;
     if (!p->apstate) return DMUS_E_NOT_INIT;                    /* 77304a01 */
     if (p->apstate != 2) return DMUS_E_AUDIOPATHS_NOT_VALID;
-    if (!p->defpath) return DMUS_E_NOT_FOUND;
-    *out = &p->defpath->IDirectMusicAudioPath_iface;
-    IDirectMusicAudioPath_AddRef(*out);
-    return S_OK;
+    if (p->host) dm_host_lock(p->host);             /* (as SetDefaultAudioPath swaps it) */
+    if (p->defpath) { *out = &p->defpath->IDirectMusicAudioPath_iface; IDirectMusicAudioPath_AddRef(*out); }
+    if (p->host) dm_host_unlock(p->host);
+    return *out ? S_OK : DMUS_E_NOT_FOUND;
 }
 static HRESULT WINAPI pf_getparamex(IDirectMusicPerformance8 *i, REFGUID g, DWORD id, DWORD gb, DWORD n, MUSIC_TIME t, MUSIC_TIME *nx, void *pp)
 {

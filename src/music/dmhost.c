@@ -1013,8 +1013,12 @@ rtime_t dm_host_latency(dm_host *h)
 HRESULT dm_host_buffer_query(dm_host *h, int idx, REFIID iid, void **out)
 {
     *out = NULL;
-    if (idx < 0 || idx >= MAXHB || !h->hb[idx].b) return DMUS_E_NOT_FOUND;
-    return IDirectSoundBuffer8_QueryInterface(&h->hb[idx].b->IDirectSoundBuffer8_iface, iid, out);
+    if (idx < 0 || idx >= MAXHB) return DMUS_E_NOT_FOUND;
+    host_enter(h);                      /* (the buffer may be let go by an audiopath on another thread) */
+    HRESULT hr = h->hb[idx].b ? IDirectSoundBuffer8_QueryInterface(&h->hb[idx].b->IDirectSoundBuffer8_iface, iid, out)
+                              : DMUS_E_NOT_FOUND;
+    host_leave(h);
+    return hr;
 }
 
 /* DMUS_PATH_PRIMARY_BUFFER: the primary buffer (with the 3D listener) of reAL's device */
