@@ -748,19 +748,27 @@ static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32
 }
 
 /* 77487250 */
-static int dl_wave(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t id, void **handle)
+/* (lim: the download's size.  The original points into the buffer and trusts its sizes; reAL copies the data, so a
+ * size past the buffer would be read, and one near 4 GB wrap the copy's allocation) */
+static int dl_wave(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t lim, uint32_t id, void **handle)
 {
+    if (nofs < 1 || (uint64_t)ofs[0] + 0x1c > lim) return -6;
     const uint8_t *w = OFS(0);
     if (U16(w, 0xc) != 1) return -4;
     if (U16(w, 0xe) != 1) return -5;
     if (U32(w, 8) >= nofs) return -6;
+    uint32_t at = ofs[U32(w, 8)];
+    if ((uint64_t)at + 4 > lim) return -6;
     const uint8_t *wd = OFS(U32(w, 8));
-    ms_wave *wv = calloc(1, sizeof(*wv));
     uint32_t size = U32(wd, 0);
+    if (size > lim - at - 4) return -6;
+    ms_wave *wv = calloc(1, sizeof(*wv));
+    if (!wv) return -1;
     wv->id = id;
     wv->rate = U32(w, 0x10);
     /* the original keeps pointing into the download buffer and uses one sample past the data as guard */
     wv->block = calloc(1, size + 8);
+    if (!wv->block) { free(wv); return -1; }
     memcpy(wv->block, wd + 4, size);
     wv->data = wv->block;
     if (U16(w, 0x1a) == 8) {
@@ -780,11 +788,13 @@ static int dl_wave(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nof
 }
 
 /* 77487430: a streaming (5) or one-shot (6) wave buffer: raw bytes, made playable by the articulation that names it */
-static int dl_wavebuf(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t type, uint32_t id, void **handle)
+static int dl_wavebuf(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t lim, uint32_t type,
+                      uint32_t id, void **handle)
 {
-    if (nofs < 1) return -6;
+    if (nofs < 1 || (uint64_t)ofs[0] + 4 > lim) return -6;
     const uint8_t *wd = OFS(0);
     uint32_t size = U32(wd, 0);
+    if (size > lim - ofs[0] - 4) return -6;            /* (as dl_wave) */
     ms_wave *wv = calloc(1, sizeof(*wv));
     if (!wv) return -1;
     wv->id = id;
@@ -821,11 +831,13 @@ static void wartic_unref(ms_wartic *a)     /* 77487c30 */
 
 /* 77487920: a wave articulation: DMUS_WAVEARTDL, the WAVEFORMATEX, the buffers' download ids; the buffers take the
  * format (8-bit data made signed, the length in samples plus a guard sample copying the last) */
-static int dl_wartic(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t id, void **handle)
+static int dl_wartic(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t lim, uint32_t id, void **handle)
 {
     if (nofs < 3) return -6;
+    if ((uint64_t)ofs[0] + 18 > lim || (uint64_t)ofs[1] + 18 > lim) return -6;     /* (the structures inside the download) */
     const uint8_t *ad = OFS(0), *wf = OFS(1);
     const uint32_t *ids = (const uint32_t *)OFS(2);
+    if (U32(ad, 8) > (lim - ofs[2]) / 4) return -6;           /* (the buffer ids too) */
     ms_wartic *a = calloc(1, sizeof(*a));
     if (!a) return -1;
     a->refs = 1;
@@ -836,10 +848,16 @@ static int dl_wartic(msynth *s, const void *buf, const uint32_t *ofs, uint32_t n
     if (a->bits == 8) a->fmt = 2;
     else if (a->bits == 16) a->fmt = 1;
     else { free(a); return -7; }
+    /* every buffer found before any is changed: a failure leaves them as they were, and holds no reference */
+    for (uint32_t i = 0; i < a->nbuf; i++) if (!find_wave(s, ids[i])) { free(a); return -8; }
     ms_bufnode **tail = &a->bufs;
     for (uint32_t i = 0; i < a->nbuf; i++) {
         ms_wave *w = find_wave(s, ids[i]);
-        if (!w) { wartic_free(a); return -8; }
+        ms_bufnode *nd = calloc(1, sizeof(*nd));
+        if (!nd) { wartic_free(a); return -1; }
+        nd->w = w;
+        w->refs++;                      /* (taken as it is linked: wartic_free lets go of exactly these) */
+        *tail = nd; tail = &nd->next;
         w->rate = a->rate;
         if (a->fmt == 2) {
             for (uint32_t k = 0; k < w->len; k++) ((uint8_t *)w->data)[k] -= 0x80;
@@ -853,13 +871,8 @@ static int dl_wartic(msynth *s, const void *buf, const uint32_t *ofs, uint32_t n
             if (w->fmt == 2) ((uint8_t *)w->data)[n] = ((uint8_t *)w->data)[n - 1];
             else ((int16_t *)w->data)[n] = ((int16_t *)w->data)[n - 1];
         }
-        ms_bufnode *nd = calloc(1, sizeof(*nd));
-        if (!nd) { wartic_free(a); return -1; }
-        nd->w = w;
         if (w->streaming) a->streaming = 1;
-        *tail = nd; tail = &nd->next;
     }
-    for (ms_bufnode *n = a->bufs; n; n = n->next) n->w->refs++;
     ms_wartic **b = &s->wartic[id % NBUCKET];
     a->next = *b; *b = a;
     *handle = a;
@@ -880,11 +893,11 @@ int msynth_download(msynth *s, const void *buf, uint32_t size, void **handle)
     }
     int r = -1;
     switch (h[0]) {
-    case 1: r = dl_instrument(s, buf, ofs, nofs, 0, handle); break;
-    case 3: r = dl_instrument(s, buf, ofs, nofs, 1, handle); break;
-    case 2: r = dl_wave(s, buf, ofs, nofs, h[1], handle); break;
-    case 4: r = dl_wartic(s, buf, ofs, nofs, h[1], handle); break;
-    case 5: case 6: r = dl_wavebuf(s, buf, ofs, nofs, h[0], h[1], handle); break;
+    case 1: case 3:                     /* (an instrument starts at the first offset: there has to be one) */
+        r = nofs ? dl_instrument(s, buf, ofs, nofs, h[0] == 3, handle) : -6; break;
+    case 2: r = dl_wave(s, buf, ofs, nofs, h[3], h[1], handle); break;
+    case 4: r = dl_wartic(s, buf, ofs, nofs, h[3], h[1], handle); break;
+    case 5: case 6: r = dl_wavebuf(s, buf, ofs, nofs, h[3], h[0], h[1], handle); break;
     default: break;
     }
     free(ofs);
@@ -1108,6 +1121,7 @@ static void da_start(v_da *d, msynth *s, const ms_region *r, int32_t tune, uint3
     d->lastpitch = 0;
     d->y1 = d->y2 = 0;
     d->b0 = d->a1 = d->a2 = 0;
+    d->node = NULL;                     /* (an instrument's note: no wave buffers, whatever the voice played before) */
     d->src = *r;
     d->data = r->wave->data;
     d->synth = s;
@@ -1313,7 +1327,8 @@ static uint32_t mix_multi(v_da *d, int16_t **bufs, uint32_t nb, const mixargs *m
             for (int i = (int)nb - 1; i >= 0; i--) { acc[i] += m->dgain[i]; g[i] = acc[i] >> 8; }
             if (filter) { b0 += m->db0; a1 += m->da1; a2 += m->da2; }
         }
-        int32_t batch = (m->end - pos + inc - 1) / inc;
+        int32_t di = inc > 0 ? inc : 1;      /* (a rate or bend down to a step of 0: no division by it) */
+        int32_t batch = (m->end - pos + di - 1) / di;
         if (n - k < (uint32_t)batch) batch = (int32_t)(n - k);
         if ((uint32_t)cnt < (uint32_t)batch) batch = cnt;
         cnt = cnt + 1 - batch;
@@ -1489,6 +1504,7 @@ static void voice_free_wave(ms_voice *v)    /* 7748b160 */
     v->active = 0;
     if (v->da.src.wave) { wave_unref(v->da.src.wave, 2); v->da.src.wave = NULL; }
     if (v->da.artic) { wartic_unref(v->da.artic); v->da.artic = NULL; }
+    v->da.node = NULL;                  /* (one of the articulation's buffers) */
 }
 
 /* 7748b380: pitch modulation (cents) at t */
@@ -1901,7 +1917,7 @@ static void cl_sysex(ms_cl *c, int64_t t, const uint8_t *m, uint32_t len)
         }
         return;
     case 0x43:      /* Yamaha XG system on */
-        if (m[3] != 'L' || m[4] || m[5] || m[6] != 0x7e || m[7]) return;
+        if (len < 8 || m[3] != 'L' || m[4] || m[5] || m[6] != 0x7e || m[7]) return;    /* (the bytes it reads) */
         c->xgmode = 1;
         c->gsmode = 0;
         cl_reset(c);
@@ -1916,7 +1932,7 @@ static void cl_sysex(ms_cl *c, int64_t t, const uint8_t *m, uint32_t len)
         reset = 1;
         break;
     case 0x7f:      /* master volume */
-        if (m[3] == 4 && m[4] == 1) queue_add(&c->q, t, QEV(0, 0xfc, m[6]));
+        if (len >= 7 && m[3] == 4 && m[4] == 1) queue_add(&c->q, t, QEV(0, 0xfc, m[6]));   /* (the byte it reads) */
         return;
     default:
         return;
@@ -2365,6 +2381,8 @@ static void da_start_wave(v_da *d, msynth *s, ms_wartic *a, int32_t pitch, uint6
     d->end64 = (int64_t)w->len << 12;
     d->big = w->len > 0x7ffff;
     if (!a->streaming) {
+        /* (a loop the segment file puts past the wave, or backwards, read past its data: no loop) */
+        if (le > w->len || ls >= le) ls = le = 0;
         if (ls || le) {
             d->lstart64 = (int64_t)(ls << 12);
             d->lend64 = (int64_t)(le << 12);
@@ -2438,7 +2456,7 @@ int msynth_play_voice(msynth *s, int64_t t, uint32_t voiceid, uint32_t group, ui
     if (t == 0) t = s->lastrender;
     ms_wartic *a;
     for (a = s->wartic[dlid % NBUCKET]; a && a->id != dlid; a = a->next) {}
-    if (!a) return 0;
+    if (!a || !a->bufs) return 0;       /* (an articulation downloaded with no buffers: nothing to play, not a crash) */
     ms_cl *c = s->cl[group - 1];
     for (uint32_t slot = 0; slot < 16; slot++) {
         if (c->chan[slot] != chan) continue;
