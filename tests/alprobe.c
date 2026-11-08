@@ -605,6 +605,27 @@ static void sec_d3(void)
                 CASE("SetOrientation(%g,%g,%g / %g,%g,%g) %08lx get %g,%g,%g / %g,%g,%g\n", of[k][0], of[k][1], of[k][2], of[k][3],
                      of[k][4], of[k][5], h, f.x, f.y, f.z, t.x, t.y, t.z);
             }
+            /* the listener's apply values (the buffer's: SetPosition above): what Get reads straight after, then after a
+             * commit.  0 and 1 for reference; 2, 3 and 0xffffffff are what the API leaves undefined */
+            static const DWORD lap[] = { 0, 1, 2, 3, 0xffffffff };
+            for (unsigned k = 0; k < sizeof(lap) / sizeof(lap[0]); k++) {
+                D3DVECTOR g = { 7, 7, 7 }, c = { 7, 7, 7 };
+                float df = -7, dc = -7;
+                IDirectSound3DListener_SetPosition(l, 0, 0, 0, DS3D_IMMEDIATE);
+                IDirectSound3DListener_SetDistanceFactor(l, 1, DS3D_IMMEDIATE);
+                HRESULT h = IDirectSound3DListener_SetPosition(l, 4, 5, 6, lap[k]);
+                HRESULT h2 = IDirectSound3DListener_SetDistanceFactor(l, 2, lap[k]);
+                IDirectSound3DListener_GetPosition(l, &g);
+                IDirectSound3DListener_GetDistanceFactor(l, &df);
+                HRESULT hc = IDirectSound3DListener_CommitDeferredSettings(l);
+                IDirectSound3DListener_GetPosition(l, &c);
+                IDirectSound3DListener_GetDistanceFactor(l, &dc);
+                CASE("listener SetPosition(4,5,6, apply %lx) %08lx get %g,%g,%g; SetDistanceFactor(2) %08lx get %s;"
+                     " commit %08lx get %g,%g,%g distance %s\n", lap[k], h, g.x, g.y, g.z, h2, fstr(df, s1), hc, c.x, c.y, c.z,
+                     fstr(dc, s2));
+            }
+            IDirectSound3DListener_SetPosition(l, 0, 0, 0, DS3D_IMMEDIATE);
+            IDirectSound3DListener_SetDistanceFactor(l, 1, DS3D_IMMEDIATE);
             IDirectSound3DListener_Release(l);
         }
         IDirectSoundBuffer_Release(p);
