@@ -67,7 +67,7 @@ typedef struct { ms_node *head; int64_t last; int32_t cur; int32_t range; } ms_c
 static ms_node *node_new(int64_t t, int32_t v)
 {
     ms_node *n = calloc(1, sizeof(*n));
-    n->t = t; n->v = v;
+    if (n) { n->t = t; n->v = v; }
     return n;
 }
 
@@ -75,6 +75,7 @@ static ms_node *node_new(int64_t t, int32_t v)
 static void curve_add(ms_curve *c, int64_t t, int32_t v)
 {
     ms_node *n = node_new(t, v), *p = c->head;
+    if (!n) return;                     /* (out of memory: the change is lost, not a NULL write) */
     if (!p || t < p->t) { n->next = c->head; c->head = n; return; }
     for (;;) {
         if (p->t == t && p->v == v) { free(n); return; }
@@ -123,6 +124,7 @@ typedef struct { ms_node *head; } ms_queue;
 static void queue_add(ms_queue *q, int64_t t, uint32_t packed)
 {
     ms_node *n = node_new(t, (int32_t)packed), *p = q->head;
+    if (!n) return;
     if (!p || t < p->t) { n->next = q->head; q->head = n; return; }
     for (;;) {
         ms_node *nx = p->next;
@@ -483,13 +485,16 @@ static void flt_clamp(ms_fltp *f)     /* 774864d0 */
 #define U32(p, o) (*(const uint32_t *)((const uint8_t *)(p) + (o)))
 
 /* 77486b10: articulation from DMUS_ARTICPARAMS (DLS1) or a DMUS_ARTICULATION2 chain of connection lists */
-static int artic_parse(ms_artic *a, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t idx, uint32_t rate,
-                       int dls2)
+/* (lim: the download's size, as dl_wave: the structures read must be inside it) */
+#define FITS(i, n) ((uint64_t)ofs[i] + (n) <= lim)
+static int artic_parse(ms_artic *a, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t lim, uint32_t idx,
+                       uint32_t rate, int dls2)
 {
     if (!dls2) {
+        if (!FITS(idx, 4)) return -1;
         uint32_t i = U32(OFS(idx), 0);
         if (i) {
-            if (i >= nofs) return -1;
+            if (i >= nofs || !FITS(i, 0x50)) return -1;
             const uint8_t *p = OFS(i);
             a->lfo.freq = pc2lfo(I32(p, 0), rate);
             a->lfo.delay = tc2samples(I32(p, 4), rate, 10);
@@ -513,13 +518,16 @@ static int artic_parse(ms_artic *a, const void *buf, const uint32_t *ofs, uint32
             a->pan = (int16_t)((I32(p, 0x4c) >> 12) / 125);
         }
     } else {
+        if (!FITS(idx, 12)) return -1;
         const uint8_t *art = OFS(idx);
+        uint32_t hops = 0;
         while (art) {
             uint32_t li = U32(art, 0);
             if (li) {
-                if (li >= nofs) return -1;
+                if (li >= nofs || !FITS(li, 8)) return -1;
                 const uint8_t *cl = OFS(li);
                 uint32_t n = U32(cl, 4);
+                if (n > (lim - ofs[li] - 8) / 12) return -1;     /* (the connections in the download) */
                 const uint8_t *c = cl + 8;
                 for (uint32_t k = 0; k < n; k++, c += 12) {
                     uint16_t src = U16(c, 0), ctl = U16(c, 2), dst = U16(c, 4);
@@ -590,7 +598,7 @@ static int artic_parse(ms_artic *a, const void *buf, const uint32_t *ofs, uint32
             }
             uint32_t nx = U32(art, 8);
             if (!nx) break;
-            if (nx >= nofs) return -1;
+            if (nx >= nofs || !FITS(nx, 12) || ++hops > nofs) return -1;   /* (a list that comes round: no end) */
             art = OFS(nx);
         }
     }
@@ -659,16 +667,20 @@ static void instr_free(ms_instr *in)
 }
 
 /* 77487d40 */
-static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, int dls2, void **handle)
+static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32_t nofs, uint32_t lim, int dls2,
+                         void **handle)
 {
+    if (!FITS(0, 0x18)) return -1;
     const uint8_t *di = OFS(0);
     ms_instr *in = calloc(1, sizeof(*in));
+    if (!in) return -1;
     in->patch = U32(di, 0);
     uint32_t ri = U32(di, 4);
     while (ri) {
-        if (ri >= nofs) { instr_free(in); return -1; }
+        if (ri >= nofs || !FITS(ri, 0x48)) { instr_free(in); return -1; }
         const uint8_t *p = OFS(ri);
         ms_region *r = calloc(1, sizeof(*r));
+        if (!r) { instr_free(in); return -1; }
         /* 77487c50 defaults */
         r->rate = 0x5622; r->unity = 0x3c; r->loopend = 1; r->oneshot = 1; r->keyhi = 0x7f; r->velhi = 0x7f;
         r->next = in->regions; in->regions = r;
@@ -698,8 +710,9 @@ static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32
         if (ai) {
             if (ai >= nofs) { instr_free(in); return -1; }
             ms_artic *a = malloc(sizeof(*a));
+            if (!a) { instr_free(in); return -1; }
             artic_init(a, s->imrate);
-            if (artic_parse(a, buf, ofs, nofs, ai, s->imrate, dls2) < 0) { free(a); instr_free(in); return -1; }
+            if (artic_parse(a, buf, ofs, nofs, lim, ai, s->imrate, dls2) < 0) { free(a); instr_free(in); return -1; }
             a->refs = 1;
             r->artic = a;
         }
@@ -717,6 +730,7 @@ static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32
             if (!r->artic) {
                 if (!a) {
                     a = malloc(sizeof(*a));
+                    if (!a) { instr_free(in); return -1; }
                     artic_init(a, s->imrate);
                     lfo_clamp(&a->lfo); eg_clamp(&a->peg); eg_clamp(&a->veg); lfo_clamp(&a->vib); flt_clamp(&a->flt);
                     a->refs = 0;
@@ -728,8 +742,9 @@ static int dl_instrument(msynth *s, const void *buf, const uint32_t *ofs, uint32
     } else {
         if (gi >= nofs) { instr_free(in); return -1; }
         ms_artic *a = malloc(sizeof(*a));
+        if (!a) { instr_free(in); return -1; }
         artic_init(a, s->imrate);
-        if (artic_parse(a, buf, ofs, nofs, gi, s->imrate, dls2) < 0) { free(a); instr_free(in); return -1; }
+        if (artic_parse(a, buf, ofs, nofs, lim, gi, s->imrate, dls2) < 0) { free(a); instr_free(in); return -1; }
         a->refs = 0;
         for (ms_region *r = in->regions; r; r = r->next)
             if (!r->artic) { r->artic = a; a->refs++; }
@@ -894,7 +909,7 @@ int msynth_download(msynth *s, const void *buf, uint32_t size, void **handle)
     int r = -1;
     switch (h[0]) {
     case 1: case 3:                     /* (an instrument starts at the first offset: there has to be one) */
-        r = nofs ? dl_instrument(s, buf, ofs, nofs, h[0] == 3, handle) : -6; break;
+        r = nofs ? dl_instrument(s, buf, ofs, nofs, h[3], h[0] == 3, handle) : -6; break;
     case 2: r = dl_wave(s, buf, ofs, nofs, h[3], h[1], handle); break;
     case 4: r = dl_wartic(s, buf, ofs, nofs, h[3], h[1], handle); break;
     case 5: case 6: r = dl_wavebuf(s, buf, ofs, nofs, h[3], h[0], h[1], handle); break;
@@ -2115,6 +2130,7 @@ static int find_bus(msynth *s, uint32_t id, uint32_t *func, int32_t *pitch, uint
 static ms_voice *voice_new(void)    /* 7748afa0 */
 {
     ms_voice *v = calloc(1, sizeof(*v));
+    if (!v) return NULL;
     v->lfo.p.freq = 0xedc;
     v->vib.p.freq = 0xedc;
     v->peg.on = 0; v->veg.on = 0;
@@ -2200,6 +2216,7 @@ static void synth_prealloc(msynth *s, int64_t end)   /* 77484ad0 */
 msynth *msynth_new(uint32_t rate, int voices, int groups, int stereo)
 {
     msynth *s = calloc(1, sizeof(*s));
+    if (!s) return NULL;
     s->mmx = 1;
     s->dynpan = 1;
     s->dynvol = 1;
@@ -2213,10 +2230,14 @@ msynth *msynth_new(uint32_t rate, int voices, int groups, int stereo)
     int extra = voices / 4;
     if (extra < 4) extra = 4;
     /* the constructor makes 32 + 8 voices, Open grows the lists to the requested size (pushing at the head) */
-    for (int i = 0; i < 32; i++) voice_push(&s->freelist, voice_new());
-    for (int i = 0; i < 8; i++) voice_push(&s->extra, voice_new());
-    for (int i = 32; i < voices; i++) voice_push(&s->freelist, voice_new());
-    for (int i = 8; i < extra; i++) voice_push(&s->extra, voice_new());
+    int nomem = 0;
+#define PUSH(list) do { ms_voice *v_ = voice_new(); if (v_) voice_push(&s->list, v_); else nomem = 1; } while (0)
+    for (int i = 0; i < 32; i++) PUSH(freelist);
+    for (int i = 0; i < 8; i++) PUSH(extra);
+    for (int i = 32; i < voices; i++) PUSH(freelist);
+    for (int i = 8; i < extra; i++) PUSH(extra);
+#undef PUSH
+    if (nomem) { msynth_free(s); return NULL; }     /* (out of memory: no synth, rather than a NULL voice in a list) */
     for (int i = voices; i < 32; i++) { ms_voice *v = s->freelist; s->freelist = v->next; free(v); }
     for (int i = extra; i < 8; i++) { ms_voice *v = s->extra; s->extra = v->next; free(v); }
     s->maxvoices = (int16_t)voices;
@@ -2224,8 +2245,10 @@ msynth *msynth_new(uint32_t rate, int voices, int groups, int stereo)
     if (groups < 1) groups = 1;
     s->ncl = (uint32_t)groups;
     s->cl = calloc((size_t)groups, sizeof(ms_cl *));
+    if (!s->cl) { s->ncl = 0; msynth_free(s); return NULL; }
     for (int i = 0; i < groups; i++) {
         s->cl[i] = malloc(sizeof(ms_cl));
+        if (!s->cl[i]) { s->ncl = (uint32_t)i; msynth_free(s); return NULL; }
         cl_init(s->cl[i], s);
         s->cl[i]->gain = s->gain;
     }

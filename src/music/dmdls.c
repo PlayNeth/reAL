@@ -43,7 +43,8 @@ struct dm_collection {
     uint8_t *data;
     dls_instr *ins; int nins;
     uint32_t *cues; int ncues;
-    dls_wave *waves; int nwaves;
+    dls_wave *waves; int nwaves, wavecap;
+    int *cuewave;                       /* each cue's wave (the first at its offset), or -1: worked out once loaded */
     int gm;
 };
 
@@ -138,6 +139,32 @@ dm_collection *dls_load(const void *data, size_t size, int gm)
 
 static void coll_destroy(dm_collection *c);
 
+/* the wave each cue names: the first in file order at the cue's offset.  Looked up per region of every download,
+ * a search of all the waves each time */
+typedef struct { uint32_t off; int idx; } offidx;
+static int offidx_cmp(const void *a, const void *b)
+{
+    const offidx *x = a, *y = b;
+    if (x->off != y->off) return x->off < y->off ? -1 : 1;
+    return x->idx < y->idx ? -1 : x->idx > y->idx;
+}
+static void map_cues(dm_collection *c)
+{
+    if (!c->ncues) return;
+    offidx *s = malloc(((size_t)c->nwaves + 1) * sizeof(*s));
+    int *m = malloc((size_t)c->ncues * sizeof(*m));
+    if (!s || !m) { free(s); free(m); return; }     /* (wave_index searches instead) */
+    for (int i = 0; i < c->nwaves; i++) { s[i].off = c->waves[i].off; s[i].idx = i; }
+    qsort(s, (size_t)c->nwaves, sizeof(*s), offidx_cmp);
+    for (int k = 0; k < c->ncues; k++) {
+        int lo = 0, hi = c->nwaves;                 /* the first entry with off >= the cue's */
+        while (lo < hi) { int mid = lo + (hi - lo) / 2; if (s[mid].off < c->cues[k]) lo = mid + 1; else hi = mid; }
+        m[k] = lo < c->nwaves && s[lo].off == c->cues[k] ? s[lo].idx : -1;
+    }
+    free(s);
+    c->cuewave = m;
+}
+
 /* as dls_load, taking over a malloc'd buffer (freed with the collection, or now on failure) */
 dm_collection *dls_load_owned(void *data, size_t size, int gm)
 {
@@ -181,11 +208,17 @@ dm_collection *dls_load_owned(void *data, size_t size, int gm)
                     if (yid == FCC('f','m','t',' ')) { w.fmt = y.p; w.fmtlen = (uint32_t)(y.e - y.p); }
                     else if (yid == FCC('d','a','t','a')) { w.data = y.p; w.len = (uint32_t)(y.e - y.p); }
                 }
-                col->waves = realloc(col->waves, (col->nwaves + 1) * sizeof(*col->waves));
+                if (col->nwaves == col->wavecap) {      /* (grown by doubling: a large bank made it quadratic) */
+                    int cap = col->wavecap ? col->wavecap * 2 : 64;
+                    dls_wave *nw = realloc(col->waves, (size_t)cap * sizeof(*col->waves));
+                    if (!nw) break;
+                    col->waves = nw; col->wavecap = cap;
+                }
                 col->waves[col->nwaves++] = w;
             }
         }
     }
+    map_cues(col);
     return col;
 }
 
@@ -196,7 +229,7 @@ static void coll_destroy(dm_collection *c)
         for (int k = 0; k < c->ins[i].nrgn; k++) free(c->ins[i].rgn[k].arts);
         free(c->ins[i].rgn); free(c->ins[i].arts);
     }
-    free(c->ins); free(c->cues); free(c->waves); free(c->data); free(c);
+    free(c->ins); free(c->cues); free(c->waves); free(c->cuewave); free(c->data); free(c);
 }
 
 void dls_addref(dm_collection *c) { if (c) __sync_add_and_fetch(&c->refs, 1); }
@@ -223,27 +256,40 @@ int dls_find(const dm_collection *c, uint32_t patch)
 static int wave_index(const dm_collection *c, uint32_t table)
 {
     if (table >= (uint32_t)c->ncues) return -1;     /* unsigned: a file's index can be 2^31 or more */
+    if (c->cuewave) return c->cuewave[table];
     for (int i = 0; i < c->nwaves; i++) if (c->waves[i].off == c->cues[table]) return i;
     return -1;
 }
 
 /* ------------------------------------------------------------------ buffer building */
-typedef struct { uint8_t *b; uint32_t n, cap; uint32_t *ofs; uint32_t nofs; } bld;
+typedef struct { uint8_t *b; uint32_t n, cap; uint32_t *ofs; uint32_t nofs, ofscap; int fail; } bld;
 
+/* (out of memory: the item goes to a scratch block and the build fails at bld_finish, so the callers' writes into
+ * the items they asked for stay inside memory) */
+static uint8_t bld_scratch[32];       /* (the callers write up to 0x14 into an item) */
 static uint32_t bld_add(bld *x, const void *data, uint32_t len)
 {
     uint32_t at = (x->n + 7) & ~7u;
-    if (at + len > x->cap) {
-        while (at + len > x->cap) x->cap = x->cap ? x->cap * 2 : 256;
-        x->b = realloc(x->b, x->cap);
+    if (!x->fail && at + len > x->cap) {
+        uint32_t cap = x->cap;
+        while (at + len > cap) cap = cap ? cap * 2 : 256;
+        uint8_t *nb = realloc(x->b, cap);
+        if (nb) { x->b = nb; x->cap = cap; } else x->fail = 1;
     }
+    if (!x->fail && x->nofs == x->ofscap) {
+        uint32_t cap = x->ofscap ? x->ofscap * 2 : 16;
+        uint32_t *no = realloc(x->ofs, cap * sizeof(uint32_t));
+        if (no) { x->ofs = no; x->ofscap = cap; } else x->fail = 1;
+    }
+    if (x->fail) return 0;
     memset(x->b + x->n, 0, at - x->n);
     if (data) memcpy(x->b + at, data, len); else memset(x->b + at, 0, len);
     x->n = at + len;
-    x->ofs = realloc(x->ofs, (x->nofs + 1) * sizeof(uint32_t));
     x->ofs[x->nofs] = at;
     return x->nofs++;
 }
+/* where an item is (a scratch block once the build has failed) */
+static uint8_t *bld_at(bld *x, uint32_t i) { return x->fail ? bld_scratch : x->b + x->ofs[i]; }
 
 static void put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24); }
 
@@ -251,7 +297,8 @@ static void put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(
 static uint8_t *bld_finish(bld *x, uint32_t type, uint32_t id, uint32_t *size)
 {
     uint32_t hdr = 16 + 4 * x->nofs, total = hdr + x->n;
-    uint8_t *out = calloc(1, total);
+    uint8_t *out = x->fail ? NULL : calloc(1, total);
+    if (!out) { free(x->b); free(x->ofs); *size = 0; return NULL; }
     put32(out, type); put32(out + 4, id); put32(out + 8, x->nofs); put32(out + 12, total);
     for (uint32_t i = 0; i < x->nofs; i++) put32(out + 16 + 4 * i, x->ofs[i] + hdr);
     memcpy(out + hdr, x->b, x->n);
@@ -260,17 +307,24 @@ static uint8_t *bld_finish(bld *x, uint32_t type, uint32_t id, uint32_t *size)
     return out;
 }
 
+/* the download as bld would lay it out (DMUS_DOWNLOADINFO, two offsets, the DMUS_WAVE at 24 and its data at 56),
+ * written straight into one block: the wave data copied once, not twice into growing buffers */
 static uint8_t *build_wave(const dls_wave *w, uint32_t id, uint32_t *size)
 {
-    bld x = { 0 };
-    uint8_t dw[32] = { 0 };     /* DMUS_WAVE: ulFirstExtCkIdx, ulCopyrightIdx, ulWaveDataIdx, WAVEFORMATEX */
+    const uint32_t hdr = 16 + 4 * 2, dat = (30 + 7) & ~7u;
+    if (w->len > 0xffffffffu - hdr - dat - 4) { *size = 0; return NULL; }
+    uint32_t total = hdr + dat + 4 + w->len;
+    uint8_t *out = calloc(1, total);
+    if (!out) { *size = 0; return NULL; }
+    put32(out, 2); put32(out + 4, id); put32(out + 8, 2); put32(out + 12, total);
+    put32(out + 16, hdr); put32(out + 20, hdr + dat);
+    uint8_t *dw = out + hdr;    /* DMUS_WAVE: ulFirstExtCkIdx, ulCopyrightIdx, ulWaveDataIdx, WAVEFORMATEX */
     memcpy(dw + 12, w->fmt, w->fmtlen < 18 ? w->fmtlen : 16);
     put32(dw + 8, 1);
-    bld_add(&x, dw, 30);
-    uint32_t i = bld_add(&x, NULL, 4 + w->len);
-    put32(x.b + x.ofs[i], w->len);
-    memcpy(x.b + x.ofs[i] + 4, w->data, w->len);
-    return bld_finish(&x, 2, id, size);
+    put32(out + hdr + dat, w->len);
+    memcpy(out + hdr + dat + 4, w->data, w->len);
+    *size = total;
+    return out;
 }
 
 /* DMUS_ARTICULATION2 chain over connection blocks; returns the first index or 0 */
@@ -278,13 +332,14 @@ static uint32_t add_artchain(bld *x, const blob *arts, int n)
 {
     if (!n) return 0;
     uint32_t *hi = malloc(n * sizeof(uint32_t)), first;
+    if (!hi) { x->fail = 1; return 0; }
     for (int i = 0; i < n; i++) {
         uint32_t h = bld_add(x, NULL, 12);
         uint32_t l = bld_add(x, arts[i].p, arts[i].n);
-        put32(x->b + x->ofs[h], l);
+        put32(bld_at(x, h), l);
         hi[i] = h;
     }
-    for (int i = 0; i + 1 < n; i++) put32(x->b + x->ofs[hi[i]] + 8, hi[i + 1]);
+    for (int i = 0; i + 1 < n; i++) put32(bld_at(x, hi[i]) + 8, hi[i + 1]);
     first = hi[0];
     free(hi);
     return first;
@@ -318,15 +373,15 @@ static uint8_t *build_instrument(const dm_collection *c, const dls_instr *in, ui
         memcpy(r + 0x24, g->wsmp, 20);
         memcpy(r + 0x38, g->loop, 16);
         uint32_t ri = bld_add(&x, r, 72);
-        put32(x.b + x.ofs[ri] + 0x10, prev);
+        put32(bld_at(&x, ri) + 0x10, prev);
         prev = ri;
         uint32_t ai = add_artchain(&x, g->arts, g->narts);
-        put32(x.b + x.ofs[ri] + 0xc, ai);
+        put32(bld_at(&x, ri) + 0xc, ai);
     }
-    put32(x.b + x.ofs[0] + 4, prev);
+    put32(bld_at(&x, 0) + 4, prev);
     /* add_artchain can move the buffer: get the index first, then the address */
     uint32_t gi = add_artchain(&x, in->arts, in->narts);
-    put32(x.b + x.ofs[0] + 8, gi);
+    put32(bld_at(&x, 0) + 8, gi);
     return bld_finish(&x, 3, id, size);
 }
 
@@ -433,7 +488,7 @@ void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpa
             uint32_t sz;
             uint8_t *b = build_wave(&c->waves[wi], wavid[wi], &sz);
             void *h = NULL;
-            int r = p->sink.download(p->ctx, b, sz, &h);
+            int r = b ? p->sink.download(p->ctx, b, sz, &h) : -1;     /* (no memory for it: not downloaded) */
             free(b);
             if (r < 0) continue;
             q->wh[wi] = h;
@@ -443,7 +498,7 @@ void *dls_port_download(dls_port *p, dm_collection *c, uint32_t patch, int setpa
     }
     uint32_t sz;
     uint8_t *b = build_instrument(c, in, setpatch ? newpatch : patch, (uint32_t)ii, wavid, ranges, nranges, &sz);
-    int r = p->sink.download(p->ctx, b, sz, &d->h);
+    int r = b ? p->sink.download(p->ctx, b, sz, &d->h) : -1;
     free(b); free(wavid);
     if (r < 0) {
         d->h = NULL;
