@@ -23,8 +23,11 @@ ALchemy's twin.
 
 If a run crashes or hangs, dsfuzz.exe notes it in the results and the script goes on with the next batch.
 
-Two more passes, if asked for them (ALchemy only, nothing is compared on your PC):
+More passes, if asked for them:
 - run2.bat runs the same calls one seed per process, so a crash loses one seed and not 25. It takes an hour or more
   and writes results2.zip.
 - run3.bat runs alprobe.exe, DirectSound and EAX case by case, in a few minutes, and writes results3.zip.
+- run4.bat runs applyprobe.exe under ALchemy, reAL and Windows' own DirectSound: a tone through a 3D buffer, moved
+  away with each dwApply value, the level the speakers get recorded (the default output's loopback). Leave the
+  volume up and nothing else playing; it takes about three minutes and writes results4.zip.
 Each pass writes its own folder and zip, so running one doesn't touch another's results.
