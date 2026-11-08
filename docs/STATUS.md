@@ -180,7 +180,7 @@ Known differences it still shows, kept on purpose:
   default 3D values).
 - Non-finite 3D values are refused (Windows takes them, and its maths gives NaN).
 - Lenient where Windows refuses, as ALchemy: Play's priority and TERMINATEBY / LOC flags without LOCDEFER, any dwApply
-  other than 0 taken as deferred, SetCooperativeLevel with no window, Compact below DSSCL_PRIORITY, SetSpeakerConfig
+  other than 0 taken as deferred (buffer and listener, measured from ALchemy's output: tests/applyprobe.c), SetCooperativeLevel with no window, Compact below DSSCL_PRIORITY, SetSpeakerConfig
   values, GetCaps with a larger dwSize, a duplicate made through another DirectSound object, a Lock overlapping one
   not yet unlocked, Unlock lengths, notifications with no event or out of order, IDirectSoundBuffer8 from an older
   IDirectSound's buffer, formats Windows refuses (a wrong nBlockAlign, odd channel masks), a cone's inside angle wider

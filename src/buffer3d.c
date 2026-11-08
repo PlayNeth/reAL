@@ -10,7 +10,7 @@ static ULONG WINAPI b3d_Release(IDirectSound3DBuffer *iface)
 
 static rl_vec3 to_v(D3DVALUE x, D3DVALUE y, D3DVALUE z) { rl_vec3 v = { x, y, z }; return v; }
 
-/* apply: DS3D_IMMEDIATE (0), or anything else deferred (ALchemy's: alprobe's 2, 3 and ffffffff defer) */
+/* apply: DS3D_IMMEDIATE (0), or anything else deferred (ALchemy, measured from its output: tests/applyprobe.c) */
 static void b3d_changed(rl_buffer *This, DWORD apply)
 {
     if (apply != DS3D_IMMEDIATE) {
@@ -218,10 +218,12 @@ static ULONG WINAPI lst_Release(IDirectSound3DListener *iface)
 
 #define LST_DEV(iface) (LISTENER(iface)->dev)
 
+/* apply: as the buffer's, DS3D_IMMEDIATE (0) applies, anything else waits for the commit (ALchemy, measured from
+ * its output: tests/applyprobe.c; Windows refuses the values other than 0 and 1) */
 static void lst_changed(rl_device *dev, DWORD apply)
 {
     dev->listener_dirty = TRUE;
-    if (apply != DS3D_DEFERRED) rl_device_commit_3d(dev);
+    if (apply == DS3D_IMMEDIATE) rl_device_commit_3d(dev);
 }
 
 static HRESULT WINAPI lst_GetAllParameters(IDirectSound3DListener *iface, LPDS3DLISTENER p)
