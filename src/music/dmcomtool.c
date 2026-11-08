@@ -193,6 +193,13 @@ static void tops_script_init(void *ctx, dm_segstate *ss, dm_track *t, uint32_t v
     }
     dm_host_release_later(st);
 }
+static int tops_script_blocks(void *ctx, dm_track *t)
+{
+    (void)ctx;
+    dm_scripttrack *T = t->data;
+    for (dm_scriptev *e = T->items; e; e = e->next) if (e->script && rm_script_init_blocks(e->script)) return 1;
+    return 0;
+}
 /* 0040fbe9: an event's message to the track's tool */
 static void tops_script_event(void *ctx, dm_segstate *ss, dm_track *t, const dm_scriptev *e, mtime_t off, uint32_t vid)
 {
@@ -211,7 +218,8 @@ static void tops_script_event(void *ctx, dm_segstate *ss, dm_track *t, const dm_
 }
 static const dm_toolops s_toolops = { tops_stamp, tops_unstamp, tops_process, tops_flush, tops_clone_ext, tops_free_ext,
                                       tops_state_graph, tops_graph_release, tops_mp_get, tops_mp_add, tops_mp_flush,
-                                      tops_mp_release, tops_state_end, tops_script_init, tops_script_event };
+                                      tops_mp_release, tops_state_end, tops_script_init, tops_script_event,
+                                      tops_script_blocks };
 
 /* the StampPMsg of the performance's, a state's and an audiopath's graph interfaces on any message */
 static HRESULT owner_stamp(rm_perf *p, DMUS_PMSG *m, int owner, void *obj)

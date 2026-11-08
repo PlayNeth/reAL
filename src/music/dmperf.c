@@ -120,6 +120,7 @@ struct dm_perf {
     int played, stopped, tempochanged;          /* +0x360 +0x364 +0x368 */
     volatile uint32_t dxver;                    /* +0x370 */
     dm_segstate *ssplaying; uint32_t cfgplaying;   /* +0x374 +0x378 */
+    struct pinit *pinit;                        /* (script Inits put off until the transport's pass is over) */
     sstrack *direct;                            /* reAL: the tracks the application plays itself (InitPlay) */
     int autodl;
     dm_audiopath *paths, *defpath;
@@ -144,7 +145,7 @@ struct dm_perf {
 static uint32_t g_trackid;                      /* 7732b1b0 */
 
 /* a port's wave voice, shared by the wave track's state and the wave messages (dmwavetrack.c) */
-typedef struct dm_wvoice { int refs; int port; void *h; } dm_wvoice;
+typedef struct dm_wvoice { int refs; int port; void *h; int rec; } dm_wvoice;   /* rec: a streaming play's (wrec) */
 static void wv_release(dm_perf *pf, dm_wvoice *v);
 static int wave_out(dm_perf *pf, dm_pmsg *p, rtime_t rt);
 
@@ -718,8 +719,11 @@ int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uin
     uint32_t cf = 0;
     if (trackid)
         for (int k = 0; k < 9 && !ctx; k++)
-            for (dm_segstate *s = pf->lists[k]; s && !ctx; s = s->lnext)
+            for (dm_segstate *s = pf->lists[k]; s && !ctx; s = s->lnext) {
+                /* (a state's tracks have the ids firstid..lastid, given in order as it was made: the others skipped) */
+                if (s->ntr && s->firstid <= s->lastid && (trackid < s->firstid || s->lastid < trackid)) continue;
                 for (int i = 0; i < s->ntr; i++) if (s->tr[i].vid == trackid) { ctx = s; cf = s->tr[i].cfg & 7; break; }
+            }
     if ((prm == PRM_TEMPO || prm == PRM_PRIVTEMPO || prm == PRM_TIMESIG) && !data) return DM_E_POINTER;
     pf->apprand = 1;                    /* (called from the application) */
     int hr = perf_getparam_ex(pf, ctx, cf, prm, group, index, mt, next, data);
@@ -1355,7 +1359,7 @@ static int note_out(dm_perf *pf, dm_pmsg *p, rtime_t rt)
     uint32_t pi, group, chan;
     int16_t transpose;
     if (map_pch(pf, p->pch, &pi, &group, &chan, &transpose) < 0) return DMUS_S_FREE;
-    if (pi > (uint32_t)pf->nports || pi >= (uint32_t)pf->nports) return DMUS_S_FREE;
+    if (pi >= (uint32_t)pf->nports) return DMUS_S_FREE;
     port *po = &pf->ports[pi];
     int on = p->n_flags & NOTEF_NOTEON;
     uint32_t msg;
@@ -2179,6 +2183,25 @@ int dm_audiopath_activate(dm_audiopath *ap, int on)
     if (!on) {
         dm_perf *pf = ap->pf;
         pf->xprec = pf->appxprec;
+        if (pf->fixes & DM_FIX_PATH_OFF) {
+            /* collected first: stopping a control state invalidates, which moves states between the lists */
+            dm_segstate *stack[64], **v = stack;
+            int n = 0, cap = 64;
+            for (int k = 0; k < 9; k++)
+                for (dm_segstate *s = pf->lists[k]; s; s = s->lnext) {
+                    if (s->audiopath != ap || !s->canstop) continue;
+                    if (n == cap) {
+                        dm_segstate **nv = v == stack ? malloc((size_t)cap * 2 * sizeof(*v)) : realloc(v, (size_t)cap * 2 * sizeof(*v));
+                        if (!nv) goto full;
+                        if (v == stack) memcpy(nv, stack, sizeof(stack));
+                        v = nv; cap *= 2;
+                    }
+                    v[n++] = s; s->refs++;      /* (held: stopping one may let go of another) */
+                }
+full:
+            for (int i = 0; i < n; i++) { if (v[i]->canstop) dm_perf_stop(pf, NULL, v[i], 0, 0); ss_unref(v[i]); }
+            if (v != stack) free(v);
+        } else
         for (int k = 0; k < 9; k++)
             for (dm_segstate *s = pf->lists[k], *nx; s; s = nx) {
                 nx = s->lnext;
@@ -2307,6 +2330,7 @@ void dm_perf_free(dm_perf *pf)
 {
     if (!pf) return;
     direct_end_all(pf);
+    while (pf->pinit) { pinit *x = pf->pinit; pf->pinit = x->next; ss_unref(x->ss); dm_track_release(x->t); free(x); }
     for (int k = 0; k < pf->nports; k++)
         for (int i = 0; i < s_nlive_ports; i++)
             if (s_live_ports[i] == pf->ports[k].id) { s_live_ports[i] = s_live_ports[--s_nlive_ports]; break; }

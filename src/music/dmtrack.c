@@ -806,6 +806,32 @@ static void track_unlink(sstrack *e)
     e->linked = 0;
 }
 
+/* script Inits put off (track_initplay_state), run by script_drain once no pass is under way */
+typedef struct pinit { struct pinit *next; dm_segstate *ss; dm_track *t; uint32_t vid; } pinit;
+static void ss_unref(dm_segstate *ss);
+static void script_defer(dm_perf *pf, dm_segstate *ss, dm_track *t, uint32_t vid)
+{
+    pinit *x = calloc(1, sizeof(*x));
+    if (!x) { pf->tops.script_init(pf->tctx, ss, t, vid); return; }    /* (no memory: now, as before) */
+    x->ss = ss; ss->refs++;
+    x->t = t; dm_track_addref(t);
+    x->vid = vid;
+    pinit **p = &pf->pinit;             /* (in the order they were made) */
+    while (*p) p = &(*p)->next;
+    *p = x;
+}
+static void script_drain(dm_perf *pf)
+{
+    pinit *x;
+    while (!pf->ssplaying && (x = pf->pinit)) {
+        pf->pinit = x->next;
+        if (x->ss->tr && pf->tops.script_init) pf->tops.script_init(pf->tctx, x->ss, x->t, x->vid);   /* (not if it ended) */
+        ss_unref(x->ss);
+        dm_track_release(x->t);
+        free(x);
+    }
+}
+
 static void track_initplay_state(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags, int noscript);
 static void track_initplay(dm_perf *pf, dm_segstate *ss, sstrack *e, uint32_t flags)
 {
@@ -871,7 +897,15 @@ static void track_initplay_state(dm_perf *pf, dm_segstate *ss, sstrack *e, uint3
         evstate *S = calloc(1, sizeof(*S));
         if (!S) break;
         e->state = S;
-        if (!noscript && pf->tops.script_init) pf->tops.script_init(pf->tctx, ss, e->t, e->vid);
+        if (!noscript && pf->tops.script_init) {
+            /* (with fixes: a state made in the middle of another's play pass - a segment trigger track's - whose
+             * script Init lets the lock go: put off until that piece is over (script_drain, before any state plays
+             * on), as another thread may change the states while the lock is let go) */
+            if ((pf->fixes & DM_FIX_GUARDS) && pf->ssplaying && ss && pf->tops.script_blocks &&
+                pf->tops.script_blocks(pf->tctx, e->t))
+                script_defer(pf, ss, e->t, e->vid);
+            else pf->tops.script_init(pf->tctx, ss, e->t, e->vid);
+        }
         break;
     }
     case TRK_PARAMCTL: {                    /* 77322dc4 */
@@ -1220,6 +1254,7 @@ int dm_track_direct_play(dm_perf *pf, dm_segstate *ss, void *d, dm_track *t, int
     pf->inplay = 0;
     pf->apprand = 0;
     pf->ssplaying = was;
+    if (!was) script_drain(pf);
     return r;
 }
 void dm_track_direct_end(void *d)

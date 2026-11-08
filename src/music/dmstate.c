@@ -96,6 +96,10 @@ static void ss_shutdown(dm_segstate *ss)
 void dm_perf_end_states(dm_perf *pf)
 {
     direct_end_all(pf);                 /* (reAL: the tracks the application plays itself, too) */
+    while (pf->pinit) {                 /* (Inits put off: their states end here) */
+        pinit *x = pf->pinit; pf->pinit = x->next;
+        ss_unref(x->ss); dm_track_release(x->t); free(x);
+    }
     for (int k = 0; k < NLISTS; k++)
         while (pf->lists[k]) { dm_segstate *s = pf->lists[k]; pf->lists[k] = s->lnext; s->lnext = NULL; ss_shutdown(s); }
 }
@@ -122,7 +126,12 @@ mtime_t dm_segstate_start_point(dm_segstate *ss) { return ss->startpoint; }   /*
 static int ss_outside(const dm_segstate *s, mtime_t t)
 {
     mtime_t pos = t - s->mtstart + s->startpoint, span = s->loopend - s->loopstart;
-    for (uint32_t k = 0; s->loopend <= pos && k < s->repeats && span > 0; k++) pos -= span;   /* span: guard added */
+    /* (span: guard added.  The repeats at once, as ss_fold: one step a repeat, up to about 1e9 of them) */
+    if (span > 0 && s->loopend <= pos && s->repeats) {
+        uint64_t k = (uint64_t)((int64_t)pos - s->loopend) / (uint64_t)span + 1;
+        if (k > s->repeats) k = s->repeats;
+        pos = (mtime_t)((int64_t)pos - (int64_t)k * span);
+    }
     return pos < 0 || s->length <= pos;
 }
 
@@ -241,6 +250,10 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
         if (ss->length < ss->loopend) {
             ss->loopend = ss->length;
             if (ss->loopend <= ss->startpoint) ss->loopstart = ss->loopend = ss->repeatsleft = ss->repeats = 0;
+            /* (a slower tempo can bring the end below the loop's start: the repeats would play backwards spans and
+             * the transport go round for ever) */
+            else if ((pf->fixes & DM_FIX_GUARDS) && ss->loopend <= ss->loopstart)
+                ss->loopstart = ss->loopend = ss->repeatsleft = ss->repeats = 0;
         }
         reflen = 1;
     }
@@ -413,6 +426,7 @@ static void ss_mark_dirty_all(dm_perf *pf)
 static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
 {
     if (!pf->played || pf->inplay || !ss) return;
+    script_drain(pf);                   /* (a state made in the last piece is Init'ed before any state plays on) */
     pf->inside_c7c8 = 1;
     int hr = DM_OK;
     if (!ss->started) {
@@ -424,6 +438,7 @@ static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
                 hr = ss_play(pf, ss, 50);
                 run_early(pf);
                 if (pf->ops.signal) pf->ops.signal(pf->ctx, DM_THREAD_REALTIME);
+                script_drain(pf);
                 if (hr == DM_OK && pf->target - ss->mtlast >= 200) { hr = ss_play(pf, ss, 200); run_early(pf); }
             }
             for (int j = 4; j <= 5; j++)
@@ -435,6 +450,7 @@ static void ss_advance(dm_perf *pf, int k, dm_segstate *ss)
         while (hr == DM_OK && span > 0 && list_find(pf, ss) == k) {
             mtime_t chunk = span <= 0x300 ? span : 0x300;
             span -= chunk;
+            script_drain(pf);
             hr = ss_play(pf, ss, chunk);
             run_early(pf);
         }
@@ -719,6 +735,7 @@ int dm_perf_play(dm_perf *pf, dm_segment *seg, uint32_t flags, int64_t start, dm
     pf->apprand = 1;
     int hr = perf_play(pf, seg, flags, start, ap, out);
     pf->apprand = 0;
+    script_drain(pf);
     return hr;
 }
 
@@ -888,6 +905,7 @@ uint32_t dm_perf_transport(dm_perf *pf)
         }
     dm_pmsg *n;
     while ((n = pf->notif.head) && n->rt < now - pf->notif_min) { q_pop(&pf->notif); pm_free(pf, n); }
+    script_drain(pf);                   /* (the pass is over) */
     return 100;
 }
 

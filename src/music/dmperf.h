@@ -193,6 +193,8 @@ void dm_perf_set_app_precision(dm_perf *pf, int extended);
                                  * them once per start or loop (the original chooses again on every play pass) */
 #define DM_FIX_STATE_TRACKCONFIG 16  /* SegmentState::SetTrackConfig with DMUS_SEG_ALLTRACKS changes every matching track
                                  * (the original looks up the track with the unchanged index: none for ALLTRACKS) */
+#define DM_FIX_PATH_OFF 64      /* deactivating an audiopath stops every state on it (the original walks the lists
+                                 * while stopping moves states between them, and can skip some) */
 #define DM_FIX_GUARDS 32        /* malformed input and bad arguments the original lets through to a hang or to bad
                                  * arithmetic are refused or bounded (a NaN master tempo, ...) */
 void dm_perf_set_fixes(dm_perf *pf, uint32_t fixes);
@@ -262,6 +264,8 @@ typedef struct {
      * track's tool (0040fbe9: the event's physical time + off) */
     void (*script_init)(void *ctx, dm_segstate *ss, dm_track *t, uint32_t vid);
     void (*script_event)(void *ctx, dm_segstate *ss, dm_track *t, const dm_scriptev *e, mtime_t off, uint32_t vid);
+    /* whether the track's script Init would let the engine lock go (a script not started yet) */
+    int (*script_blocks)(void *ctx, dm_track *t);
 } dm_toolops;
 void dm_perf_set_toolops(dm_perf *pf, const dm_toolops *ops, void *ctx);
 /* the graphs: the setters take over one reference (released through graph_release), the getters lend theirs */

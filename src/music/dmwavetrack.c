@@ -319,7 +319,7 @@ static int ws_alloc_voice(dm_perf *pf, dm_wavetrack *T, wstate *S, void *dl, uin
     if (!rec) {
         if (S->voices[it->index]) wv_release(pf, S->voices[it->index]);
         S->voices[it->index] = v;
-    } else rec->voice = v;
+    } else { rec->voice = v; v->rec = 1; }
     *out = v;
     return hr;
 }
@@ -545,6 +545,9 @@ static int wave_out(dm_perf *pf, dm_pmsg *p, rtime_t rt)
         return DMUS_S_FREE;
     }
     if (po->ops.voice_stop) po->ops.voice_stop(po->ctx, v->h, rt);
+    /* a streaming play's download goes with its voice: the state holding it is looked for (only such a voice is in
+     * a state's records, so the others skip the search of every state's tracks) */
+    if (v->rec)
     for (int k = 0; k < 9; k++)
         for (dm_segstate *s = pf->lists[k]; s; s = s->lnext)
             for (int i = 0; i < s->ntr; i++)
