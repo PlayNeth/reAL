@@ -171,6 +171,21 @@ static int insn_len(const BYTE *p)
     }
 }
 
+/* 32 bytes for a trampoline: the hooks share one page (a VirtualAlloc each reserved 64 KB of address space for 32
+ * bytes, and a failed patch kept its block) */
+static BYTE *trampoline(void)
+{
+    static BYTE *page;
+    static LONG used;
+    if (!page) {
+        BYTE *pg = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!pg) return NULL;
+        if (InterlockedCompareExchangePointer((void **)&page, pg, NULL)) VirtualFree(pg, 0, MEM_RELEASE);
+    }
+    LONG k = InterlockedIncrement(&used) - 1;
+    return k < 4096 / 32 ? page + 32 * k : NULL;
+}
+
 /* patch fn so that it jumps to repl; returns a pointer that runs the original */
 void *rl_hotpatch(void *fn, void *repl, const char *name)
 {
@@ -197,12 +212,13 @@ void *rl_hotpatch(void *fn, void *repl, const char *name)
         LOG_INFO("cannot hook %s: unknown prologue %02x %02x %02x %02x %02x %02x", name, p[0], p[1], p[2], p[3], p[4], p[5]);
         return NULL;
     }
-    BYTE *t = VirtualAlloc(NULL, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!t) return NULL;
+    if (!VirtualProtect(p, len, PAGE_EXECUTE_READWRITE, &old)) return NULL;
+    BYTE *t = trampoline();
+    if (!t) { VirtualProtect(p, len, old, &old); return NULL; }
     memcpy(t, p, len);
     t[len] = 0xE9;
     *(INT32 *)(t + len + 1) = (INT32)((p + len) - (t + len + 5));
-    if (!VirtualProtect(p, len, PAGE_EXECUTE_READWRITE, &old)) return NULL;
+    FlushInstructionCache(GetCurrentProcess(), t, 32);
     p[0] = 0xE9;
     *(INT32 *)(p + 1) = (INT32)((BYTE *)repl - (p + 5));
     for (int i = 5; i < len; i++) p[i] = 0x90;

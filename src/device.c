@@ -85,8 +85,14 @@ void rl_device_commit_3d(rl_device *dev)
 
 static void update_all_gains(rl_device *dev)
 {
-    for (rl_buffer *b = dev->all; b; b = b->next_all)
+    /* every source recomputed: a commit waiting for the mixer would give them the same gains again (an immediate
+     * EAX 4 context set made the reverb's update and the commit each do it) */
+    dev->eax_commit = dev->eax_commit_some = FALSE;
+    dev->eax4_ctx_pending = FALSE;
+    for (rl_buffer *b = dev->all; b; b = b->next_all) {
+        b->eax_commit_one = FALSE;
         rl_buffer_update_gains(b);          /* (the primary's: its DSSCL_WRITEPRIMARY voice) */
+    }
 }
 
 /* The first EAX call of a version loads the reverb (ALchemy fn 0x10042220) and, when the game switches
@@ -235,7 +241,16 @@ static void mix(rl_device *dev, UINT32 frames)
     if (dev->eax_commit) {
         dev->eax_commit = FALSE;
         update_all_gains(dev);
+    } else if (dev->eax_commit_some) {
+        /* only sources' own immediate sets: when no other source or context value is waiting (set deferred), every
+         * other source would be recomputed to the gains it has, so only the committed ones are */
+        BOOL others = dev->eax4_ctx_pending;
+        for (rl_buffer *b = dev->all; b && !others; b = b->next_all) if (!b->eax_commit_one && b->eax4_pending) others = TRUE;
+        if (others) update_all_gains(dev);
+        else for (rl_buffer *b = dev->all; b; b = b->next_all)
+            if (b->eax_commit_one) { b->eax_commit_one = FALSE; rl_buffer_update_gains(b); }
     }
+    dev->eax_commit_some = FALSE;
     /* the effect buses this period: slot 0 for EAX 1-3, every slot running an effect for EAX 4 */
     float *bus[RL_SENDS] = { NULL };
     rl_reverb *fxr[RL_SENDS] = { NULL };

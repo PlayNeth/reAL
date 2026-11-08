@@ -126,6 +126,8 @@ typedef struct rl_device {
     rl_reverb   reverb;           /* FX slot 0's reverb (the only one before EAX 4) */
     float      *sendbuf;          /* RL_SENDS effect buses of mixbuf_frames each; bus 0 feeds `reverb` */
     BOOL        eax_commit;       /* an immediate EAX set: recompute every source (applied by the mixer) */
+    BOOL        eax_commit_some;  /* ... only the sources marked eax_commit_one (nothing else changed since) */
+    BOOL        eax4_ctx_pending; /* a deferred EAX 4 context or slot set not yet committed */
     /* EAX 4: context and FX slots; slots 1..3 get their own reverb when one is loaded into them */
     BOOL        eax4_init;
     eax4_context eax4c;
@@ -227,6 +229,8 @@ struct rl_buffer {
     eax2_buffer   eax2;
     eax3_buffer   eax3;
     eax4_source   eax4;
+    BOOL          eax4_pending;     /* a deferred EAX 4 source set its gains don't have yet */
+    BOOL          eax_commit_one;   /* recompute at the next mix (rl_device.eax_commit_some) */
 };
 
 /* the buffer's device, its lock taken.  A buffer the game keeps after its DirectSound goes moves to the graveyard

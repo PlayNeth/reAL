@@ -239,9 +239,13 @@ static HRESULT ks_set(IKsPropertySet *iface, REFGUID set, ULONG id, LPVOID inst,
         else r = eax4fx_set(&dev->eax4s[w4 - 41], &dev->eax4c, id, data, data_len);
         /* ALchemy stores every value at once; an immediate set commits: the mixer recomputes all sources
          * (and the slots' effects), so a batch of deferred sets ends with one commit */
-        if (r == EAX_OK && !(id & EAX_DEFERRED)) {
-            if (w4 != 45) rl_device_eax_listener_changed(dev);
-            dev->eax_commit = TRUE;
+        /* (a set that failed may still have stored its first records: SENDPARAMS, ACTIVEFXSLOTID) */
+        if (r != EAX_OK || (id & EAX_DEFERRED)) {
+            if (w4 == 45) This->eax4_pending = TRUE;
+            else dev->eax4_ctx_pending = TRUE;
+        } else {
+            if (w4 != 45) { rl_device_eax_listener_changed(dev); dev->eax_commit = TRUE; }
+            else { This->eax_commit_one = TRUE; dev->eax_commit_some = TRUE; }   /* (the mixer decides: device.c) */
         }
         LeaveCriticalSection(&dev->lock);
         hr = eax_hr(r);

@@ -124,13 +124,15 @@ static void route_speakers(rl_buffer *b, BOOL spatial, BOOL use_hrtf, const floa
 static void update_gains(rl_buffer *b)
 {
     rl_device *dev = b->dev;
+    b->eax4_pending = FALSE;            /* (its EAX 4 values, set deferred or not, are read now) */
     float base = rl_db100_to_gain(b->volume);
     BOOL is3d = !b->is_primary && (b->desc.dwFlags & DSBCAPS_CTRL3D) != 0;   /* (the primary's: plain 2D, unpanned) */
     BOOL spatial = is3d && b->src3d.mode != RL_DS3DMODE_DISABLE;
     BOOL use_hrtf = spatial && b->hrtf && dev->hrtf.dirs;
     rl_geom geo;
     float pan[2];
-    rl_spatial_geometry(&dev->listener, &b->src3d, &geo);
+    if (is3d) rl_spatial_geometry(&dev->listener, &b->src3d, &geo);    /* (read only for a 3D buffer) */
+    else memset(&geo, 0, sizeof(geo));
     if (spatial) { pan[0] = geo.pan[0]; pan[1] = geo.pan[1]; }
     else rl_pan_gains(b->is_primary ? 0 : b->pan, pan);
 

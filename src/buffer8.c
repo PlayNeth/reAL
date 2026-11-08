@@ -586,8 +586,11 @@ static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFF
     rl_fxchain *old = This->fx;
     This->fx = NULL;
     This->voice.data = This->shared->data;
+    BYTE *olddata = NULL;               /* (no effects: the processed copy of the buffer goes too, taken under the lock) */
+    if (!count) { olddata = This->fxdata; This->fxdata = NULL; }
     LeaveCriticalSection(&This->dev->lock);
     rl_fxchain_free(old);
+    HeapFree(GetProcessHeap(), 0, olddata);
     LOG_CALL("Buffer[%d]::SetFX(%lu)", This->id, (unsigned long)count);
     if (!count) return DS_OK;
 
@@ -597,15 +600,26 @@ static HRESULT WINAPI dsb_SetFX(IDirectSoundBuffer8 *iface, DWORD count, LPDSEFF
     rl_fxchain *c = rl_fxchain_create(This->shared->wfx ? This->shared->wfx : &This->fmt.Format, count, fx, results,
                                       defer, &hr);
     if (!c) return hr;
-    if (!This->fxdata) This->fxdata = HeapAlloc(GetProcessHeap(), 0, This->voice.size);
-    if (!This->fxdata) { rl_fxchain_free(c); return DSERR_OUTOFMEMORY; }
-    memset(This->fxdata, This->voice.sfmt == RL_U8 ? 0x80 : 0, This->voice.size);
+    /* the processed copy: made outside the lock, put in place under it (another SetFX may race this one) */
     rl_buffer_lock(This);
+    BOOL have = This->fxdata != NULL;
+    LeaveCriticalSection(&This->dev->lock);
+    BYTE *fresh = have ? NULL : HeapAlloc(GetProcessHeap(), 0, This->voice.size);
+    if (!have && !fresh) { rl_fxchain_free(c); return DSERR_OUTOFMEMORY; }
+    rl_buffer_lock(This);
+    if (!This->fxdata) { This->fxdata = fresh; fresh = NULL; }
+    if (!This->fxdata) {                /* (let go by a SetFX(0) meanwhile, and none made here) */
+        LeaveCriticalSection(&This->dev->lock);
+        rl_fxchain_free(c);
+        return DSERR_OUTOFMEMORY;
+    }
+    memset(This->fxdata, This->voice.sfmt == RL_U8 ? 0x80 : 0, This->voice.size);
     This->fx = c;
     This->voice.data = This->fxdata;
     This->fx_head = This->fx_last = (uint32_t)(This->voice.pos >> 32);
     This->fx_lead = 0;
     LeaveCriticalSection(&This->dev->lock);
+    HeapFree(GetProcessHeap(), 0, fresh);   /* (one made here and not needed) */
     return hr;
 }
 
