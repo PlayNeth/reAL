@@ -377,6 +377,7 @@ static void agc_lookahead(fx_agc *a, float s)                  /* fn 0x10059cd0 
     if (!(cap > v)) v = cap;
     double t = (double)v - 0.5 + 1.4999999464748726e-08;   /* v >= 0 here */
     uint32_t n = (uint32_t)(int64_t)rnd_magic(t);
+    if (n > FXA_DLEN) n = FXA_DLEN;             /* (ALchemy's line is as long: above 192 kHz the 50 ms cap passes it) */
     if (0.5f < a->cf) { a->fade_dn = 1; a->fade_up = 0; a->d2 = n; }
     else { a->fade_up = 1; a->fade_dn = 0; a->d1 = n; }
 }
@@ -600,8 +601,18 @@ static void eq_high(eq_filter *f)                              /* fn 0x10070120 
     }
 }
 
+int eax4dsp_fixes = 1;
+
 static void peq_coefs(eq_filter *f)
 {
+    /* (a fix: ALchemy's high shelf passes a frequency at or past Nyquist, but its low shelf and peaks have their
+     * poles at or outside the unit circle there and blow up: an 8 kHz band on a 16 kHz device.  Such a peak is
+     * passed, such a low shelf is its gain over the whole band) */
+    if (eax4dsp_fixes && f->type != 2 && !(f->F < 0.5f) && f->g != 0.0f) {
+        memset(f->c, 0, sizeof(f->c));
+        f->c[2] = f->type == 0 ? f->g : 1.0f;
+        return;
+    }
     if (f->type == 0) eq_low(f); else if (f->type == 1) eq_peak(f); else eq_high(f);
 }
 

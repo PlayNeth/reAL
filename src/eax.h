@@ -13,6 +13,9 @@
 #define REAL_EAX_H
 
 #include <stdint.h>
+
+/* reAL's `fixes` for the EAX maths (set with the config; 1 when it is built on its own) */
+extern int eax_fixes;
 #include "alrv.h"
 
 /* ------------------------------------------------------------------ property layouts (as in eax.h) */

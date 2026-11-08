@@ -237,6 +237,9 @@ static HRESULT check_type(rl_fx *This, const DMO_MEDIA_TYPE *mt, WAVEFORMATEX *w
     if (w->nChannels != 1 && w->nChannels != 2) return DMO_E_TYPE_NOT_ACCEPTED;
     if (w->nBlockAlign != w->nChannels * w->wBitsPerSample / 8 || !w->nSamplesPerSec) return DMO_E_TYPE_NOT_ACCEPTED;
     if (This->kind == DSFX_WAVES && w->wBitsPerSample == 8) return DMO_E_TYPE_NOT_ACCEPTED;
+    /* (a fix: the rates SetFX takes effects at.  Below 5 Hz the compressor's look-ahead line is empty and its wrap
+     * never ends, below 3 Hz ParamEq's coefficients are NaN, and past about 1.1 MHz the delay lines' lengths wrap) */
+    if (fx_fixes() && (w->nSamplesPerSec < 100 || w->nSamplesPerSec > 200000)) return DMO_E_TYPE_NOT_ACCEPTED;
     memcpy(wf, w, sizeof(PCMWAVEFORMAT));
     wf->cbSize = 0;
     return S_OK;
@@ -380,6 +383,7 @@ static HRESULT WINAPI mo_ProcessOutput(IMediaObject *i, DWORD f, DWORD n, DMO_OU
     HRESULT hr;
     *st = 0;
     if (n != 1) { hr = E_INVALIDARG; goto out; }
+    if (!b) { hr = E_POINTER; goto out; }
     if (!This->has_in || !This->has_out) { hr = DMO_E_TYPE_NOT_SET; goto out; }
     b->dwStatus = 0;
     BYTE *p = NULL;

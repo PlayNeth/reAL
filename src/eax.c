@@ -29,9 +29,14 @@ static float mb_gain(int32_t mb)
     return mb_lin(mb);
 }
 
-/* ALchemy's float -> int for millibel sums: round-to-nearest of v -/+ (0.5 - 1.5e-8), i.e. truncation */
+int eax_fixes = 1;
+
+/* ALchemy's float -> int for millibel sums: round-to-nearest of v -/+ (0.5 - 1.5e-8), i.e. truncation.  Past 32 bits
+ * it wraps, and a huge attenuation (air absorption over a billion metres) comes out a gain; with fixes it is taken as
+ * silence, and the sums it goes into cannot overflow */
 static int32_t trunc_mb(float v)
 {
+    if (eax_fixes && !(v > -1.0e9f && v < 1.0e9f)) return v > 0.0f ? 0 : -1000000000;
     volatile double t = v;
     if (v < 0.0f) t = (t + 0.5) - 1.4999999464748726e-08;
     else          t = (t - 0.5) + 1.4999999464748726e-08;

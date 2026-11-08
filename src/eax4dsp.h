@@ -5,6 +5,9 @@
 #define REAL_EAX4DSP_H
 #include <stdint.h>
 
+/* reAL's `fixes` for the EAX 4 effects (set with the config; 1 when they are built on their own) */
+extern int eax4dsp_fixes;
+
 typedef struct fx_distortion {        /* CPlugDistortion state (ALchemy offsets from plug + 8) */
     float rate, ramp_mix;             /* 0x4c, 0xb0 */
     float edge_norm, eq_norm, gain;   /* 0x44, 0x48, 0x50 */

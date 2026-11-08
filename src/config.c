@@ -8,6 +8,7 @@
  *   5. environment: REAL_LOG=<0-3>, REAL_INI=<path to an extra ini, highest priority>
  */
 #include "real.h"
+#include "eax4dsp.h"
 #ifndef REAL_BUILD
 #define REAL_BUILD "unknown build"
 #endif
@@ -179,6 +180,7 @@ void rl_config_load(void)
     if (GetEnvironmentVariableA("REAL_INI", path, MAX_PATH) && load_file(path, exe_name))
         lstrcpynA(s_loaded[n++], path, MAX_PATH);
     if (GetEnvironmentVariableA("REAL_NOFIXES", NULL, 0)) g_cfg.fixes = 0;
+    eax4dsp_fixes = eax_fixes = g_cfg.fixes;    /* (the EAX code is built without the config: eax4dsp.h, eax.h) */
     if (GetEnvironmentVariableA("REAL_LOG", path, MAX_PATH))
         g_cfg.log_level = clampi(atoi(path), 0, 3);
 
