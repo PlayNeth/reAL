@@ -539,7 +539,6 @@ rl_cmss3 *rl_cmss3_create(uint32_t rate, uint32_t mask, int virt)
 void rl_cmss3_destroy(rl_cmss3 *c) { free(c); }
 void rl_cmss3_reset(rl_cmss3 *c) { if (c) reset_state(c); }
 uint32_t rl_cmss3_mask(const rl_cmss3 *c) { return c->mask; }
-uint32_t rl_cmss3_latency(const rl_cmss3 *c) { return c->bs + (HOP << c->tiers); }
 
 void rl_cmss3_set_intensity(rl_cmss3 *c, int percent)
 {

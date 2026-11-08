@@ -49,8 +49,6 @@ int msynth_assign_buses(msynth *s, uint32_t group, uint32_t channel, const uint3
 int msynth_play_voice(msynth *s, int64_t t, uint32_t voiceid, uint32_t group, uint32_t chan, uint32_t dlid,
                       int32_t pitch, int32_t vol, uint64_t start, uint64_t ls, uint64_t le);
 int msynth_stop_voice(msynth *s, int64_t t, uint32_t voiceid);
-/* IDirectMusicSynth8::Refresh: a streaming wave buffer (download type 5) has been refilled */
-int msynth_refresh(msynth *s, uint32_t dlid);
 
 /* fixes of the original's flaws (off by default, for comparison against it) */
 #define MS_FIX_WAVE_END 1       /* a one-shot wave voice plays its last sample (the original stops two short of the

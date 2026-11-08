@@ -29,8 +29,6 @@ void      rl_cmss3_reset(rl_cmss3 *c);
 void      rl_cmss3_set_intensity(rl_cmss3 *c, int percent);
 /* the speaker bits the upmixer writes (the output mask without LFE; 0x33 for a stereo output) */
 uint32_t  rl_cmss3_mask(const rl_cmss3 *c);
-/* frames of delay between input and output */
-uint32_t  rl_cmss3_latency(const rl_cmss3 *c);
 /* run n frames: in L/R, out[b] for each speaker bit b (index = bit number, NULL to skip; written, not
  * added).  Bits the upmixer does not produce are zero-filled. */
 void      rl_cmss3_process(rl_cmss3 *c, const float *l, const float *r, float *const out[12], uint32_t n);

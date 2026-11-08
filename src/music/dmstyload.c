@@ -599,7 +599,6 @@ static void pattern_release(dms_pattern *p)
     band_free(p->band);
     free(p);
 }
-void dms_pattern_addref(dms_pattern *p) { if (p) p->refs++; }
 /* a pattern as saved and loaded again (7740ac0a / 7740c5f3: IDirectMusicPatternTrack::SetPatternByName): its own
  * header, rhythm, part references and markers; the parts and the motif's band shared */
 dms_pattern *dms_pattern_copy(const dms_pattern *P)
@@ -630,7 +629,6 @@ dms_pattern *dms_pattern_copy(const dms_pattern *P)
     }
     return C;
 }
-void dms_pattern_release(dms_pattern *p) { pattern_release(p); }
 void dms_style_release(dms_style *s)
 {
     if (!s || __sync_sub_and_fetch(&s->refs, 1) > 0) return;

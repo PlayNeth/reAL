@@ -28,8 +28,7 @@ void dm_host_unlock(dm_host *h);
 dm_perf *dm_host_perf(dm_host *h);        /* call only with the lock held */
 void dm_host_set_volume(dm_host *h, int32_t mb);
 rtime_t dm_host_clock(dm_host *h);
-/* whether this thread holds a performance's lock; a COM object released once it no longer does (now if it does not) */
-int  dm_host_held(void);
+/* a COM object released once this thread no longer holds a performance's lock (now if it holds none) */
 void dm_host_release_later(void *unk);
 uint32_t dm_host_rate(dm_host *h);
 /* an application's own download buffers (IDirectMusicPortDownload), with the engine lock held: ids from the port's

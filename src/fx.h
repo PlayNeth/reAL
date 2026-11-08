@@ -39,7 +39,4 @@ rl_fxchain *rl_fxchain_from_config(const WAVEFORMATEX *wfx, DWORD count, const r
 /* the send's mixing (dst gets n samples, or 2n when `dup`: a mono send into a stereo buffer) */
 void rl_send_mix(int16_t *dst, const int16_t *src, DWORD n, uint16_t gain, BOOL first, BOOL dup);
 
-/* one of our effects as a COM object (CoCreateInstance of a standard effect's class, for DirectMusic) */
-HRESULT rl_fx_create(REFCLSID cls, REFIID iid, void **out);
-
 #endif

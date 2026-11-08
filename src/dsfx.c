@@ -167,7 +167,6 @@ static const int s_nparams[DSFX_NKINDS] = { [DSFX_GARGLE] = 2, [DSFX_ECHO] = 5, 
                                             [DSFX_I3DL2] = 13 };
 
 int dsfx_nparams(int kind) { return kind >= 0 && kind < DSFX_NKINDS ? s_nparams[kind] : 0; }
-int dsfx_kind(const dsfx *f) { return f->kind; }
 
 /* 1001a090 (_ftol2_sse): float to integer, truncating */
 static int32_t ftol(float v) { return (int32_t)v; }
@@ -1335,4 +1334,3 @@ void dsfx_process_at(dsfx *f, void *data, uint32_t frames, int64_t t)
     if (f->active) update_params(f, t);
     process(f, d, frames - done);
 }
-void dsfx_process(dsfx *f, void *data, uint32_t frames) { dsfx_process_at(f, data, frames, 0); }

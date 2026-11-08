@@ -41,7 +41,5 @@ typedef struct {
 /* the configuration object (AddRef'd) behind an IUnknown, or NULL if it is not one of ours */
 const apc *rm_apcfg_data(IUnknown *u, IUnknown **holder);
 HRESULT rm_apcfg_create(REFIID riid, void **out);
-/* loading from data (the loader): the object, or the failure */
-HRESULT rm_apcfg_load(const BYTE *data, DWORD size, IUnknown **out);
 
 #endif

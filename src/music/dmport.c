@@ -1268,7 +1268,6 @@ void rm_port_detach(rm_port *p)
 void rm_port_release(rm_port *p) { if (p) port_release(p); }
 HRESULT rm_port_query(rm_port *p, REFIID riid, void **out) { return port_qi(p, riid, out); }
 HRESULT rm_port_sink(rm_port *p, REFIID riid, void **out) { return sink_new(p, 0, riid, out); }
-BOOL rm_port_is(IDirectMusicPort *i, rm_port *p) { return i && i == &p->IDirectMusicPort_iface; }
 rm_port *rm_port_of(IDirectMusicPort *i) { return i && !IsBadReadPtr(i, sizeof(void *)) && i->lpVtbl == &dp_vtbl ? pt(i) : NULL; }
 dm_host *rm_port_own_host(rm_port *p) { return p->own ? p->host : NULL; }
 DWORD rm_port_groups(rm_port *p) { return port_groups(p); }

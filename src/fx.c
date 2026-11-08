@@ -707,19 +707,6 @@ static rl_fx *fx_new(int std)
     return This;
 }
 
-HRESULT rl_fx_create(REFCLSID cls, REFIID iid, void **out)
-{
-    if (!out) return E_POINTER;
-    *out = NULL;
-    int s = std_index(cls);
-    if (s < 0) return CLASS_E_CLASSNOTAVAILABLE;
-    rl_fx *This = fx_new(s);
-    if (!This) return E_OUTOFMEMORY;
-    HRESULT hr = fx_qi(This, iid, out);
-    fx_release(This);
-    return hr;
-}
-
 /* ------------------------------------------------------------------ the chain */
 typedef struct {
     GUID cls;

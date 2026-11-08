@@ -19,7 +19,6 @@ enum { DSFX_GARGLE, DSFX_CHORUS, DSFX_FLANGER, DSFX_ECHO, DSFX_DISTORTION, DSFX_
 typedef struct dsfx dsfx;
 dsfx *dsfx_new(int kind);
 void dsfx_free(dsfx *f);
-int dsfx_kind(const dsfx *f);
 /* SetInputType/SetOutputType with one format: tag 1 (PCM, 8 or 16 bits) or 3 (float, 32 bits), 1 or 2 channels */
 int dsfx_set_format(dsfx *f, unsigned tag, unsigned channels, unsigned rate, unsigned bits);
 /* the effect's parameters as dsdmo's IMediaParams has them (index in the order of its DSFX structure) */
@@ -57,9 +56,8 @@ int dsfx_i3dl2_set_preset(dsfx *f, uint32_t preset);
 int dsfx_i3dl2_get_preset(dsfx *f, uint32_t *preset);
 int dsfx_i3dl2_set_quality(dsfx *f, int32_t quality);
 int dsfx_i3dl2_get_quality(dsfx *f, int32_t *quality);
-void dsfx_i3dl2_object(dsfx *f, void *out);
-void dsfx_i3dl2_frame(dsfx *f, uint32_t fn, void *out);  /* debugging: a function's frame (i3dl2_frame) */       /* debugging: XP's object, 0x4c8 bytes */
-void dsfx_process(dsfx *f, void *data, uint32_t frames);
+void dsfx_i3dl2_object(dsfx *f, void *out);             /* debugging: XP's object, 0x4c8 bytes */
+void dsfx_i3dl2_frame(dsfx *f, uint32_t fn, void *out);  /* debugging: a function's frame (i3dl2_frame) */
 /* Process with its time stamp (reference time): in quanta of 3 ms, the envelopes followed to each one's time */
 void dsfx_process_at(dsfx *f, void *data, uint32_t frames, int64_t t);
 

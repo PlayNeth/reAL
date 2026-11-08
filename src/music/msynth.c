@@ -2495,18 +2495,6 @@ int msynth_play_voice(msynth *s, int64_t t, uint32_t voiceid, uint32_t group, ui
     return 0;
 }
 
-/* 774852a0: Refresh: a streaming buffer has been filled (8-bit data made signed) */
-int msynth_refresh(msynth *s, uint32_t dlid)
-{
-    ms_wave *w = find_wave(s, dlid);
-    if (!w) return 0;
-    if (w->playing) return -1;
-    if (w->valid) return -1;
-    w->valid = 1;
-    if (w->fmt == 2) for (uint32_t k = 0; k < w->len; k++) ((uint8_t *)w->data)[k] -= 0x80;
-    return 0;
-}
-
 /* 77485150: StopVoice: the playing voice releases at t, or its start still waiting goes */
 int msynth_stop_voice(msynth *s, int64_t t, uint32_t voiceid)
 {

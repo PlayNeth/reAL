@@ -92,7 +92,6 @@ int dm_audiopath_activate(dm_audiopath *ap, int on);
 int dm_audiopath_set_volume(dm_audiopath *ap, int32_t vol, uint32_t dur);     /* AudioPath::SetVolume */
 int dm_audiopath_convert(dm_audiopath *ap, uint32_t pch, uint32_t *out);
 void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap);
-dm_audiopath *dm_perf_get_default_audiopath(dm_perf *pf);
 uint32_t dm_perf_pchannels(dm_perf *pf);
 uint32_t dm_perf_port_groups(dm_perf *pf);
 int dm_perf_stop(dm_perf *pf, dm_segment *seg, dm_segstate *ss, mtime_t mt, uint32_t flags);
@@ -163,7 +162,6 @@ rtime_t dm_perf_resolved_time(dm_perf *pf, rtime_t rt, uint32_t flags);   /* Get
 int dm_perf_getparam(dm_perf *pf, int prm, uint32_t trackid, uint32_t group, uint32_t index, mtime_t mt, mtime_t *next, void *data);
 int dm_perf_setparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime_t mt, void *data);
 int dm_segment_download(dm_perf *pf, dm_segment *seg);
-int dm_segment_unload(dm_perf *pf, dm_segment *seg);
 /* the same through an audiopath (GUID_DownloadToAudioPath / GUID_UnloadFromAudioPath: its PChannels) */
 int dm_segment_download_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap);
 int dm_segment_unload_ap(dm_perf *pf, dm_segment *seg, dm_audiopath *ap);
@@ -174,7 +172,6 @@ rtime_t dm_perf_latency_time(dm_perf *pf);
 rtime_t dm_perf_queue_time(dm_perf *pf);
 void dm_perf_set_dxver(dm_perf *pf, uint32_t v);
 void dm_perf_set_auto_download(dm_perf *pf, int on);
-int dm_perf_get_auto_download(dm_perf *pf);
 void dm_perf_set_prepare_time(dm_perf *pf, uint32_t ms);
 uint32_t dm_perf_get_prepare_time(dm_perf *pf);
 void dm_perf_set_bumper_length(dm_perf *pf, uint32_t ms);
@@ -208,9 +205,6 @@ void dm_perf_set_groove(dm_perf *pf, int8_t g);
 /* SetGlobalParam(GUID_PerfMasterTempo) (7730c4c3): 0.01 to 100, the tempo map rebuilt from the prepared time
  * when a primary segment plays there */
 void dm_perf_set_master_tempo(dm_perf *pf, float f);
-int dm_perf_get_groove(dm_perf *pf, int8_t *g);
-/* the application thread's rand() (a style track's creation seeds it with time(NULL), 77411f7d) */
-void dm_perf_set_app_seed(dm_perf *pf, uint32_t seed);
 /* debugging: every rand() the engine takes (thread: 1 the application's) */
 extern void (*dm_rand_hook)(int app, int value, void *caller);
 
@@ -221,13 +215,11 @@ int dm_perf_remove_notification_type(dm_perf *pf, const dm_guid *g);
 void dm_perf_set_notification_handle(dm_perf *pf, void (*cb)(void *ctx), void *ctx, rtime_t rtmin);
 dm_pmsg *dm_perf_get_notification(dm_perf *pf);
 /* SendPMsg (77304e7e): an application's message into the queues; a message without a tool goes to the output tool.
- * dm_perf_alloc_pmsg gives a cleared message of the type's size; on failure dm_perf_send_pmsg frees it. */
+ * dm_perf_alloc_pmsg gives a cleared message of the type's size. */
 dm_pmsg *dm_perf_alloc_pmsg(dm_perf *pf, uint32_t size);
-int dm_perf_send_pmsg(dm_perf *pf, dm_pmsg *p);
 int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p);
 /* SendPMsg for a message the application keeps on failure (an application message: the host frees its own copy) */
 int dm_perf_send_pmsg_keep(dm_perf *pf, dm_pmsg *p);
-dm_pmsg *dm_perf_clone_pmsg(dm_perf *pf, const dm_pmsg *p);
 
 /* tool graphs and application tools (dmime's CGraph and IDirectMusicTool).  The graphs are the host's objects; the
  * engine knows them as opaque pointers and calls the host to stamp a message through one.  A message stamped to an

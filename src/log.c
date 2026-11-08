@@ -59,14 +59,6 @@ int rl_log_try(const char *line, int process_exit)
     return 1;
 }
 
-void rl_log_flush(void)
-{
-    if (!s_inited || !s_log) return;
-    EnterCriticalSection(&s_log_cs);
-    fflush(s_log);
-    LeaveCriticalSection(&s_log_cs);
-}
-
 const char *rl_guid_str(const GUID *g, char buf[64])
 {
     if (!g) return "(null)";

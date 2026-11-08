@@ -785,7 +785,6 @@ int dm_perf_setparam(dm_perf *pf, int prm, uint32_t group, uint32_t index, mtime
 }
 
 int dm_segment_download(dm_perf *pf, dm_segment *seg) { return dm_segment_download_ap(pf, seg, NULL); }
-int dm_segment_unload(dm_perf *pf, dm_segment *seg) { return dm_segment_unload_ap(pf, seg, NULL); }
 
 /* ------------------------------------------------------------------ dispatch */
 /* a state's entry joins (or leaves) its track's list of states playing it */

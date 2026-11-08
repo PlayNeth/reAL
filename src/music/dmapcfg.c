@@ -462,17 +462,6 @@ HRESULT rm_apcfg_create(REFIID riid, void **out)
     return hr;
 }
 
-HRESULT rm_apcfg_load(const BYTE *data, DWORD size, IUnknown **out)
-{
-    *out = NULL;
-    rm_apcfg *This = apcfg_new();
-    if (!This) return E_OUTOFMEMORY;
-    HRESULT hr = load(This, data, size);
-    if (FAILED(hr)) { ac_release(This); return hr; }
-    *out = (IUnknown *)&This->IDirectMusicObject_iface;
-    return S_OK;
-}
-
 const apc *rm_apcfg_data(IUnknown *u, IUnknown **holder)
 {
     IDirectMusicObject *o = NULL;

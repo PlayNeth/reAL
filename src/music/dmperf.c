@@ -1984,16 +1984,9 @@ void dm_perf_set_notification_handle(dm_perf *pf, void (*cb)(void *ctx), void *c
 /* 77305c42 GetNotificationPMsg: the oldest delivered notification (the caller frees it), NULL if none */
 dm_pmsg *dm_perf_get_notification(dm_perf *pf) { return q_pop(&pf->notif); }
 dm_pmsg *dm_perf_alloc_pmsg(dm_perf *pf, uint32_t size) { return pm_alloc(pf, size); }
-int dm_perf_send_pmsg(dm_perf *pf, dm_pmsg *p)
-{
-    int hr = send_pmsg(pf, p);
-    if (hr < 0) pm_free(pf, p);
-    return hr;
-}
 
 int dm_perf_free_pmsg(dm_perf *pf, dm_pmsg *p) { return p ? pm_free(pf, p) : DM_E_POINTER; }
 int dm_perf_send_pmsg_keep(dm_perf *pf, dm_pmsg *p) { return send_pmsg(pf, p); }
-dm_pmsg *dm_perf_clone_pmsg(dm_perf *pf, const dm_pmsg *p) { return pm_clone(pf, p); }
 
 /* ------------------------------------------------------------------ tool graphs */
 void dm_perf_set_toolops(dm_perf *pf, const dm_toolops *ops, void *ctx)
@@ -2158,7 +2151,6 @@ void dm_audiopath_release(dm_audiopath *ap)
 }
 
 void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap) { pf->defpath = ap; }
-dm_audiopath *dm_perf_get_default_audiopath(dm_perf *pf) { return pf->defpath; }
 uint32_t dm_perf_pchannels(dm_perf *pf) { return pf->nextpch; }
 /* the channel groups port 0 has: the highest one a PChannel is on */
 uint32_t dm_perf_port_groups(dm_perf *pf)
@@ -2287,7 +2279,6 @@ void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx
     pf->ports[idx].removed = removed;
 }
 void dm_perf_set_auto_download(dm_perf *pf, int on) { pf->autodl = on; }
-int dm_perf_get_auto_download(dm_perf *pf) { return pf->autodl; }
 /* the DirectX version the application asked for (6, 7 or 8, set by QueryInterface); read without the lock (a word
  * written whole) */
 void dm_perf_set_dxver(dm_perf *pf, uint32_t v) { pf->dxver = v; }
@@ -2306,13 +2297,11 @@ void dm_perf_set_master_tempo(dm_perf *pf, float f)
     pf->master = f;
     if (primary_at(pf, pf->prepared)) tempo_rebuild(pf, NULL, pf->prepared, 1);
 }
-int dm_perf_get_groove(dm_perf *pf, int8_t *g) { if (!pf->hasgroove) return 0; *g = pf->groove; return 1; }
 /* the application thread's msvcrt rand() state: one for the process (a style track's creation seeds it with
  * time(NULL), 77411f7d / 77412800) */
 static uint32_t g_apprnd = 1;
 static long (*g_timefn)(void);
 uint32_t *dm_app_rand_state(void) { return &g_apprnd; }
-void dm_perf_set_app_seed(dm_perf *pf, uint32_t seed) { (void)pf; g_apprnd = seed; }
 void dm_set_time_source(long (*fn)(void)) { g_timefn = fn; }
 void dm_style_srand(void) { g_apprnd = g_timefn ? (uint32_t)g_timefn() : (uint32_t)time(NULL); }
 /* srand(time(NULL)) on the thread the performance is running on now (the application's or the transport's) */

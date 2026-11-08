@@ -200,7 +200,6 @@ dms_styletrack *dms_motiftrack_new(dms_style *s, dms_pattern *p);
 dms_styletrack *dms_patterntrack_load(const uint8_t *p, size_t n, dm_getcoll_fn getcoll, void *ctx, int32_t *hr);
 /* IDirectMusicStyle::GetMotif (77409532): a segment with the motif track (and the motif's band) */
 dm_segment *dms_motif_segment(dms_style *s, dms_pattern *p);
-void dms_pattern_addref(dms_pattern *p);
 dms_pattern *dms_pattern_copy(const dms_pattern *p);
 dms_pattern *dms_patterntrack_swap(dms_styletrack *T, dms_pattern *p);   /* (the old one kept by the track) */
 /* IDirectMusicPatternTrack (the engine's lock held) */
@@ -208,7 +207,6 @@ struct dm_segstate; struct dm_segment;
 int dms_patterntrack_set_variation(dm_track *t, struct dm_segstate *ss, uint32_t flags, uint32_t part);
 int dms_patterntrack_set_pattern(dm_track *t, struct dm_segstate *ss, const dms_pattern *src, mtime_t *length);
 int dms_patterntrack_create_segment(dm_track *t, const dms_style *style, struct dm_segment **out);
-void dms_pattern_release(dms_pattern *p);
 /* 77410c9b: the PChannels of all the styles */
 int dms_styletrack_pchs(dms_styletrack *T);
 

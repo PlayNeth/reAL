@@ -43,7 +43,6 @@ static void spare_init(void)
 }
 static void host_enter(dm_host *h);
 static void host_leave(dm_host *h);
-int dm_host_held(void) { return t_held > 0; }
 void dm_host_release_later(void *unk)
 {
     IUnknown *u = unk;
