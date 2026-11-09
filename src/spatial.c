@@ -185,6 +185,53 @@ void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *a
     *el = atan2f(rel.y, h) * (180.0f / 3.14159265f);
 }
 
+/* ALchemy 2.4.2.1 on stereo speakers (DSSPEAKER_STEREO), its HRTF renderer: pink noise from a mono 3D buffer at the
+ * minimum distance, each speaker's level against the same buffer in 2D (tests/levelprobe.c noise, WASAPI loopback,
+ * Windows 11), every 15 degrees from ahead to behind, the left measured as the mirror of the right within 0.6 dB.
+ * dB, the far and the near speaker.  Elevation follows the angle off the median plane: a source above or below
+ * plays as the one ahead (measured within 1.2 dB to +-90), and one up on the right as its lateral angle
+ * (azimuth 90, elevation 45 as 45: measured within 1.1 dB).  reAL's output against these, recorded the same way:
+ * within 1.1 dB at every measured direction (the noise measured over half a second varies by about that) */
+static const float k_stereo_far[2][13]  = {
+    { -5.5f, -7.7f, -10.9f, -10.0f, -10.3f, -8.4f, -6.8f, -8.8f, -9.3f, -11.7f, -13.7f, -9.3f, -7.7f },
+    /* Windows 11's own DirectSound, the same run (a mild pan, about the same power everywhere) */
+    { -7.8f, -8.6f, -8.95f, -8.7f, -9.7f, -9.7f, -10.1f, -10.2f, -9.3f, -8.6f, -9.3f, -8.4f, -7.9f } };
+static const float k_stereo_near[2][13] = {
+    { -5.5f, -4.3f, -2.65f, -1.7f, -1.1f, -1.1f, -0.65f, -2.0f, -2.9f, -3.8f, -5.1f, -5.8f, -7.7f },
+    { -7.8f, -8.2f, -8.05f, -7.2f, -7.6f, -6.9f, -6.4f, -7.4f, -7.2f, -7.1f, -8.4f, -8.0f, -7.9f } };
+
+/* a table's level at an angle from ahead (0..180) */
+static float stereo_at(const float *tab, float a)
+{
+    float t = a / 15.0f;
+    int i = (int)t;
+    if (i < 0) i = 0;
+    if (i > 11) i = 11;
+    float f = t - (float)i;
+    if (f < 0.0f) f = 0.0f; else if (f > 1.0f) f = 1.0f;
+    return tab[i] + (tab[i + 1] - tab[i]) * f;
+}
+
+void rl_spatial_stereo_pan(float az, float el, int windows, float pan[2])
+{
+    windows = windows ? 1 : 0;
+    if (!rl_finite(az) || !rl_finite(el)) { az = 0.0f; el = 0.0f; }
+    const float d2r = 3.14159265f / 180.0f;
+    float ce = cosf(el * d2r), x = sinf(az * d2r) * ce, y = sinf(el * d2r), z = cosf(az * d2r) * ce;
+    if (x > 1.0f) x = 1.0f; else if (x < -1.0f) x = -1.0f;
+    /* the angle off the median plane, ahead (lat) and behind (180 - lat), the two levels mixed by how far behind
+     * it is around the ear axis (0 ahead, 90 overhead or underneath, 180 behind): above and below play as ahead,
+     * and nothing jumps where z or x changes sign (on the median plane both sides are the same level) */
+    float lat = asinf(fabsf(x)) / d2r;
+    float phi = fabsf(atan2f(y, z)) / d2r, back = (phi - 90.0f) / 90.0f;
+    if (!(back > 0.0f)) back = 0.0f; else if (back > 1.0f) back = 1.0f;
+    const float *tf = k_stereo_far[windows], *tn = k_stereo_near[windows];
+    float far = (1.0f - back) * stereo_at(tf, lat) + back * stereo_at(tf, 180.0f - lat);
+    float near = (1.0f - back) * stereo_at(tn, lat) + back * stereo_at(tn, 180.0f - lat);
+    float gf = powf(10.0f, far / 20.0f), gn = powf(10.0f, near / 20.0f);
+    if (x >= 0.0f) { pan[0] = gf; pan[1] = gn; } else { pan[0] = gn; pan[1] = gf; }
+}
+
 float rl_spatial_distance(const rl_listener3d *l, const rl_source3d *s)
 {
     if (s->mode == RL_DS3DMODE_HEADRELATIVE) return len(s->pos);

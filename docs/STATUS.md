@@ -69,6 +69,20 @@ effects are compared by `tests/test_fx.c`):
   synth reads while they are stopped), not every 3D buffer loaded: Play works a stopped one's gains out again.
   At 300 loaded buffers an immediate listener Set went from 98 to 11 us, under the lock the mixer takes.
 
+**3D on stereo speakers without HRTF** (`src/spatial.c` rl_spatial_stereo_pan): a positioned source plays at
+ALchemy's levels for its direction.
+- They come from ALchemy 2.4.2.1's output, measured on stereo speakers (DSSPEAKER_STEREO, Windows 11):
+  `tests/levelprobe.c noise` (pink noise, WASAPI loopback) every 15 degrees around and at five elevations.
+- Each speaker's level against the same buffer in 2D: ahead -5.5 dB each, to the side -0.7 near / -6.8 far, the
+  widest split around 30-60 degrees (about -10.5 / -2), behind -7.7 each; up and down play about as ahead.
+- reAL used an equal-power pan with the centre at full level: 3D sounds came out about 6 dB louder than ALchemy's
+  and Windows' (both measured), and hard to one side at 90 degrees.
+- reAL's output recorded the same way is within 1.1 dB of ALchemy's at every measured direction.
+- DirectMusic's sink buffers (Microsoft's DirectSound under ALchemy too) take Windows 11's levels from the same
+  run: a mild pan, -7.8 dB each ahead, -6.4 / -10.1 at the side.
+- Not changed: headphones and four or more speakers (the equal-power pair, not measured yet), HRTF files and
+  `hrtf=builtin`, and 2D buffers. ALchemy's 2D is about 1 dB below Windows' and reAL's; that is not copied.
+
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.
 - The data: the MIT KEMAR compact set, diffuse-field equalised, at 48 kHz (mit-hrtf-lib's tables). It has 14 rings

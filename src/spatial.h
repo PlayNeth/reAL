@@ -11,6 +11,7 @@ typedef struct rl_vec3 { float x, y, z; } rl_vec3;
 static inline int rl_finite(float f)
 {
     union { float f; uint32_t u; } b = { f };
+    __asm__("" : "+r"(b.u));            /* (or clang, told by fast math there is no NaN, drops the test) */
     return (b.u & 0x7f800000u) != 0x7f800000u;
 }
 
@@ -66,5 +67,9 @@ void rl_spatialize(const rl_listener3d *l, const rl_source3d *s, float gains[2],
 /* listener-source distance (head-relative: from the origin), in the application's units */
 float rl_spatial_distance(const rl_listener3d *l, const rl_source3d *s);
 void rl_spatial_direction(const rl_listener3d *l, const rl_source3d *s, float *az, float *el);
+/* a 3D source's two gains on stereo speakers (not headphones, no HRTF file), as measured from the output for a
+ * direction (azimuth 0..360, + right; elevation, degrees): ALchemy's, or Windows' (windows: DirectMusic's sink
+ * buffers, Microsoft's DirectSound under ALchemy too); pan[0] left, pan[1] right */
+void rl_spatial_stereo_pan(float az, float el, int windows, float pan[2]);
 
 #endif

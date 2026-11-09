@@ -135,6 +135,13 @@ static void update_gains(rl_buffer *b)
     else memset(&geo, 0, sizeof(geo));
     if (spatial) { pan[0] = geo.pan[0]; pan[1] = geo.pan[1]; }
     else rl_pan_gains(b->is_primary ? 0 : b->pan, pan);
+    /* stereo speakers, no HRTF: ALchemy's levels for the direction (its HRTF renderer's, measured: spatial.c).  The
+     * equal-power pan above stays for headphones and four or more speakers, not measured yet */
+    if (spatial && !use_hrtf && dev->layout.n <= 2 && !dev->headphones) {
+        float az, el;
+        rl_spatial_direction(&dev->listener, &b->src3d, &az, &el);
+        rl_spatial_stereo_pan(az, el, b->sink, pan);  /* (a DirectMusic sink buffer: Microsoft's, Windows' levels) */
+    }
 
     /* direct path level, EAX high-frequency damping and reverb send; a 2D buffer has no distance or cone (its 3D
      * state is the default, at the origin: the listener's distance from there used to attenuate it) */
