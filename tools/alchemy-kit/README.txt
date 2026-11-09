@@ -32,4 +32,6 @@ More passes, if asked for them:
   volume up and nothing else playing; it takes about three minutes and writes results4.zip.
 - run5.bat runs levelprobe.exe the same way: how loud a tone comes out on each channel for 2D buffers at several
   pans and 3D buffers in several places, about two minutes, results5.zip.
+- run6.bat runs levelprobe.exe noise: pink noise, 3D every 15 degrees around and at five elevations, each channel's
+  level in three bands, about three minutes, results6.zip.
 Each pass writes its own folder and zip, so running one doesn't touch another's results.
