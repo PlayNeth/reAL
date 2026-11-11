@@ -205,7 +205,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 
 ## HRTF data
 
-reAL renders 3D sounds on headphones through per-direction filters. They come from one of two places:
+reAL can render 3D sounds on stereo speakers and headphones through per-direction filters, as ALchemy does on both. Without them a 3D sound is panned at ALchemy's level for its direction, but without ALchemy's tone colour. The filters come from one of two places:
 
 - **The built-in set:** `hrtf=builtin` in `reAL.ini`. It is the MIT KEMAR dummy head (Bill Gardner and Keith Martin, MIT Media Lab, 1994), diffuse-field equalised: 710 directions from 40° below to straight above, set to the same loudness as ALchemy's HRTF. It isn't ALchemy's sound, but it needs no measurement. It is off by default, because the default stays what ALchemy without HRTF data sounds like.
 - **A `reAL_hrtf.bin`:** next to `dsound.dll` or in the Windows folder, or named by `hrtf=<path>`. It is used whenever it is there (`hrtf=auto`, the default). The file isn't included: build it from a measurement of the implementation you want to match, such as your own ALchemy install. The tools are in the release's `tools` folder:
@@ -217,6 +217,13 @@ python3 tools/hrtf_build.py measured.npz reAL_hrtf.bin
 ```
 
 Measured against ALchemy: a median difference of 1.1 % (−39 dB) over 133 directions, with ear levels within 0.1 dB.
+
+The comparison kit's `run9.bat` makes the same measurement (97 directions) with `levelprobe.exe clicks`:
+
+```
+python3 tools/clicks_to_npz.py ALchemy.f32 ALchemy-clicks.txt measured.npz
+python3 tools/hrtf_build.py measured.npz reAL_hrtf.bin
+```
 
 `hrtf=off` turns HRTF off either way. `tools/hrtf_kemar.py` regenerates the built-in set (`src/hrtf_kemar_data.h`) from [mit-hrtf-lib](https://github.com/zodsoft/mit-hrtf-lib)'s tables.
 

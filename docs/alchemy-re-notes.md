@@ -229,6 +229,10 @@ multiplies the voice's playback rate (sink method +4).  Verified against the emu
 * SetPosition on a stopped buffer is sometimes not applied before Play (8 of 146 positions came
   out identical to the previous one even with a 100 ms lead-in).
 * With the EAX listener volume at 0 there is no reverb tail at all.
+* The same under DSSPEAKER_STEREO (tests/levelprobe.c clicks, Windows 11, 97 directions): front −3.73 dB/ear, back
+  −11.67, the far ear 11 samples late at the side, the constant offset a few 16-bit steps in proportion to the
+  input, 4 of 97 positions stale.  So stereo speakers and headphones get the same filters.  Asking the object for
+  DSSPEAKER_HEADPHONE (SetSpeakerConfig, which only overwrites the stored value) changes nothing in the output.
 
 ## Speakers beyond stereo (ported in src/speakers.c; verified in the emulator)
 

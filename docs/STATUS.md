@@ -87,8 +87,13 @@ ALchemy's levels for its direction.
   thousandth of the minimum distance to the right as one to the right (`levelprobe near`, the kit's run7.bat; all
   within 1 dB). A stereo 3D buffer plays its mono sum in both. With 3D disabled ALchemy plays a stereo 3D buffer's
   mono sum too, the same on both speakers; reAL does without the fixes and keeps it stereo with them.
-- The tone colour is not ALchemy's: its 3D sound ahead is 8 dB down below 500 Hz and 4 dB down above, where reAL's is
-  5.5 dB down throughout (to the side the near speaker gains 2 dB above 4 kHz and the far one loses 11). Only the
+- The tone colour without HRTF data is not ALchemy's, only the level: ALchemy's 3D sound on two channels is its
+  HRTF (ahead 8 dB down below 500 Hz and 4 dB down above; to the side the near ear gains 2 dB above 4 kHz and the far
+  one loses 11). A `reAL_hrtf.bin` measured from ALchemy gives the filters themselves: `tests/levelprobe.c clicks`
+  (the kit's run9.bat) records ALchemy's response to one sample from 97 directions, `tools/clicks_to_npz.py` and
+  `tools/hrtf_build.py` make the file. reAL with that file, recorded the same way under Wine: a median difference
+  from ALchemy of -36 dB over the directions, each ear's level within 0.05 dB (the directions ALchemy itself
+  rendered with the previous position aside; the build repairs those from their mirror image).
   overall level is fitted.
 
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
