@@ -320,6 +320,8 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   Without DMUS_AUDIOF_BUFFERS a standard path fails with E_POINTER (dmime makes it with no buffers, which
   CreateAudioPath refuses), and so does InitAudio with a default path, leaving the performance not set up; reDM
   made them with buffers. `tests/comcmp.sh dx7test.exe stdpath` matches.
+- InitAudio with no output device fails with DirectSound's DSERR_NODRIVER, as dmime's (reDM answered
+  E_OUTOFMEMORY). Not followed: dmime's PlaySegmentEx then answers 88781170, reDM's DMUS_E_NOT_INIT.
 - The shared reverb's DMO is one object while anyone holds it, as dsound's buffer gives its effect.
 - The 3D path's Doppler and pitch, matching Windows dsound.
 

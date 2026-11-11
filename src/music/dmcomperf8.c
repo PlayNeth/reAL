@@ -360,7 +360,7 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
         dm_host_lock(p->host);
         if (!p->added[0]) { p->added[0] = 1; dm_host_port_enable(p->host, 0, p->host, 1); }
         dm_host_unlock(p->host);
-    } else hr = ensure_host(p, rate, voices);
+    } else hr = ensure_host(p, rate, voices, TRUE);
     if (FAILED(hr)) return hr;
     PERF_LOCKED(p, dm_host_set_dx7port(p->host, 0));   /* (InitAudio's port: DMUS_PORTPARAMS8, the audiopath feature) */
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {

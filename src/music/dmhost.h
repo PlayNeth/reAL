@@ -14,6 +14,8 @@ typedef struct dm_host dm_host;
 /* rate / voices: the default synth port's parameters (DirectMusic: 22050 Hz, 64 voices); groups: channel groups */
 dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups);
 dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int channels);   /* 1 or 2 */
+/* the same, saying why there is none: the output device's failure, or 0 (no memory) */
+dm_host *dm_host_new_why(uint32_t rate, uint32_t voices, uint32_t groups, int channels, long *why);
 /* a DirectX 7 synth port: dmusic's CreatePort without DMUS_PORTPARAMS8 and the audiopath feature (771885dd), and the
  * port Performance::Init's AddPort(NULL) makes; it takes no waves */
 void dm_host_set_dx7port(dm_host *h, int on);

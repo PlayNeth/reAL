@@ -120,12 +120,15 @@ static void perf_init_settings(rm_perf *p, BOOL again)
     else if (!again) { dm_perf_set_prepare_time(pf, p->prepare_ms); dm_perf_set_bumper_length(pf, p->bumper_ms); }
     if (p->pregraph) { dm_perf_set_graph(pf, p->pregraph); p->pregraph = NULL; }
 }
-static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices)
+/* audio: InitAudio's, which fails with DirectSound's own error when there is no output device (dmime's with
+ * DirectSoundCreate's DSERR_NODRIVER) */
+static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices, BOOL audio)
 {
     if (p->host) return S_OK;
     p->closed = FALSE;                      /* (a CloseDown before Init) */
-    p->host = dm_host_new(rate ? rate : 22050, voices ? voices : 64, 64);
-    if (!p->host) return E_OUTOFMEMORY;
+    long why = 0;
+    p->host = dm_host_new_why(rate ? rate : 22050, voices ? voices : 64, 64, 2, &why);
+    if (!p->host) return audio && why == DSERR_NODRIVER ? DSERR_NODRIVER : E_OUTOFMEMORY;
     p->port = rm_port_new(p->host);
     p->slot[0] = p->port;
     p->added[0] = 1;                        /* (InitAudio's; Init's is not, until AddPort) */
@@ -168,7 +171,7 @@ static HRESULT WINAPI pf_init(IDirectMusicPerformance8 *i, IDirectMusic **pdm, L
     LOG_CALL("music: Performance::Init");
     if (p->host && !p->closed) return DMUS_E_ALREADY_INITED;
     HRESULT hr = perf_reopen(p);
-    if (hr == S_FALSE) hr = ensure_host(p, 22050, 64);
+    if (hr == S_FALSE) hr = ensure_host(p, 22050, 64, FALSE);
     if (FAILED(hr)) return hr;
     dm_host_lock(p->host);
     p->added[0] = 0;                        /* (the DirectX 6 way: AddPort, then AssignPChannelBlock) */

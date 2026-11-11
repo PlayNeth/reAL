@@ -561,6 +561,11 @@ dm_host *dm_host_new(uint32_t rate, uint32_t voices, uint32_t groups) { return d
  * stereo (the host's clock counts its frames), both its channels that bus */
 dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int channels)
 {
+    return dm_host_new_why(rate, voices, groups, channels, NULL);
+}
+dm_host *dm_host_new_why(uint32_t rate, uint32_t voices, uint32_t groups, int channels, long *why)
+{
+    if (why) *why = 0;
     dm_host *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->rate = rate ? rate : 22050;
@@ -576,7 +581,8 @@ dm_host *dm_host_new_ex(uint32_t rate, uint32_t voices, uint32_t groups, int cha
     }
     h->waveid = 0x40000000;
     h->voiceid = 1;
-    if (FAILED(rl_device_acquire(&h->dev))) { h->dev = NULL; dm_host_free(h); return NULL; }
+    HRESULT dhr = rl_device_acquire(&h->dev);
+    if (FAILED(dhr)) { if (why) *why = dhr; h->dev = NULL; dm_host_free(h); return NULL; }
     int mono = channels == 1;
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, !mono);
     if (h->syn) msynth_set_clock(h->syn, host_clock_ms);
