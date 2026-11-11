@@ -665,6 +665,11 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - Application tools in the message pipeline: ProcessPMsg with DMUS_S_REQUEUE / DMUS_S_FREE / S_OK, the delivery
   types (immediate, queue, at time), Flush on invalidation, DMUS_PMSGT_DIRTY at a segment's start, end and abort, and
   DMUS_PCHANNEL_BROADCAST_SEGMENT.
+- The tools get their messages from one thread at a time, in the order they were taken: the transport and the
+  realtime thread both hand them over with the lock let go, and under load two messages sent one after the other
+  could arrive swapped (seen in `scrtest track`, 3 runs of 30; dmime's never, in 60). What stays, in dmime too: a
+  message due at its time and one prepared for a second later come to the two threads together, and either may be
+  first (3 of dmime's 60 runs, 2 of reDM's); the test's events no longer fall that way.
 - How it fits together: an engine message the application sees gets an application view (`dm_pmsg.ext`, a
   DMUS_PMSG with a private header). The view and the engine message are synced at every hand-over (pm_to_com /
   pm_from_com in dmcom.c). The engine calls back into the COM layer through `dm_toolops`. Messages for application

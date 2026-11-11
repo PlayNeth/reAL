@@ -712,7 +712,9 @@ End Sub
     files['trk.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000001', 'trk', [
         (0, 0, 0, 'trk.spt', 'One'), (0, 768, 768, 'trk.spt', 'Two'), (1, 1536, 1536, 'trk.spt', 'One'),
         (2, 2304, 2304, 'trk.spt', 'Boom'), (4, 3072, 3072, 'trk.spt', 'Two'), (0, 3840, 3840, 'trk.spt', 'NoSuch'),
-        (0, 4608, 4608, 'trk.spt', 'PlayIt'), (0, 6144, 5376, 'trk.spt', 'One'), (0, 5400, 5900, 'trk.spt', 'Two')])
+        (0, 4800, 4800, 'trk.spt', 'PlayIt'), (0, 6144, 5376, 'trk.spt', 'One'), (0, 5400, 5900, 'trk.spt', 'Two')])
+    # (PlayIt not a second - the prepare time - after the routine called at its time: the transport thread would
+    # reach the one as the realtime thread reaches the other, and either may come first, in dmime too)
     files['trkbad.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000003', 'trkbad', [(0, 0, 0, 'bad.spt', 'One')], BAR)
     files['noname.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000004', 'noname', [(0, 0, 0, 'trk.spt', None)], BAR)
     files['nohdr.sgt'] = tseg('8f6d1a10-1700-4000-8000-000000000005', 'nohdr', [(None, 0, 0, 'trk.spt', 'One')], BAR)
