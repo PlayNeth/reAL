@@ -156,7 +156,9 @@ void rl_config_load(void)
     char exe[MAX_PATH], exe_name[MAX_PATH], path[MAX_PATH + 32];
     defaults();
 
+    exe[0] = 0;
     GetModuleFileNameA(NULL, exe, MAX_PATH);
+    exe[MAX_PATH - 1] = 0;          /* (a path cut at MAX_PATH has no terminator on Windows XP) */
     const char *base = strrchr(exe, '\\');
     lstrcpynA(exe_name, base ? base + 1 : exe, MAX_PATH);
 
@@ -167,7 +169,9 @@ void rl_config_load(void)
         if (load_file(path, exe_name)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
     }
 
+    path[0] = 0;
     GetModuleFileNameA(g_self, path, MAX_PATH);
+    path[MAX_PATH - 1] = 0;
     dir_of(path);
     lstrcatA(path, "dsound.ini");
     if (load_file(path, exe_name)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
@@ -193,6 +197,8 @@ void rl_config_load(void)
     if (!g_cfg.log_file[0]) {
         lstrcpynA(g_cfg.log_file, exe, MAX_PATH);
         dir_of(g_cfg.log_file);
+        /* (a folder whose path leaves no room for the name: the log next to nothing, in the current folder) */
+        if (lstrlenA(g_cfg.log_file) > MAX_PATH - 9) g_cfg.log_file[0] = 0;
         lstrcatA(g_cfg.log_file, "reAL.log");
     }
 
