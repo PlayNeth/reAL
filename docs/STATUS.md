@@ -82,11 +82,14 @@ ALchemy's levels for its direction.
   run: a mild pan, -7.8 dB each ahead, -6.4 / -10.1 at the side.
 - Not changed: headphones and four or more speakers (the equal-power pair, not measured yet), HRTF files and
   `hrtf=builtin`, and 2D buffers. ALchemy's 2D is about 1 dB below Windows' and reAL's; that is not copied.
-- Not measured yet: a source at the listener's own position (head-relative at 0,0,0, how games play a sound
-  "nowhere" through a 3D buffer), inside the minimum distance, and a stereo 3D buffer. reAL plays the first as
-  straight ahead, -5.5 dB each (full level before 1.6.1). `levelprobe near` measures them (the kit's run7.bat, which
-  also runs `applyprobe cross`: whether an immediate set of something else, SetVolume, or Stop and Play apply a
-  deferred 3D change).
+- At the listener's own position (head-relative at 0,0,0, how games play a sound "nowhere" through a 3D buffer)
+  and inside the minimum distance ALchemy plays as reAL does: a source at the listener as one straight ahead, a
+  thousandth of the minimum distance to the right as one to the right (`levelprobe near`, the kit's run7.bat; all
+  within 1 dB). A stereo 3D buffer plays its mono sum in both. With 3D disabled ALchemy plays a stereo 3D buffer's
+  mono sum too, the same on both speakers; reAL does without the fixes and keeps it stereo with them.
+- The tone colour is not ALchemy's: its 3D sound ahead is 8 dB down below 500 Hz and 4 dB down above, where reAL's is
+  5.5 dB down throughout (to the side the near speaker gains 2 dB above 4 kHz and the far one loses 11). Only the
+  overall level is fitted.
 
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.

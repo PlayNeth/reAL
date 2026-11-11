@@ -244,7 +244,10 @@ static void update_gains(rl_buffer *b)
     } else {
         b->voice.hrtf = NULL;
     }
-    b->voice.mono3d = spatial && b->voice.channels >= 2;   /* (positioned: the mono sum of every channel) */
+    /* positioned: the mono sum of every channel.  ALchemy plays a stereo 3D buffer that way with 3D disabled too
+     * (tests/levelprobe.c near: both speakers the same, 3.5 dB below the 2D buffer); with the fixes it stays stereo,
+     * as a DirectMusic sink buffer, Microsoft's, does */
+    b->voice.mono3d = spatial ? b->voice.channels >= 2 : is3d && !g_cfg.fixes && !b->sink && b->voice.channels == 2;
     b->voice.gain[0] = pan[0] * direct * base;
     b->voice.gain[1] = pan[1] * direct * base;
     /* (a fix: a NaN gain would carry into the mix, the reverb and every later block) */
