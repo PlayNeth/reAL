@@ -1482,6 +1482,7 @@ static int curve_out(dm_perf *pf, dm_pmsg *p, rtime_t rt)
         port *po = &pf->ports[e->port];
         uint32_t idx = (p->flags & PF_DX8) ? p->c_merge : 0, msg = 0;
         int32_t v;
+        const mtime_t mt0 = p->mt;
         switch (p->c_type) {
         case CURVET_PB:
             if (fromcur) p->c_start = (int16_t)(mg_get(&e->m[MG_PB], idx) + 0x2000);
@@ -1530,6 +1531,14 @@ static int curve_out(dm_perf *pf, dm_pmsg *p, rtime_t rt)
             po->lastpacked = rt;
             if (p->rt != 0) {
                 if (fromcur) p->c_measure = (uint16_t)curve_step(p);
+                /* (the step is kept in 16 bits: one that is 0 there - 65536 ticks, or a file's huge length times the
+                 * factor wrapped - leaves the curve where it is, to be sent again at the same time for ever) */
+                if ((pf->fixes & DM_FIX_GUARDS) && p->c_measure == 0 && p->mt == mt0 && p->c_dur != 0 &&
+                    mt0 - p->c_origstart < p->c_dur && !((p->c_flags & CURVEF_RESET) && p->c_resetdur < 0)) {
+                    p->c_measure = 0xffff;
+                    p->mt = (mtime_t)(0xffffu + (uint32_t)mt0);
+                    if (p->mt > p->c_origstart + p->c_dur) p->mt = p->c_origstart + p->c_dur;
+                }
                 ret = DMUS_S_REQUEUE;
             }
         }

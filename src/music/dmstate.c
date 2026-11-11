@@ -861,9 +861,12 @@ uint32_t dm_perf_transport(dm_perf *pf)
             int dirty = 0;
             pf->target = target;
             dm_segstate *p = pf->lists[3];
+            /* the state whose end holds the target back with nothing left of it to play, and where it was */
+            dm_segstate *held = NULL;
+            mtime_t heldat = 0;
             if (p && p->started) {
                 mtime_t span = target - p->mtlast, avail = ss_avail(p, span);
-                if (avail < span) pf->target += avail - span;
+                if (avail < span) { pf->target += avail - span; if (avail <= 0) { held = p; heldat = p->mtlast; } }
             }
             for (dm_segstate *c = pf->lists[4]; c; c = c->lnext) {
                 if (!c->started) continue;
@@ -871,6 +874,7 @@ uint32_t dm_perf_transport(dm_perf *pf)
                     mtime_t span = pf->target - c->mtlast, avail = ss_avail(c, span);
                     if (span <= avail) continue;
                     pf->target += avail - span;
+                    if (avail <= 0) { held = c; heldat = c->mtlast; }
                 } else pf->target = c->mtstop;
                 dirty = 1;
             }
@@ -888,6 +892,15 @@ uint32_t dm_perf_transport(dm_perf *pf)
             for (dm_segstate *s = pf->lists[5], *nx; s; s = nx) { nx = s->lnext; ss_advance(pf, 5, s); }
             if (dirty) { ss_mark_dirty_all(pf); track_control(pf); }
             pf->prepared = pf->target;
+            /* (a state already past its end - a file's start point beyond its length, lengths that wrap - holds the
+             * target at or behind where it is: it plays nothing, so it never reports its end, and this loop never
+             * leaves.  It is stopped where it stands.  Only a state with nothing left: one with something left
+             * plays it, and a state whose stop sets the target is retired in the pass) */
+            if ((pf->fixes & DM_FIX_GUARDS) && held && pf->target < target && pf->played && !pf->inplay) {
+                int k = list_find(pf, held);
+                if ((k == 3 || k == 4) && held->mtlast == heldat && pf->target <= held->mtlast)
+                    stop_state(pf, held, held->mtlast, 1);
+            }
         } while (pf->target < target);
     }
     rtime_t lat = dm_perf_latency_time(pf);

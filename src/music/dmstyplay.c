@@ -820,7 +820,14 @@ static int st_play_parts(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, m
         if (rep) {
             if (remute) { st_mute_update(pf, S, pr->pch, start, off); S->cursor[idx] = NULL; }
             if (seek) S->partoff[idx] = 0;
-            if (plen) while (!(start < (int64_t)pstart + S->partoff[idx] + plen)) S->partoff[idx] += plen;
+            /* (a pattern start billions of ticks from the time played, from a file's lengths: the steps' sum
+             * wraps before it arrives and the loop never ends, as it never does with a length below 0.  The sum
+             * the loop would reach, worked out; no length below 0) */
+            if ((pf->fixes & DM_FIX_GUARDS) && plen < 0) plen = 0;
+            int64_t gap = (int64_t)start - ((int64_t)pstart + S->partoff[idx] + plen);
+            if ((pf->fixes & DM_FIX_GUARDS) && plen && gap >= (int64_t)plen * 65536)
+                S->partoff[idx] = (mtime_t)((int64_t)S->partoff[idx] + (gap / plen + 1) * plen);
+            else if (plen) while (!(start < (int64_t)pstart + S->partoff[idx] + plen)) S->partoff[idx] += plen;
             if (S->partoff[idx] + plen + pstart < end) { *again = 1; stop = S->partoff[idx] + plen + pstart; }
         }
         if (second) {
@@ -1211,6 +1218,12 @@ static int32_t st_choose(dm_perf *pf, const dms_style *s, int force, mtime_t t, 
                 F.tsbeats = 0; F.tsbeat = 0;
                 f_apply(&F, 9);
                 f_reject(&F, 11);
+                /* (a signature of no beats is never the widest: with only such patterns left none has the one chosen,
+                 * and the swap below would bring them all back, for ever.  They count as tried) */
+                if ((!pf || (pf->fixes & DM_FIX_GUARDS)) && f_empty(&F)) {
+                    for (int i = 0; i < F.n; i++) if (F.c[i].code == 11) F.c[i].code = -1;
+                    break;
+                }
                 dms_pattern *p0 = f_nth(&F, 0);
                 const uint8_t *ts = p0 ? pat_ts(p0, s) : s->ts;
                 int32_t ml = sty_beat(ts) * ts[0];
@@ -1372,13 +1385,16 @@ static int32_t st_play(dm_perf *pf, stystate *S, mtime_t start, mtime_t end, mti
         if (!restored) {
             hr = st_select(pf, S, tflags, t3, off, floop);
             if (S->pattern && start >= 1 && (fseek || fdirty)) {
-                int still = 0;
+                int still = 0, far = 0;
                 while (hr >= 0 && S->pend <= start) {
                     mtime_t was = S->pend;
                     hr = st_select(pf, S, tflags, S->pend, off, floop);
                     /* (patterns of no length chosen over and over: no end.  Another choice may still move on) */
                     if (S->pend > was) still = 0;
                     else if ((pf->fixes & DM_FIX_GUARDS) && ++still >= 256) break;
+                    /* (a file's start point millions of bars in: a pattern chosen for each on the way, minutes of
+                     * it.  65536 patterns are days of music) */
+                    if ((pf->fixes & DM_FIX_GUARDS) && ++far >= 65536) break;
                 }
                 dochord = fdirty || floop;
             } else if (!S->pattern || start < 1) dochord = fdirty || floop;
