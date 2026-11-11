@@ -553,6 +553,10 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
         for (int k = 0; k < 3; k++)          /* EAX 4 slot reverbs are recreated at the new rate */
             if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); dev->xreverb[k] = NULL; }
         dev->eax4s[0].reverb.dirty = 0xffffffff;
+        /* EAX 2 / 3: the new reverb takes the room the game has set (their listener has nothing new to apply, so the
+         * mixer would leave it the default room until the game's next change) */
+        if (dev->eax_used && (dev->eax_version == 2 || dev->eax_version == 3))
+            rl_reverb_set_props(&dev->reverb, &dev->eax_props);
         dev->reverb_dirty = TRUE;
         LeaveCriticalSection(&dev->lock);
     }
