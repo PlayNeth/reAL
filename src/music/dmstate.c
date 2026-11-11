@@ -292,7 +292,10 @@ static int ss_play(dm_perf *pf, dm_segstate *ss, mtime_t len)
             }
         ss->mtlast += n; ss->rtlast += rtdelta; ss->trackflags = 0;
         ss->segpos += n; ss->rtsegpos += rtdelta; hr = DM_OK;
-        if (ss->segpos < ss->loopend) goto out;
+        /* (a file's loop end past its length with no repeats: the end is never seen here, and the transport, which
+         * gives a state at its length nothing more to play, goes round for ever) */
+        if (ss->segpos < ss->loopend &&
+            !((pf->fixes & DM_FIX_GUARDS) && ss->repeatsleft == 0 && ss->segpos == ss->length)) goto out;
         if (ss->repeatsleft == 0) {
             if (ss->segpos != ss->length) goto out;
             hr = DMUS_S_END;
