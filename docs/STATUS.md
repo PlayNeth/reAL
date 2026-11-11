@@ -682,6 +682,10 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - `tests/comcmp.sh dx7test.exe reopen` (each of Init and InitAudio followed by each, what is set before and while
   closed, a created port, an audiopath and a state from before, CloseDown called by a tool, CloseDown twice)
   matches, 352 lines; tooltest's messages after a second InitAudio are those of the first.
+- The transport's first pass is made before Init returns, not left to its thread: a tempo message or
+  master tempo within a few milliseconds of Init could be handled before that thread first ran, and was cut out of
+  the tempo map again (the map is cut from where the transport has prepared to). Seen in dx7test reopen, one run
+  in nine; none in 14 since.
 - After CloseDown and Init or InitAudio again, a message a tool sends on (DMUS_S_REQUEUE) goes on: reDM kept
   freeing it, as during CloseDown, so nothing past the first tool was heard. `tests/comcmp.sh tooltest.exe` plays
   through two tools after a second InitAudio.

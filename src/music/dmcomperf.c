@@ -154,6 +154,11 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices, BOOL audi
     perf_init_settings(p, FALSE);
     for (struct rm_global *e = p->globals; e; e = e->next)        /* (set before the performance was) */
         if (IsEqualGUID(&e->g, &G_PerfMasterGrooveLevel) && e->size >= 1) dm_perf_set_groove(dm_host_perf(p->host), *(char *)e->data);
+    /* the transport's first pass, before Init returns (with the prepare time just set): its thread may not have run
+     * yet when the application's first call comes, and a tempo message handled then was cut out of the tempo map
+     * again, a master tempo not entered in it (the map is cut and rebuilt from where the transport has prepared to:
+     * from the very start, before its first pass) */
+    dm_perf_transport(dm_host_perf(p->host));
     dm_host_unlock(p->host);
     BOOL off = FALSE;                       /* 77303d4d: automatic download off */
     pf_setglobal(&p->IDirectMusicPerformance8_iface, &GUID_PerfAutoDownload, &off, 4);
