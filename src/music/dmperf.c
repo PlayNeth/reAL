@@ -94,6 +94,7 @@ struct dm_audiopath {
     dm_audiopath *next;
     void *graph;                                /* +0x48 its tool graph (the host's) */
     void *wrapper;                              /* the COM object (weak) */
+    int dead;                                   /* +0x54 clear: the performance was closed down under it */
 };
 
 #define NLISTS 10
@@ -1893,19 +1894,6 @@ void dm_perf_run_app_tools(dm_perf *pf)
     }
     pf->apprun = 0;
 }
-/* CloseDown: every message freed (the states, graphs and audiopaths they name let go) */
-void dm_perf_drop_all_messages(dm_perf *pf)
-{
-    dm_queue *qs[] = { &pf->early, &pf->nearq, &pf->ontime, &pf->notif };
-    for (int k = 0; k < 4; k++) for (dm_pmsg *p; (p = q_pop(qs[k])); ) pm_free(pf, p);
-    while (pf->apphead) { dm_pmsg *p = pf->apphead; pf->apphead = p->next; pm_free(pf, p); }
-    pf->apptail = NULL;
-    pf->closed = 1;
-}
-
-/* Init or InitAudio again after CloseDown: messages go back to the queues once more */
-void dm_perf_reopen(dm_perf *pf) { pf->closed = 0; }
-
 uint32_t dm_perf_realtime(dm_perf *pf)
 {
     pf->xprec = 0;
@@ -2170,6 +2158,12 @@ void dm_audiopath_release(dm_audiopath *ap)
 }
 
 void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap) { pf->defpath = ap; }
+int dm_audiopath_dead(dm_audiopath *ap) { return ap->dead; }
+int dm_perf_has_audiopath(dm_perf *pf)
+{
+    for (dm_audiopath *ap = pf->paths; ap; ap = ap->next) if (!ap->dead) return 1;
+    return 0;
+}
 uint32_t dm_perf_pchannels(dm_perf *pf) { return pf->nextpch; }
 /* the channel groups port 0 has: the highest one a PChannel is on */
 uint32_t dm_perf_port_groups(dm_perf *pf)
@@ -2327,6 +2321,47 @@ void dm_style_srand(void) { g_apprnd = g_timefn ? (uint32_t)g_timefn() : (uint32
 void dm_perf_srand(dm_perf *pf) { *(pf->apprand ? &g_apprnd : &pf->rnd) = g_timefn ? (uint32_t)g_timefn() : (uint32_t)time(NULL); }
 void (*dm_rand_hook)(int app, int value, void *caller);
 
+
+/* CloseDown (77308c70): every message freed (the states, graphs and audiopaths they name let go), and with them
+ * what dmime's lets go of: the tempo map and its history, the time signatures, the notification types and the
+ * event, the PChannels (an audiopath made before has none left), where the transport had got to */
+void dm_perf_drop_all_messages(dm_perf *pf)
+{
+    flush_ports(pf);            /* (Stop's All Sound Off and controller resets: out before the ports are let go) */
+    dm_queue *qs[] = { &pf->early, &pf->nearq, &pf->ontime, &pf->notif, &pf->tmap, &pf->thist, &pf->tsq };
+    for (int k = 0; k < 7; k++) for (dm_pmsg *p; (p = q_pop(qs[k])); ) pm_free(pf, p);
+    while (pf->apphead) { dm_pmsg *p = pf->apphead; pf->apphead = p->next; pm_free(pf, p); }
+    pf->apptail = NULL;
+    free(pf->ntypes); pf->ntypes = NULL; pf->nntypes = 0;
+    pf->notify_cb = NULL; pf->notify_ctx = NULL;
+    while (pf->blocks) {
+        pchblock *b = pf->blocks; pf->blocks = b->next;
+        for (int i = 0; i < 16; i++) for (int k = 0; k < MG_N; k++) mg_reset(&b->e[i].m[k], 0);
+        free(b);
+    }
+    while (pf->apblocks) { apblock *b = pf->apblocks; pf->apblocks = b->next; free(b); }
+    for (dm_audiopath *ap = pf->paths; ap; ap = ap->next) { ap->n = 0; ap->active = 0; ap->dead = 1; }
+    pf->nextpch = 0;
+    pf->hasgroove = 0;
+    pf->played = 0;
+    pf->target = 0;
+    pf->closed = 1;
+}
+
+/* Init or InitAudio again after CloseDown, as dmime's start over (77303d4d and the threads' start 7730f05e): the
+ * clock's base is now, so music time starts from 0 again; the master tempo is 1; messages go back to the queues */
+void dm_perf_reopen(dm_perf *pf)
+{
+    pf->closed = 0;
+    pf->latfloor = 0;
+    pf->lastnoteon = 0;
+    pf->master = 1.0f;
+    pf->ssplaying = NULL; pf->cfgplaying = 0;
+    pf->stopped = 1;
+    pf->rtbase = clock_now(pf);
+    pf->horizon = pf->rtbase;
+    dm_perf_srand(pf);
+}
 
 static void free_queue(dm_perf *pf, dm_queue *q)
 {

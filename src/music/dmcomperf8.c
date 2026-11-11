@@ -76,12 +76,6 @@ static HRESULT WINAPI pf_addport(IDirectMusicPerformance8 *i, IDirectMusicPort *
         return E_INVALIDARG;
     }
     HRESULT hr = S_OK;
-    long vol = 0;
-    int hasvol = 0;
-    EnterCriticalSection(&p->gcs);
-    for (struct rm_global *e = p->globals; e; e = e->next)
-        if (IsEqualGUID(&e->g, &GUID_PerfMasterVolume) && e->size == 4) { memcpy(&vol, e->data, 4); hasvol = 1; }
-    LeaveCriticalSection(&p->gcs);
     dm_host_lock(p->host);
     int k = perf_slot(p, rp);
     if (k < 0) {
@@ -89,8 +83,8 @@ static HRESULT WINAPI pf_addport(IDirectMusicPerformance8 *i, IDirectMusicPort *
         if (k < 1 || k >= 8) { hr = E_OUTOFMEMORY; k = -1; }
         else { p->slot[k] = rp; IDirectMusicPort_AddRef(port); }
     } else if (!p->added[k]) dm_host_port_enable(p->host, k, k ? own : p->host, 1);
-    if (k > 0 && hasvol) dm_host_set_volume(own, vol);     /* (the master volume already set) */
-    if (k >= 0) p->added[k] = 1;
+    if (k > 0 && p->hasmastervol) dm_host_set_volume(own, p->mastervol);   /* (the master volume set since Init: +0x33c) */
+    if (k >= 0) { p->added[k] = 1; p->hadport = TRUE; }
     if (!port && !dm_perf_pchannels(dm_host_perf(p->host))) dm_perf_assign_block(dm_host_perf(p->host), 0, 0, 1);
     dm_host_unlock(p->host);
     LOG_CALL("music: Performance::AddPort(%p) -> %08lx (port %d)", (void *)port, (unsigned long)hr, k);
@@ -252,7 +246,8 @@ static HRESULT WINAPI pf_setglobal(IDirectMusicPerformance8 *i, REFGUID g, void 
         if (p->host) { dm_host_lock(p->host); dm_perf_set_master_tempo(dm_host_perf(p->host), *(float *)v); dm_host_unlock(p->host); }
     } else if (IsEqualGUID(g, &GUID_PerfMasterVolume)) {
         if (sz != 4) return E_INVALIDARG;
-        if (p->host) {
+        p->mastervol = *(long *)v; p->hasmastervol = TRUE;    /* (+0x33c: Init sets it back to 0; to the ports there are) */
+        if (p->host && !p->closed) {
             dm_host_set_volume(p->host, *(long *)v);
             dm_host_lock(p->host);              /* (each port's synth, as dmime sets the volume on each port) */
             for (int k = 1; k < 8; k++) if (p->slot[k] && p->added[k]) dm_host_set_volume(rm_port_own_host(p->slot[k]), *(long *)v);
@@ -362,6 +357,7 @@ static HRESULT WINAPI pf_initaudio(IDirectMusicPerformance8 *i, IDirectMusic **p
         dm_host_unlock(p->host);
     } else hr = ensure_host(p, rate, voices, TRUE);
     if (FAILED(hr)) return hr;
+    p->hadport = TRUE;
     PERF_LOCKED(p, dm_host_set_dx7port(p->host, 0));   /* (InitAudio's port: DMUS_PORTPARAMS8, the audiopath feature) */
     if (params && params->dwSize >= sizeof(DMUS_AUDIOPARAMS)) {
         params->dwValidData |= DMUS_AUDIOPARAMS_SAMPLERATE | DMUS_AUDIOPARAMS_VOICES;
@@ -395,6 +391,24 @@ static HRESULT pf_play(rm_perf *p, IUnknown *src, DWORD flags, __int64 start, ID
     if (path && !a) return E_INVALIDARG;
     if (!p->host) return DMUS_E_NOT_INIT;
     CLOSED_RET(p, DMUS_E_NO_MASTER_CLOCK);
+    /* 7730d57b ff.: an audiopath left from before a CloseDown has no port; and once the performance has had a port,
+     * one must still be there (RemovePort leaves its place, CloseDown starts over) */
+    if (a && a->ap && dm_audiopath_dead(a->ap)) return (HRESULT)0x8878122b;     /* DMUS_E_AUDIOPATH_NOPORT */
+    if (p->hadport) {
+        int any = 0;
+        for (int k = 0; k < 8; k++) if (p->added[k]) any = 1;
+        if (!any) return (HRESULT)0x8878122b;
+    }
+    /* 7730d8c2: InitAudio's way plays on an audiopath, the one given or the default one: with neither,
+     * DMUS_E_NO_AUDIOPATH; and with no audiopath left at all the port they keep is gone too (seen: the last path
+     * let go, and the answer is the port's) */
+    if (p->apstate == 2 && !a && !p->defpath && !(flags & 0x4000)) {    /* (not with DMUS_SEGF_USE_AUDIOPATH: dmime makes
+                                                                         * the segment's own path, reDM plays without) */
+        dm_host_lock(p->host);
+        int live = dm_perf_has_audiopath(dm_host_perf(p->host));
+        dm_host_unlock(p->host);
+        return live ? (HRESULT)0x8878122c : (HRESULT)0x8878122b;
+    }
     dm_segstate *ss = NULL;
     dm_host_lock(p->host);
     dm_perf *pf = dm_host_perf(p->host);
@@ -727,6 +741,7 @@ static HRESULT WINAPI pf_setdefpath(IDirectMusicPerformance8 *i, IDirectMusicAud
     if (p->apstate != 2) return DMUS_E_AUDIOPATHS_NOT_VALID;
     rm_path *a = path ? unsafe_path((IUnknown *)path) : NULL;
     if (path && !a) return E_INVALIDARG;
+    if (a && a->ap && dm_audiopath_dead(a->ap)) return E_INVALIDARG;    /* (773049c1: not one of the performance's any more) */
     if (a) IDirectMusicAudioPath_AddRef(path);
     /* swapped under the engine lock (a PlaySegment on another thread takes the default path there), the old one let
      * go after it */

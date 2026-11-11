@@ -124,6 +124,8 @@ struct rm_perf {
     rm_buf *bufs;
     IDirectMusic8 *dm;
     BOOL closed;
+    BOOL hadport;                           /* a port was added since Init (+0x2c: the port table is not empty) */
+    long mastervol; BOOL hasmastervol;      /* +0x33c the master volume set since Init */
     /* dmime's version (+0x370): 6 when created, 7 after a QueryInterface for IDirectMusicPerformance2, 8 after one for
      * IDirectMusicPerformance8, each setting it again.  Below 8: the graph works before Init, Init keeps the prepare
      * time and bumper length, and the DirectX 8 behaviours of the engine (dxver) are off. */

@@ -915,12 +915,18 @@ static void reopened(void)
     tool *A = new_tool("RA", FALSE, DMUS_PMSGF_TOOL_IMMEDIATE, 0, NULL), *B = new_tool("RB", FALSE, DMUS_PMSGF_TOOL_IMMEDIATE, 0, NULL);
     IDirectMusicGraph_InsertTool(g, TI(A), NULL, 0, 0);
     IDirectMusicGraph_InsertTool(g, TI(B), NULL, 0, 1);
+    name_graph(g, "RG");
     printf("  set graph %08lx\n", IDirectMusicPerformance8_SetGraph(perf, g));
     IDirectMusicSegment8 *s = load("bells1.sgt");
     if (s) {
-        printf("  play %08lx\n", IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)s, NULL, NULL, 0, 0, NULL, NULL, NULL));
-        Sleep(800);
+        IDirectMusicSegmentState *ss = NULL;
+        MUSIC_TIME st = 0;
+        EnterCriticalSection(&logcs); nlog = 0; LeaveCriticalSection(&logcs);
+        printf("  play %08lx\n", IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)s, NULL, NULL, 0, 0, &ss, NULL, NULL));
+        if (ss) { IDirectMusicSegmentState_GetStartTime(ss, &st); IDirectMusicSegmentState_Release(ss); }
+        Sleep(2500);
         printf("  first tool got messages: %d, the second: %d\n", A->processed > 0, B->processed > 0);
+        dumplog(st, 1536);          /* (what is played, as the first time) */
         IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
         IDirectMusicSegment8_Unload(s, (IUnknown *)perf);
         IDirectMusicSegment8_Release(s);

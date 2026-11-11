@@ -667,6 +667,21 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - Application tools in the message pipeline: ProcessPMsg with DMUS_S_REQUEUE / DMUS_S_FREE / S_OK, the delivery
   types (immediate, queue, at time), Flush on invalidation, DMUS_PMSGT_DIRTY at a segment's start, end and abort, and
   DMUS_PCHANNEL_BROADCAST_SEGMENT.
+- CloseDown and Init or InitAudio again, as dmime's (77308c70, 77303d4d, 7730f05e). reDM keeps its engine across
+  the two and kept its state with it. CloseDown now lets go of what dmime's does: the tempo map and time
+  signatures, the notification types and event, the global parameters, every PChannel and port (the resets Stop
+  queued sent to them first), also when called a second time. The transport does nothing while closed. Init starts
+  over: music time from 0, the master tempo 1, the master volume 0 (set before Init or while closed it is kept to
+  read and not applied), automatic download off. What is set while closed
+  (global parameters, notification types, the event) is kept until the next CloseDown, as dmime keeps it. An
+  audiopath made before the CloseDown is no longer the performance's: SetDefaultAudioPath refuses it
+  (E_INVALIDARG) and PlaySegmentEx on it answers DMUS_E_AUDIOPATH_NOPORT.
+- PlaySegment's answers (7730d57b ff.): DMUS_E_AUDIOPATH_NOPORT once the performance has had a port and none is left
+  (RemovePort of the last), DMUS_E_NO_AUDIOPATH after InitAudio with no path given and no default one, and the
+  port's answer again when no audiopath is left at all.
+- `tests/comcmp.sh dx7test.exe reopen` (each of Init and InitAudio followed by each, what is set before and while
+  closed, a created port, an audiopath and a state from before, CloseDown called by a tool, CloseDown twice)
+  matches, 352 lines; tooltest's messages after a second InitAudio are those of the first.
 - After CloseDown and Init or InitAudio again, a message a tool sends on (DMUS_S_REQUEUE) goes on: reDM kept
   freeing it, as during CloseDown, so nothing past the first tool was heard. `tests/comcmp.sh tooltest.exe` plays
   through two tools after a second InitAudio.

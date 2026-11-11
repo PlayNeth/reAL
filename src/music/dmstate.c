@@ -849,6 +849,9 @@ void dm_perf_get_time(dm_perf *pf, rtime_t *rt, mtime_t *mt)
 uint32_t dm_perf_transport(dm_perf *pf)
 {
     pf->xprec = 0;
+    /* (closed down: dmime's thread is gone until Init.  This one stays, and must leave where the transport had got to
+     * alone: taken on from the old clock base, the first segment after Init would be played up to there at once) */
+    if (pf->closed) return 100;
     rtime_t now = clock_now(pf);
     mtime_t target = R2M(pf, now + (rtime_t)(uint32_t)(pf->prepare_ms * 10000));
     if (pf->tempochanged) {

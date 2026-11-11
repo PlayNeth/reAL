@@ -2,7 +2,7 @@
  * created, 7 after a QueryInterface for IDirectMusicPerformance2, 8 after one for IDirectMusicPerformance8, each
  * QueryInterface setting it again) and answers DirectX 6/7 applications as DirectX 6/7 did; and the performance after
  * CloseDown; and Segment::InitPlay.  Prints every HRESULT and out-parameter.  Run with tests/comcmp.sh dx7test.exe
- * [6|7|8|qi|noport|stopall|closed|notify|initplay|trackplay [segment files]]; trackplay (each of a segment
+ * [6|7|8|qi|noport|stopall|closed|notify|initplay|stdpath|reopen|trackplay [segment files]]; trackplay (each of a segment
  * file's tracks played by the application on Segment::InitPlay's state) only when named. */
 #define COBJMACROS
 #define INITGUID
@@ -800,6 +800,372 @@ static void stdpath(int how)
     IDirectMusicPerformance8_Release(pf);
 }
 
+/* ------------------------------------------------------------------ CloseDown and Init again: what is kept */
+static DWORD s_opened;              /* when the last Init or InitAudio began */
+static void show_state(IDirectMusicPerformance8 *pf, const char *when, MUSIC_TIME before)
+{
+    REFERENCE_TIME rt = 0; MUSIC_TIME mt = 0;
+    HRESULT hr = IDirectMusicPerformance8_GetTime(pf, &rt, &mt);
+    /* (from 0 at Init: no more than the time since at 120 a minute; going on from before: that much more) */
+    long since = (long)(GetTickCount() - s_opened) * 1536 / 1000 + 100;
+    if (before >= 0) P("  %s: GetTime %08lx music time %s\n", when, hr, mt < 0 ? "negative" : mt <= since ? "from 0" : "goes on");
+    else P("  %s: GetTime %08lx\n", when, hr);
+    float tempo = -1; long vol = 12345; char groove = 99; BOOL ad = 77;
+    HRESULT h1 = IDirectMusicPerformance8_GetGlobalParam(pf, &GUID_PerfMasterTempo, &tempo, sizeof(tempo));
+    HRESULT h2 = IDirectMusicPerformance8_GetGlobalParam(pf, &GUID_PerfMasterVolume, &vol, sizeof(vol));
+    HRESULT h3 = IDirectMusicPerformance8_GetGlobalParam(pf, &GUID_PerfMasterGrooveLevel, &groove, sizeof(groove));
+    HRESULT h4 = IDirectMusicPerformance8_GetGlobalParam(pf, &GUID_PerfAutoDownload, &ad, sizeof(ad));
+    P("  %s: master tempo %08lx %.2f volume %08lx %ld groove %08lx %d autodownload %08lx %d\n", when, h1, tempo, h2, vol, h3, groove, h4, (int)ad);
+    REFERENCE_TIME r0 = 0, r1 = 0;
+    h1 = IDirectMusicPerformance8_MusicToReferenceTime(pf, mt + 7680, &r0);
+    h2 = IDirectMusicPerformance8_MusicToReferenceTime(pf, mt + 7680 + 768, &r1);
+    P("  %s: MusicToReferenceTime %08lx %08lx a beat ahead takes %ld ms\n", when, h1, h2, (long)((r1 - r0) / 10000));
+    struct { MUSIC_TIME mtTime; double dblTempo; } tp = { 0, -1 };
+    hr = IDirectMusicPerformance8_GetParam(pf, &GUID_TempoParam, 0xffffffff, 0, mt, NULL, &tp);
+    P("  %s: GetParam tempo %08lx %.1f\n", when, hr, tp.dblTempo);
+    IDirectMusicPort *port = (IDirectMusicPort *)1; DWORD grp = 99, ch = 99;
+    hr = IDirectMusicPerformance8_PChannelInfo(pf, 0, &port, &grp, &ch);
+    P("  %s: PChannelInfo(0) %08lx port %s group %lu channel %lu\n", when, hr, !port ? "null" : port == (void *)1 ? "untouched" : "yes", grp, ch);
+    if (SUCCEEDED(hr) && port && port != (void *)1) IDirectMusicPort_Release(port);
+    hr = IDirectMusicPerformance8_PChannelInfo(pf, 20, &port, &grp, &ch);
+    P("  %s: PChannelInfo(20) %08lx\n", when, hr);
+    if (SUCCEEDED(hr) && port && port != (void *)1) IDirectMusicPort_Release(port);
+    IDirectMusicGraph *g = NULL;
+    hr = IDirectMusicPerformance8_GetGraph(pf, &g);
+    P("  %s: GetGraph %08lx %s\n", when, hr, g ? "one" : "none");
+    if (g) IDirectMusicGraph_Release(g);
+    IDirectMusicAudioPath *ap = NULL;
+    hr = IDirectMusicPerformance8_GetDefaultAudioPath(pf, &ap);
+    P("  %s: GetDefaultAudioPath %08lx %s\n", when, hr, ap ? "one" : "none");
+    if (ap) IDirectMusicAudioPath_Release(ap);
+    IDirectMusicSegmentState *st = (IDirectMusicSegmentState *)1;
+    hr = IDirectMusicPerformance8_GetSegmentState(pf, &st, mt);
+    P("  %s: GetSegmentState %08lx %s\n", when, hr, !st ? "null" : st == (void *)1 ? "untouched" : "one");
+    if (SUCCEEDED(hr) && st && st != (void *)1) IDirectMusicSegmentState_Release(st);
+}
+/* the notifications waiting, by kind */
+static void drain_notes(IDirectMusicPerformance8 *pf, const char *when)
+{
+    int n = 0, starts = 0, ends = 0;
+    HRESULT hr, first = 1;
+    DMUS_NOTIFICATION_PMSG *m;
+    for (;;) {
+        m = NULL;
+        hr = IDirectMusicPerformance8_GetNotificationPMsg(pf, &m);
+        if (first == 1) first = hr;
+        if (hr != S_OK || !m) break;
+        n++;
+        if (m->dwNotificationOption == DMUS_NOTIFICATION_SEGSTART) starts++;
+        if (m->dwNotificationOption == DMUS_NOTIFICATION_SEGEND) ends++;
+        IDirectMusicPerformance8_FreePMsg(pf, (DMUS_PMSG *)m);
+    }
+    P("  %s: GetNotificationPMsg %08lx, %s (start %s, end %s)\n", when, first, n ? "some" : "none", starts ? "yes" : "no", ends ? "yes" : "no");
+}
+static void send_tempo(IDirectMusicPerformance8 *pf, double t)
+{
+    DMUS_TEMPO_PMSG *m = NULL;
+    if (FAILED(IDirectMusicPerformance8_AllocPMsg(pf, sizeof(*m), (DMUS_PMSG **)&m)) || !m) return;
+    m->dwType = DMUS_PMSGT_TEMPO; m->dwFlags = DMUS_PMSGF_REFTIME; m->rtTime = 0; m->dblTempo = t;
+    m->dwPChannel = 0; m->dwGroupID = 0xffffffff;
+    HRESULT hr = IDirectMusicPerformance8_SendPMsg(pf, (DMUS_PMSG *)m);
+    P("  tempo message %08lx\n", hr);
+    if (FAILED(hr)) IDirectMusicPerformance8_FreePMsg(pf, (DMUS_PMSG *)m);
+}
+static HRESULT open_perf(IDirectMusicPerformance8 *pf, int audio, const char *what)
+{
+    s_opened = GetTickCount();
+    HRESULT hr = audio ? IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL)
+                       : IDirectMusicPerformance8_Init(pf, NULL, NULL, NULL);
+    P("  %s: %s %08lx\n", what, audio ? "InitAudio" : "Init", hr);
+    if (!audio) {
+        P("  %s: AddPort(NULL) %08lx\n", what, IDirectMusicPerformance8_AddPort(pf, NULL));
+        P("  %s: AssignPChannelBlock %08lx\n", what, IDirectMusicPerformance8_AssignPChannelBlock(pf, 0, NULL, 1));
+    }
+    return hr;
+}
+static void reopen(int audio1, int audio2)
+{
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    if (!pf) { P("  no performance\n"); return; }
+    if (FAILED(open_perf(pf, audio1, "first"))) { IDirectMusicPerformance8_Release(pf); return; }
+    show_state(pf, "first", -1);
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    P("  AddNotificationType %08lx SetNotificationHandle %08lx\n", IDirectMusicPerformance8_AddNotificationType(pf, &GUID_NOTIFICATION_SEGMENT),
+      IDirectMusicPerformance8_SetNotificationHandle(pf, ev, 0));
+    float tempo = 0.5f; long vol = -600; char groove = 5; BOOL ad = TRUE;
+    P("  SetGlobalParam tempo %08lx volume %08lx groove %08lx autodownload %08lx\n",
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfMasterTempo, &tempo, sizeof(tempo)),
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfMasterVolume, &vol, sizeof(vol)),
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfMasterGrooveLevel, &groove, sizeof(groove)),
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfAutoDownload, &ad, sizeof(ad)));
+    IDirectMusicGraph *mine = NULL;
+    CoCreateInstance(&CLSID_DirectMusicGraph, NULL, CLSCTX_INPROC, &IID_IDirectMusicGraph, (void **)&mine);
+    if (mine) IDirectMusicGraph_InsertTool(mine, &s_tool.IDirectMusicTool_iface, NULL, 0, 0);
+    P("  SetGraph %08lx\n", IDirectMusicPerformance8_SetGraph(pf, mine));
+    send_tempo(pf, 60.0);
+    IDirectMusicSegment8 *seg = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg);
+    if (seg) { IDirectMusicSegment8_SetLength(seg, DMUS_PPQ * 400); }
+    IDirectMusicSegmentState *st = NULL;
+    P("  PlaySegment %08lx\n", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg, 0, 0, &st));
+    Sleep(6000);
+    P("  IsPlaying %08lx\n", IDirectMusicPerformance8_IsPlaying(pf, (IDirectMusicSegment *)seg, NULL));
+    show_state(pf, "playing", -1);
+    REFERENCE_TIME rt = 0; MUSIC_TIME before = 0;
+    IDirectMusicPerformance8_GetTime(pf, &rt, &before);
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    P("  closed: IsPlaying %08lx, the state's %08lx\n", IDirectMusicPerformance8_IsPlaying(pf, (IDirectMusicSegment *)seg, NULL),
+      IDirectMusicPerformance8_IsPlaying(pf, NULL, st));
+    drain_notes(pf, "closed");
+    open_perf(pf, audio2, "second");
+    show_state(pf, "second", before);
+    drain_notes(pf, "second");
+    P("  second: IsPlaying %08lx, the state's %08lx\n", IDirectMusicPerformance8_IsPlaying(pf, (IDirectMusicSegment *)seg, NULL),
+      IDirectMusicPerformance8_IsPlaying(pf, NULL, st));
+    if (st) { IDirectMusicSegmentState_Release(st); st = NULL; }
+    /* played again: the notification types asked for before, the handle, the graph */
+    ResetEvent(ev);
+    IDirectMusicSegment8 *seg2 = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg2);
+    if (seg2) IDirectMusicSegment8_SetLength(seg2, DMUS_PPQ / 2);
+    P("  second: PlaySegment %08lx\n", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg2, 0, 0, NULL));
+    DWORD w = WaitForSingleObject(ev, 1500);
+    Sleep(1200);
+    P("  second: the handle %s\n", w == WAIT_OBJECT_0 ? "signalled" : "not signalled");
+    drain_notes(pf, "second, played");
+    send_untimed((IDirectMusicPerformance *)pf, DMUS_PMSGF_REFTIME, "second, a user message");
+    P("  second: SetGraph(NULL) %08lx\n", IDirectMusicPerformance8_SetGraph(pf, NULL));
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    open_perf(pf, audio1, "third");
+    show_state(pf, "third", -1);
+    P("  third: PlaySegment %08lx\n", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg2, 0, 0, NULL));
+    Sleep(300);
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    if (seg) IDirectMusicSegment8_Release(seg);
+    if (seg2) IDirectMusicSegment8_Release(seg2);
+    if (mine) IDirectMusicGraph_Release(mine);
+    CloseHandle(ev);
+    P("  Release %lu\n", IDirectMusicPerformance8_Release(pf));
+}
+
+/* CloseDown and Init again: a created port, an audiopath and a state from before; what is set while closed */
+static void reopen_kept(int audio)
+{
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    if (!pf) { P("  no performance\n"); return; }
+    IDirectMusic *dm = NULL;
+    HRESULT hr = audio ? IDirectMusicPerformance8_InitAudio(pf, &dm, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL)
+                       : IDirectMusicPerformance8_Init(pf, &dm, NULL, NULL);
+    P("  %s %08lx dm %s\n", audio ? "InitAudio" : "Init", hr, dm ? "yes" : "none");
+    IDirectMusicPort *port = NULL;
+    IDirectMusicAudioPath *ap = NULL;
+    if (!audio && dm) {
+        DMUS_PORTPARAMS8 pp;
+        memset(&pp, 0, sizeof(pp));
+        pp.dwSize = sizeof(pp);
+        hr = IDirectMusic_CreatePort(dm, &CLSID_DirectMusicSynth, (DMUS_PORTPARAMS *)&pp, &port, NULL);
+        P("  CreatePort %08lx\n", hr);
+        if (port) {
+            P("  Activate %08lx", IDirectMusicPort_Activate(port, TRUE));
+            P(" AddPort %08lx", IDirectMusicPerformance8_AddPort(pf, port));
+            P(" AssignPChannelBlock %08lx\n", IDirectMusicPerformance8_AssignPChannelBlock(pf, 0, port, 1));
+        }
+    } else if (audio) {
+        hr = IDirectMusicPerformance8_CreateStandardAudioPath(pf, DMUS_APATH_DYNAMIC_STEREO, 4, TRUE, &ap);
+        P("  CreateStandardAudioPath %08lx\n", hr);
+    }
+    IDirectMusicPort *q = (IDirectMusicPort *)1; DWORD g = 99, c = 99;
+    hr = IDirectMusicPerformance8_PChannelInfo(pf, 3, &q, &g, &c);
+    P("  PChannelInfo(3) %08lx %s group %lu channel %lu\n", hr, !q ? "no port" : q == (void *)1 ? "untouched" : q == port ? "the port" : "a port", g, c);
+    if (SUCCEEDED(hr) && q && q != (void *)1) IDirectMusicPort_Release(q);
+    IDirectMusicSegment8 *seg = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg);
+    if (seg) IDirectMusicSegment8_SetLength(seg, DMUS_PPQ * 400);
+    IDirectMusicSegmentState *st = NULL;
+    P("  PlaySegmentEx %08lx\n", IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)seg, NULL, NULL, 0, 0, &st, NULL, (IUnknown *)ap));
+    Sleep(300);
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    /* set while closed */
+    float tempo = 0.5f; char groove = 7;
+    IDirectMusicGraph *mine = NULL;
+    CoCreateInstance(&CLSID_DirectMusicGraph, NULL, CLSCTX_INPROC, &IID_IDirectMusicGraph, (void **)&mine);
+    if (mine) IDirectMusicGraph_InsertTool(mine, &s_tool.IDirectMusicTool_iface, NULL, 0, 0);
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    P("  closed: SetGlobalParam tempo %08lx groove %08lx SetGraph %08lx AddNotificationType %08lx SetNotificationHandle %08lx\n",
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfMasterTempo, &tempo, sizeof(tempo)),
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfMasterGrooveLevel, &groove, sizeof(groove)),
+      IDirectMusicPerformance8_SetGraph(pf, mine), IDirectMusicPerformance8_AddNotificationType(pf, &GUID_NOTIFICATION_SEGMENT),
+      IDirectMusicPerformance8_SetNotificationHandle(pf, ev, 0));
+    if (dm) { IDirectMusic_Release(dm); dm = NULL; }
+    hr = audio ? IDirectMusicPerformance8_InitAudio(pf, &dm, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL)
+               : IDirectMusicPerformance8_Init(pf, &dm, NULL, NULL);
+    P("  again: %s %08lx dm %s\n", audio ? "InitAudio" : "Init", hr, dm ? "yes" : "none");
+    show_state(pf, "again", -1);
+    {       /* the notification types and the event asked for while closed */
+        IDirectMusicSegment8 *sn = NULL;
+        CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&sn);
+        if (sn) IDirectMusicSegment8_SetLength(sn, DMUS_PPQ / 4);
+        ResetEvent(ev);
+        P("  again: PlaySegment %08lx", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)sn, 0, 0, NULL));
+        DWORD wn = WaitForSingleObject(ev, 1500);
+        Sleep(700);
+        P(" the handle %s\n", wn == WAIT_OBJECT_0 ? "signalled" : "not signalled");
+        drain_notes(pf, "again, asked for while closed");
+        Sleep(2500);
+        if (sn) IDirectMusicSegment8_Release(sn);
+    }
+    if (ap) {       /* the old audiopath as the default one */
+        P("  again: SetDefaultAudioPath(the old one) %08lx", IDirectMusicPerformance8_SetDefaultAudioPath(pf, ap));
+        IDirectMusicSegment8 *sd = NULL;
+        CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&sd);
+        if (sd) IDirectMusicSegment8_SetLength(sd, DMUS_PPQ / 4);
+        P(" PlaySegment %08lx", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)sd, DMUS_SEGF_SECONDARY, 0, NULL));
+        Sleep(3000);                    /* (its notifications taken, so none is left for what follows, and its state
+                                         * gone, which held the default path) */
+        for (DMUS_NOTIFICATION_PMSG *n = NULL; IDirectMusicPerformance8_GetNotificationPMsg(pf, &n) == S_OK && n; n = NULL)
+            IDirectMusicPerformance8_FreePMsg(pf, (DMUS_PMSG *)n);
+        P(" SetDefaultAudioPath(NULL) %08lx\n", IDirectMusicPerformance8_SetDefaultAudioPath(pf, NULL));
+        if (sd) IDirectMusicSegment8_Release(sd);
+    }
+    if (port) {
+        q = (IDirectMusicPort *)1;
+        hr = IDirectMusicPerformance8_PChannelInfo(pf, 3, &q, &g, &c);
+        P("  again: PChannelInfo(3) %08lx %s\n", hr, !q ? "no port" : q == (void *)1 ? "untouched" : q == port ? "the port" : "a port");
+        if (SUCCEEDED(hr) && q && q != (void *)1) IDirectMusicPort_Release(q);
+        P("  again: RemovePort %08lx", IDirectMusicPerformance8_RemovePort(pf, port));
+        P(" AddPort %08lx AssignPChannelBlock %08lx", IDirectMusicPerformance8_AddPort(pf, port), IDirectMusicPerformance8_AssignPChannelBlock(pf, 0, port, 1));
+        P(" RemovePort %08lx\n", IDirectMusicPerformance8_RemovePort(pf, port));
+    } else if (!audio) P("  again: AddPort(NULL) %08lx\n", IDirectMusicPerformance8_AddPort(pf, NULL));
+    if (st) {
+        MUSIC_TIME t = -5;
+        IDirectMusicSegment *sg = (IDirectMusicSegment *)1;
+        hr = IDirectMusicSegmentState_GetSegment(st, &sg);
+        P("  again: the old state: IsPlaying %08lx GetSegment %08lx", IDirectMusicPerformance8_IsPlaying(pf, NULL, st), hr);
+        if (SUCCEEDED(hr) && sg && sg != (void *)1) IDirectMusicSegment_Release(sg);
+        P(" GetStartTime %08lx Stop %08lx\n", IDirectMusicSegmentState_GetStartTime(st, &t), IDirectMusicPerformance8_Stop(pf, NULL, st, 0, 0));
+        IDirectMusicSegmentState_Release(st);
+    }
+    IDirectMusicSegment8 *seg2 = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg2);
+    if (seg2) IDirectMusicSegment8_SetLength(seg2, DMUS_PPQ / 2);
+    if (ap) {
+        P("  again: the old audiopath: Activate %08lx", IDirectMusicAudioPath_Activate(ap, TRUE));
+        P(" PlaySegmentEx %08lx\n", IDirectMusicPerformance8_PlaySegmentEx(pf, (IUnknown *)seg2, NULL, NULL, DMUS_SEGF_SECONDARY, 0, NULL, NULL, (IUnknown *)ap));
+    }
+    ResetEvent(ev);
+    P("  again: PlaySegment %08lx\n", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg2, 0, 0, NULL));
+    DWORD w = WaitForSingleObject(ev, 1500);
+    Sleep(1200);
+    P("  again: the handle %s\n", w == WAIT_OBJECT_0 ? "signalled" : "not signalled");
+    drain_notes(pf, "again, played");
+    send_untimed((IDirectMusicPerformance *)pf, DMUS_PMSGF_REFTIME, "again, a user message");
+    if (ap) P("  the old audiopath: Release %lu\n", IDirectMusicAudioPath_Release(ap));
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    if (port) IDirectMusicPort_Release(port);
+    if (dm) IDirectMusic_Release(dm);
+    if (seg) IDirectMusicSegment8_Release(seg);
+    if (seg2) IDirectMusicSegment8_Release(seg2);
+    if (mine) IDirectMusicGraph_Release(mine);
+    CloseHandle(ev);
+    P("  Release %lu\n", IDirectMusicPerformance8_Release(pf));
+}
+
+/* CloseDown called by a tool, from the performance's own thread, and Init again afterwards */
+typedef struct { IDirectMusicTool IDirectMusicTool_iface; LONG ref; volatile LONG done; HRESULT hr; LONG after; } cdtool;
+static HRESULT WINAPI cd_process(IDirectMusicTool *i, IDirectMusicPerformance *p, DMUS_PMSG *m)
+{
+    cdtool *t = (cdtool *)i;
+    if (InterlockedCompareExchange(&t->done, 1, 0) == 0) { t->hr = IDirectMusicPerformance_CloseDown(p); InterlockedExchange(&t->done, 2); }
+    else InterlockedIncrement(&t->after);
+    return DMUS_S_FREE;
+}
+static IDirectMusicToolVtbl cd_vtbl = { t_qi, t_addref, t_release, t_init, t_deliv, t_nt, t_types, cd_process, t_flush };
+static void reopen_intool(void)
+{
+    static cdtool ct = { { &cd_vtbl }, 1 };
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    if (!pf) { P("  no performance\n"); return; }
+    P("  InitAudio %08lx\n", IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL));
+    IDirectMusicGraph *g = NULL;
+    CoCreateInstance(&CLSID_DirectMusicGraph, NULL, CLSCTX_INPROC, &IID_IDirectMusicGraph, (void **)&g);
+    if (g) IDirectMusicGraph_InsertTool(g, &ct.IDirectMusicTool_iface, NULL, 0, 0);
+    P("  SetGraph %08lx\n", IDirectMusicPerformance8_SetGraph(pf, g));
+    IDirectMusicGraph *pg = NULL;
+    IDirectMusicPerformance8_QueryInterface(pf, &IID_IDirectMusicGraph, (void **)&pg);
+    for (int k = 0; k < 3; k++) {
+        DMUS_PMSG *m = NULL;
+        if (FAILED(IDirectMusicPerformance8_AllocPMsg(pf, sizeof(DMUS_PMSG), &m)) || !m) break;
+        m->dwType = DMUS_PMSGT_USER; m->dwFlags = DMUS_PMSGF_REFTIME; m->rtTime = 0;
+        if (pg) IDirectMusicGraph_StampPMsg(pg, m);
+        if (FAILED(IDirectMusicPerformance8_SendPMsg(pf, m))) IDirectMusicPerformance8_FreePMsg(pf, m);
+    }
+    if (pg) IDirectMusicGraph_Release(pg);
+    for (int k = 0; k < 300 && ct.done != 2; k++) Sleep(10);
+    Sleep(300);
+    P("  the tool's CloseDown %s %08lx, messages after it: %s\n", ct.done == 2 ? "returned" : "did not return", ct.hr, ct.after ? "some" : "none");
+    if (ct.done != 2) return;
+    P("  GetTime %08lx\n", IDirectMusicPerformance8_GetTime(pf, NULL, NULL));
+    P("  InitAudio again %08lx\n", IDirectMusicPerformance8_InitAudio(pf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 16, DMUS_AUDIOF_ALL, NULL));
+    show_state(pf, "again", -1);
+    IDirectMusicSegment8 *seg = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg);
+    if (seg) IDirectMusicSegment8_SetLength(seg, DMUS_PPQ / 2);
+    P("  PlaySegment %08lx\n", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg, 0, 0, NULL));
+    Sleep(500);
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    if (seg) IDirectMusicSegment8_Release(seg);
+    if (g) IDirectMusicGraph_Release(g);
+    P("  Release %lu\n", IDirectMusicPerformance8_Release(pf));
+}
+
+
+/* CloseDown twice with something set in between; and a state of the default path held through CloseDown and Init */
+static void reopen_twice(void)
+{
+    IDirectMusicPerformance8 *pf = NULL;
+    CoCreateInstance(&CLSID_DirectMusicPerformance, NULL, CLSCTX_INPROC, &IID_IDirectMusicPerformance8, (void **)&pf);
+    if (!pf) { P("  no performance\n"); return; }
+    open_perf(pf, 1, "first");
+    IDirectMusicSegment8 *seg = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg);
+    if (seg) IDirectMusicSegment8_SetLength(seg, DMUS_PPQ * 400);
+    IDirectMusicSegmentState *st = NULL;
+    IDirectMusicAudioPath *dp = NULL;
+    P("  PlaySegment %08lx", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg, 0, 0, &st));
+    P(" GetDefaultAudioPath %08lx\n", IDirectMusicPerformance8_GetDefaultAudioPath(pf, &dp));
+    Sleep(200);
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    float tempo = 0.5f;
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    P("  closed: SetGlobalParam %08lx AddNotificationType %08lx SetNotificationHandle %08lx\n",
+      IDirectMusicPerformance8_SetGlobalParam(pf, &GUID_PerfMasterTempo, &tempo, sizeof(tempo)),
+      IDirectMusicPerformance8_AddNotificationType(pf, &GUID_NOTIFICATION_SEGMENT), IDirectMusicPerformance8_SetNotificationHandle(pf, ev, 0));
+    P("  CloseDown again %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    tempo = -1;
+    P("  closed twice: GetGlobalParam %08lx %.2f\n", IDirectMusicPerformance8_GetGlobalParam(pf, &GUID_PerfMasterTempo, &tempo, sizeof(tempo)), tempo);
+    open_perf(pf, 0, "second");         /* (the state and the old default path still held) */
+    show_state(pf, "second", -1);
+    IDirectMusicSegment8 *seg2 = NULL;
+    CoCreateInstance(&CLSID_DirectMusicSegment, NULL, CLSCTX_INPROC, &IID_IDirectMusicSegment8, (void **)&seg2);
+    if (seg2) IDirectMusicSegment8_SetLength(seg2, DMUS_PPQ / 2);
+    ResetEvent(ev);
+    P("  second: PlaySegment %08lx\n", IDirectMusicPerformance8_PlaySegment(pf, (IDirectMusicSegment *)seg2, 0, 0, NULL));
+    DWORD w = WaitForSingleObject(ev, 1500);
+    Sleep(1200);
+    P("  second: the handle %s\n", w == WAIT_OBJECT_0 ? "signalled" : "not signalled");
+    drain_notes(pf, "second, played");
+    if (st) IDirectMusicSegmentState_Release(st);
+    if (dp) IDirectMusicAudioPath_Release(dp);
+    P("  CloseDown %08lx\n", IDirectMusicPerformance8_CloseDown(pf));
+    if (seg) IDirectMusicSegment8_Release(seg);
+    if (seg2) IDirectMusicSegment8_Release(seg2);
+    CloseHandle(ev);
+    P("  Release %lu\n", IDirectMusicPerformance8_Release(pf));
+}
+
 int main(int argc, char **argv)
 {
     const char *only = argc > 1 ? argv[1] : NULL;
@@ -830,6 +1196,16 @@ int main(int argc, char **argv)
         P("stdpath, InitAudio:\n"); stdpath(2);
         P("stdpath, InitAudio without buffers or a default path:\n"); stdpath(3);
         P("stdpath, no Init:\n"); stdpath(4);
+    }
+    if (!only || !strcmp(only, "reopen")) {
+        P("reopen, Init and Init:\n"); reopen(0, 0);
+        P("reopen, Init and InitAudio:\n"); reopen(0, 1);
+        P("reopen, InitAudio and Init:\n"); reopen(1, 0);
+        P("reopen, InitAudio and InitAudio:\n"); reopen(1, 1);
+        P("reopen, a port and what is set while closed, Init:\n"); reopen_kept(0);
+        P("reopen, an audiopath and what is set while closed, InitAudio:\n"); reopen_kept(1);
+        P("reopen, CloseDown by a tool:\n"); reopen_intool();
+        P("reopen, CloseDown twice, and a state held through:\n"); reopen_twice();
     }
     if (only && !strcmp(only, "trackplay")) { P("trackplay:\n"); trackplay(argc - 2, argv + 2); }
     CoUninitialize();

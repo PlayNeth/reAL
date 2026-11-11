@@ -91,6 +91,8 @@ void dm_audiopath_addref(dm_audiopath *ap);
 void dm_audiopath_release(dm_audiopath *ap);
 int dm_audiopath_activate(dm_audiopath *ap, int on);
 int dm_audiopath_set_volume(dm_audiopath *ap, int32_t vol, uint32_t dur);     /* AudioPath::SetVolume */
+int dm_audiopath_dead(dm_audiopath *ap);        /* made before a CloseDown: it has no port any more */
+int dm_perf_has_audiopath(dm_perf *pf);         /* one made since the last CloseDown is still there */
 int dm_audiopath_convert(dm_audiopath *ap, uint32_t pch, uint32_t *out);
 void dm_perf_set_default_audiopath(dm_perf *pf, dm_audiopath *ap);
 uint32_t dm_perf_pchannels(dm_perf *pf);

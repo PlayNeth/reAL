@@ -50,24 +50,36 @@ static ULONG WINAPI pf_addref(IDirectMusicPerformance8 *i) { return InterlockedI
 static void pf_closedown(rm_perf *p)
 {
     p->apstate = 0;                         /* (77308c70: not set up, whether closed down already or not) */
-    if (p->closed) return;
+    BOOL again = p->closed;
     p->closed = TRUE;
+    p->hadport = FALSE;
     if (p->defpath) {                   /* (taken off under the lock, as SetDefaultAudioPath) */
         if (p->host) dm_host_lock(p->host);
         rm_path *a = p->defpath; p->defpath = NULL;
+        if (p->host) dm_perf_set_default_audiopath(dm_host_perf(p->host), NULL);    /* (the application may hold it yet) */
         if (p->host) dm_host_unlock(p->host);
         if (a) IDirectMusicAudioPath_Release(&a->IDirectMusicAudioPath_iface);
     }
+    if (p->host) dm_host_lock(p->host);
     if (p->host) {
-        dm_host_lock(p->host);
         dm_perf *pf = dm_host_perf(p->host);
-        dm_perf_stop(pf, NULL, NULL, 0, 0);
-        dm_perf_drop_app_messages(pf);
-        dm_perf_end_states(pf);
-        dm_perf_drop_all_messages(pf);
+        if (!again) {
+            dm_perf_stop(pf, NULL, NULL, 0, 0);
+            dm_perf_drop_app_messages(pf);
+            dm_perf_end_states(pf);
+        }
+        dm_perf_drop_all_messages(pf);      /* (again: what was asked for while closed goes too) */
         dm_perf_set_graph(pf, NULL);
-        dm_host_unlock(p->host);
+        /* (77308c70 lets every port go: none is added any more) */
+        for (int k = 0; k < 8; k++)
+            if (p->slot[k] && p->added[k]) { p->added[k] = 0; dm_host_port_enable(p->host, k, k ? rm_port_own_host(p->slot[k]) : p->host, 0); }
     }
+    /* (and the global parameters: GetGlobalParam answers E_INVALIDARG until one is set again) */
+    EnterCriticalSection(&p->gcs);
+    while (p->globals) { struct rm_global *e = p->globals; p->globals = e->next; free(e->data); free(e); }
+    p->hasmastervol = FALSE;
+    LeaveCriticalSection(&p->gcs);
+    if (p->host) dm_host_unlock(p->host);
 }
 static void pf_teardown(rm_perf *p)
 {
@@ -126,6 +138,7 @@ static HRESULT ensure_host(rm_perf *p, uint32_t rate, uint32_t voices, BOOL audi
 {
     if (p->host) return S_OK;
     p->closed = FALSE;                      /* (a CloseDown before Init) */
+    p->mastervol = 0; p->hasmastervol = FALSE;    /* (77303d4d: set before Init, it is kept to read and not applied) */
     long why = 0;
     p->host = dm_host_new_why(rate ? rate : 22050, voices ? voices : 64, 64, 2, &why);
     if (!p->host) return audio && why == DSERR_NODRIVER ? DSERR_NODRIVER : E_OUTOFMEMORY;
@@ -154,9 +167,16 @@ static HRESULT perf_reopen(rm_perf *p)
     if (!p->host) return S_FALSE;
     dm_host_lock(p->host);
     p->closed = FALSE;
+    p->mastervol = 0; p->hasmastervol = FALSE;    /* (77303d4d: the master volume back to 0, whatever was set meanwhile) */
+    dm_host_set_volume(p->host, 0);
     dm_perf_reopen(dm_host_perf(p->host));
     perf_init_settings(p, TRUE);
+    for (struct rm_global *e = p->globals; e; e = e->next)        /* (set after CloseDown) */
+        if (IsEqualGUID(&e->g, &G_PerfMasterGrooveLevel) && e->size >= 1) dm_perf_set_groove(dm_host_perf(p->host), *(char *)e->data);
+    dm_perf_transport(dm_host_perf(p->host));       /* (dmime's thread starts with a pass; this one may not come round in time) */
     dm_host_unlock(p->host);
+    BOOL off = FALSE;                       /* 77303d4d: automatic download off */
+    pf_setglobal(&p->IDirectMusicPerformance8_iface, &GUID_PerfAutoDownload, &off, 4);
     return S_OK;
 }
 
