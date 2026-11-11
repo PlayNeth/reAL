@@ -9,6 +9,10 @@
 [default]
 ; WASAPI buffer length in ms. 0/unset = buffers*duration/2 (50 ms with ALchemy's defaults).
 latency=0
+; Output sample rate: device (default: the device's own), game (the game's primary format when it is 44100 or
+; 48000 Hz, otherwise the device's) or a rate in Hz. Sounds at that rate play without resampling; with PipeWire
+; (default.clock.allowed-rates = [ 44100 48000 ]) the device switches to it, Windows converts.
+;outrate=device
 ; ALchemy-compatible keys (same meaning and limits as ALchemy's dsound.ini)
 buffers=4
 duration=25

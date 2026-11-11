@@ -510,6 +510,24 @@ static void wasapi_close(wasapi_out *w)
     memset(w, 0, sizeof(*w));
 }
 
+#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+#endif
+#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
+#endif
+
+/* the rate to open the output at (outrate=): the device's, the game's, or a fixed one */
+static UINT32 wanted_rate(rl_device *dev, UINT32 device)
+{
+    if (g_cfg.out_rate > 0) return (UINT32)g_cfg.out_rate;
+    if (!g_cfg.out_rate) return device;
+    EnterCriticalSection(&dev->lock);
+    UINT32 r = rl_game_rate(dev->primary_fmt.nSamplesPerSec, device);
+    LeaveCriticalSection(&dev->lock);
+    return r;
+}
+
 static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
 {
     WAVEFORMATEX *mixfmt = NULL;
@@ -535,10 +553,43 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     else if (mixfmt->wBitsPerSample == 32) w->fmt = OUT_S32;
     else { hr = AUDCLNT_E_UNSUPPORTED_FORMAT; goto fail; }
 
+    /* the mix format, at the rate outrate= asks for.  A shared stream at another rate than the device's: PipeWire
+     * (through Wine) switches the device to it when it may, Windows converts (AUTOCONVERTPCM); either way the
+     * buffers at that rate play as they are, unresampled */
+    union { WAVEFORMATEX f; WAVEFORMATEXTENSIBLE x; } fmt;
+    memset(&fmt, 0, sizeof(fmt));
+    memcpy(&fmt, mixfmt, mixfmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixfmt->cbSize >= 22 ?
+                         sizeof(WAVEFORMATEXTENSIBLE) : sizeof(WAVEFORMATEX));
+    if (fmt.f.wFormatTag != WAVE_FORMAT_EXTENSIBLE) fmt.f.cbSize = 0;
+    const UINT32 device_rate = mixfmt->nSamplesPerSec;
+    UINT32 want = wanted_rate(dev, device_rate);
+    if (want == dev->rate_refused) want = device_rate;
     REFERENCE_TIME dur = (REFERENCE_TIME)g_cfg.latency_ms * 10000;
-    hr = IAudioClient_Initialize(w->client, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                                 dur, 0, mixfmt, NULL);
+    /* at the rate wanted with Windows' conversion flags, then without them (an audio stack that does not know them),
+     * then at the device's; each on a fresh client, as a failed Initialize may leave one unusable */
+    static const DWORD convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+    for (int t = want != device_rate ? 0 : 2; ; t++) {
+        const UINT32 r = t < 2 ? want : device_rate;
+        fmt.f.nSamplesPerSec = r;
+        fmt.f.nAvgBytesPerSec = r * fmt.f.nBlockAlign;
+        if (!w->client) {
+            hr = IMMDevice_Activate(w->mmdev, &RL_IID_IAudioClient, CLSCTX_INPROC_SERVER, NULL, (void **)&w->client);
+            if (FAILED(hr)) goto fail;
+        }
+        hr = IAudioClient_Initialize(w->client, AUDCLNT_SHAREMODE_SHARED,
+                                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK | (t == 0 ? convert : 0), dur, 0, &fmt.f, NULL);
+        if (SUCCEEDED(hr) || t == 2) break;
+        IAudioClient_Release(w->client);
+        w->client = NULL;
+        if (t == 1) {
+            LOG_INFO("WASAPI: %lu Hz refused (%08lx), using the device's %lu Hz", (unsigned long)want,
+                     (unsigned long)hr, (unsigned long)device_rate);
+            dev->rate_refused = want;
+        }
+    }
     if (FAILED(hr)) { LOG_INFO("WASAPI: Initialize failed (%08lx)", (unsigned long)hr); goto fail; }
+    const UINT32 rate = fmt.f.nSamplesPerSec;
+    dev->device_rate = device_rate;
 
     w->event = CreateEventW(NULL, FALSE, FALSE, NULL);
     hr = IAudioClient_SetEventHandle(w->client, w->event);
@@ -551,10 +602,10 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     REFERENCE_TIME period = 0;
     IAudioClient_GetDevicePeriod(w->client, &period, NULL);
 
-    if (dev->out_rate != mixfmt->nSamplesPerSec || !dev->reverb.eng[0].mem) {
+    if (dev->out_rate != rate || !dev->reverb.eng[0].mem) {
         EnterCriticalSection(&dev->lock);
         rl_reverb_free(&dev->reverb);
-        rl_reverb_init(&dev->reverb, mixfmt->nSamplesPerSec);
+        rl_reverb_init(&dev->reverb, rate);
         for (int k = 0; k < 3; k++)          /* EAX 4 slot reverbs are recreated at the new rate */
             if (dev->xreverb[k]) { rl_reverb_free(dev->xreverb[k]); HeapFree(GetProcessHeap(), 0, dev->xreverb[k]); dev->xreverb[k] = NULL; }
         dev->eax4s[0].reverb.dirty = 0xffffffff;
@@ -565,11 +616,11 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
         dev->reverb_dirty = TRUE;
         LeaveCriticalSection(&dev->lock);
     }
-    if (g_cfg.hrtf_mode && (dev->hrtf.rate != mixfmt->nSamplesPerSec || !dev->hrtf.dirs))
-        load_hrtf(dev, mixfmt->nSamplesPerSec);
-    BOOL rate_changed = dev->out_rate && dev->out_rate != mixfmt->nSamplesPerSec;
-    dev->out_rate = mixfmt->nSamplesPerSec;
-    choose_layout(dev, w->mmdev, mixfmt, rate_changed);
+    if (g_cfg.hrtf_mode && (dev->hrtf.rate != rate || !dev->hrtf.dirs))
+        load_hrtf(dev, rate);
+    BOOL rate_changed = dev->out_rate && dev->out_rate != rate;
+    dev->out_rate = rate;
+    choose_layout(dev, w->mmdev, &fmt.f, rate_changed);
     dev->period_frames = period ? (UINT32)(period * dev->out_rate / 10000000) : dev->out_rate / 100;
 
     /* pre-fill with silence so the first period doesn't underrun */
@@ -580,8 +631,8 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     hr = IAudioClient_Start(w->client);
     if (FAILED(hr)) goto fail;
 
-    LOG_INFO("WASAPI: %lu Hz, %lu ch, %s, buffer %lu frames, period %lu frames",
-             (unsigned long)dev->out_rate, (unsigned long)w->channels,
+    LOG_INFO("WASAPI: %lu Hz%s, %lu ch, %s, buffer %lu frames, period %lu frames",
+             (unsigned long)dev->out_rate, rate != device_rate ? " (outrate)" : "", (unsigned long)w->channels,
              w->fmt == OUT_F32 ? "float32" : w->fmt == OUT_S16 ? "s16" : "s32",
              (unsigned long)w->buffer_frames, (unsigned long)dev->period_frames);
     CoTaskMemFree(mixfmt);
@@ -619,6 +670,12 @@ static DWORD WINAPI render_thread(LPVOID param)
         HANDLE hs[2] = { dev->quit_event, w.event };
         DWORD r = WaitForMultipleObjects(2, hs, FALSE, 200);
         if (r == WAIT_OBJECT_0) break;
+        if (InterlockedExchange(&dev->reopen, 0)) {      /* outrate=game: the game asked for another rate */
+            wasapi_close(&w);
+            while (dev->running && FAILED(wasapi_open(dev, &w)))
+                if (WaitForSingleObject(dev->quit_event, 500) == WAIT_OBJECT_0) break;
+            continue;
+        }
 
         UINT32 padding = 0;
         HRESULT hr = IAudioClient_GetCurrentPadding(w.client, &padding);

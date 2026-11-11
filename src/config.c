@@ -71,6 +71,9 @@ static void apply(const char *key, const char *val)
     /* reAL keys */
     else if (!_stricmp(key, "enabled"))    g_cfg.enabled = is_true(val);
     else if (!_stricmp(key, "latency"))    g_cfg.latency_ms = clampi(atoi(val), 0, 500);
+    else if (!_stricmp(key, "outrate"))
+        g_cfg.out_rate = !_stricmp(val, "game") ? -1 : !_stricmp(val, "device") ? 0 :
+                         atoi(val) >= 8000 && atoi(val) <= 192000 ? atoi(val) : 0;
     else if (!_stricmp(key, "log"))        g_cfg.log_level = clampi(atoi(val), 0, 3);
     else if (!_stricmp(key, "log3d"))      g_cfg.log_3d = is_true(val);
     else if (!_stricmp(key, "fixes"))      g_cfg.fixes = is_true(val);
@@ -205,8 +208,11 @@ void rl_config_load(void)
     rl_log_init();
     LOG_INFO("reAL " REAL_VERSION " (" REAL_BUILD ") loaded into %s", exe);
     for (int i = 0; i < n; i++) LOG_INFO("  config: %s", s_loaded[i]);
-    LOG_INFO("  enabled=%d latency=%dms maxvoicecount=%d disabledirectmusic=%d hrtf=%s resampler=%s log=%d",
-             g_cfg.enabled, g_cfg.latency_ms, g_cfg.max_voices, g_cfg.disable_dmusic,
+    char outrate[16];
+    if (g_cfg.out_rate > 0) snprintf(outrate, sizeof(outrate), "%d", g_cfg.out_rate);
+    else lstrcpynA(outrate, g_cfg.out_rate ? "game" : "device", sizeof(outrate));
+    LOG_INFO("  enabled=%d latency=%dms outrate=%s maxvoicecount=%d disabledirectmusic=%d hrtf=%s resampler=%s log=%d",
+             g_cfg.enabled, g_cfg.latency_ms, outrate, g_cfg.max_voices, g_cfg.disable_dmusic,
              !g_cfg.hrtf_mode ? "off" : g_cfg.hrtf_mode == 2 ? "builtin" : g_cfg.hrtf_path[0] ? g_cfg.hrtf_path : "auto",
              g_cfg.resampler == RL_INTERP_SINC ? "sinc" : "linear", g_cfg.log_level);
     {

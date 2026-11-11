@@ -173,6 +173,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `resampler` | `sinc` (default) or `linear` (ALchemy's). |
 | `fixes` | `false` behaves exactly as ALchemy. |
 | `latency` | WASAPI buffer length in ms; `0` uses ALchemy's `buffers` × `duration` / 2. |
+| `outrate` | The output's sample rate: `device` (default, the device's own), `game` (the game's primary format when it is 44100 or 48000 Hz) or a rate in Hz. Sounds at that rate play without resampling; under PipeWire, the device switches to it when its `allowed-rates` include it. |
 | `buffers`, `duration`, `maxvoicecount`, `disabledirectmusic` | ALchemy's own keys, with the same meaning and limits. |
 | `enabled`, `realdsound` | `enabled=false` hands everything to the DirectSound named by `realdsound=`. |
 

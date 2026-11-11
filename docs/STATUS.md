@@ -17,6 +17,18 @@ Ground rules carried through the project:
 **DirectSound side:** 2D/3D output, HRTF, EAX 1–4 (including ALchemy's reverb and the 11 EAX4 effects),
 Doppler, and WASAPI output.
 
+**Output rate** (`src/device.c`, `outrate=`): reAL mixes at the rate it opens WASAPI at, and a buffer at that
+rate plays as it is (the same-rate copy, no resampling).
+- `device` (default): the device's mix format, as before.
+- `game`: the primary buffer's format when it is 44100 or 48000 Hz; any other (22050, say) keeps the device's, as
+  3D, HRTF and reverb at 22050 would sound worse than resampling. A SetFormat to another of those rates opens the
+  output again at it (the mixer thread does; a short gap).
+- A rate in Hz: that rate.
+- The shared stream at another rate than the device's: through Wine, PipeWire switches the device to it when the
+  rate is in its allowed rates and nothing else holds the device at another, and resamples otherwise; Windows
+  converts (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM). A rate the device refuses (with or without those flags) falls back
+  to the device's and is not asked for again.
+
 **Inaudible voices** (`src/mixcore.c`):
 - A voice is idle when its gains and every effect send are exactly 0, current and target, and no crossfade is
   running. That covers DSBVOLUME_MIN, a 3D source muted at maximum distance, and an EAX path at -10000 mB.

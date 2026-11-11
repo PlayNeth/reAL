@@ -25,6 +25,8 @@ typedef struct rl_config {
     int  duration;          /* ALchemy compat: ms per buffer */
     int  max_voices;        /* reported HW voices / hard voice limit */
     int  latency_ms;        /* WASAPI buffer length; 0 = derive from buffers*duration/2 */
+    int  out_rate;          /* outrate=: 0 the device's (its mix format), -1 the game's (its primary buffer's format,
+                             * when 44100 or 48000), or a rate in Hz */
     int  disable_dmusic;
     int  enabled;           /* 0 = forward everything to the real dsound.dll */
     int  log_level;         /* 0 off, 1 info, 2 calls, 3 verbose (per-lock / per-play) */
@@ -89,7 +91,10 @@ typedef struct rl_device {
     HANDLE      thread;
     HANDLE      quit_event;
     volatile LONG running;
+    volatile LONG reopen;         /* the output wants another rate (outrate=game): the mixer thread opens it again */
     UINT32      out_rate;
+    UINT32      device_rate;      /* the device's own (its mix format's) */
+    UINT32      rate_refused;     /* an outrate= rate the device would not open at (not asked for again) */
     UINT32      out_channels;     /* channels in the mix: layout.n */
     rl_layout   layout;           /* the speaker layout mixed (ALchemy's: stereo, quad, 5.1 or 7.1) */
     rl_layout   dev_layout;       /* the device's own, when different (folded with out_mtx at the output) */
@@ -139,6 +144,13 @@ typedef struct rl_device {
     /* HRTF (loaded from reAL_hrtf.bin once the output rate is known) */
     rl_hrtf_set hrtf;
 } rl_device;
+
+/* the output rate a game's primary format asks for with outrate=game: 44100 or 48000 as it is, any other the
+ * device's (mixing 3D, HRTF and reverb at 22050 would sound worse than resampling to the device) */
+static inline UINT32 rl_game_rate(UINT32 primary, UINT32 device)
+{
+    return primary == 44100 || primary == 48000 ? primary : device;
+}
 
 HRESULT     rl_device_acquire(rl_device **out);
 void        rl_device_release(rl_device *dev);

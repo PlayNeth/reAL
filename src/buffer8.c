@@ -465,6 +465,11 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
     }
     for (rl_buffer *b = dev->all; b; b = b->next_all)
         if (b->is_primary) { prim_format(b); b->mix_qpc = 0; }    /* (its last mix was in the old format) */
+    /* outrate=game: the output follows the rate asked for (the mixer thread opens it again) */
+    if (g_cfg.out_rate < 0 && dev->device_rate) {
+        UINT32 r = rl_game_rate(wfx->nSamplesPerSec, dev->device_rate);
+        if (r != dev->out_rate && r != dev->rate_refused) InterlockedExchange(&dev->reopen, 1);
+    }
     LeaveCriticalSection(&dev->lock);
     LOG_CALL("Primary::SetFormat %lu Hz %u ch %u bits", (unsigned long)wfx->nSamplesPerSec, wfx->nChannels, wfx->wBitsPerSample);
     return DS_OK;
