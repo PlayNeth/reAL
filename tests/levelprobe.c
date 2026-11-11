@@ -1,10 +1,12 @@
 /* levelprobe - how loud a tone comes out, per output channel, for 2D and 3D buffers in the usual placements: the
  * default output's loopback (WASAPI) recorded while each plays.  Compares the gain and panning laws of the
- * dsound.dll next to it (tools/alchemy-kit run5.bat / run6.bat: ALchemy, reAL, Windows).
+ * dsound.dll next to it (tools/alchemy-kit run5.bat to run7.bat: ALchemy, reAL, Windows).
  *   levelprobe.exe          a 441 Hz tone: 2D at five pans, 2D stereo, 3D in nine places
  *   levelprobe.exe noise    pink noise: 2D, and 3D every 15 degrees of azimuth on the right, two on the left, five
  *                           elevations ahead and one up on the right; each channel's level in all, below 500 Hz,
- *                           500 Hz to 4 kHz and above 4 kHz */
+ *                           500 Hz to 4 kHz and above 4 kHz
+ *   levelprobe.exe near     pink noise: 2D mono and stereo, then a mono and a stereo 3D buffer at the listener's own
+ *                           position, head-relative, inside the minimum distance and with 3D disabled */
 #define COBJMACROS
 #include <initguid.h>
 #include <windows.h>
@@ -150,10 +152,10 @@ static IDirectSoundBuffer *tone(int channels, DWORD flags)
 }
 
 /* two seconds of pink noise (Paul Kellet's filter on a fixed white noise), about -15 dB RMS, mono, looping */
-static IDirectSoundBuffer *noise(DWORD flags)
+static IDirectSoundBuffer *noise_ch(DWORD flags, int ch)
 {
-    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 1, 44100, 88200, 2, 16, 0 };
-    DSBUFFERDESC bd = { sizeof(bd), flags | DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, 176400, 0, &wf, { 0 } };
+    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, (WORD)ch, 44100, 88200 * ch, (WORD)(2 * ch), 16, 0 };
+    DSBUFFERDESC bd = { sizeof(bd), flags | DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, 176400 * ch, 0, &wf, { 0 } };
     IDirectSoundBuffer *b = NULL;
     HRESULT hr = IDirectSound8_CreateSoundBuffer(s_ds, &bd, &b, NULL);
     if (!b) { P("CreateSoundBuffer(noise, flags %lx) %08lx\n", flags, hr); return NULL; }
@@ -163,6 +165,7 @@ static IDirectSoundBuffer *noise(DWORD flags)
         unsigned seed = 12345;
         double b0 = 0, b1 = 0, b2 = 0;
         for (DWORD i = 0; i < n1 / 2; i++) {
+            if (ch == 2 && (i & 1)) { s[i] = i >= 22051 ? s[i - 22051] : 0; continue; }   /* (the right: the left a quarter second late) */
             seed = seed * 1103515245u + 12345u;
             double w = ((seed >> 8) & 0xffff) / 32768.0 - 1.0;
             b0 = 0.99765 * b0 + w * 0.0990460; b1 = 0.96300 * b1 + w * 0.2965164; b2 = 0.57000 * b2 + w * 1.0526913;
@@ -174,6 +177,8 @@ static IDirectSoundBuffer *noise(DWORD flags)
     }
     return b;
 }
+
+static IDirectSoundBuffer *noise(DWORD flags) { return noise_ch(flags, 1); }
 
 static void play_measure(IDirectSoundBuffer *b, const char *what)
 {
@@ -217,9 +222,47 @@ static void noise_run(void)
     IDirectSoundBuffer_Release(b);
 }
 
+/* levelprobe near: what the directions of `noise` leave out - a source at the listener's own position (the usual
+ * way to play a sound "nowhere" through a 3D buffer: head-relative at 0,0,0), inside the minimum distance, and a
+ * stereo 3D buffer (which ALchemy makes; Windows 7 and later refuse it) */
+static void near_run(void)
+{
+    s_bands = 1;
+    IDirectSoundBuffer *b = noise(0);
+    if (b) { play_measure(b, "2D noise"); IDirectSoundBuffer_Release(b); }
+    if ((b = noise_ch(0, 2))) { play_measure(b, "2D stereo noise"); IDirectSoundBuffer_Release(b); }
+    for (int ch = 1; ch <= 2; ch++) {
+        if (!(b = noise_ch(DSBCAPS_CTRL3D, ch))) continue;
+        IDirectSound3DBuffer *d = NULL;
+        IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&d);
+        if (!d) { IDirectSoundBuffer_Release(b); continue; }
+        static const struct { float x, y, z; DWORD mode; const char *n; } at[] = {
+            { 0, 0, 1, DS3DMODE_NORMAL, "ahead at the minimum distance" },
+            { 0, 0, 0, DS3DMODE_NORMAL, "at the listener" },
+            { 0, 0, 0, DS3DMODE_HEADRELATIVE, "head-relative at the listener" },
+            { 0, 0, 1, DS3DMODE_HEADRELATIVE, "head-relative ahead" },
+            { 1, 0, 0, DS3DMODE_HEADRELATIVE, "head-relative right" },
+            { 0, 0, 0.25f, DS3DMODE_NORMAL, "ahead at a quarter of the minimum distance" },
+            { 0.25f, 0, 0, DS3DMODE_NORMAL, "right at a quarter of the minimum distance" },
+            { 0.001f, 0, 0, DS3DMODE_NORMAL, "right at a thousandth of the minimum distance" },
+            { 1, 0, 0, DS3DMODE_NORMAL, "right at the minimum distance" },
+            { 0, 0, 1, DS3DMODE_DISABLE, "3D disabled" },
+        };
+        for (unsigned k = 0; k < sizeof(at) / sizeof(at[0]); k++) {
+            IDirectSound3DBuffer_SetMode(d, at[k].mode, DS3D_IMMEDIATE);
+            IDirectSound3DBuffer_SetPosition(d, at[k].x, at[k].y, at[k].z, DS3D_IMMEDIATE);
+            char w[96];
+            snprintf(w, sizeof(w), "3D %s noise, %s", ch == 2 ? "stereo" : "mono", at[k].n);
+            play_measure(b, w);
+        }
+        IDirectSound3DBuffer_Release(d);
+        IDirectSoundBuffer_Release(b);
+    }
+}
+
 int main(int argc, char **argv)
 {
-    int noisemode = argc > 1 && !strcmp(argv[1], "noise");
+    int noisemode = argc > 1 && !strcmp(argv[1], "noise"), nearmode = argc > 1 && !strcmp(argv[1], "near");
     CreateThread(NULL, 0, watchdog, (LPVOID)(UINT_PTR)180000, 0, NULL);
     setvbuf(stdout, NULL, _IONBF, 0);
     CoInitialize(NULL);
@@ -238,8 +281,8 @@ int main(int argc, char **argv)
     IDirectSoundBuffer *prim = NULL;
     IDirectSound8_CreateSoundBuffer(s_ds, &pd, &prim, NULL);
     levels("silence", 300);
-    if (noisemode) {
-        noise_run();
+    if (noisemode || nearmode) {
+        if (nearmode) near_run(); else noise_run();
         if (prim) IDirectSoundBuffer_Release(prim);
         IDirectSound8_Release(s_ds);
         if (s_ac) IAudioClient_Stop(s_ac);

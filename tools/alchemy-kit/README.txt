@@ -34,4 +34,8 @@ More passes, if asked for them:
   pans and 3D buffers in several places, about two minutes, results5.zip.
 - run6.bat runs levelprobe.exe noise: pink noise, 3D every 15 degrees around and at five elevations, each channel's
   level in three bands, about three minutes, results6.zip.
+- run7.bat runs levelprobe.exe near: pink noise from a 3D buffer at the listener's own position (head-relative at
+  0,0,0, the usual way to play a sound "nowhere"), inside the minimum distance, and from a stereo 3D buffer; then
+  applyprobe.exe cross: whether a deferred 3D change is applied by an immediate set of something else, by SetVolume
+  or by Stop and Play. About four minutes, results7.zip.
 Each pass writes its own folder and zip, so running one doesn't touch another's results.

@@ -5,7 +5,10 @@
  * The values read back can't tell (ALchemy's getters and reAL's give the new value either way: alprobe d3).
  * Uses the dsound.dll next to it (tools/alchemy-kit run4.bat runs it under ALchemy, reAL and Windows).
  *   applyprobe.exe [wait ms]      (default 1000: how long a change is given to reach the output, whatever the
- *                                 output latency set) */
+ *                                 output latency set)
+ *   applyprobe.exe cross [wait ms]   what else applies a deferred change: an immediate set of the other object (the
+ *                                 listener's for the buffer's, the buffer's for the listener's), an immediate set of
+ *                                 another value of the same buffer, SetVolume, Stop and Play (run7.bat) */
 #define COBJMACROS
 #include <initguid.h>
 #include <windows.h>
@@ -16,6 +19,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 DEFINE_GUID(AP_CLSID_MMDeviceEnumerator, 0xBCDE0395, 0xE52F, 0x467C, 0x8E, 0x3D, 0xC4, 0x57, 0x92, 0x91, 0x69, 0x2E);
 DEFINE_GUID(AP_IID_IMMDeviceEnumerator,  0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46, 0xDE, 0x8D, 0xB6, 0x36, 0x17, 0xE6);
@@ -109,6 +113,8 @@ static DWORD WINAPI watchdog(LPVOID p)
 
 int main(int argc, char **argv)
 {
+    int cross = argc > 1 && !strcmp(argv[1], "cross");
+    if (cross) { argc--; argv++; }
     int wait = argc > 1 ? atoi(argv[1]) : 1000;
     if (wait < 50) wait = 1000;
     CreateThread(NULL, 0, watchdog, (LPVOID)(UINT_PTR)180000, 0, NULL);
@@ -153,7 +159,46 @@ int main(int argc, char **argv)
     static const DWORD ap[] = { 0, 1, 2, 3, 0xffffffff };
     double ref = level(300);            /* the level with nothing moved, every case's start checked against it */
     P("playing: %.1f dB\n", ref);
-    for (int who = 0; who < 2; who++)
+    /* cross: a change set deferred (the buffer or the listener 100 times further away), then one immediate call
+     * that changes nothing itself; the level after it, and after the commit */
+    static const char *const cases[] = {
+        "buffer deferred, then the listener's SetPosition (same place) immediate",
+        "listener deferred, then the buffer's SetPosition (same place) immediate",
+        "buffer deferred, then the buffer's SetMinDistance (same value) immediate",
+        "listener deferred, then the listener's SetRolloffFactor (same value) immediate",
+        "buffer deferred, then the buffer's SetVolume (same volume)",
+        "buffer deferred, then Stop and Play",
+        "listener deferred, then Stop and Play",
+    };
+    for (unsigned k = 0; cross && k < sizeof(cases) / sizeof(cases[0]); k++) {
+        IDirectSound3DListener_CommitDeferredSettings(l);
+        IDirectSound3DBuffer_SetPosition(d, 0, 0, 1, DS3D_IMMEDIATE);
+        IDirectSound3DListener_SetPosition(l, 0, 0, 0, DS3D_IMMEDIATE);
+        Sleep(wait);
+        double base = level(300);
+        if (base < ref - 10) P("(the reset didn't bring the level back: %.1f dB)\n", base);
+        int onlst = k == 1 || k == 3 || k == 6;
+        HRESULT h = onlst ? IDirectSound3DListener_SetPosition(l, 0, 0, -99, DS3D_DEFERRED)
+                          : IDirectSound3DBuffer_SetPosition(d, 0, 0, 100, DS3D_DEFERRED);
+        HRESULT h2 = E_FAIL;
+        switch (k) {
+        case 0: h2 = IDirectSound3DListener_SetPosition(l, 0, 0, 0, DS3D_IMMEDIATE); break;
+        case 1: h2 = IDirectSound3DBuffer_SetPosition(d, 0, 0, 1, DS3D_IMMEDIATE); break;
+        case 2: h2 = IDirectSound3DBuffer_SetMinDistance(d, 1.0f, DS3D_IMMEDIATE); break;
+        case 3: h2 = IDirectSound3DListener_SetRolloffFactor(l, 1.0f, DS3D_IMMEDIATE); break;
+        case 4: h2 = IDirectSoundBuffer_SetVolume(b, 0); break;
+        default: IDirectSoundBuffer_Stop(b); h2 = IDirectSoundBuffer_Play(b, 0, 0, DSBPLAY_LOOPING); break;
+        }
+        Sleep(wait);
+        double mid = level(300);
+        HRESULT hc = IDirectSound3DListener_CommitDeferredSettings(l);
+        Sleep(wait);
+        double after = level(300);
+        P("%s: %08lx %08lx; level %.1f dB, after the call %.1f dB, after the commit (%08lx) %.1f dB: %s\n", cases[k], h, h2,
+          base, mid, hc, after, base < -90 ? "no sound (nothing to measure)" : mid - base < -10 ? "the call applied it" :
+          after - base < -10 ? "only the commit applied it" : "no change, even after the commit");
+    }
+    for (int who = 0; !cross && who < 2; who++)
         for (unsigned k = 0; k < sizeof(ap) / sizeof(ap[0]); k++) {
             /* back to the start: whatever is still pending committed first, then both put back at once */
             IDirectSound3DListener_CommitDeferredSettings(l);
