@@ -80,8 +80,12 @@ ALchemy's levels for its direction.
 - reAL's output recorded the same way is within 1.1 dB of ALchemy's at every measured direction.
 - DirectMusic's sink buffers (Microsoft's DirectSound under ALchemy too) take Windows 11's levels from the same
   run: a mild pan, -7.8 dB each ahead, -6.4 / -10.1 at the side.
-- Not changed: headphones and four or more speakers (the equal-power pair, not measured yet), HRTF files and
-  `hrtf=builtin`, and 2D buffers. ALchemy's 2D is about 1 dB below Windows' and reAL's; that is not copied.
+- Headphones take the same levels: ALchemy renders them with the filters it uses on stereo speakers (its
+  responses to a click have the same levels, 11-sample ear delay and constant offset under either speaker
+  configuration; SetSpeakerConfig(DSSPEAKER_HEADPHONE) on the object changes nothing either). Before 1.6.2 reAL
+  kept the equal-power pan there, 6 dB louder.
+- Not changed: four or more speakers (the equal-power pair, not measured), HRTF files and `hrtf=builtin`, and 2D
+  buffers. ALchemy's 2D is about 1 dB below Windows' and reAL's; that is not copied.
 - At the listener's own position (head-relative at 0,0,0, how games play a sound "nowhere" through a 3D buffer)
   and inside the minimum distance ALchemy plays as reAL does: a source at the listener as one straight ahead, a
   thousandth of the minimum distance to the right as one to the right (`levelprobe near`, the kit's run7.bat; all
