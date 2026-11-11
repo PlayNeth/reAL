@@ -406,7 +406,11 @@ static HRESULT WINAPI dsb_Play(IDirectSoundBuffer8 *iface, DWORD res1, DWORD pri
     } else {
         This->voice.looping = (flags & DSBPLAY_LOOPING) != 0;
         if (This->desc.dwFlags & DSBCAPS_CTRL3D) {
-            /* make sure a deferred position set before Play is not lost */
+            /* Play of a 3D buffer commits what is deferred, its own and the listener's, as ALchemy (tests/applyprobe.c
+             * cross: a deferred move of either is heard after Stop and Play; Windows keeps it for the commit); not a
+             * DirectMusic sink buffer's, Microsoft's, and not on a buffer already playing, where Play only changes
+             * the flags.  Its gains, as it is not in the play list yet */
+            if (!This->sink && !This->voice.playing) rl_device_commit_3d_buffers(This->dev);
             rl_buffer_update_gains(This);
         }
         if (This->fx && !This->voice.playing) {     /* Play on a playing buffer only changes the flags */
@@ -535,7 +539,11 @@ static HRESULT WINAPI dsb_Stop(IDirectSoundBuffer8 *iface)
         This->voice.playing = 0;            /* (the DSSCL_WRITEPRIMARY voice: Play goes on from here) */
         if (This->in_play_list) rl_device_stop_voice(This->dev, This);
     } else {
+        /* Stop of a playing 3D buffer commits what is deferred, as its Play does (ALchemy, tests/applyprobe.c cross:
+         * a deferred move of another buffer is heard after it; not a 2D buffer's, nor a sink buffer's) */
+        BOOL commit = (This->desc.dwFlags & DSBCAPS_CTRL3D) && !This->sink && This->voice.playing;
         stop_locked(This);
+        if (commit) rl_device_commit_3d_buffers(This->dev);
     }
     LeaveCriticalSection(&This->dev->lock);
     return DS_OK;

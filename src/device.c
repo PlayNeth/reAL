@@ -62,7 +62,7 @@ void rl_device_stop_voice(rl_device *dev, rl_buffer *b)
     b->in_play_list = FALSE;
 }
 
-void rl_device_commit_3d(rl_device *dev)
+static void commit_3d(rl_device *dev, BOOL sinks)
 {
     BOOL all = dev->listener_dirty;
     if (all) {
@@ -71,7 +71,7 @@ void rl_device_commit_3d(rl_device *dev)
     }
     for (rl_buffer *b = dev->all; b; b = b->next_all) {
         if (b->is_primary || !(b->desc.dwFlags & DSBCAPS_CTRL3D)) continue;
-        if (b->src3d_dirty) {
+        if (b->src3d_dirty && (sinks || !b->sink)) {
             b->src3d = b->src3d_pending;
             b->src3d_dirty = FALSE;
             rl_buffer_update_gains(b);
@@ -82,6 +82,11 @@ void rl_device_commit_3d(rl_device *dev)
         }
     }
 }
+
+void rl_device_commit_3d(rl_device *dev) { commit_3d(dev, TRUE); }
+/* a buffer's immediate set or Play (ALchemy's commit): DirectMusic's sink buffers, Microsoft's there, keep their own
+ * deferred values for the listener's commit (their gains still follow a listener that changed) */
+void rl_device_commit_3d_buffers(rl_device *dev) { commit_3d(dev, FALSE); }
 
 static void update_all_gains(rl_device *dev)
 {

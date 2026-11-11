@@ -145,6 +145,7 @@ void        rl_device_release(rl_device *dev);
 void        rl_device_start_voice(rl_device *dev, rl_buffer *b);   /* lock held */
 void        rl_device_stop_voice(rl_device *dev, rl_buffer *b);    /* lock held */
 void        rl_device_commit_3d(rl_device *dev);                    /* lock held: apply deferred 3D */
+void        rl_device_commit_3d_buffers(rl_device *dev);            /* ... but the sink buffers' own */
 void        rl_device_addref(rl_device *dev);
 rl_device  *rl_device_grave(void);   /* where orphaned buffers live on (rl_buffers_orphan): no thread, never freed */
 

@@ -154,6 +154,13 @@ often than referenced still goes (ALchemy's and Windows' count), but, as Windows
 every call on them is E_INVALIDARG and AddRef / Release answer 0xffffffff (`primtest overrelease` matches Windows 7).
 Fallout's later calls on such a buffer used to land in freed memory and corrupt the heap.
 
+**Deferred 3D settings** (`src/buffer3d.c`, `src/buffer8.c`; `tests/applyprobe.c`, measured from the output under
+ALchemy, Windows 11 and reAL): any apply value but 0 defers, for a buffer and the listener. Under ALchemy an
+immediate set on either commits everything deferred, the other's too, and so do Play and Stop of a 3D buffer, any
+3D buffer's (reAL: Play of one not playing, Stop of one playing, the cases measured); SetVolume and a 2D buffer's
+Play do not. Windows
+applies a deferred value only at CommitDeferredSettings, and so do DirectMusic's sink buffers here.
+
 **Listener orientation** (`src/buffer3d.c`): SetOrientation refuses, as ALchemy (0x10043740), a front or top vector
 that is all zero or has an infinite / NaN component (DSERR_INVALIDPARAM, the orientation kept). Fallout 3 sets
 0,0,0 / 0,0,0 hundreds of times before the player has one; Windows refuses those too. reAL took them and its 3D

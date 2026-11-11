@@ -8,7 +8,8 @@
  *                                 output latency set)
  *   applyprobe.exe cross [wait ms]   what else applies a deferred change: an immediate set of the other object (the
  *                                 listener's for the buffer's, the buffer's for the listener's), an immediate set of
- *                                 another value of the same buffer, SetVolume, Stop and Play (run7.bat) */
+ *                                 another value of the same buffer, SetVolume, Stop and Play, and another
+ *                                 buffer's Play or Stop (run7.bat) */
 #define COBJMACROS
 #include <initguid.h>
 #include <windows.h>
@@ -169,7 +170,20 @@ int main(int argc, char **argv)
         "buffer deferred, then the buffer's SetVolume (same volume)",
         "buffer deferred, then Stop and Play",
         "listener deferred, then Stop and Play",
+        "buffer deferred, then another 3D buffer's Play",
+        "buffer deferred, then another 3D buffer's Stop",
+        "buffer deferred, then a 2D buffer's Play",
     };
+    /* (the other buffers: silent, so only the first one's level is measured) */
+    IDirectSoundBuffer *o = NULL, *q = NULL;
+    if (cross) {
+        DSBUFFERDESC od = { sizeof(od), DSBCAPS_CTRL3D | DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, 44100, 0, &wf, { 0 } };
+        DSBUFFERDESC qd = { sizeof(qd), DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, 44100, 0, &wf, { 0 } };
+        IDirectSound8_CreateSoundBuffer(ds, &od, &o, NULL);
+        IDirectSound8_CreateSoundBuffer(ds, &qd, &q, NULL);
+        if (o) IDirectSoundBuffer_SetVolume(o, DSBVOLUME_MIN);
+        if (q) IDirectSoundBuffer_SetVolume(q, DSBVOLUME_MIN);
+    }
     for (unsigned k = 0; cross && k < sizeof(cases) / sizeof(cases[0]); k++) {
         IDirectSound3DListener_CommitDeferredSettings(l);
         IDirectSound3DBuffer_SetPosition(d, 0, 0, 1, DS3D_IMMEDIATE);
@@ -178,6 +192,8 @@ int main(int argc, char **argv)
         double base = level(300);
         if (base < ref - 10) P("(the reset didn't bring the level back: %.1f dB)\n", base);
         int onlst = k == 1 || k == 3 || k == 6;
+        if (k >= 7 && !(k == 9 ? q : o)) { P("%s: no second buffer\n", cases[k]); continue; }
+        if (k == 8) IDirectSoundBuffer_Play(o, 0, 0, DSBPLAY_LOOPING);      /* (playing before the change is set) */
         HRESULT h = onlst ? IDirectSound3DListener_SetPosition(l, 0, 0, -99, DS3D_DEFERRED)
                           : IDirectSound3DBuffer_SetPosition(d, 0, 0, 100, DS3D_DEFERRED);
         HRESULT h2 = E_FAIL;
@@ -187,7 +203,10 @@ int main(int argc, char **argv)
         case 2: h2 = IDirectSound3DBuffer_SetMinDistance(d, 1.0f, DS3D_IMMEDIATE); break;
         case 3: h2 = IDirectSound3DListener_SetRolloffFactor(l, 1.0f, DS3D_IMMEDIATE); break;
         case 4: h2 = IDirectSoundBuffer_SetVolume(b, 0); break;
-        default: IDirectSoundBuffer_Stop(b); h2 = IDirectSoundBuffer_Play(b, 0, 0, DSBPLAY_LOOPING); break;
+        case 5: case 6: IDirectSoundBuffer_Stop(b); h2 = IDirectSoundBuffer_Play(b, 0, 0, DSBPLAY_LOOPING); break;
+        case 7: h2 = IDirectSoundBuffer_Play(o, 0, 0, DSBPLAY_LOOPING); break;
+        case 8: h2 = IDirectSoundBuffer_Stop(o); break;
+        case 9: h2 = IDirectSoundBuffer_Play(q, 0, 0, DSBPLAY_LOOPING); break;
         }
         Sleep(wait);
         double mid = level(300);
@@ -197,7 +216,11 @@ int main(int argc, char **argv)
         P("%s: %08lx %08lx; level %.1f dB, after the call %.1f dB, after the commit (%08lx) %.1f dB: %s\n", cases[k], h, h2,
           base, mid, hc, after, base < -90 ? "no sound (nothing to measure)" : mid - base < -10 ? "the call applied it" :
           after - base < -10 ? "only the commit applied it" : "no change, even after the commit");
+        if (o) IDirectSoundBuffer_Stop(o);
+        if (q) IDirectSoundBuffer_Stop(q);
     }
+    if (o) IDirectSoundBuffer_Release(o);
+    if (q) IDirectSoundBuffer_Release(q);
     for (int who = 0; !cross && who < 2; who++)
         for (unsigned k = 0; k < sizeof(ap) / sizeof(ap[0]); k++) {
             /* back to the start: whatever is still pending committed first, then both put back at once */

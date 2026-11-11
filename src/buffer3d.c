@@ -10,15 +10,21 @@ static ULONG WINAPI b3d_Release(IDirectSound3DBuffer *iface)
 
 static rl_vec3 to_v(D3DVALUE x, D3DVALUE y, D3DVALUE z) { rl_vec3 v = { x, y, z }; return v; }
 
-/* apply: DS3D_IMMEDIATE (0), or anything else deferred (ALchemy, measured from its output: tests/applyprobe.c) */
+/* apply: DS3D_IMMEDIATE (0), or anything else deferred (ALchemy, measured from its output: tests/applyprobe.c).
+ * An immediate set commits everything deferred, the listener's and the other buffers' too, as ALchemy (applyprobe
+ * cross: a listener's deferred move is heard after a buffer's immediate set; Windows applies neither then).  A
+ * DirectMusic sink buffer, Microsoft's under ALchemy, applies its own values only */
 static void b3d_changed(rl_buffer *This, DWORD apply)
 {
     if (apply != DS3D_IMMEDIATE) {
         This->src3d_dirty = TRUE;
-    } else {
+    } else if (This->sink || This->is_primary) {    /* (the primary's: no source, its values only kept) */
         This->src3d = This->src3d_pending;
         This->src3d_dirty = FALSE;
         rl_buffer_update_gains(This);
+    } else {
+        This->src3d_dirty = TRUE;
+        rl_device_commit_3d_buffers(This->dev);
     }
 }
 
