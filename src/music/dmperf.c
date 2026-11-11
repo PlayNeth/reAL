@@ -140,6 +140,7 @@ struct dm_perf {
     dm_toolops tops; void *tctx;                /* tool graphs and application tools (the host's) */
     void *graph;                                /* +0x24 the application's tool graph (SetGraph) */
     dm_pmsg *apphead, *apptail;                 /* messages waiting for an application tool's ProcessPMsg */
+    int apprun;                                 /* a thread is in dm_perf_run_app_tools */
 };
 
 static uint32_t g_trackid;                      /* 7732b1b0 */
@@ -1874,10 +1875,15 @@ static void run_pmsg(dm_perf *pf, dm_pmsg *p)
 }
 
 /* the realtime and transport threads' ProcessPMsg of an application's tool (77309396 ff.): S_OK, the tool keeps the
- * message; DMUS_S_REQUEUE, it goes back to the queues; anything else frees it */
+ * message; DMUS_S_REQUEUE, it goes back to the queues; anything else frees it.  One thread at a time: the lock is
+ * let go around each tool here, and the other thread taking the next message meanwhile could reach its tool first
+ * (seen under load: two lyrics sent one after the other arriving swapped, which dmime's never did).  It leaves them
+ * to the one already here, which goes on until none is left. */
 void dm_perf_run_app_tools(dm_perf *pf)
 {
     dm_pmsg *p;
+    if (pf->apprun) return;
+    pf->apprun = 1;
     while ((p = pf->apphead)) {
         pf->apphead = p->next;
         if (!pf->apphead) pf->apptail = NULL;
@@ -1885,6 +1891,7 @@ void dm_perf_run_app_tools(dm_perf *pf)
         int hr = pf->tops.process ? pf->tops.process(pf->tctx, p) : DMUS_S_FREE;
         if (hr != DM_OK && (hr != DMUS_S_REQUEUE || pf->closed || send_pmsg(pf, p) < 0)) pm_free(pf, p);
     }
+    pf->apprun = 0;
 }
 /* CloseDown: every message freed (the states, graphs and audiopaths they name let go) */
 void dm_perf_drop_all_messages(dm_perf *pf)
