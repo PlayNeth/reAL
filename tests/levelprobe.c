@@ -5,6 +5,8 @@
  *   levelprobe.exe noise    pink noise: 2D, and 3D every 15 degrees of azimuth on the right, two on the left, five
  *                           elevations ahead and one up on the right; each channel's level in all, below 500 Hz,
  *                           500 Hz to 4 kHz and above 4 kHz
+ *   levelprobe.exe noise headphones   the same after SetSpeakerConfig(DSSPEAKER_HEADPHONE) (the kit's run8.bat)
+ *   levelprobe.exe clicks [file]   one sample from each direction, the response written to the file (run9.bat)
  *   levelprobe.exe near     pink noise: 2D mono and stereo, then a mono and a stereo 3D buffer at the listener's own
  *                           position, head-relative, inside the minimum distance and with 3D disabled */
 #define COBJMACROS
@@ -222,6 +224,117 @@ static void noise_run(void)
     IDirectSoundBuffer_Release(b);
 }
 
+/* levelprobe clicks [file]: the dsound.dll's response to a single sample, for each direction - what it does to a
+ * positioned sound, as a filter (the levels of `noise` are that filter's in three bands).  A mono 3D buffer at the
+ * output's rate holding one sample at -6 dB is played once from each direction at the minimum distance, and what the
+ * first two channels get is written to the file (default clicks.f32): for each case, in the order printed, IR_LEN
+ * frames of 32-bit float left and right, from IR_PRE frames before the first sample that is not silence.  First a 2D
+ * buffer (the path's own delay and level), then every 15 degrees around at elevations 0 and +-30, every 30 degrees at
+ * +-60, straight up; then checks that it is a fixed filter: one direction three times, at half the level, and from
+ * twice the distance.  A silent buffer loops throughout, so the output never stops between cases. */
+#define IR_LEN 4096
+#define IR_PRE 64
+static FILE *s_irf;
+static IDirectSoundBuffer *click_buffer(DWORD flags, int amp)
+{
+    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 1, s_rate, s_rate * 2, 2, 16, 0 };
+    DWORD bytes = (s_rate * 3 / 10) * 2;
+    DSBUFFERDESC bd = { sizeof(bd), flags | DSBCAPS_CTRLVOLUME | DSBCAPS_GLOBALFOCUS, bytes, 0, &wf, { 0 } };
+    IDirectSoundBuffer *b = NULL;
+    HRESULT hr = IDirectSound8_CreateSoundBuffer(s_ds, &bd, &b, NULL);
+    if (!b) { P("CreateSoundBuffer(click, flags %lx) %08lx\n", flags, hr); return NULL; }
+    void *p1; DWORD n1;
+    if (SUCCEEDED(IDirectSoundBuffer_Lock(b, 0, 0, &p1, &n1, NULL, NULL, DSBLOCK_ENTIREBUFFER))) {
+        memset(p1, 0, n1);
+        if (n1 >= 2 * 257) ((short *)p1)[256] = (short)amp;
+        IDirectSoundBuffer_Unlock(b, p1, n1, NULL, 0);
+    }
+    return b;
+}
+/* one click: played once, half a second recorded, the response cut out and written */
+static void click_measure(IDirectSoundBuffer *b, const char *what)
+{
+    static float out[IR_LEN * 2];
+    double sum[MAXCH] = { 0 }, frames = 0;
+    Sleep(120);                                     /* (the place set reaches the output's next block) */
+    if (s_nocap) { IDirectSoundBuffer_Play(b, 0, 0, 0); Sleep(500); IDirectSoundBuffer_Stop(b); P("%s\n", what); return; }
+    loopback_read(NULL, NULL);
+    s_capn = 0;
+    IDirectSoundBuffer_SetCurrentPosition(b, 0);
+    IDirectSoundBuffer_Play(b, 0, 0, 0);
+    DWORD end = GetTickCount() + 500;
+    while ((LONG)(end - GetTickCount()) > 0) { Sleep(10); loopback_read(sum, &frames); }
+    loopback_read(sum, &frames);
+    IDirectSoundBuffer_Stop(b);
+    UINT32 on = s_capn;
+    float peak[2] = { 0, 0 };
+    for (UINT32 i = 0; i < s_capn; i++)
+        for (int c = 0; c < 2; c++) {
+            float v = fabsf(s_capbuf[c][i]);
+            if (v > peak[c]) peak[c] = v;
+            if (v > 1e-4f && i < on) on = i;
+        }
+    memset(out, 0, sizeof(out));
+    UINT32 from = on > IR_PRE ? on - IR_PRE : 0;
+    for (UINT32 i = 0; i < IR_LEN && from + i < s_capn; i++) { out[2 * i] = s_capbuf[0][from + i]; out[2 * i + 1] = s_capbuf[1][from + i]; }
+    if (s_irf) fwrite(out, sizeof(float), IR_LEN * 2, s_irf);
+    P("%-40s captured %lu frames, first sound at %lu, peak ch0 %.5f ch1 %.5f%s\n", what, (unsigned long)s_capn, (unsigned long)on,
+      peak[0], peak[1], on == s_capn ? "  (NOTHING HEARD)" : on + IR_LEN - IR_PRE > s_capn ? "  (cut short)" : "");
+}
+static void click_at(IDirectSound3DBuffer *d, IDirectSoundBuffer *b, int az, int el, float dist, const char *tag)
+{
+    double a = az * 3.14159265358979 / 180.0, e = el * 3.14159265358979 / 180.0;
+    IDirectSound3DBuffer_SetPosition(d, (float)(sin(a) * cos(e)) * dist, (float)sin(e) * dist, (float)(cos(a) * cos(e)) * dist,
+                                     DS3D_IMMEDIATE);
+    char w[64];
+    snprintf(w, sizeof(w), "click az %d el %d%s", az, el, tag);
+    click_measure(b, w);
+}
+static void click_run(const char *file)
+{
+    if (!s_nocap && !(s_irf = fopen(file, "wb"))) { P("cannot write %s\n", file); return; }
+    P("clicks: %d frames a case before the first sound, %d in all, 32-bit float left and right, at %lu Hz\n", IR_PRE, IR_LEN,
+      (unsigned long)s_rate);
+    /* the output kept running: a loop of silence */
+    WAVEFORMATEX zf = { WAVE_FORMAT_PCM, 2, s_rate, s_rate * 4, 4, 16, 0 };
+    DSBUFFERDESC zd = { sizeof(zd), DSBCAPS_GLOBALFOCUS, s_rate * 4, 0, &zf, { 0 } };
+    IDirectSoundBuffer *z = NULL;
+    IDirectSound8_CreateSoundBuffer(s_ds, &zd, &z, NULL);
+    if (z) {
+        void *p1; DWORD n1;
+        if (SUCCEEDED(IDirectSoundBuffer_Lock(z, 0, 0, &p1, &n1, NULL, NULL, DSBLOCK_ENTIREBUFFER))) { memset(p1, 0, n1); IDirectSoundBuffer_Unlock(z, p1, n1, NULL, 0); }
+        IDirectSoundBuffer_Play(z, 0, 0, DSBPLAY_LOOPING);
+    }
+    Sleep(500);
+    IDirectSoundBuffer *b = click_buffer(0, 16384);
+    if (b) { click_measure(b, "click 2D"); click_measure(b, "click 2D again"); IDirectSoundBuffer_Release(b); }
+    IDirectSoundBuffer *h = click_buffer(DSBCAPS_CTRL3D, 8192);
+    if ((b = click_buffer(DSBCAPS_CTRL3D, 16384))) {
+        IDirectSound3DBuffer *d = NULL;
+        IDirectSoundBuffer_QueryInterface(b, &IID_IDirectSound3DBuffer, (void **)&d);
+        if (d) {
+            static const int els[] = { 0, 30, -30, 60, -60 };
+            for (unsigned k = 0; k < sizeof(els) / sizeof(els[0]); k++)
+                for (int az = 0; az < 360; az += (els[k] == 60 || els[k] == -60) ? 30 : 15) click_at(d, b, az, els[k], 1.0f, "");
+            click_at(d, b, 0, 90, 1.0f, "");
+            click_at(d, b, 45, 0, 1.0f, " (again)");
+            click_at(d, b, 45, 0, 1.0f, " (a third time)");
+            click_at(d, b, 45, 0, 2.0f, " (twice the distance)");
+            click_at(d, b, 45, 0, 0.5f, " (half the minimum distance)");
+            IDirectSound3DBuffer_Release(d);
+        }
+        IDirectSoundBuffer_Release(b);
+    }
+    if (h) {
+        IDirectSound3DBuffer *d = NULL;
+        IDirectSoundBuffer_QueryInterface(h, &IID_IDirectSound3DBuffer, (void **)&d);
+        if (d) { click_at(d, h, 45, 0, 1.0f, " (half the level)"); click_at(d, h, 0, 0, 1.0f, " (half the level)"); IDirectSound3DBuffer_Release(d); }
+        IDirectSoundBuffer_Release(h);
+    }
+    if (z) { IDirectSoundBuffer_Stop(z); IDirectSoundBuffer_Release(z); }
+    if (s_irf) { fclose(s_irf); s_irf = NULL; }
+}
+
 /* levelprobe near: what the directions of `noise` leave out - a source at the listener's own position (the usual
  * way to play a sound "nowhere" through a 3D buffer: head-relative at 0,0,0), inside the minimum distance, and a
  * stereo 3D buffer (which ALchemy makes; Windows 7 and later refuse it) */
@@ -263,7 +376,8 @@ static void near_run(void)
 int main(int argc, char **argv)
 {
     int noisemode = argc > 1 && !strcmp(argv[1], "noise"), nearmode = argc > 1 && !strcmp(argv[1], "near");
-    CreateThread(NULL, 0, watchdog, (LPVOID)(UINT_PTR)180000, 0, NULL);
+    int clickmode = argc > 1 && !strcmp(argv[1], "clicks");
+    CreateThread(NULL, 0, watchdog, (LPVOID)(UINT_PTR)(argc > 1 && !strcmp(argv[1], "clicks") ? 300000 : 180000), 0, NULL);
     setvbuf(stdout, NULL, _IONBF, 0);
     CoInitialize(NULL);
     char path[MAX_PATH] = "";
@@ -277,12 +391,23 @@ int main(int argc, char **argv)
     DWORD sc = 0;
     IDirectSound8_GetSpeakerConfig(s_ds, &sc);
     P("speaker config %08lx\n", sc);
+    /* "headphones" after the mode: DSSPEAKER_HEADPHONE asked of this DirectSound object before any buffer is
+     * made (ALchemy keeps the setting to the object: a new one starts from the device's again), and put back at
+     * the end - does the dsound.dll render for headphones then */
+    int hp = argc > 2 && !clickmode && !strcmp(argv[2], "headphones");
+    if (hp) {
+        DWORD now = 0;
+        HRESULT h1 = IDirectSound8_SetSpeakerConfig(s_ds, DSSPEAKER_HEADPHONE);
+        IDirectSound8_GetSpeakerConfig(s_ds, &now);
+        P("SetSpeakerConfig(DSSPEAKER_HEADPHONE) %08lx, now %08lx\n", h1, now);
+    }
     DSBUFFERDESC pd = { sizeof(pd), DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D, 0, 0, NULL, { 0 } };
     IDirectSoundBuffer *prim = NULL;
     IDirectSound8_CreateSoundBuffer(s_ds, &pd, &prim, NULL);
     levels("silence", 300);
-    if (noisemode || nearmode) {
-        if (nearmode) near_run(); else noise_run();
+    if (noisemode || nearmode || clickmode) {
+        if (clickmode) click_run(argc > 2 ? argv[2] : "clicks.f32"); else if (nearmode) near_run(); else noise_run();
+        if (hp) P("speaker config put back: %08lx\n", IDirectSound8_SetSpeakerConfig(s_ds, sc));
         if (prim) IDirectSoundBuffer_Release(prim);
         IDirectSound8_Release(s_ds);
         if (s_ac) IAudioClient_Stop(s_ac);

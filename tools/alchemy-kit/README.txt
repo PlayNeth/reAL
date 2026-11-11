@@ -38,4 +38,10 @@ More passes, if asked for them:
   0,0,0, the usual way to play a sound "nowhere"), inside the minimum distance, and from a stereo 3D buffer; then
   applyprobe.exe cross: whether a deferred 3D change is applied by an immediate set of something else, by SetVolume
   or by Stop and Play. About four minutes, results7.zip.
+- run8.bat runs levelprobe.exe noise (each band's level at every angle), applyprobe.exe cross (with another
+  buffer's Play and Stop) and the noise again after asking DirectSound for headphones. About eight minutes,
+  results8.zip.
+- run9.bat runs levelprobe.exe clicks: one sample from each of about a hundred directions, what the speakers get
+  written to a file for each dsound.dll (a few MB each); then the noise after asking the same DirectSound object for
+  headphones. About six minutes, results9.zip.
 Each pass writes its own folder and zip, so running one doesn't touch another's results.
