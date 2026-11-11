@@ -21,8 +21,11 @@ SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/refused.c src/dsou
 EXACT_SRCS="src/speakers.c src/cmss3.c src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reDM: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
 MUSIC_SRCS="src/music/dmtheory.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmport.c src/music/dmapcfg.c src/music/dmperf.c src/music/dmseg.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c src/music/sf2dls.c src/music/msynth.c src/music/wavesrev.c src/music/dmhost.c src/music/dmcom.c src/music/dmgraph.c src/music/dmldr.c src/music/dmavs.c src/music/dmscript.c"
-CFLAGS_EXACT="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
-CFLAGS="$CFLAGS_EXACT -ffast-math"
+CFLAGS_BASE="-O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -msse2 -mfpmath=sse"
+# -fwrapv: the ported code (reDM's time arithmetic above all) wraps as the x86 original does; without it a signed
+# overflow, which a file's values can reach, is undefined and the compiler may assume it away
+CFLAGS_EXACT="$CFLAGS_BASE -fwrapv"
+CFLAGS="$CFLAGS_BASE -ffast-math"
 
 echo "CC = $CC"
 # shellcheck disable=SC2086
@@ -161,13 +164,13 @@ if command -v cc >/dev/null 2>&1; then
     cc -O2 -std=gnu11 -Wall -o build/test_eax4 tests/test_eax4.c src/eax.c src/eax4fx.c src/alrv_params.c -lm
     cc -O2 -std=gnu11 -Wall -o build/test_fx tests/test_fx.c src/eax4dsp.c -lm
     # reDM performance engine against dmime captures (tools/dmgt perf, DMGT_VTIME=1)
-    cc -O1 -std=gnu11 -Wall -o build/test_perf tests/test_perf.c src/music/dmperf.c src/music/dmseg.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmtheory.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c -lm
-    cc -O1 -std=gnu11 -Wall -o build/test_dls tests/test_dls.c src/music/dmdls.c
-    cc -O1 -std=gnu11 -Wall -o build/test_sf2 tests/test_sf2.c src/music/sf2dls.c src/music/dmdls.c src/music/msynth.c -lm
-    cc -O2 -std=gnu11 -Wall -ffp-contract=off -o build/test_wavesrev tests/test_wavesrev.c src/music/wavesrev.c -lm
+    cc -O1 -std=gnu11 -fwrapv -Wall -o build/test_perf tests/test_perf.c src/music/dmperf.c src/music/dmseg.c src/music/dmstyload.c src/music/dmcomp.c src/music/dmcompose.c src/music/dmtheory.c src/music/dmwave.c src/music/dmsmf.c src/music/dmdls.c -lm
+    cc -O1 -std=gnu11 -fwrapv -Wall -o build/test_dls tests/test_dls.c src/music/dmdls.c
+    cc -O1 -std=gnu11 -fwrapv -Wall -o build/test_sf2 tests/test_sf2.c src/music/sf2dls.c src/music/dmdls.c src/music/msynth.c -lm
+    cc -O2 -std=gnu11 -fwrapv -Wall -ffp-contract=off -o build/test_wavesrev tests/test_wavesrev.c src/music/wavesrev.c -lm
     # dsdmo's effects against dsdmo.dll itself: tools/dsfx/cmp.sh
-    cc -O1 -std=gnu11 -Wall -ffp-contract=off -Isrc -o build/test_dsfx tests/test_dsfx.c src/dsfx.c src/i3dl2.c src/music/wavesrev.c -lm
-    cc -O2 -std=gnu11 -Wall -o build/test_msynth tests/test_msynth.c src/music/msynth.c -lm
+    cc -O1 -std=gnu11 -fwrapv -Wall -ffp-contract=off -Isrc -o build/test_dsfx tests/test_dsfx.c src/dsfx.c src/i3dl2.c src/music/wavesrev.c -lm
+    cc -O2 -std=gnu11 -fwrapv -Wall -o build/test_msynth tests/test_msynth.c src/music/msynth.c -lm
     GT=${REAL_GT:-../re/gt}
     if [ -f "$GT/params.bin" ]; then
         ./build/test_alrv_params "$GT/params.bin"
