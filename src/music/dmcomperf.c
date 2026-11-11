@@ -154,6 +154,7 @@ static HRESULT perf_reopen(rm_perf *p)
     if (!p->host) return S_FALSE;
     dm_host_lock(p->host);
     p->closed = FALSE;
+    dm_perf_reopen(dm_host_perf(p->host));
     perf_init_settings(p, TRUE);
     dm_host_unlock(p->host);
     return S_OK;

@@ -667,6 +667,9 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - Application tools in the message pipeline: ProcessPMsg with DMUS_S_REQUEUE / DMUS_S_FREE / S_OK, the delivery
   types (immediate, queue, at time), Flush on invalidation, DMUS_PMSGT_DIRTY at a segment's start, end and abort, and
   DMUS_PCHANNEL_BROADCAST_SEGMENT.
+- After CloseDown and Init or InitAudio again, a message a tool sends on (DMUS_S_REQUEUE) goes on: reDM kept
+  freeing it, as during CloseDown, so nothing past the first tool was heard. `tests/comcmp.sh tooltest.exe` plays
+  through two tools after a second InitAudio.
 - The tools get their messages from one thread at a time, in the order they were taken: the transport and the
   realtime thread both hand them over with the lock let go, and under load two messages sent one after the other
   could arrive swapped (seen in `scrtest track`, 3 runs of 30; dmime's never, in 60). What stays, in dmime too: a

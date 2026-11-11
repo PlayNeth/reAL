@@ -903,6 +903,33 @@ static void filetool(void)
     RegDeleteKeyW(HKEY_CLASSES_ROOT, L"CLSID\\{8f6d1a10-7001-4000-8000-000000000001}");
 }
 
+/* InitAudio again after CloseDown: a tool's messages still go on to the next one */
+static void reopened(void)
+{
+    printf("after CloseDown and InitAudio again\n");
+    HRESULT hr = IDirectMusicPerformance8_InitAudio(perf, NULL, NULL, NULL, DMUS_APATH_SHARED_STEREOPLUSREVERB, 64, DMUS_AUDIOF_ALL, NULL);
+    printf("  InitAudio %08lx\n", hr);
+    if (FAILED(hr)) return;
+    IDirectMusicGraph *g = NULL;
+    CoCreateInstance(&CLSID_DirectMusicGraph, NULL, CLSCTX_INPROC, &IID_IDirectMusicGraph, (void **)&g);
+    tool *A = new_tool("RA", FALSE, DMUS_PMSGF_TOOL_IMMEDIATE, 0, NULL), *B = new_tool("RB", FALSE, DMUS_PMSGF_TOOL_IMMEDIATE, 0, NULL);
+    IDirectMusicGraph_InsertTool(g, TI(A), NULL, 0, 0);
+    IDirectMusicGraph_InsertTool(g, TI(B), NULL, 0, 1);
+    printf("  set graph %08lx\n", IDirectMusicPerformance8_SetGraph(perf, g));
+    IDirectMusicSegment8 *s = load("bells1.sgt");
+    if (s) {
+        printf("  play %08lx\n", IDirectMusicPerformance8_PlaySegmentEx(perf, (IUnknown *)s, NULL, NULL, 0, 0, NULL, NULL, NULL));
+        Sleep(800);
+        printf("  first tool got messages: %d, the second: %d\n", A->processed > 0, B->processed > 0);
+        IDirectMusicPerformance8_Stop(perf, NULL, NULL, 0, 0);
+        IDirectMusicSegment8_Unload(s, (IUnknown *)perf);
+        IDirectMusicSegment8_Release(s);
+    }
+    IDirectMusicPerformance8_SetGraph(perf, NULL);
+    IDirectMusicGraph_Release(g);
+    IDirectMusicPerformance8_CloseDown(perf);
+}
+
 int main(int argc, char **argv)
 {
     void *volatile keep = (void *)DirectSoundCreate; (void)keep;
@@ -933,6 +960,7 @@ int main(int argc, char **argv)
     if (perfgraph) IDirectMusicGraph_Release(perfgraph);
     if (perftool) IDirectMusicTool_Release(perftool);
     IDirectMusicPerformance8_CloseDown(perf);
+    reopened();
     IDirectMusicPerformance8_Release(perf);
     IDirectMusicLoader8_Release(loader);
     CoUninitialize();

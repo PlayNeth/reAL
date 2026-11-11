@@ -48,6 +48,7 @@ dm_perf *dm_perf_new(const dm_hostops *ops, void *ctx);
 void dm_perf_free(dm_perf *pf);
 void dm_perf_end_states(dm_perf *pf);
 void dm_perf_drop_all_messages(dm_perf *pf);   /* CloseDown: every queued message freed */       /* CloseDown: every segment state shut down (tracks, segment, audiopath let go) */
+void dm_perf_reopen(dm_perf *pf);              /* Init again after CloseDown: tools' messages are sent on again */
 /* IDirectMusicPerformance::AddPort / AssignPChannelBlock / AssignPChannel */
 int dm_perf_add_port(dm_perf *pf, const dm_portops *ops, void *ctx);
 void dm_perf_port_set_ops(dm_perf *pf, int idx, const dm_portops *ops, void *ctx, int removed);

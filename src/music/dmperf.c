@@ -1903,6 +1903,9 @@ void dm_perf_drop_all_messages(dm_perf *pf)
     pf->closed = 1;
 }
 
+/* Init or InitAudio again after CloseDown: messages go back to the queues once more */
+void dm_perf_reopen(dm_perf *pf) { pf->closed = 0; }
+
 uint32_t dm_perf_realtime(dm_perf *pf)
 {
     pf->xprec = 0;
