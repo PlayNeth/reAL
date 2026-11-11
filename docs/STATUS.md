@@ -748,6 +748,19 @@ Smaller items still open: none.
   a play, or against a segment's last release (`release`); and a VBScript routine against a script's teardown
   (`vbs`).
 - `TP_RELOAD=<ms>` makes `test_perf` load every track of the playing segment again from its own chunk.
+- **Mutated files** (`tools/fuzz`): `native.py` runs reDM's file parsers and performance natively under
+  AddressSanitizer (segments, the styles and collections they name, DLS; the fixes on); `wine.sh` runs
+  `tests/ldfuzz.c`, the same through the COM layer under Wine (loader, scripts and their routines, containers,
+  audiopath configurations, chord maps and the composer, playing). At 1.6.2: 350,000 native runs and about a million
+  inputs under Wine without a memory error.
+  - What the native runs found were loops with no end, all the original's code on values no real file has, ended
+    under DM_FIX_GUARDS: a loop end past the length with no repeats, and a state already past its end (a start
+    point beyond the length), which held the transport's target for ever; a curve whose step is 0 in its 16 bits,
+    sent again at the same time for ever; style patterns with a signature of no beats, which the pattern filter
+    brought back for ever; a pattern start billions of ticks from the time played, whose part offsets wrapped
+    before arriving; and a start point millions of bars in, walked pattern by pattern (stopped after 65536).
+  - Left as they are: files that are only a great deal of work (a loop of 7 ticks repeated without end).
+  - With the fixes on, every segment of the test set plays the same as under 1.6.1 (321 runs compared).
   Build it with `-fsanitize=address` to check the reload path.
 - `tools/dmgt` drives Microsoft's dmime/dmsynth offline and logs what reaches the port.
   `tests/test_perf.c` does the same for reAL's engine.

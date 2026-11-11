@@ -125,6 +125,8 @@ $CC -O1 -Wno-format -o build/cmapcom.exe tests/cmapcom.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/comptest.exe tests/comptest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/trktest.exe tests/trktest.c -lole32 -luuid -ldxguid
 $CC -O1 -Wno-format -o build/scrtest.exe tests/scrtest.c -lole32 -loleaut32 -luuid -ldxguid
+# mutated files through the COM layer (tools/fuzz/wine.sh)
+$CC -O1 -Wno-format -o build/ldfuzz.exe tests/ldfuzz.c -lole32 -loleaut32 -luuid -ldxguid
 # reDM's locks from several threads (tests/lockstress.c) and two of their meetings forced (tests/lockorder.c)
 $CC -O1 -o build/lockstress.exe tests/lockstress.c -ldsound -lole32 -luuid -ldxguid -lshlwapi
 $CC -O1 -o build/lockorder.exe tests/lockorder.c -ldsound -lole32 -luuid -ldxguid
