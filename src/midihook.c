@@ -61,7 +61,7 @@ static dm_host *midi_host(void)
     if (s_host || s_host_failed) return s_host;
     EnterCriticalSection(&s_mcs);           /* two first uses at once must not make two synths */
     if (s_host || s_host_failed) { LeaveCriticalSection(&s_mcs); return s_host; }
-    dm_host *h = dm_host_new(g_cfg.midi_rate, 64, 1);
+    dm_host *h = dm_host_new(g_cfg.midi_rate ? (uint32_t)g_cfg.midi_rate : DM_HOST_RATE_OUTPUT, 64, 1);
     if (!h) {
         s_host_failed = 1;
         LeaveCriticalSection(&s_mcs);

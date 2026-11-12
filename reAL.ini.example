@@ -80,11 +80,14 @@ logeax=false
 ; GM instrument collection: by default DirectMusic's own gm.dls (registry GMFilePath, else
 ; system32\drivers\gm.dls, also outside WOW64 redirection, then the game's folder). Point this at another
 ; DLS file or at a SoundFont (.sf2), absolute or relative to the game's folder, to use a custom one.
-; Under Wine a Linux path works too (gmdls=/home/me/SoundFonts/bank.sf2).
+; Under Wine a Linux path works too (gmdls=/home/me/SoundFonts/bank.sf2). With no gm.dls, under Wine reAL
+; also tries the GM SoundFont Linux distributions install: /usr/share/soundfonts/default.sf2 or FluidR3_GM.sf2,
+; /usr/share/sounds/sf2/default-GM.sf2 or FluidR3_GM.sf2.
 ;gmdls=D:\Sound\MyGM.dls
 ; MIDI music (games that play General MIDI through Windows' MIDI API, e.g. Claw): midi=true adds the
 ; "reDM GM Synth" output and makes it the MIDI mapper, so the game's music plays through reAL with
-; the GM collection above (gm.dls or gmdls=). midirate= sets its sample rate (default 22050),
+; the GM collection above (gm.dls or gmdls=). midirate= sets its sample rate (default 22050, Microsoft's
+; GS synth's; auto renders at the output's rate, so the music is not resampled),
 ; midireverb=false turns its reverb off. miditrace=true logs every MIDI / MCI call the game makes.
 ;midi=true
 ;miditrace=true

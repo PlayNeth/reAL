@@ -46,7 +46,7 @@ typedef struct rl_config {
     char gm_dls[MAX_PATH];      /* custom GM collection; "" = the system's gm.dls */
     int  midi_trace;            /* log the game's winmm MIDI / MCI calls */
     int  midi;                  /* reDM GM Synth as the MIDI mapper / an extra MIDI output */
-    int  midi_rate;             /* its sample rate */
+    int  midi_rate;             /* its sample rate; 0 (midirate=auto) the output's */
     int  midi_reverb;           /* reverb send (CC91) through the Waves reverb */
 } rl_config;
 

@@ -30,7 +30,7 @@ Both halves are checked against the originals: the EAX processing bit for bit ag
 
 - A **32-bit game** that plays its sound through DirectSound, and optionally DirectMusic or Windows' MIDI.
 - **Linux** with Wine or Proton, or **Windows**. reAL plays through WASAPI and uses Microsoft's Universal C Runtime, which Windows 10 and 11 include; Windows 7 and 8.1 get it from Windows Update.
-- **Optional, for DirectMusic music (reDM):** the General MIDI collection `gm.dls`. Windows has it; under Wine, copy it from a Windows install or point `gmdls=` at another DLS file or a SoundFont.
+- **Optional, for DirectMusic music (reDM):** the General MIDI collection `gm.dls`. Windows has it; under Wine, copy it from a Windows install, point `gmdls=` at another DLS file or a SoundFont, or install your distribution's GM SoundFont (Arch: `soundfont-fluid`; Debian/Ubuntu: `fluid-soundfont-gm`), which reAL finds by itself.
 - **Optional, for HRTF on headphones:** nothing for the built-in set (`hrtf=builtin`, the MIT KEMAR dummy head), or a `reAL_hrtf.bin` you build yourself (see [HRTF data](#hrtf-data)). Without either, 3D sounds use stereo panning.
 
 ## Installing
@@ -166,7 +166,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `log` | `0` off, `1` info, `2` API calls, `3` everything (very verbose). With `1` or more, refused calls are logged too. |
 | `music` | `true` uses reDM, reAL's own DirectMusic. |
 | `gmdls` | Another DLS file or SoundFont (`.sf2`) for reDM's instruments. A Linux path works under Wine. |
-| `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` and `midireverb=` adjust it. |
+| `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` (default `22050`; `auto` renders at the output's rate, unresampled) and `midireverb=` adjust it. |
 | `speakers` | `auto` (Windows' setup), `stereo`, `headphones`, `quad`, `5.1` or `7.1`. |
 | `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
 | `hrtf` | `auto` (default: a `reAL_hrtf.bin` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a `reAL_hrtf.bin`, or `off`. |

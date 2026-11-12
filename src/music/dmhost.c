@@ -568,6 +568,11 @@ dm_host *dm_host_new_why(uint32_t rate, uint32_t voices, uint32_t groups, int ch
     if (why) *why = 0;
     dm_host *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
+    HRESULT dhr = rl_device_acquire(&h->dev);      /* (open once it returns: its rate is known) */
+    if (FAILED(dhr)) { if (why) *why = dhr; h->dev = NULL; dm_host_free(h); return NULL; }
+    if (rate == DM_HOST_RATE_OUTPUT)
+        rate = !h->dev->out_rate ? 22050 : h->dev->out_rate < 11025 ? 11025 : h->dev->out_rate > 48000 ? 48000 :
+               h->dev->out_rate;
     h->rate = rate ? rate : 22050;
     h->bufframes = h->rate * BUF_MS / 1000;
     QueryPerformanceFrequency(&h->qpf);
@@ -581,8 +586,6 @@ dm_host *dm_host_new_why(uint32_t rate, uint32_t voices, uint32_t groups, int ch
     }
     h->waveid = 0x40000000;
     h->voiceid = 1;
-    HRESULT dhr = rl_device_acquire(&h->dev);
-    if (FAILED(dhr)) { if (why) *why = dhr; h->dev = NULL; dm_host_free(h); return NULL; }
     int mono = channels == 1;
     h->syn = msynth_new(h->rate, voices ? (int)voices : 64, groups ? (int)groups : 64, !mono);
     if (h->syn) msynth_set_clock(h->syn, host_clock_ms);
@@ -1144,12 +1147,20 @@ static void unquote(char *d, const char *s, int n)
 
 /* gm.dls: gmdls= (absolute, or relative to the game's folder), else DirectMusic's own lookup (HKLM\Software\
  * Microsoft\DirectMusic GMFilePath, system32\drivers\gm.dls), else the 64-bit system32 (Sysnative) and gm.dls next
- * to the game or to reAL.  Every candidate tried is logged the first time. */
+ * to the game or to reAL, else (under Wine, which has no gm.dls) a GM SoundFont where Linux distributions install one.
+ * Every candidate tried is logged the first time. */
+static const char *const linux_gm_sf2[] = {
+    "/usr/share/soundfonts/default.sf2",            /* Arch, Fedora: a link to the distribution's GM SoundFont */
+    "/usr/share/soundfonts/FluidR3_GM.sf2",         /* Arch's soundfont-fluid */
+    "/usr/share/sounds/sf2/default-GM.sf2",         /* Debian, Ubuntu */
+    "/usr/share/sounds/sf2/FluidR3_GM.sf2",         /* Debian's fluid-soundfont-gm */
+};
+
 const char *dm_gm_dls_path(void)
 {
     static char path[MAX_PATH];
     if (path[0]) return path;
-    char cand[8][MAX_PATH], tmp[MAX_PATH];
+    char cand[8 + sizeof(linux_gm_sf2) / sizeof(linux_gm_sf2[0])][MAX_PATH], tmp[MAX_PATH];
     int n = 0;
     if (g_cfg.gm_dls[0]) {
         unquote(tmp, g_cfg.gm_dls, MAX_PATH);
@@ -1187,12 +1198,21 @@ const char *dm_gm_dls_path(void)
     { char *sl = strrchr(tmp, '\\'); if (sl) { lstrcpyA(sl + 1, "gm.dls"); lstrcpynA(cand[n++], tmp, MAX_PATH); } }
     GetModuleFileNameA(g_self, tmp, MAX_PATH);
     { char *sl = strrchr(tmp, '\\'); if (sl) { lstrcpyA(sl + 1, "gm.dls"); lstrcpynA(cand[n++], tmp, MAX_PATH); } }
+    {   /* Wine's own conversion of a Linux path to its DOS name (normally Z:\usr\...) */
+        WCHAR *(CDECL *dosname)(LPCSTR) = (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_dos_file_name");
+        for (size_t i = 0; dosname && i < sizeof(linux_gm_sf2) / sizeof(linux_gm_sf2[0]); i++) {
+            WCHAR *w = dosname(linux_gm_sf2[i]);
+            if (!w) continue;
+            WideCharToMultiByte(CP_ACP, 0, w, -1, cand[n++], MAX_PATH, NULL, NULL);
+            HeapFree(GetProcessHeap(), 0, w);
+        }
+    }
     for (int i = 0; i < n; i++) {
         int ok = file_exists(cand[i]);
         LOG_INFO("music: GM collection candidate %s: %s", cand[i], ok ? "found" : "not found");
         if (ok) { lstrcpynA(path, cand[i], MAX_PATH); return path; }
     }
     lstrcpynA(path, cand[0], MAX_PATH);
-    LOG_INFO("music: no gm.dls found; set gmdls= in reAL.ini to a DLS file");
+    LOG_INFO("music: no gm.dls found; set gmdls= in reAL.ini to a DLS or SoundFont file");
     return path;
 }

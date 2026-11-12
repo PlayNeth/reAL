@@ -88,7 +88,7 @@ static void apply(const char *key, const char *val)
     }
     else if (!_stricmp(key, "miditrace"))  g_cfg.midi_trace = is_true(val);
     else if (!_stricmp(key, "midi"))       g_cfg.midi = is_true(val);
-    else if (!_stricmp(key, "midirate"))   g_cfg.midi_rate = clampi(atoi(val), 11025, 48000);
+    else if (!_stricmp(key, "midirate"))   g_cfg.midi_rate = !_stricmp(val, "auto") ? 0 : clampi(atoi(val), 11025, 48000);
     else if (!_stricmp(key, "midireverb")) g_cfg.midi_reverb = is_true(val);
     else if (!_stricmp(key, "gmdls"))      lstrcpynA(g_cfg.gm_dls, val, MAX_PATH);
     else if (!_stricmp(key, "resampler"))
@@ -228,5 +228,6 @@ void rl_config_load(void)
         LOG_INFO("  cmss=on cmssintensity=%d", g_cfg.cmss_intensity);
     LOG_INFO("  music=%d (set by %s) gmdls=%s", g_cfg.music, s_music_from, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
     if (g_cfg.midi || g_cfg.midi_trace)
-        LOG_INFO("  midi=%d midirate=%d midireverb=%d miditrace=%d", g_cfg.midi, g_cfg.midi_rate, g_cfg.midi_reverb, g_cfg.midi_trace);
+        LOG_INFO("  midi=%d midirate=%s%.0d midireverb=%d miditrace=%d", g_cfg.midi, g_cfg.midi_rate ? "" : "auto",
+                 g_cfg.midi_rate, g_cfg.midi_reverb, g_cfg.midi_trace);
 }

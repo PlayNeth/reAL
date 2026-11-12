@@ -10,7 +10,10 @@ Ground rules carried through the project:
   The flags are `DM_FIX_*` in `src/music/dmperf.h`, `MS_FIX_*` in `msynth.h`, plus `dm_wave_set_fix_length`
   and `dm_set_clone_fix`. Setting `REDM_NOFIXES` in the environment turns all of them off.
 - For gm.dls, use the system's copy by default. `gmdls=` in `reAL.ini` points to a custom DLS or SoundFont,
-  and Linux paths work under Wine.
+  and Linux paths work under Wine. Under Wine, which has no gm.dls, a GM SoundFont where Linux distributions install
+  one is used when no gm.dls is found: `/usr/share/soundfonts/default.sf2` or `FluidR3_GM.sf2` (Arch, Fedora),
+  `/usr/share/sounds/sf2/default-GM.sf2` or `FluidR3_GM.sf2` (Debian, Ubuntu). It is read whole and converted, so
+  a large one (FluidR3_GM is about 140 MB) takes a moment and that much memory.
 
 ## Done
 
