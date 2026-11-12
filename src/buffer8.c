@@ -456,6 +456,9 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
     }
     /* we always mix in float at the device rate; just remember what the game asked for, and play a
      * DSSCL_WRITEPRIMARY primary buffer in it */
+    const BOOL changed = dev->primary_fmt.nSamplesPerSec != wfx->nSamplesPerSec ||
+                         dev->primary_fmt.nChannels != wfx->nChannels ||
+                         dev->primary_fmt.wBitsPerSample != wfx->wBitsPerSample;
     dev->primary_fmt = *wfx;
     dev->primary_fmt.cbSize = 0;
     if (wfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
@@ -471,7 +474,11 @@ static HRESULT WINAPI dsb_SetFormat(IDirectSoundBuffer8 *iface, LPCWAVEFORMATEX 
         if (r != dev->out_rate && r != dev->rate_refused) InterlockedExchange(&dev->reopen, 1);
     }
     LeaveCriticalSection(&dev->lock);
-    LOG_CALL("Primary::SetFormat %lu Hz %u ch %u bits", (unsigned long)wfx->nSamplesPerSec, wfx->nChannels, wfx->wBitsPerSample);
+    /* at log=1 when it changes (what outrate=game follows), every call at log=2 */
+    if (changed) LOG_INFO("Primary::SetFormat %lu Hz %u ch %u bits", (unsigned long)wfx->nSamplesPerSec, wfx->nChannels,
+                          wfx->wBitsPerSample);
+    else LOG_CALL("Primary::SetFormat %lu Hz %u ch %u bits", (unsigned long)wfx->nSamplesPerSec, wfx->nChannels,
+                  wfx->wBitsPerSample);
     return DS_OK;
 }
 
