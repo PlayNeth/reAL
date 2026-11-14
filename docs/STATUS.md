@@ -326,7 +326,10 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   GetObjectInPath, the 32-frame pre-roll and Discontinuity at Play / SetCurrentPosition. `tests/fxtest.c` (sections
   api, params, data, seq, none) matches Windows 7's dsound line for line, but for a NaN parameter in `params`:
   reAL refuses it (E_INVALIDARG), where the original's range checks let it through and Chorus' and Flanger's Phase
-  would then index past their tables.
+  would then index past their tables. Since 1.5.0, `api` also differs on the CTRLFX buffers Windows 7 refuses
+  (100 and 149 ms, which it calls DSERR_BUFFERTOOSMALL; 24-bit; extensible quad; static; LOCHARDWARE; a DirectX 7
+  object): reAL creates them, as ALchemy, SetFX on them answers DSERR_CONTROLUNAVAIL, and their caps show
+  LOCHARDWARE where Windows 7's show LOCSOFTWARE (227 lines on 1.8.0).
 - The effects' buffered DMO interface (IMediaObject::ProcessInput / ProcessOutput, dsdmo's CPCMDMO 10005480 /
   100055b0): the input buffer held (with a reference) while it has a whole frame, output in whole frames after what
   the output buffer already has, the input's time stamp moved on by the frames before, SYNCPOINT always and
@@ -906,7 +909,10 @@ Smaller items still open: none.
   `DMO_DUMP`, `DMO_FRAME` and `DMO_PROBE` (a hook that saves the stack at an address) with test_dsfx's `DSFX_DUMP`
   are how the I3DL2 translation was checked against the original.
 - `tests/comcmp.sh fxtest.exe <section>` with `FXPROBE_LOG=fxlog.txt FXPROBE_DATA=fxdata.raw FXPROBE_VERBOSE=1`
-  compares SetFX against Windows 7 (`FXTEST_ONLY` / `FXTEST_SIZES` narrow the data section to one run).
+  compares SetFX against Windows 7 (`FXTEST_ONLY` / `FXTEST_SIZES` narrow the data section to one run). Register
+  XP's dsdmo (5.3.2600.5512) in the Microsoft prefix for it: Windows 11's, patched (`tools/dsdmo`) with `msvcrx`,
+  hangs building a chain under Wine 9.21 (`api`, `seq` and `data` never finish), and is needed only for bit-exact
+  effect output (`tools/dsfx`).
 - The Microsoft DLLs (XP dm*, dswave, dsdmo; Windows 7 dsound), the Ghidra project and the reference
   captures lived outside this repository and are not part of the zip. Keep your own copies of the Microsoft
   DLLs you supplied.
