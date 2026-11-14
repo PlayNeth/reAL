@@ -15,7 +15,7 @@
 #include "hrtf.h"
 #include "eax.h"
 
-#define REAL_VERSION "1.7.1"
+#define REAL_VERSION "1.8.0"
 
 #define impl_from(ptr, type, member) ((type *)((char *)(ptr) - offsetof(type, member)))
 
