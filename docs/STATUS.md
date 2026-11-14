@@ -315,11 +315,41 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   (`DSFX_FIX_ECHO_PANDELAY`); I3DL2 runs at the quality GetQuality reports (2) until SetQuality, where XP runs at
   half rate (`DSFX_FIX_I3DL2_QUALITY`).
 
+**waveOut (reAL's `winmm.dll`)**
+- `winmm.dll` (`winmm/`): Windows 11's 193 exports, each a jump to the system's winmm (`winmm/gen.py` makes the
+  tables from `winmm/exports.txt`; an export the system's lacks, as Wine's WOW thunks, answers
+  MMSYSERR_NOTSUPPORTED). The first waveOut, midiOut, midiStream or mciSend* call loads reAL (`dsound.dll`, found the
+  usual way) and takes its waveOut functions (`reAL_winmm_bind`); MIDI and MCI stay the system's, which reAL hooks in
+  place as without the proxy (`rl_midi_hook` finds the system's winmm through `reAL_winmm_proxy`). `waveout=false`:
+  waveOut stays the system's too.
+- `src/waveout.c`: one device ("reAL", also the mapper). Each stream is a looping reAL buffer of a second in the
+  game's format, filled every 5 ms by a thread of its own. Compressed formats (the mapper's ACM conversions) and a
+  stream reAL cannot make open on the system's winmm, and every call on that handle goes there.
+- `src/wavecore.c`, the stream's timeline: an ideal device without latency (its clock I runs with real time while
+  the stream plays, buffers laid along it, gaps silent) whose output the mixer plays `delta` later (the mixing period,
+  10 ms and the resampler's taps; about 30 ms). A buffer is done, and the position counts, as the ideal device plays
+  it. waveOutReset keeps what is between the mixer and I, which the ideal device has played, and the next buffer goes
+  in at I: a game that resets and writes its mix again from its own clock (Pajama Sam 2, ten times a second) plays
+  on without a gap, where an output with latency drops it at each reset. I keeps to real time until the output's
+  clock has drifted a mixing period away, then runs up to 0.05% faster or slower until it is back.
+- Loops (WHDR_BEGINLOOP / ENDLOOP, dwLoops) are queued a pass at a time as the ideal device nears them, so a loop for
+  ever costs nothing; waveOutBreakLoop ends it with the pass being played. Pause stops the stream where the mixer
+  is.
+- Callbacks (WOM_OPEN, WOM_DONE, WOM_CLOSE; function, window, thread, event) come from a thread of reAL's, as XP's
+  driver sent them, never inside the call (Windows 10 and 11 send WOM_OPEN inside waveOutOpen). waveOutReset and
+  waveOutClose return once theirs have run, as Wine's. A callback function is called through a thunk that keeps
+  EBX, ESI and EDI and clears the direction flag (Windows 10 and 11's winmm counts on them after a callback).
+- `tests/test_wavecore.c`: buffers back to back, a write to an idle device, reset, pause, loops (broken, and for
+  ever), and a game resetting every ~104 ms with the mixer's clock up to 600 ppm off: the output goes on sample by
+  sample (a splice at most a frame off, two at 600 ppm). The PCM Pajama Sam 2 wrote (winmmtrace) replayed the same
+  way against an ideal device matches it but for a frame at some splices.
+
 **DirectMusic: playback**
 - DLS synth (dmsynth port), including wave voices and streaming.
 - Segments with sequence, band, tempo, time signature, SysEx and wave tracks.
 - MIDI files, and SoundFont banks converted to DLS.
-- MIDI routed through winmm (midiOut, midiStream and MCI). The GM synth (`midi=true`) gets a program's instruments,
+- MIDI routed through winmm (midiOut, midiStream and MCI), hooked in the system's winmm (also behind reAL's
+  `winmm.dll`). The GM synth (`midi=true`) gets a program's instruments,
   in every bank and drum kit, the first time the music asks for that program (program 0 from the start): whatever the
   synth falls back to for a patch it lacks keeps the program number or is program 0, so it plays as with every
   instrument loaded, without a second copy of the collection's samples. With `midirate=auto`, when the output changes

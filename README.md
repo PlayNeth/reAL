@@ -28,7 +28,7 @@ Both halves are checked against the originals: the EAX processing bit for bit ag
 
 ## Requirements
 
-- A **32-bit game** that plays its sound through DirectSound, and optionally DirectMusic or Windows' MIDI.
+- A **32-bit game** that plays its sound through DirectSound, and optionally DirectMusic or Windows' MIDI. Games that play through waveOut instead work with reAL's `winmm.dll` (see [waveOut games](#waveout-games)).
 - **Linux** with Wine or Proton, or **Windows**. reAL plays through WASAPI and uses Microsoft's Universal C Runtime, which Windows 10 and 11 include; Windows 7 and 8.1 get it from Windows Update.
 - **Optional, for DirectMusic music (reDM):** the General MIDI collection `gm.dls`. Windows has it; under Wine, copy it from a Windows install, point `gmdls=` at another DLS file or a SoundFont, or install your distribution's GM SoundFont (Arch: `soundfont-fluid`; Debian/Ubuntu: `fluid-soundfont-gm`), which reAL finds by itself.
 - **Optional, for HRTF on headphones:** nothing for the built-in set (`hrtf=builtin`, the MIT KEMAR dummy head), or a `reAL_hrtf.bin` you build yourself (see [HRTF data](#hrtf-data)). Without either, 3D sounds use stereo panning.
@@ -56,14 +56,21 @@ Put `dsound.dll` next to the game's exe. Don't replace the one in `System32` or 
 
 > **Games that create DirectSound through COM** (`CoCreateInstance`; Hot Wheels: Beat That!, for one) load Windows' own `dsound.dll` and never see the one next to them. For those, set the two paths in `tools/dsound-com-redirect.reg` to your `dsound.dll` and double-click it. It points DirectSound's COM classes at reAL for your Windows user, so it also applies to any other 32-bit program of yours that does the same (few do). It doesn't apply to programs run as administrator. `tools/dsound-com-redirect-undo.reg` removes it.
 
+### waveOut games
+
+Some games never use DirectSound and play through Windows' waveOut functions instead (Pajama Sam 2, for one). For those, `winmm.dll` from the release goes next to the game's exe as well; it loads reAL and plays the game's waveOut sound through it.
+
+- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --winmm /path/to/game.exe` installs reAL into the prefix, copies `winmm.dll` next to the game and sets the game's `winmm` and `dsound` overrides to `native,builtin`. By hand: copy both DLLs next to the exe and run it with `WINEDLLOVERRIDES="winmm,dsound=n,b"`.
+- **Windows:** copy `winmm.dll` and `dsound.dll` next to the game's exe.
+
 ### Checking it works
 
 Set `log=1` in `reAL.ini` and start the game. `reAL.log` appears next to the game's exe, and its first line names reAL's version and build.
 
 ## Uninstalling
 
-- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `dsound.dll` back and removes the global override. Per-game overrides made with `--app` stay, but fall back to Wine's DLL.
-- **Windows:** delete `dsound.dll` from the game's folder. If you used the COM redirect, run `dsound-com-redirect-undo.reg`. If you registered `reDM.dll` (see [DirectMusic](#directmusic-redm)), run `regsvr32 /u` on it.
+- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `dsound.dll` back and removes the global override. Per-game overrides made with `--app` or `--winmm` stay, but fall back to Wine's DLLs. Delete any `winmm.dll` you put next to a game.
+- **Windows:** delete `dsound.dll` (and `winmm.dll`, if you added it) from the game's folder. If you used the COM redirect, run `dsound-com-redirect-undo.reg`. If you registered `reDM.dll` (see [DirectMusic](#directmusic-redm)), run `regsvr32 /u` on it.
 - You can also delete `reAL.ini`, `reAL.log` and `reAL_hrtf.bin`.
 
 ---
@@ -124,6 +131,10 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
 
 `midi=true` adds a "reDM GM Synth" output and makes it the MIDI mapper, for games that play General MIDI through Windows' MIDI functions (Claw, for one). The music plays through reAL with the same GM collection.
 
+### waveOut
+
+With reAL's `winmm.dll` next to the game, the game's waveOut sound plays through reAL's mixer, alongside everything else it plays, about 30 ms behind the game. reAL keeps the timing of a device with no latency, so a game that resets its sound to write its mix again from its own clock (Pajama Sam 2 does this ten times a second) plays on smoothly, where Wine's output drops a little at every reset and crackles. Its callbacks come from a thread of reAL's, as on Windows XP, which avoids the hangs some old games have on Windows 10 and 11. Compressed formats are left to Windows' own winmm. The midiOut, MIDI stream and MCI calls still go to Windows' winmm, where `midi=true` catches them as before.
+
 ### Where reAL differs from ALchemy
 
 reAL fixes what ALchemy gets wrong:
@@ -167,6 +178,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `music` | `true` uses reDM, reAL's own DirectMusic. |
 | `gmdls` | Another DLS file or SoundFont (`.sf2`) for reDM's instruments. A Linux path works under Wine. |
 | `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` (default `22050`; `auto` renders at the output's rate, unresampled, and follows it if the game changes its format) and `midireverb=` adjust it. Instruments are loaded as the music first uses them, so a large SoundFont isn't held in memory twice. |
+| `waveout` | With reAL's `winmm.dll` next to the game: `true` (default) plays the game's waveOut sound through reAL, `false` leaves it to Windows' (or Wine's). |
 | `speakers` | `auto` (Windows' setup), `stereo`, `headphones`, `quad`, `5.1` or `7.1`. |
 | `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
 | `hrtf` | `auto` (default: a `reAL_hrtf.bin` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a `reAL_hrtf.bin`, or `off`. |
@@ -184,6 +196,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | File | |
 |---|---|
 | `dsound.dll` | reAL itself. |
+| `winmm.dll` | Only for [waveOut games](#waveout-games): next to the game's exe, it loads reAL and passes it the game's waveOut calls. |
 | `reAL.ini` | Settings (see [Settings](#settings)). |
 | `dsound.ini` | ALchemy's settings file, if you have one next to the DLL. |
 | `reAL.log` | Next to the game's exe, with `log=1` or more; `logfile=` puts it elsewhere. Send it with any bug report. |

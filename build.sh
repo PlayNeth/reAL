@@ -16,7 +16,7 @@ if [ -z "$CC" ]; then
     fi
 fi
 
-SRCS="src/dllmain.c src/midihook.c src/config.c src/log.c src/refused.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/virt.c src/alrv.c src/hrtf.c src/hrtf_builtin.c"
+SRCS="src/dllmain.c src/midihook.c src/waveout.c src/wavecore.c src/config.c src/log.c src/refused.c src/dsound.c src/buffer.c src/fx.c src/device.c src/mixcore.c src/spatial.c src/reverb.c src/virt.c src/alrv.c src/hrtf.c src/hrtf_builtin.c"
 # ported parameter code that reproduces ALchemy's float rounding: no -ffast-math
 EXACT_SRCS="src/speakers.c src/cmss3.c src/alrv_params.c src/eax.c src/eax4fx.c src/eax4dsp.c"
 # reDM: the performance engine (dmperf.c includes dmtrack.c and dmstate.c), DLS, synth, reverb, COM layer
@@ -61,6 +61,12 @@ done
 $CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32 -loleaut32
 rm -f build/dsound.lib build/dsound.pdb build/dllmain.lib
 echo "built build/dsound.dll"
+
+# winmm.dll: reAL's proxy for games that play waveOut (and MIDI) without DirectSound (winmm/gen.py makes its tables)
+# shellcheck disable=SC2086
+$CC -O2 -std=gnu11 -Wall -Wextra -shared -o build/winmm.dll winmm/proxy.c winmm/stubs.S winmm/winmm.def $LDFLAGS
+rm -f build/winmm.lib build/winmm.pdb
+echo "built build/winmm.dll"
 
 # dstrace: API tracer that sits in front of another dsound.dll (e.g. ALchemy's)
 mkdir -p build/tracer
@@ -152,6 +158,9 @@ if command -v cc >/dev/null 2>&1; then
     # the built-in HRTF set (hrtf=builtin)
     cc -O1 -g -std=gnu11 -Wall -o build/test_hrtf tests/test_hrtf.c src/hrtf.c src/hrtf_builtin.c -lm
     ./build/test_hrtf
+    # a waveOut stream's timeline (reAL's winmm.dll)
+    cc -O1 -g -std=gnu11 -Wall -o build/test_wavecore tests/test_wavecore.c src/wavecore.c -lm
+    ./build/test_wavecore
     cc -O1 -g -std=gnu11 -Wall -o build/test_speakers tests/test_speakers.c src/speakers.c -lm
     ./build/test_speakers tests/gt/speakers_gt.txt
     cc -O1 -g -std=gnu11 -Wall -o build/test_cmss3 tests/test_cmss3.c src/cmss3.c -lm

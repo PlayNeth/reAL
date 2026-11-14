@@ -3,6 +3,9 @@
 #
 #   ./install.sh                       global: every app in the prefix uses reAL
 #   ./install.sh --app game.exe ...    only these executables use reAL (others keep Wine's dsound)
+#   ./install.sh --winmm /path/to/game.exe ...
+#                                      also reAL's winmm.dll next to these games (their waveOut sound through reAL;
+#                                      for games that never load DirectSound, it is what loads reAL)
 #   ./install.sh --uninstall
 #
 # Uses $WINEPREFIX (default ~/.wine). Note: `wineboot -u` (runs after Wine upgrades) restores
@@ -28,6 +31,9 @@ if [ "$1" = "--uninstall" ]; then
     exit 0
 fi
 
+WINMM="build/winmm.dll"
+if [ -f winmm.dll ]; then WINMM="winmm.dll"; fi
+
 [ -f "$DLL" ] || ./build.sh
 [ -f "$SYS/dsound.dll.wine" ] || cp -f "$SYS/dsound.dll" "$SYS/dsound.dll.wine"
 cp -f "$DLL" "$SYS/dsound.dll"
@@ -36,6 +42,21 @@ echo "installed $DLL -> $SYS/dsound.dll"
 if [ ! -f "$PREFIX/drive_c/windows/reAL.ini" ]; then
     cp reAL.ini.example "$PREFIX/drive_c/windows/reAL.ini"
     echo "config: $PREFIX/drive_c/windows/reAL.ini"
+fi
+
+if [ "$1" = "--winmm" ]; then
+    [ -f "$WINMM" ] || { echo "no $WINMM"; exit 1; }
+    shift
+    for exe in "$@"; do
+        [ -f "$exe" ] || { echo "no $exe"; exit 1; }
+        cp -f "$WINMM" "$(dirname "$exe")/winmm.dll"
+        name=$(basename "$exe")
+        for dll in winmm dsound; do
+            wine reg add "HKCU\\Software\\Wine\\AppDefaults\\$name\\DllOverrides" /v $dll /d native,builtin /f >/dev/null
+        done
+        echo "installed winmm.dll next to $exe; override: $name -> winmm, dsound=native,builtin"
+    done
+    exit 0
 fi
 
 if [ "$1" = "--app" ]; then

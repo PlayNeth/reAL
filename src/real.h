@@ -48,6 +48,7 @@ typedef struct rl_config {
     int  midi;                  /* reDM GM Synth as the MIDI mapper / an extra MIDI output */
     int  midi_rate;             /* its sample rate; 0 (midirate=auto) the output's */
     int  midi_reverb;           /* reverb send (CC91) through the Waves reverb */
+    int  waveout;               /* reAL's winmm.dll: the game's waveOut through reAL (default on) */
 } rl_config;
 
 extern rl_config g_cfg;
@@ -61,6 +62,7 @@ void rl_crash_logger(void);
 void rl_log_shutdown(int process_exit);    /* DLL_PROCESS_DETACH: the crash handler removed, the log closed */
 void *rl_hotpatch(void *fn, void *repl, const char *name);   /* returns a pointer that runs the original */
 void rl_midi_hook(int can_load);
+FARPROC WINAPI reAL_winmm_bind(HMODULE sys, const char *name);   /* reAL's winmm.dll: waveout.c */
 void rl_log(int level, const char *fmt, ...);
 #define LOG_INFO(...)  rl_log(1, __VA_ARGS__)
 #define LOG_CALL(...)  do { if (g_cfg.log_level >= 2) rl_log(2, __VA_ARGS__); } while (0)

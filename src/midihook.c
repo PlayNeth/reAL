@@ -1,8 +1,9 @@
 /* winmm MIDI / MCI hooks.
  *
  * Games older than DirectMusic (Claw, ...) play music through winmm: the midiOut / midiStream API or the MCI
- * sequencer.  reAL is loaded into those games anyway (dsound.dll), so it hooks winmm's functions in place, like the
- * COM hooks for DirectMusic, instead of needing a winmm.dll proxy.
+ * sequencer.  reAL is loaded into those games anyway (dsound.dll), or by reAL's winmm.dll in a game that has no use
+ * for DirectSound, and hooks the system winmm's functions in place, like the COM hooks for DirectMusic: what winmm
+ * calls inside itself (the MCI sequencer playing a file) comes through too.
  *
  * miditrace=true: every call is logged with its arguments and result and passed on unchanged.  Calls winmm makes
  * internally while serving another one (the MCI sequencer driving midiOut, a stream thread) are indented. */
@@ -869,6 +870,11 @@ void rl_midi_hook(int can_load)
     HMODULE mm = GetModuleHandleA("winmm.dll");
     if (!mm && can_load) mm = LoadLibraryA("winmm.dll");
     if (!mm) return;
+    {   /* reAL's winmm.dll (the game's waveOut through reAL): it passes these calls to the system's, hooked here */
+        HMODULE (*proxy)(void);
+        *(FARPROC *)&proxy = GetProcAddress(mm, "reAL_winmm_proxy");
+        if (proxy && !(mm = proxy())) return;
+    }
     if (InterlockedExchange(&done, 1)) return;     /* hook once: a second patch would wrap our own hooks */
     {   /* and only one copy of reAL in a process (another dsound.dll of ours loaded too), as the COM hooks */
         char name[64];

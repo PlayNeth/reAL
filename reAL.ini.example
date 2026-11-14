@@ -92,6 +92,11 @@ logeax=false
 ; midireverb=false turns its reverb off. miditrace=true logs every MIDI / MCI call the game makes.
 ;midi=true
 ;miditrace=true
+; waveOut (with reAL's winmm.dll next to the game): the game's waveOut sound plays through reAL, mixed with the
+; rest, about 30 ms behind the game. A game that resets its sound to write its mix again (Pajama Sam 2) plays on
+; without the gap an output with latency leaves at each reset. waveout=false leaves waveOut to Windows' (or
+; Wine's) winmm; MIDI is still reAL's with midi=true.
+;waveout=false
 
 ; per-game examples
 [EverQuest2.exe]

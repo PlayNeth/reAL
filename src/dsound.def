@@ -14,3 +14,4 @@ EXPORTS
     DirectSoundCaptureCreate8    @12
     DllRegisterServer                PRIVATE
     DllUnregisterServer              PRIVATE
+    reAL_winmm_bind
