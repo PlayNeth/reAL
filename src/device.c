@@ -2,6 +2,7 @@
  * Same output strategy ALchemy's software path uses (CWASAPIRender), which under Wine goes
  * through mmdevapi -> winepulse/winealsa -> PipeWire/PulseAudio/ALSA. */
 #include "real.h"
+#include <stdio.h>
 #include <xmmintrin.h>
 #include "eax4dsp.h"
 #include <math.h>
@@ -463,9 +464,21 @@ static void set_hrtf(rl_device *dev, rl_hrtf_set *set)
     LeaveCriticalSection(&dev->lock);
 }
 
+/* hrtf=: a Linux path under Wine (/home/...) by Wine's own conversion to its DOS name (normally Z:\home\...) */
+static void hrtf_path(char *out, const char *in)
+{
+    WCHAR *(CDECL *dosname)(LPCSTR) = in[0] == '/' ?
+        (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_dos_file_name") : NULL;
+    WCHAR *w = dosname ? dosname(in) : NULL;
+    if (w) {
+        WideCharToMultiByte(CP_ACP, 0, w, -1, out, MAX_PATH, NULL, NULL);
+        HeapFree(GetProcessHeap(), 0, w);
+    } else lstrcpynA(out, in, MAX_PATH);
+}
+
 static void load_hrtf(rl_device *dev, UINT32 rate)
 {
-    char cand[3][MAX_PATH + 32];
+    char cand[5][MAX_PATH + 32];
     int n = 0;
     if (g_cfg.hrtf_mode == 2) {
         rl_hrtf_set set;
@@ -475,26 +488,39 @@ static void load_hrtf(rl_device *dev, UINT32 rate)
                  (unsigned long)set.taps, (unsigned long)set.rate);
         return;
     }
-    if (g_cfg.hrtf_path[0]) lstrcpynA(cand[n++], g_cfg.hrtf_path, MAX_PATH);
-    else {
-        GetModuleFileNameA(g_self, cand[n], MAX_PATH);
-        char *s = strrchr(cand[n], '\\'); if (s) s[1] = 0; else cand[n][0] = 0;
-        lstrcatA(cand[n++], "reAL_hrtf.bin");
-        if (GetWindowsDirectoryA(cand[n], MAX_PATH)) { lstrcatA(cand[n++], "\\reAL_hrtf.bin"); }
+    if (g_cfg.hrtf_path[0]) hrtf_path(cand[n++], g_cfg.hrtf_path);
+    else {      /* reAL_hrtf.bin, then reAL_hrtf.sofa, next to reAL and in the Windows folder */
+        char dir[MAX_PATH], win[MAX_PATH];
+        GetModuleFileNameA(g_self, dir, MAX_PATH);
+        char *s = strrchr(dir, '\\'); if (s) s[1] = 0; else dir[0] = 0;
+        if (!GetWindowsDirectoryA(win, MAX_PATH)) win[0] = 0;
+        static const char *const names[] = { "reAL_hrtf.bin", "reAL_hrtf.sofa" };
+        for (int k = 0; k < 2; k++) {
+            snprintf(cand[n++], MAX_PATH + 32, "%s%s", dir, names[k]);
+            if (win[0]) snprintf(cand[n++], MAX_PATH + 32, "%s\\%s", win, names[k]);
+        }
     }
     for (int i = 0; i < n; i++) {
         BYTE *data; DWORD size;
         if (!read_file(cand[i], &data, &size)) continue;
         rl_hrtf_set set;
-        int ok = rl_hrtf_load(&set, data, size, rate);
+        char why[128] = "";
+        /* (a SOFA file is HDF5: its signature first) */
+        int sofa = size >= 8 && !memcmp(data, "\x89HDF\r\n\x1a\n", 8);
+        int ok = sofa ? rl_hrtf_load_sofa(&set, data, size, rate, why, sizeof(why)) : rl_hrtf_load(&set, data, size, rate);
         HeapFree(GetProcessHeap(), 0, data);
-        if (!ok) { LOG_INFO("HRTF: %s is not a valid reAL_hrtf.bin", cand[i]); continue; }
+        if (!ok) {
+            if (sofa) LOG_INFO("HRTF: %s: %s", cand[i], why);
+            else LOG_INFO("HRTF: %s is neither a reAL_hrtf.bin nor a SOFA file", cand[i]);
+            continue;
+        }
         set_hrtf(dev, &set);
-        LOG_INFO("HRTF: %s (%lu directions, %lu taps, %lu Hz)", cand[i], (unsigned long)set.n_dirs,
-                 (unsigned long)set.taps, (unsigned long)set.rate);
+        LOG_INFO("HRTF: %s (%s%lu directions in %lu rings, %lu taps, %lu Hz)", cand[i], sofa ? "SOFA, " : "",
+                 (unsigned long)set.n_dirs, (unsigned long)set.n_rings, (unsigned long)set.taps, (unsigned long)set.rate);
         return;
     }
-    LOG_INFO("HRTF: no reAL_hrtf.bin found, using stereo panning for 3D sounds (hrtf=builtin for the built-in set)");
+    if (g_cfg.hrtf_path[0]) LOG_INFO("HRTF: %s not loaded, using stereo panning for 3D sounds", cand[0]);
+    else LOG_INFO("HRTF: no reAL_hrtf.bin or reAL_hrtf.sofa found, using stereo panning for 3D sounds (hrtf=builtin for the built-in set)");
 }
 
 /* ---------------------------------------------------------------- WASAPI */

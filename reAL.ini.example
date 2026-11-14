@@ -37,11 +37,13 @@ resampler=sinc
 ;cmssintensity=0
 
 ; HRTF for 3D sounds on headphones:
-;   auto    (default) a reAL_hrtf.bin next to dsound.dll or in the Windows folder, if there is one; otherwise
-;           stereo panning, as ALchemy without HRTF data
+;   auto    (default) a reAL_hrtf.bin, or else a reAL_hrtf.sofa, next to dsound.dll or in the Windows folder, if
+;           there is one; otherwise stereo panning, as ALchemy without HRTF data
 ;   builtin the built-in set: the MIT KEMAR dummy head (Gardner and Martin, MIT Media Lab, 1994). Not ALchemy's
 ;           sound, but needs no measurement
-;   <path>  a reAL_hrtf.bin elsewhere;  off  panning always
+;   <path>  a SOFA file (any HRTF measurement in the AES69 format: SADIE, ARI, LISTEN, CIPIC, ...) or a
+;           reAL_hrtf.bin elsewhere; a Linux path works under Wine (hrtf=/home/me/hrtf/D1_48K.sofa)
+;   off     panning always
 ;hrtf=auto
 
 ; fixes: where ALchemy lets through what Windows refuses and it does harm (a zero 3D distance, a Doppler shift or

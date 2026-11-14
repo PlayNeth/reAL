@@ -1,6 +1,6 @@
 /* reAL - HRTF rendering for 3D voices (headphones).
- * Data comes from reAL_hrtf.bin (built by tools/hrtf_build.py from an hrtfprobe measurement), or from the built-in
- * MIT KEMAR set (hrtf_builtin.c).
+ * Data comes from reAL_hrtf.bin (built by tools/hrtf_build.py from an hrtfprobe measurement), from a SOFA file
+ * (hrtf_sofa.c), or from the built-in MIT KEMAR set (hrtf_builtin.c).
  * Platform independent. */
 #ifndef REAL_HRTF_H
 #define REAL_HRTF_H
@@ -9,7 +9,7 @@
 
 #define RL_HRTF_MAX_TAPS 256          /* 64 measured taps at 48 kHz resampled for 192 kHz */
 #define RL_HRTF_HIST     1024         /* power of two, > taps + max delay */
-#define RL_HRTF_MAX_RINGS 16
+#define RL_HRTF_MAX_RINGS 64
 
 typedef struct rl_hrtf_filter {
     float delay[2];                   /* samples */
@@ -35,6 +35,9 @@ typedef struct rl_hrtf_voice {
 
 /* load from memory (file contents); resamples to out_rate if needed. returns 0 on error */
 int  rl_hrtf_load(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out_rate);
+/* a SOFA file's impulse responses (hrtf_sofa.c), resampled to out_rate; why (whylen bytes) says what was wrong.
+ * returns 0 on error */
+int  rl_hrtf_load_sofa(rl_hrtf_set *set, const void *data, uint32_t size, uint32_t out_rate, char *why, int whylen);
 /* the built-in set (MIT KEMAR, hrtf_builtin.c), resampled to out_rate. returns 0 on error */
 int  rl_hrtf_load_builtin(rl_hrtf_set *set, uint32_t out_rate);
 void rl_hrtf_free(rl_hrtf_set *set);

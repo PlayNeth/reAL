@@ -115,6 +115,35 @@ ALchemy's levels for its direction.
   rendered with the previous position aside; the build repairs those from their mirror image).
   overall level is fitted.
 
+**SOFA files** (`hrtf=<path>.sofa`, or `reAL_hrtf.sofa` where `reAL_hrtf.bin` is looked for; `src/hrtf_sofa.c`):
+- Read with libmysofa 1.3.5's HDF5 and SOFA reader (`src/sofa`, BSD licence; `src/sofa/README.md` lists reAL's
+  changes): reAL's own inflate (`src/sofa/inflate.c`, table-driven for codes up to 9 bits) in place of zlib, a
+  chunk size that overflowed `int` checked, and a chunk's bytes copied a row at a time (half the reading time).
+- Impulse responses (DataType FIR), two ears; positions spherical or cartesian (SOFA's azimuth turned to reAL's
+  clockwise one). A set measured at several distances: the distance most directions have, the farthest of a tie.
+- Each ear's onset becomes a whole-sample delay: the louder ear's first sample above 10% of its peak, less 2; the
+  other ear's that and the lag (within 1 ms) where the two responses correlate best below 1.5 kHz. The quieter ear's
+  own threshold onset was too early on SADIE's sets (low ripple before the sound, a weak far ear: the far ear came
+  out 17 samples sooner). Data.Delay is added; delays count from the set's earliest onset. 64 taps at 48 kHz (as
+  long at the file's rate) from the onset, the last eighth faded; the level as the built-in set's (horizontal
+  ring's mean energy 0.82).
+- Directions: a set measured on rings (elevations to half a degree; most directions on rings of four or more,
+  at most 64 rings) keeps them, its measured azimuths laid out evenly, mixed linearly between two measured ones;
+  any other layout (CIPIC's interaural-polar grid converted) goes onto rings 10 degrees apart, 72 directions at the
+  horizon and fewer towards the poles, each from its three nearest measurements (inverse angular distance). Then
+  it is a reAL_hrtf.bin in memory, loaded and resampled to the output by the same code. RL_HRTF_MAX_RINGS went from
+  16 to 64.
+- `tests/test_sofa.c` with libmysofa's test files (`SOFA_TESTS=<libmysofa>/tests ./build.sh`): CIPIC, FHK, SADIE
+  (H20), LISTEN, MIT KEMAR (both pinnae), Mesh2HRTF, TU Berlin (one ring, four distances), ARI (two subjects),
+  and NetCDF-written files load, the near ear louder (11-25 dB) and sooner (32-44 samples at 48 kHz) on either
+  side. The D1 set and testfile (DataType not FIR) are refused, and the 23 damaged files from libmysofa's bug
+  reports are refused cleanly under AddressSanitizer and UBSan (one, issue 130, overflowed `int` in the reader:
+  fixed).
+- Fuzzed (`test_sofa -fuzz`, AddressSanitizer, UBSan and LeakSanitizer): 4,000 damaged copies of ten of those sets
+  (bits flipped, bytes and 32/64-bit values replaced, ranges copied, the file cut short), 2,346 of which still
+  loaded. No memory error; one leak, of the attributes of a file refused after reading them, fixed in the reader.
+  1,000 more after the reader and inflate were made faster: clean too.
+
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.
 - The data: the MIT KEMAR compact set, diffuse-field equalised, at 48 kHz (mit-hrtf-lib's tables). It has 14 rings

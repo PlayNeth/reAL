@@ -31,7 +31,7 @@ Both halves are checked against the originals: the EAX processing bit for bit ag
 - A **32-bit game** that plays its sound through DirectSound, and optionally DirectMusic or Windows' MIDI. Games that play through waveOut instead work with reAL's `winmm.dll` (see [waveOut games](#waveout-games)).
 - **Linux** with Wine or Proton, or **Windows**. reAL plays through WASAPI and uses Microsoft's Universal C Runtime, which Windows 10 and 11 include; Windows 7 and 8.1 get it from Windows Update.
 - **Optional, for DirectMusic music (reDM):** the General MIDI collection `gm.dls`. Windows has it; under Wine, copy it from a Windows install, point `gmdls=` at another DLS file or a SoundFont, or install your distribution's GM SoundFont (Arch: `soundfont-fluid`; Debian/Ubuntu: `fluid-soundfont-gm`), which reAL finds by itself.
-- **Optional, for HRTF on headphones:** nothing for the built-in set (`hrtf=builtin`, the MIT KEMAR dummy head), or a `reAL_hrtf.bin` you build yourself (see [HRTF data](#hrtf-data)). Without either, 3D sounds use stereo panning.
+- **Optional, for HRTF on headphones:** nothing for the built-in set (`hrtf=builtin`, the MIT KEMAR dummy head), a SOFA file of any HRTF measurement, or a `reAL_hrtf.bin` you build yourself (see [HRTF data](#hrtf-data)). Without any of them, 3D sounds use stereo panning.
 
 ## Installing
 
@@ -102,7 +102,7 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
 ### 3D audio and speakers
 
 - **DirectSound 3D:** listener and sounds, deferred settings, cones, distances, and Doppler with ALchemy's formula.
-- **HRTF on headphones,** from the built-in MIT KEMAR set or a `reAL_hrtf.bin` (see [HRTF data](#hrtf-data)). Off by default.
+- **HRTF on headphones,** from the built-in MIT KEMAR set, a SOFA file or a `reAL_hrtf.bin` (see [HRTF data](#hrtf-data)). Off by default.
 - **3D sounds of any channel count** are accepted, as ALchemy accepts them, and play as their mono mix while positioned.
 - **Speakers:** stereo, headphones, quad, 5.1 and 7.1, from Windows' speaker setup or `speakers=`. ALchemy's layouts, its channel converter for multichannel sounds (the LFE goes to the fronts through its bass limiter), and its 3D panning across the speakers.
 - **CMSS-3D** (`cmss=on`, off by default as in ALchemy): ALchemy's stereo-to-surround upmixer for music, ambience and videos. On quad, 5.1 and 7.1 it moves centred sound to the centre speaker and ambience to the rears and sides; on stereo speakers and headphones it virtualizes the rear pair. It matches ALchemy to better than −80 dB.
@@ -181,7 +181,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `waveout` | With reAL's `winmm.dll` next to the game: `true` (default) plays the game's waveOut sound through reAL, `false` leaves it to Windows' (or Wine's). |
 | `speakers` | `auto` (Windows' setup), `stereo`, `headphones`, `quad`, `5.1` or `7.1`. |
 | `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
-| `hrtf` | `auto` (default: a `reAL_hrtf.bin` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a `reAL_hrtf.bin`, or `off`. |
+| `hrtf` | `auto` (default: a `reAL_hrtf.bin` or `reAL_hrtf.sofa` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a SOFA file or a `reAL_hrtf.bin` (a Linux path works under Wine), or `off`. |
 | `resampler` | `sinc` (default) or `linear` (ALchemy's). |
 | `fixes` | `false` behaves exactly as ALchemy. |
 | `latency` | WASAPI buffer length in ms; `0` uses ALchemy's `buffers` × `duration` / 2. |
@@ -200,7 +200,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `reAL.ini` | Settings (see [Settings](#settings)). |
 | `dsound.ini` | ALchemy's settings file, if you have one next to the DLL. |
 | `reAL.log` | Next to the game's exe, with `log=1` or more; `logfile=` puts it elsewhere. Send it with any bug report. |
-| `reAL_hrtf.bin` | HRTF filters, next to `dsound.dll` or in the Windows folder. |
+| `reAL_hrtf.bin`, `reAL_hrtf.sofa` | HRTF filters, next to `dsound.dll` or in the Windows folder. |
 | `gm.dls` | DirectMusic's instruments, for reDM: the system's, or the one named by `gmdls=`. |
 | `reDM.dll` | Only if you registered reAL as DirectMusic's server (a copy of `dsound.dll`). |
 
@@ -219,9 +219,10 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 
 ## HRTF data
 
-reAL can render 3D sounds on stereo speakers and headphones through per-direction filters, as ALchemy does on both. Without them a 3D sound is panned at ALchemy's level for its direction, but without ALchemy's tone colour. The filters come from one of two places:
+reAL can render 3D sounds on stereo speakers and headphones through per-direction filters, as ALchemy does on both. Without them a 3D sound is panned at ALchemy's level for its direction, but without ALchemy's tone colour. The filters come from one of three places:
 
 - **The built-in set:** `hrtf=builtin` in `reAL.ini`. It is the MIT KEMAR dummy head (Bill Gardner and Keith Martin, MIT Media Lab, 1994), diffuse-field equalised: 710 directions from 40° below to straight above, set to the same loudness as ALchemy's HRTF. It isn't ALchemy's sound, but it needs no measurement. It is off by default, because the default stays what ALchemy without HRTF data sounds like.
+- **A SOFA file:** the standard format (AES69) HRTF measurements are published in, such as those of the SADIE, ARI, LISTEN, CIPIC and FABIAN databases or of your own head. Name it with `hrtf=<path>` (a Linux path works under Wine), or call it `reAL_hrtf.sofa` and put it next to `dsound.dll` or in the Windows folder. reAL takes the impulse responses at one distance, keeps the file's rings of directions (or samples any other layout onto rings 10° apart), splits each response into its delay and 64 taps as for the built-in set, and sets it to the same loudness. The log names the file and how many directions it holds, or why it wasn't used.
 - **A `reAL_hrtf.bin`:** next to `dsound.dll` or in the Windows folder, or named by `hrtf=<path>`. It is used whenever it is there (`hrtf=auto`, the default). The file isn't included: build it from a measurement of the implementation you want to match, such as your own ALchemy install. The tools are in the release's `tools` folder:
 
 ```
@@ -268,6 +269,8 @@ src/        the DLL (C11, Win32 COM by hand)
   eax*.c, alrv*.c      EAX 1-4 and ALchemy's reverb; eax4dsp.* the 11 non-reverb EAX 4 effects
   speakers.c, cmss3.c, virt.c, hrtf.c   speaker layouts, CMSS-3D, virtualizers, HRTF
   hrtf_builtin.c, hrtf_kemar_data.h     the built-in HRTF set (MIT KEMAR)
+  hrtf_sofa.c, sofa/                    SOFA files (libmysofa's reader, BSD licence)
+  waveout.c, wavecore.c                 waveOut through reAL (with winmm/, the winmm.dll proxy)
   fx.c, dsfx.c, i3dl2.c                 DirectSound effects (SetFX)
   refused.c            the log of refused calls
   music/               reDM: engine (dm*.c), synth (msynth.c), DLS / SoundFont, COM layer (dmcom*.c)
@@ -311,5 +314,7 @@ Logs what a game asks DirectMusic to do (it's how reDM started). DirectMusic is 
 ## License
 
 MIT, see [`LICENSE`](LICENSE). A personal project; ALchemy is © Creative Technology, and this repository contains no Creative or Microsoft code or binaries.
+
+SOFA files are read with [libmysofa](https://github.com/hoene/libmysofa)'s reader, © 2016-2017 Symonics GmbH, Christian Hoene, BSD licence: its notice is in [`src/sofa/LICENSE`](src/sofa/LICENSE).
 
 The built-in HRTF set is derived from the MIT KEMAR measurements: B. Gardner and K. Martin, "HRTF Measurements of a KEMAR Dummy-Head Microphone", MIT Media Lab Perceptual Computing Technical Report #280, 1994. MIT provides them without usage restrictions. The 48 kHz tables are from mit-hrtf-lib (© 2007 Aristotel Digenis, © 2014 greekgoddj, MIT licence); its notice is in [`LICENSE-HRTF`](LICENSE-HRTF).

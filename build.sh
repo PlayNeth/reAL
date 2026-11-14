@@ -52,6 +52,18 @@ OBJS="$OBJS $o"
 o=build/obj/i3dl2.o
 $CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/i3dl2.c
 OBJS="$OBJS $o"
+# SOFA files (hrtf=path.sofa): libmysofa's reader as it is (third-party: its own warnings off), and reAL's inflate
+for f in src/sofa/hdf/btree.c src/sofa/hdf/dataobject.c src/sofa/hdf/fractalhead.c src/sofa/hdf/gcol.c \
+         src/sofa/hdf/superblock.c src/sofa/hrtf/reader.c src/sofa/hrtf/tools.c; do
+    o=build/obj/sofa_$(basename "$f" .c).o
+    $CC -O2 -std=gnu11 -w -fwrapv -msse2 -mfpmath=sse -c -o "$o" "$f"
+    OBJS="$OBJS $o"
+done
+for f in src/sofa/inflate.c src/hrtf_sofa.c; do
+    o=build/obj/$(basename "$f" .c).o
+    $CC $CFLAGS_EXACT -c -o "$o" "$f"
+    OBJS="$OBJS $o"
+done
 for f in $MUSIC_SRCS; do
     o=build/obj/music_$(basename "$f" .c).o
     $CC $CFLAGS_EXACT -ffp-contract=off -DDM_FPU_NATIVE -Isrc -c -o "$o" "$f"
@@ -158,6 +170,16 @@ if command -v cc >/dev/null 2>&1; then
     # the built-in HRTF set (hrtf=builtin)
     cc -O1 -g -std=gnu11 -Wall -o build/test_hrtf tests/test_hrtf.c src/hrtf.c src/hrtf_builtin.c -lm
     ./build/test_hrtf
+    # SOFA files as HRTF sets: SOFA_TESTS=<libmysofa>/tests ./build.sh loads the SOFA files there
+    mkdir -p build/native
+    for f in src/sofa/hdf/btree.c src/sofa/hdf/dataobject.c src/sofa/hdf/fractalhead.c src/sofa/hdf/gcol.c \
+             src/sofa/hdf/superblock.c src/sofa/hrtf/reader.c src/sofa/hrtf/tools.c; do
+        cc -O1 -g -std=gnu11 -w -fwrapv -c -o build/native/sofa_$(basename "$f" .c).o "$f"
+    done
+    cc -O1 -g -std=gnu11 -Wall -o build/test_sofa tests/test_sofa.c src/hrtf.c src/hrtf_sofa.c src/sofa/inflate.c \
+        build/native/sofa_*.o -lm
+    # (its tester*.sofa hold made-up responses, not a head's)
+    if [ -n "$SOFA_TESTS" ]; then ./build/test_sofa $(ls "$SOFA_TESTS"/*.sofa | grep -v /tester) | tail -1; fi
     # a waveOut stream's timeline (reAL's winmm.dll)
     cc -O1 -g -std=gnu11 -Wall -o build/test_wavecore tests/test_wavecore.c src/wavecore.c -lm
     ./build/test_wavecore
