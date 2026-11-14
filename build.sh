@@ -110,6 +110,8 @@ rm -f build/hrtfprobe.lib build/hrtfprobe.pdb
 $CC -O1 -o build/eaxtest.exe tests/eaxtest.c -lole32 -luuid
 rm -f build/eaxtest.lib build/eaxtest.pdb
 $CC -O1 -o build/streamtest.exe tests/streamtest.c -lwinmm -ldsound
+# waveOut through reAL's winmm.dll (put winmm.dll and dsound.dll next to it)
+$CC -O1 -o build/wotest.exe tests/wotest.c -lwinmm
 $CC -O1 -o build/dmplay.exe tests/dmplay.c -ldsound -lole32 -luuid -ldxguid -ladvapi32
 $CC -O1 -DNO_DSOUND -o build/dmplay_nods.exe tests/dmplay.c -lole32 -luuid -ldxguid -ladvapi32
 $CC -O1 -o build/notiftest.exe tests/notiftest.c -ldsound -lole32 -luuid -ldxguid

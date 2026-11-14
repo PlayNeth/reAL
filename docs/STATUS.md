@@ -372,6 +372,11 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   ever), and a game resetting every ~104 ms with the mixer's clock up to 600 ppm off: the output goes on sample by
   sample (a splice at most a frame off, two at 600 ppm). The PCM Pajama Sam 2 wrote (winmmtrace) replayed the same
   way against an ideal device matches it but for a frame at some splices.
+- `tests/wotest.c` (under Wine, with `winmm.dll` and `dsound.dll` beside it): 11025 Hz 8-bit mono with a callback
+  function, 8 buffers played, 30 rounds of a reset and three buffers every 100 ms, pause and restart, close. All 12
+  checks pass through reAL (every WOM_DONE and WHDR_DONE, the position held while paused, one WOM_OPEN and one
+  WOM_CLOSE, no callback on the caller's thread); on Wine's own winmm two fail (the position moves while paused, a
+  callback runs on the caller's thread). Pajama Sam 2 confirmed in the game: no more crackling.
 
 **DirectMusic: playback**
 - DLS synth (dmsynth port), including wave voices and streaming.
@@ -419,7 +424,8 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - GetObjectInPath for configured paths: buffers (dwBuffer across the maps), their effects, mix-ins (PChannel 0 only),
   the primary buffer; ConvertPChannel as dmime (broadcast values pass, others DMUS_E_NOT_FOUND).
 - `tests/cfgcmp.sh` runs `tests/cfgtest.c`'s configurations one by one against Microsoft's: all match, the port and
-  sink stages included.
+  sink stages included, but for the `pan` lines: on buffers without DSBCAPS_CTRLPAN, Microsoft's GetPan answers
+  DSERR_CONTROLUNAVAIL and reAL's DS_OK (as ALchemy, since 1.5.0: volume, pan and frequency need no CTRL flag).
 
 **DirectMusic: port objects** (`src/music/dmport.c`)
 - The synth port, as dmusic's DirectX 8 software synth port: IDirectMusicPort, IDirectMusicPortDownload and
