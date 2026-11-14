@@ -759,9 +759,10 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - Recomposing while playing: the signpost track recomposes at the start (DMUS_TRACKCONFIG_PLAY_COMPOSE) or on a
   loop (DMUS_TRACKCONFIG_LOOP_COMPOSE) and sends GUID_NOTIFICATION_RECOMPOSE. The transport thread's rand() is
   seeded from time() when it starts, as Microsoft's is, so these compose the same chords.
+- On a chord map with cycles, the path the search found is read back along its marks, which can lead round a
+  cycle for ever: Microsoft hangs, adding chords until memory runs out. reDM follows the path as found when that
+  happens (`c10.sgt`), with REDM_NOFIXES too, since Microsoft gives no result to match there.
 - Microsoft's flaws fixed (off with REDM_NOFIXES):
-  - On a chord map with cycles, the path the search found is read back along its marks, which can lead round a
-    cycle for ever: Microsoft hangs. reDM follows the path as found when that happens (`c10.sgt`).
   - ChangeChordMap drops the chord track's chord names, failing or not; reDM keeps them.
 - Not emulated: a missing "from" chord in ComposeTransition leaves stack contents in Microsoft's buffer; reDM
   uses the default chord there (which is what the stack held in every test).

@@ -140,8 +140,8 @@ typedef struct creq {
     int16_t minchords, maxchords;   /* +0x28 +0x2a */
     int16_t activity;               /* +0x2c */
     int16_t f_short, f_long, f_many, f_few;    /* +0x2e +0x30 +0x32 +0x34 why paths failed */
-    dmc_next **path;                /* (fixes) the connection taken at each count, kept while searching */
-    int pathcap, pathend;           /* (fixes) its size; the count the path ended at */
+    dmc_next **path;                /* (not in Microsoft's) the connection taken at each count, kept while searching */
+    int pathcap, pathend;           /* (not in Microsoft's) its size; the count the path ended at */
     uint32_t visits;                /* (fixes) the entries tried in this search, bounded */
 } creq;
 /* 77282f45: a copy (the names copied, the subchord lists shared) */
@@ -180,7 +180,7 @@ static int path_via(dmc_next *x, creq *R)
     R->count--; R->minsum -= x->minbeats; R->maxsum -= x->maxbeats;
     return ok;
 }
-/* (fixes) the connection taken from the entry at the path's current count */
+/* (not in Microsoft's) the connection taken from the entry at the path's current count */
 static void path_took(creq *R, dmc_next *x) { if (R->path && R->count >= 0 && R->count < R->pathcap) R->path[R->count] = x; }
 /* 77282817: from an entry to one that may end on the end chord, within the request's bounds; the path's connections
  * marked 2 (tried and failed: 4) */
@@ -235,11 +235,12 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
     creq saved;
     memset(&saved, 0, sizeof(saved));
     req_copy(&saved, R);
-    /* (fixes) the connections taken, kept as the path is found */
+    /* the connections taken, kept as the path is found (with the fixes off too: they are only read where Microsoft
+     * would never return) */
     int base = R->count;
     R->path = NULL; R->pathcap = 0; R->pathend = -1;
     R->visits = 0;
-    if (g_fixes && R->maxchords >= 0) {
+    if (R->maxchords >= 0) {
         R->pathcap = R->maxchords + 1;
         R->path = calloc((size_t)R->pathcap, sizeof(*R->path));
     }
@@ -272,10 +273,11 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
         clist_append(&s->out, n);
     }
     /* the path is read back along the marked connections, the first marked one of each entry; when it came back to
-     * an entry, the marks can lead round a cycle for ever (Microsoft hangs there).  Fixed: such a path is followed
-     * as it was found instead */
+     * an entry, the marks can lead round a cycle for ever (Microsoft hangs there, adding chords until memory runs
+     * out).  Such a path is followed as it was found instead, with the fixes off too, since Microsoft gives no
+     * result to match there (a damaged chord map hung the loader fuzzer with REDM_NOFIXES) */
     int found = 0;
-    if (path) {
+    {
         int ne = 0, steps = 0;
         for (dmc_entry *q = entries; q; q = q->next) ne++;
         for (dmc_entry *q = e; q; ) {
@@ -289,7 +291,7 @@ static int find_path(dmc_entry *entries, creq *R, cstep *s)
     for (int i = base; e; i++) {
         dmc_next *x;
         if (found) {
-            if (i >= pathend || !(x = path[i])) break;
+            if (!path || i >= pathend || !(x = path[i])) break;
         } else {
             for (x = e->nexts; x && !(x->flags & 2); x = x->next) {}
             if (!x) break;
