@@ -1,6 +1,7 @@
 /* reDM: the chord, command and mute tracks of dmstyle (loading, parameters, Clone).  Notes in
  * docs/dmstyle_notes.md; the addresses are XP dmstyle's. */
 #include "dmsty.h"
+#include "riff.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -68,18 +69,15 @@ void *dms_msort(void *head, size_t off, int (*cmp)(const void *, const void *))
                              _p->next = (e); } } while (0)
 
 /* a chunk reader over a list's data */
-typedef struct { const uint8_t *p, *e; } rd;
+typedef riff_rd rd;
+/* (the size as written in *size; a list's data with its type) */
 static int next_chunk(rd *r, uint32_t *id, rd *data, uint32_t *size)
 {
-    if (r->e - r->p < 8) return 0;
-    uint32_t sz = u32(r->p + 4);
-    *id = u32(r->p);
-    *size = sz;
-    const uint8_t *d = r->p + 8;
-    if ((size_t)(r->e - d) < sz) sz = (uint32_t)(r->e - d);
-    data->p = d; data->e = d + sz;
-    r->p = d + sz + (sz & 1);
-    if (r->p > r->e) r->p = r->e;
+    riff_chunk c;
+    if (!riff_next(r, &c, RIFF_CLAMP)) return 0;
+    *id = c.id;
+    *size = c.size;
+    *data = c.data;
     return 1;
 }
 /* a read of n bytes from a chunk (short reads leave the rest of dst as it was) */

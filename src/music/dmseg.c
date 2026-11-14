@@ -5,13 +5,14 @@
 #include "dmsty.h"
 #include "dmcomp.h"
 #include "dmdls.h"
+#include "riff.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
 #define FCC(a, b, c, d) ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | ((uint32_t)(d) << 24))
 
-typedef struct { const uint8_t *p, *e; } rd;    /* a chunk's data */
+typedef riff_rd rd;    /* a chunk's data */
 
 static uint32_t u32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint16_t u16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
@@ -19,18 +20,11 @@ static uint16_t u16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 /* next chunk of r: id, data (and list type for RIFF/LIST in *type, data after it) */
 static int next_chunk(rd *r, uint32_t *id, rd *data, uint32_t *type)
 {
-    if (r->e - r->p < 8) return 0;
-    uint32_t sz = u32(r->p + 4);
-    *id = u32(r->p);
-    const uint8_t *d = r->p + 8;
-    if ((size_t)(r->e - d) < sz) sz = (uint32_t)(r->e - d);
-    data->p = d; data->e = d + sz;
-    r->p = d + sz + (sz & 1);
-    if (r->p > r->e) r->p = r->e;
-    if (type) {
-        *type = 0;
-        if ((*id == FCC('R','I','F','F') || *id == FCC('L','I','S','T')) && sz >= 4) { *type = u32(d); data->p += 4; }
-    }
+    riff_chunk c;
+    if (!riff_next(r, &c, RIFF_CLAMP)) return 0;
+    *id = c.id;
+    *data = type ? riff_list_body(&c) : c.data;
+    if (type) *type = riff_list_type(&c);
     return 1;
 }
 

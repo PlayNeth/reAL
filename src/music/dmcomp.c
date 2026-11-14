@@ -2,6 +2,7 @@
  * The addresses are XP dmcompos's. */
 #include "dmcomp.h"
 #include "dmsty.h"      /* dms_msort */
+#include "riff.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,18 +21,17 @@ static void get_guid(dm_guid *g, const uint8_t *p) { g->d1 = u32(p); g->d2 = u16
 /* a chunk reader over a list's data; `end` is the whole file's end (dmcompos's reads run past a chunk's end) */
 typedef struct { const uint8_t *p, *e, *end; } rd;
 typedef struct { uint32_t id, size, type; rd data; } chk;
+/* (type: the first 4 bytes of any chunk with them, as dmcompos reads it; a list's data with its type) */
 static int next_chunk(rd *r, chk *c)
 {
-    if (r->e - r->p < 8) return 0;
-    uint32_t sz = u32(r->p + 4);
-    c->id = u32(r->p);
-    c->size = sz;
-    const uint8_t *d = r->p + 8;
-    if ((size_t)(r->e - d) < sz) sz = (uint32_t)(r->e - d);
-    c->data.p = d; c->data.e = d + sz; c->data.end = r->end;
-    c->type = sz >= 4 ? u32(d) : 0;
-    r->p = d + sz + (sz & 1);
-    if (r->p > r->e) r->p = r->e;
+    riff_rd t = { r->p, r->e };
+    riff_chunk k;
+    if (!riff_next(&t, &k, RIFF_CLAMP)) return 0;
+    r->p = t.p;
+    c->id = k.id;
+    c->size = k.size;
+    c->data.p = k.data.p; c->data.e = k.data.e; c->data.end = r->end;
+    c->type = k.data.e - k.data.p >= 4 ? riff_u32(k.data.p) : 0;
     return 1;
 }
 static int is_list(const chk *c, uint32_t type) { return (c->id == FCC('L','I','S','T') || c->id == FCC('R','I','F','F')) && c->data.e - c->data.p >= 4 && c->type == type; }

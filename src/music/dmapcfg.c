@@ -14,6 +14,7 @@
 #include "dmldr.h"
 #include "../real.h"
 #include "dmapcfg.h"
+#include "riff.h"
 #include "dmgraph.h"
 #include "dmscript.h"
 #include <string.h>
@@ -39,18 +40,13 @@ typedef struct { DWORD id, type; span d; } ck;
 /* the next chunk of s (advanced); FALSE at its end or on a truncated chunk */
 static BOOL next(span *s, ck *c)
 {
-    if (s->n < 8) return FALSE;
-    DWORD id, len;
-    memcpy(&id, s->p, 4); memcpy(&len, s->p + 4, 4);
-    if (len > s->n - 8) return FALSE;
-    c->id = id; c->d.p = s->p + 8; c->d.n = len; c->type = 0;
-    if ((id == FCC('R','I','F','F') || id == FCC('L','I','S','T')) && len >= 4) {
-        memcpy(&c->type, c->d.p, 4);
-        c->d.p += 4; c->d.n -= 4;
-    }
-    DWORD adv = 8 + len + (len & 1);
-    if (adv > s->n) adv = s->n;
-    s->p += adv; s->n -= adv;
+    riff_rd r = { s->p, s->p + s->n };
+    riff_chunk k;
+    if (!riff_next(&r, &k, RIFF_STRICT)) return FALSE;
+    const riff_rd b = riff_list_body(&k);
+    c->id = k.id; c->type = riff_list_type(&k);
+    c->d.p = b.p; c->d.n = (DWORD)(b.e - b.p);
+    s->n -= (DWORD)(r.p - s->p); s->p = r.p;
     return TRUE;
 }
 static BOOL is_list(const ck *c) { return c->id == FCC('R','I','F','F') || c->id == FCC('L','I','S','T'); }

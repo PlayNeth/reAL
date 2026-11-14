@@ -12,6 +12,7 @@
  * Extension chunks and copyright strings, which the synth ignores, are not sent.  dmusic refuses an instrument that
  * uses the last wave of the pool (DMUS_E_INVALIDOFFSET); that bug is not reproduced. */
 #include "dmdls.h"
+#include "riff.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -48,19 +49,15 @@ struct dm_collection {
     int gm;
 };
 
-typedef struct { const uint8_t *p, *e; } rd;
+typedef riff_rd rd;
+/* the next chunk of r: id, data (for a form or list, the chunks after its type, which goes in *type) */
 static int next_chunk(rd *r, uint32_t *id, rd *data, uint32_t *type)
 {
-    if (r->e - r->p < 8) return 0;
-    uint32_t sz = u32(r->p + 4);
-    *id = u32(r->p);
-    const uint8_t *d = r->p + 8;
-    if ((size_t)(r->e - d) < sz) sz = (uint32_t)(r->e - d);
-    data->p = d; data->e = d + sz;
-    r->p = d + sz + (sz & 1);
-    if (r->p > r->e) r->p = r->e;
-    *type = 0;
-    if ((*id == FCC('R','I','F','F') || *id == FCC('L','I','S','T')) && sz >= 4) { *type = u32(d); data->p += 4; }
+    riff_chunk c;
+    if (!riff_next(r, &c, RIFF_CLAMP)) return 0;
+    *id = c.id;
+    *data = type ? riff_list_body(&c) : c.data;
+    if (type) *type = riff_list_type(&c);
     return 1;
 }
 
