@@ -2606,3 +2606,63 @@ void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos)
     synth_mix(s, bufs, s->stereo ? 2 : 1, (uint32_t)s->stereo, frames, pos);
     s->bus.n = 0;
 }
+
+/* ================================================================== a synth's state into another (reAL)
+ * midi=true with midirate=auto: when the output changes rate, the MIDI device's synth is made again at the new rate
+ * and takes over what the old one was told: each channel group's registers, each controller's value and its points
+ * still to come, and the events queued.  Times after src_t move to dst_t on, at dst's rate.  Voices sounding are not
+ * taken (they stop), nor DirectX 8 voices waiting to start (the MIDI device makes none). */
+static int64_t take_time(int64_t t, int64_t src_t, uint32_t src_rate, int64_t dst_t, uint32_t dst_rate)
+{
+    if (t <= src_t) return dst_t;
+    return dst_t + (t - src_t) * (int64_t)dst_rate / (int64_t)src_rate;
+}
+static void take_curve(ms_curve *d, const ms_curve *s, int64_t st, uint32_t sr, int64_t dt, uint32_t dr)
+{
+    curve_clear(d);
+    d->cur = curve_at(s, st);
+    d->last = dt;
+    d->range = s->range;
+    for (const ms_node *p = s->head; p; p = p->next)
+        if (p->t > st) curve_add(d, take_time(p->t, st, sr, dt, dr), p->v);
+}
+void msynth_take_state(msynth *dst, int64_t dst_t, const msynth *src, int64_t src_t)
+{
+    for (uint32_t g = 0; g < dst->ncl && g < src->ncl; g++) {
+        ms_cl *d = dst->cl[g];
+        const ms_cl *s = src->cl[g];
+        for (int i = 0; i < 16; i++) {
+            take_curve(&d->mw[i], &s->mw[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->pb[i], &s->pb[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->vol[i], &s->vol[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->expr[i], &s->expr[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->pan[i], &s->pan[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->rev[i], &s->rev[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->cho[i], &s->cho[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->cc74[i], &s->cc74[i], src_t, src->rate, dst_t, dst->rate);
+            take_curve(&d->press[i], &s->press[i], src_t, src->rate, dst_t, dst->rate);
+        }
+        memcpy(d->sustain, s->sustain, sizeof(d->sustain));
+        memcpy(d->rpn, s->rpn, sizeof(d->rpn));
+        memcpy(d->bankmsb, s->bankmsb, sizeof(d->bankmsb));
+        memcpy(d->banklsb, s->banklsb, sizeof(d->banklsb));
+        memcpy(d->patch, s->patch, sizeof(d->patch));
+        d->gain = s->gain;
+        memcpy(d->prio, s->prio, sizeof(d->prio));
+        d->xgmode = s->xgmode; d->gsmode = s->gsmode;
+        memcpy(d->rpndata, s->rpndata, sizeof(d->rpndata));
+        d->master = s->master;
+        memcpy(d->finetune, s->finetune, sizeof(d->finetune));
+        memcpy(d->scale, s->scale, sizeof(d->scale));
+        memcpy(d->coarse, s->coarse, sizeof(d->coarse));
+        memcpy(d->chan, s->chan, sizeof(d->chan));
+        memcpy(d->drum, s->drum, sizeof(d->drum));
+        memcpy(d->mono, s->mono, sizeof(d->mono));
+        memcpy(d->buses, s->buses, sizeof(d->buses));
+        /* the queue: what is still to come (in time order, so each goes after the ones before it) */
+        while (d->q.head) { ms_node *n = d->q.head; d->q.head = n->next; free(n); }
+        for (const ms_node *p = s->q.head; p; p = p->next)
+            queue_add(&d->q, take_time(p->t, src_t, src->rate, dst_t, dst->rate), (uint32_t)p->v);
+        d->clean = 0;
+    }
+}

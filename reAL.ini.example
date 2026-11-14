@@ -87,7 +87,8 @@ logeax=false
 ; MIDI music (games that play General MIDI through Windows' MIDI API, e.g. Claw): midi=true adds the
 ; "reDM GM Synth" output and makes it the MIDI mapper, so the game's music plays through reAL with
 ; the GM collection above (gm.dls or gmdls=). midirate= sets its sample rate (default 22050, Microsoft's
-; GS synth's; auto renders at the output's rate, so the music is not resampled),
+; GS synth's; auto renders at the output's rate, so the music is not resampled, and follows it when a game
+; changes its output format with outrate=game),
 ; midireverb=false turns its reverb off. miditrace=true logs every MIDI / MCI call the game makes.
 ;midi=true
 ;miditrace=true

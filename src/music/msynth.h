@@ -42,6 +42,8 @@ void msynth_render(msynth *s, int16_t *buf, uint32_t frames, int64_t pos);
 void msynth_read(msynth *s, int16_t **bufs, const uint32_t *busids, const uint32_t *funcs, const int32_t *pitch,
                  uint32_t nbuf, uint32_t frames);
 void msynth_seek(msynth *s, int64_t pos);
+/* (reAL) what src was told, as of src_t, into dst as of dst_t (a synth made again at another rate) */
+void msynth_take_state(msynth *dst, int64_t dst_t, const msynth *src, int64_t src_t);
 int msynth_assign_buses(msynth *s, uint32_t group, uint32_t channel, const uint32_t *buses, uint32_t n);
 
 /* IDirectMusicSynth8::PlayVoice / StopVoice (t: sample time, 0 = now; dlid: a wave articulation, download type 4,

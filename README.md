@@ -166,7 +166,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `log` | `0` off, `1` info, `2` API calls, `3` everything (very verbose). With `1` or more, refused calls are logged too. |
 | `music` | `true` uses reDM, reAL's own DirectMusic. |
 | `gmdls` | Another DLS file or SoundFont (`.sf2`) for reDM's instruments. A Linux path works under Wine. |
-| `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` (default `22050`; `auto` renders at the output's rate, unresampled) and `midireverb=` adjust it. |
+| `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` (default `22050`; `auto` renders at the output's rate, unresampled, and follows it if the game changes its format) and `midireverb=` adjust it. Instruments are loaded as the music first uses them, so a large SoundFont isn't held in memory twice. |
 | `speakers` | `auto` (Windows' setup), `stereo`, `headphones`, `quad`, `5.1` or `7.1`. |
 | `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
 | `hrtf` | `auto` (default: a `reAL_hrtf.bin` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a `reAL_hrtf.bin`, or `off`. |

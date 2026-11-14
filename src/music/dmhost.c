@@ -570,9 +570,7 @@ dm_host *dm_host_new_why(uint32_t rate, uint32_t voices, uint32_t groups, int ch
     if (!h) return NULL;
     HRESULT dhr = rl_device_acquire(&h->dev);      /* (open once it returns: its rate is known) */
     if (FAILED(dhr)) { if (why) *why = dhr; h->dev = NULL; dm_host_free(h); return NULL; }
-    if (rate == DM_HOST_RATE_OUTPUT)
-        rate = !h->dev->out_rate ? 22050 : h->dev->out_rate < 11025 ? 11025 : h->dev->out_rate > 48000 ? 48000 :
-               h->dev->out_rate;
+    if (rate == DM_HOST_RATE_OUTPUT) rate = dm_host_output_rate(h);
     h->rate = rate ? rate : 22050;
     h->bufframes = h->rate * BUF_MS / 1000;
     QueryPerformanceFrequency(&h->qpf);
@@ -749,19 +747,38 @@ void dm_host_midi_at(dm_host *h, rtime_t rt, uint32_t group, const uint8_t *msg,
     host_leave(h);
 }
 
-/* every instrument of a collection, as a GM synth has them (the Microsoft GS Wavetable synth loads all of gm.dls) */
-int dm_host_download_all(dm_host *h, dm_collection *c)
+/* the instruments of a collection with one program number, in every bank and drum kit: a GM synth's instruments as
+ * the music first asks for them (midi=true).  Whatever the synth falls back to for a patch it lacks keeps the program
+ * number, or is program 0 (drum kit 0, XG's drum bank), so this is all a program change can need. */
+int dm_host_download_program(dm_host *h, dm_collection *c, uint32_t program)
 {
     int n = 0;
     host_enter(h);
     for (int i = 0; i < dls_count(c); i++) {
         uint32_t patch;
         int hr;
-        if (dls_enum(c, i, &patch, NULL) < 0) continue;
+        if (dls_enum(c, i, &patch, NULL) < 0 || (patch & 0x7f) != program) continue;
         if (dls_port_download(h->dls, c, patch, 0, 0, NULL, 0, &hr)) n++;
     }
     host_leave(h);
     return n;
+}
+
+/* what src's synth was told into dst's (midi=true following the output's rate): as of what each has written */
+void dm_host_take_state(dm_host *dst, dm_host *src)
+{
+    host_enter(src);
+    host_enter(dst);
+    msynth_take_state(dst->syn, dst->written, src->syn, src->written);
+    host_leave(dst);
+    host_leave(src);
+}
+
+/* the rate DM_HOST_RATE_OUTPUT gives now: the output's, as the synth can run it */
+uint32_t dm_host_output_rate(dm_host *h)
+{
+    const UINT32 r = h->dev->out_rate;
+    return !r ? 22050 : r < 11025 ? 11025 : r > 48000 ? 48000 : r;
 }
 
 /* ------------------------------------------------------------------ IDirectSoundConnect's view of the sink

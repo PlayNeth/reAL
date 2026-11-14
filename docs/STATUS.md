@@ -319,7 +319,12 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - DLS synth (dmsynth port), including wave voices and streaming.
 - Segments with sequence, band, tempo, time signature, SysEx and wave tracks.
 - MIDI files, and SoundFont banks converted to DLS.
-- MIDI routed through winmm (midiOut, midiStream and MCI).
+- MIDI routed through winmm (midiOut, midiStream and MCI). The GM synth (`midi=true`) gets a program's instruments,
+  in every bank and drum kit, the first time the music asks for that program (program 0 from the start): whatever the
+  synth falls back to for a patch it lacks keeps the program number or is program 0, so it plays as with every
+  instrument loaded, without a second copy of the collection's samples. With `midirate=auto`, when the output changes
+  rate the synth is made again at the new one and takes over the old one's state (`msynth_take_state`: each channel's
+  registers, the controllers' values and points to come, the queued events); notes sounding at that moment stop.
 - The Waves reverb.
 
 **DirectMusic: notifications and audiopaths**

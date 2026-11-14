@@ -28,8 +28,10 @@ static void hexs(char *out, int n, const BYTE *p, DWORD len)
 
 /* ------------------------------------------------------------------ the reDM MIDI device
  * midi=true: a General MIDI software synth device, "reDM GM Synth", added after the system's MIDI outputs and
- * standing in for the MIDI mapper.  It is reDM's synth (Microsoft's DLS synth) with every instrument of gm.dls
- * (or gmdls=) loaded, as the Microsoft GS Wavetable synth has them, playing through reAL like any game sound. */
+ * standing in for the MIDI mapper.  It is reDM's synth (Microsoft's DLS synth) with the instruments of gm.dls (or
+ * gmdls=) the Microsoft GS Wavetable synth has, playing through reAL like any game sound.  An instrument goes into
+ * the synth when the music first asks for its program, not all at once: the collection stays loaded either way, and
+ * a large SoundFont would otherwise sit in memory twice. */
 #include "music/dmhost.h"
 
 #define RM_MAGIC 0x4d4c4552     /* 'RELM' */
@@ -56,6 +58,20 @@ static rm_midiout *ours(HMIDIOUT h)
 }
 
 static int s_host_failed;     /* don't retry on every message; midiOutOpen tries again */
+static CRITICAL_SECTION s_scs;  /* the synth in use: a message, a volume change, a new synth (midirate=auto) */
+static dm_collection *s_gm;     /* the GM collection (a reference for the process) */
+static uint32_t s_have[4];      /* the programs whose instruments are in the synth */
+static int32_t s_vol_mb;        /* midiOutSetVolume's, once set */
+static int s_vol_set;
+
+/* (s_scs held) the instruments of a program, once */
+static void need_program(dm_host *h, uint32_t prog)
+{
+    if (!s_gm || (s_have[prog >> 5] >> (prog & 31) & 1)) return;
+    s_have[prog >> 5] |= 1u << (prog & 31);
+    dm_host_download_program(h, s_gm, prog);
+}
+
 static dm_host *midi_host(void)
 {
     if (s_host || s_host_failed) return s_host;
@@ -68,20 +84,60 @@ static dm_host *midi_host(void)
         LOG_INFO("midi: cannot start the synth (no audio device?)");
         return NULL;
     }
-    s_host = h;
-    LeaveCriticalSection(&s_mcs);
-    dm_host_set_reverb(s_host, g_cfg.midi_reverb);
+    /* set up before other threads see it (s_mcs, then s_scs: nothing takes them the other way round) */
+    dm_host_set_reverb(h, g_cfg.midi_reverb);
     const char *gm = dm_gm_dls_path();
-    dm_collection *c = dm_collection_from_file(gm, 1);
-    if (c) LOG_INFO("midi: %s: %d instruments loaded", gm, dm_host_download_all(s_host, c));
-    else LOG_INFO("midi: no GM collection (%s): the synth has no instruments; set gmdls= to a DLS file", gm);
-    return s_host;
+    EnterCriticalSection(&s_scs);
+    if (!s_gm) s_gm = dm_collection_from_file(gm, 1);
+    if (s_gm) {
+        need_program(h, 0);     /* (notes before any program change, and drum kit 0) */
+        LOG_INFO("midi: %s: %d instruments, each program's going into the synth as the music first uses it", gm,
+                 dls_count(s_gm));
+    } else LOG_INFO("midi: no GM collection (%s): the synth has no instruments; set gmdls= to a DLS file", gm);
+    if (s_vol_set) dm_host_set_volume(h, s_vol_mb);
+    s_host = h;
+    LeaveCriticalSection(&s_scs);
+    LeaveCriticalSection(&s_mcs);
+    return h;
+}
+
+/* (s_scs held) midirate=auto and the output at another rate than the synth's (outrate=game following a SetFormat):
+ * a new synth at the output's, with the programs downloaded again and what the old one was told.  Notes sounding at
+ * that moment stop. */
+static dm_host *follow_rate(dm_host *old)
+{
+    static uint32_t failed;     /* a rate a synth could not be made at: not tried again on every message */
+    const uint32_t was = dm_host_rate(old), want = dm_host_output_rate(old);
+    if (want == failed) return old;
+    dm_host *h = dm_host_new(DM_HOST_RATE_OUTPUT, 64, 1);
+    if (!h) {
+        failed = want;
+        LOG_INFO("midi: the output runs at %u Hz now, but no synth could be made at it: it stays at %u Hz", want, was);
+        return old;
+    }
+    dm_host_set_reverb(h, g_cfg.midi_reverb);
+    if (s_vol_set) dm_host_set_volume(h, s_vol_mb);
+    const uint32_t have[4] = { s_have[0], s_have[1], s_have[2], s_have[3] };
+    memset(s_have, 0, sizeof(s_have));
+    for (uint32_t p = 0; p < 128; p++) if (have[p >> 5] >> (p & 31) & 1) need_program(h, p);
+    dm_host_take_state(h, old);     /* what the old synth was told: programs, controllers, events still to come */
+    s_host = h;
+    dm_host_free(old);
+    LOG_INFO("midi: the output runs at %u Hz now: the synth with it (was %u Hz)", dm_host_rate(h), was);
+    return h;
 }
 
 static void midi_send(const BYTE *m, uint32_t len)
 {
-    dm_host *h = midi_host();
-    if (h) dm_host_midi(h, m, len);
+    if (!midi_host()) return;
+    EnterCriticalSection(&s_scs);
+    dm_host *h = s_host;
+    if (h && !g_cfg.midi_rate && dm_host_output_rate(h) != dm_host_rate(h)) h = follow_rate(h);
+    if (h) {
+        if (len >= 2 && (m[0] & 0xf0) == 0xc0) need_program(h, m[1] & 0x7f);
+        dm_host_midi(h, m, len);
+    }
+    LeaveCriticalSection(&s_scs);
 }
 
 static void callback(rm_midiout *o, UINT msg, DWORD_PTR p1)
@@ -328,8 +384,13 @@ static MMRESULT WINAPI h_setvol(HMIDIOUT h, DWORD v)
     if (o || (g_cfg.midi && is_rm_id((UINT_PTR)h))) {
         if (o) o->volume = v;
         WORD l = LOWORD(v), rr = HIWORD(v);
-        dm_host *hh = midi_host();
-        if (hh) dm_host_set_volume(hh, vol_mb((WORD)(((DWORD)l + rr) / 2)));
+        if (midi_host()) {
+            EnterCriticalSection(&s_scs);
+            s_vol_mb = vol_mb((WORD)(((DWORD)l + rr) / 2));
+            s_vol_set = 1;
+            if (s_host) dm_host_set_volume(s_host, s_vol_mb);
+            LeaveCriticalSection(&s_scs);
+        }
         r = 0;
     } else r = o_setvol(h, v);
     LEAVE();
@@ -822,6 +883,7 @@ void rl_midi_hook(int can_load)
     HMODULE pin;
     GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, (LPCSTR)rl_midi_hook, &pin);
     InitializeCriticalSection(&s_mcs);
+    InitializeCriticalSection(&s_scs);
     if (g_cfg.midi) LOG_INFO("midi: reDM GM Synth replaces the MIDI mapper");
     if (g_cfg.midi_trace) LOG_INFO("midi: tracing winmm MIDI and MCI calls");
     HOOK("midiOutGetNumDevs", o_getnumdevs, h_getnumdevs);

@@ -54,7 +54,9 @@ void dm_host_port_enable(dm_host *h, int idx, dm_host *port, int on);
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len);
 /* a message at a reference time on a channel group (0: all of them), as IDirectMusicPort::PlayBuffer plays it */
 void dm_host_midi_at(dm_host *h, rtime_t rt, uint32_t group, const uint8_t *msg, uint32_t len);
-int dm_host_download_all(dm_host *h, dm_collection *c);     /* returns how many instruments went in */
+int dm_host_download_program(dm_host *h, dm_collection *c, uint32_t program);
+uint32_t dm_host_output_rate(dm_host *h);
+void dm_host_take_state(dm_host *dst, dm_host *src);
 void dm_host_set_reverb(dm_host *h, int on);
 /* audiopath buffers (see dmhost.c) */
 void dm_host_path_close(dm_host *h, const int *idx, int nidx);
