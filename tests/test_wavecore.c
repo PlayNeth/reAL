@@ -380,6 +380,44 @@ int main(void)
     CHECK(n10 == 4000 && n20 == 4000 && n30 == 500, "broken loop: %ld %ld %ld", n10, n20, n30);
     CHECK(m->ndone == 3 && m->done[2] == buf[4], "broken loop: done %d", m->ndone);
 
+    /* two loops queued, one after the other, broken during the first one's first pass: that one ends with it, the
+     * other plays all its passes; each buffer done once, after its last frame */
+    for (int plain = 0; plain < 2; plain++) {
+        sim_init(m, 0, 10);
+        memset(buf[2], 10, 1000); memset(buf[3], 20, 1000); memset(buf[4], 30, 1000);
+        wc_write(&m->s, 0.1, buf[2], buf[2], 1000, WC_BEGINLOOP | WC_ENDLOOP, 3);
+        if (plain) wc_write(&m->s, 0.1, buf[4], buf[4], 1000, 0, 0);
+        wc_write(&m->s, 0.1, buf[3], buf[3], 1000, WC_BEGINLOOP | WC_ENDLOOP, 3);
+        sim_run(m, 0.12);
+        wc_breakloop(&m->s, m->t);
+        sim_run(m, 3.0);
+        n10 = n20 = n30 = 0;
+        for (k = 0; k < m->nout; k++) n10 += m->out[k] == 10, n20 += m->out[k] == 20, n30 += m->out[k] == 30;
+        CHECK(n10 == 1000 && n20 == 3000 && n30 == plain * 1000, "two loops, the first broken: %ld %ld %ld", n10, n20, n30);
+        CHECK(m->ndone == 2 + plain && m->done[0] == buf[2] && m->done[1 + plain] == buf[3] &&
+              m->done_t[1 + plain] > 0.1 + (4000.0 + plain * 1000) / RATE,
+              "two loops, the first broken: %d done, the second loop's at %.3f", m->ndone, m->done_t[1 + plain]);
+    }
+    /* broken during the loop's last pass, its first buffer played already; and after the loop's end, before a tick
+     * has seen it: nothing to break, no buffer done twice */
+    for (int late = 0; late < 2; late++) {
+        sim_init(m, 0, 10);
+        memset(buf[2], 10, 1000); memset(buf[3], 20, 1000); memset(buf[4], 30, 1000);
+        wc_write(&m->s, 0.1, buf[2], buf[2], 1000, WC_BEGINLOOP, 2);
+        wc_write(&m->s, 0.1, buf[3], buf[3], 1000, WC_ENDLOOP, 0);
+        wc_write(&m->s, 0.1, buf[4], buf[4], 1000, 0, 0);
+        double tb = 0.1 + (late ? 4000.5 : 3500.0) / RATE;
+        sim_run(m, tb);
+        int64_t loop_end = m->s.seg[m->s.n - 1].start;
+        if (late) while (wc_ideal(&m->s, tb) < (double)loop_end + 2) tb += 0.0001;
+        wc_breakloop(&m->s, tb);
+        sim_run(m, 3.0);
+        n10 = n20 = n30 = 0;
+        for (k = 0; k < m->nout; k++) n10 += m->out[k] == 10, n20 += m->out[k] == 20, n30 += m->out[k] == 30;
+        CHECK(n10 == 2000 && n20 == 2000 && n30 == 1000 && m->ndone == 3 && m->done[0] == buf[2] && m->done[1] == buf[3],
+              "broken %s: %ld %ld %ld, %d done", late ? "after the loop's end" : "in the last pass", n10, n20, n30, m->ndone);
+    }
+
     /* a loop for ever (dwLoops 0xffffffff), broken after a few seconds: its passes are queued as they near */
     sim_init(m, 0, 10);
     memset(buf[2], 40, 1000); memset(buf[3], 50, 300);

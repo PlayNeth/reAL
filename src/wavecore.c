@@ -164,7 +164,8 @@ void wc_tick(wc_stream *s, double t)
     retire(s, I);
 }
 
-static int append(wc_stream *s, void *hdr, const uint8_t *data, uint32_t frames, int64_t start, int last, uint32_t pass)
+static int append(wc_stream *s, void *hdr, const uint8_t *data, uint32_t frames, int64_t start, int last, uint32_t pass,
+                  uint32_t loop)
 {
     if (s->n == s->cap) {
         if (s->head) {
@@ -178,6 +179,7 @@ static int append(wc_stream *s, void *hdr, const uint8_t *data, uint32_t frames,
     }
     wc_seg *g = &s->seg[s->n++];
     g->hdr = hdr; g->data = data; g->frames = frames; g->start = start; g->last = (uint8_t)last; g->pass = pass;
+    g->loop = loop;
     s->tail = start + frames;
     return 1;
 }
@@ -206,7 +208,7 @@ static void extend(wc_stream *s, double I)
         int last = pass + 1 == s->passes;
         s->next_pass++;
         for (int k = 0; k < s->nloop; k++)
-            if (!append(s, s->loop[k].hdr, s->loop[k].data, s->loop[k].frames, s->tail, last, pass)) {
+            if (!append(s, s->loop[k].hdr, s->loop[k].data, s->loop[k].frames, s->tail, last, pass, s->loop_id)) {
                 loop_final(s, pass);        /* (out of memory: it ends with this pass, as far as it got) */
                 break;
             }
@@ -215,7 +217,7 @@ static void extend(wc_stream *s, double I)
     while ((s->loop_open || s->next_pass == s->passes) && s->nlater) {
         struct wc_later l = s->later[0];
         memmove(s->later, s->later + 1, (size_t)(--s->nlater) * sizeof(*s->later));
-        write_at(s, I, l.hdr, l.data, l.frames, l.flags, l.loops);
+        if (!write_at(s, I, l.hdr, l.data, l.frames, l.flags, l.loops)) s->done(s->ctx, l.hdr);    /* (out of memory) */
     }
 }
 static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint32_t frames, uint32_t flags,
@@ -236,6 +238,7 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
     if (s->running && at < s->R + s->guard) at = s->R + s->guard;      /* (paused: it starts where the device stopped) */
     if ((flags & WC_BEGINLOOP) && !s->loop_open) {
         s->loop_open = 1; s->nloop = 0; s->broken = 0;
+        if (!++s->loop_id) s->loop_id = 1;
         s->passes = 0;
         s->next_pass = loops ? loops : 1;   /* (kept here until the loop's end comes) */
     }
@@ -244,7 +247,7 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
         s->loop[s->nloop].hdr = hdr; s->loop[s->nloop].data = data; s->loop[s->nloop].frames = frames;
         s->nloop++;
     }
-    if (!append(s, hdr, data, frames, at, !inloop, 0)) {
+    if (!append(s, hdr, data, frames, at, !inloop, 0, inloop ? s->loop_id : 0)) {
         if (inloop) s->nloop--;
         return 0;
     }
@@ -315,31 +318,59 @@ void wc_restart(wc_stream *s, double t)
     topup(s, s->ia);
 }
 
-/* the loop ends with the pass the ideal device is playing: the passes after it go, and what follows moves up */
+/* the loop the ideal device is playing (or the next one to come) ends with the pass being played: the passes after
+ * it go, and what follows moves up.  More than one loop may be queued (one written when all of another's passes
+ * were): the pieces say which is which */
 void wc_breakloop(wc_stream *s, double t)
 {
-    if (s->loop_open) { s->broken = 1; return; }
-    if (!s->passes) return;                 /* (no loop) */
     double I = ideal_now(s, t);
     int64_t from = (int64_t)ceil(I);
     if (s->running && from < s->R + s->guard) from = s->R + s->guard;
-    /* the pass being played: that of the first piece not over by then (before the loop: it plays once) */
     int i = s->head;
-    while (i < s->n && s->seg[i].start + s->seg[i].frames <= from) i++;
-    uint32_t cur = i < s->n ? s->seg[i].pass : s->next_pass - 1;
-    int cut = i;
-    while (cut < s->n && s->seg[cut].pass <= cur) cut++;
-    int end = cut;
-    while (end < s->n && s->seg[end].pass > cur) end++;     /* (the passes after it; what follows the loop is pass 0) */
-    if (end > cut) {
-        int64_t at = s->seg[cut].start, gap = s->seg[end - 1].start + s->seg[end - 1].frames - at;
-        memmove(s->seg + cut, s->seg + end, (size_t)(s->n - end) * sizeof(*s->seg));
-        s->n -= end - cut;
-        for (int k = cut; k < s->n; k++) s->seg[k].start -= gap;
+    while (i < s->n && s->seg[i].start + s->seg[i].frames <= from) i++;     /* (the piece being played) */
+    int j = i;
+    while (j < s->n && !s->seg[j].loop) j++;
+    const uint32_t L = j < s->n ? s->seg[j].loop : 0;
+    if (!L || (L == s->loop_id && s->loop_open)) {      /* (none queued, or one whose end has not been written) */
+        if (s->loop_open) s->broken = 1;
+        return;
+    }
+    const uint32_t cur = j == i ? s->seg[i].pass : 0;   /* (before the loop: it plays once) */
+    const int table = L == s->loop_id && s->passes;     /* (the last loop written: its passes may not all be queued) */
+    if (table ? s->next_pass == s->passes && cur + 1 >= s->passes : 0) return;     /* (its last pass already) */
+    if (!table) {
+        /* a loop queued whole: its last pass's pieces name its buffers.  Those with a piece of this pass still
+         * queued are done after it; the others have played theirs and are done now */
+        int any = 0;
+        for (int k = j; k < s->n; k++) {
+            if (s->seg[k].loop != L || s->seg[k].pass <= cur || !s->seg[k].last) continue;
+            int found = 0;
+            for (int q = s->head; q < s->n; q++)
+                if (s->seg[q].loop == L && s->seg[q].pass == cur && s->seg[q].hdr == s->seg[k].hdr) {
+                    s->seg[q].last = 1; found = 1;
+                }
+            if (!found) s->done(s->ctx, s->seg[k].hdr);
+            any = 1;
+        }
+        if (!any) return;                               /* (its last pass already) */
+    }
+    int o = j;
+    int64_t gap = 0, at = -1;
+    for (int k = j; k < s->n; k++) {
+        if (s->seg[k].loop == L && s->seg[k].pass > cur) {
+            if (at < 0) at = s->seg[k].start;
+            gap += s->seg[k].frames;
+            continue;
+        }
+        s->seg[o] = s->seg[k];
+        s->seg[o++].start -= gap;
+    }
+    s->n = o;
+    if (gap) {
         s->tail -= gap;
         if (s->W > at) s->W = s->C = at;
     }
-    loop_final(s, cur < s->next_pass ? cur : s->next_pass - 1);
+    if (table) loop_final(s, cur);
     extend(s, I);
     topup(s, I);
 }

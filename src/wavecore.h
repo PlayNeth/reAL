@@ -28,6 +28,7 @@ typedef struct wc_seg {
     int64_t start;              /* on the timeline */
     uint8_t last;               /* the buffer's last piece: it is done once played */
     uint32_t pass;              /* a loop's: which time through */
+    uint32_t loop;              /* which loop (0: none) */
 } wc_seg;
 
 #define WC_MAXLOOP 64
@@ -57,6 +58,7 @@ typedef struct wc_stream {
      * wait in `later` */
     struct { void *hdr; const uint8_t *data; uint32_t frames; } loop[WC_MAXLOOP];
     int nloop, loop_open, broken;
+    uint32_t loop_id;               /* that loop's number: more than one may be queued, the table is the last one's */
     uint32_t passes, next_pass;     /* the passes in all, the next one to queue (passes: all queued) */
     struct wc_later { void *hdr; const uint8_t *data; uint32_t frames, flags, loops; } *later;
     int nlater, caplater;
