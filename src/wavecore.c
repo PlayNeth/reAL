@@ -32,7 +32,6 @@ double wc_ideal(const wc_stream *s, double t)
 {
     return s->running ? s->ia + (t - s->ta) * s->rate * s->slope : s->ia;
 }
-
 /* where the ideal device should be for the mixer's position */
 static double target(const wc_stream *s) { return (double)s->R + s->delta + s->period / 2.0; }
 /* the ideal device's clock set back to the mixer's: the mixer did not play for a while (the output opened again, the
@@ -77,13 +76,15 @@ static void fill(wc_stream *s, int64_t upto)
     if (upto > s->R + s->ring - s->guard) upto = s->R + s->ring - s->guard;
     int64_t x = s->W;
     if (upto <= x) return;
-    for (int i = s->head; i < s->n && x < upto; i++) {
+    /* (paused: the ring has what the ideal device played and silence after it; the mixer plays up to there) */
+    const int64_t stop = s->running ? upto : (int64_t)s->ia < upto ? (int64_t)s->ia : upto;
+    for (int i = s->head; i < s->n && x < stop; i++) {
         const wc_seg *g = &s->seg[i];
         int64_t e = g->start + g->frames;
         if (e <= x) continue;
-        if (g->start >= upto) break;
+        if (g->start >= stop) break;
         if (g->start > x) { put_range(s, x, NULL, g->start - x); x = g->start; }
-        int64_t to = e < upto ? e : upto;
+        int64_t to = e < stop ? e : stop;
         put_range(s, x, g->data + (size_t)(x - g->start) * s->block, to - x);
         x = to;
     }
@@ -225,7 +226,7 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
     }
     int64_t at = s->tail, now = llround(I);
     if (at < now) at = now;
-    if (at < s->R + s->guard) at = s->R + s->guard;
+    if (s->running && at < s->R + s->guard) at = s->R + s->guard;      /* (paused: it starts where the device stopped) */
     if ((flags & WC_BEGINLOOP) && !s->loop_open) {
         s->loop_open = 1; s->nloop = 0; s->broken = 0;
         s->passes = 0;
@@ -264,7 +265,7 @@ void wc_reset(wc_stream *s, double t)
 {
     double I = ideal_now(s, t);
     int64_t x = llround(I);
-    if (x < s->R + s->guard) x = s->R + s->guard;
+    if (s->running && x < s->R + s->guard) x = s->R + s->guard;
     fill(s, x);                         /* what the ideal device has played stays (the buffers go back now) */
     s->head = s->n = 0;
     s->loop_open = 0; s->nloop = 0; s->passes = s->next_pass = 0; s->nlater = 0;
@@ -274,17 +275,37 @@ void wc_reset(wc_stream *s, double t)
     topup(s, I);
 }
 
+/* The ideal device stops at a whole frame.  What it has played is heard before the pause: the mixer goes on to there
+ * (wc_drained says when it has; the ring has silence from there on), and the buffer can be stopped. */
 void wc_pause(wc_stream *s, double t)
 {
     if (!s->running) return;
-    s->ia = wc_ideal(s, t);
+    s->ia = (double)(int64_t)ceil(ideal_now(s, t));
+    /* (the mixer may have taken more already, in a large piece: that is heard before the pause too) */
+    if (s->ia < (double)(s->R + s->guard)) s->ia = (double)(s->R + s->guard);
     s->running = 0;
+    if (s->W > (int64_t)s->ia) s->W = (int64_t)s->ia;     /* (what the ring holds past it: silence again) */
+    topup(s, s->ia);
 }
+int wc_drained(const wc_stream *s) { return !s->running && s->R >= (int64_t)s->ia; }
+/* The mixer is where the pause left it, no longer `delta` behind the ideal device.  What is still to play moves
+ * along the timeline, to where the ideal device has to be for the mixer; silence up to there. */
 void wc_restart(wc_stream *s, double t)
 {
     if (s->running) return;
-    s->ta = t;
+    const int64_t P = (int64_t)s->ia, to = s->R + s->delta + (s->period + 1) / 2, d = to > P ? to - P : 0;
+    if (d) {
+        for (int i = s->head; i < s->n; i++)
+            if (s->seg[i].start + s->seg[i].frames > P) s->seg[i].start += d;     /* (one partly played: its rest) */
+        if (s->tail > P) s->tail += d;
+        const int64_t from = P > s->R + s->guard ? P : s->R + s->guard;
+        if (P + d > from) put_range(s, from, NULL, P + d - from);
+    }
+    s->W = P + d;
+    s->ia = (double)(P + d); s->ta = t; s->slope = 1.0; s->err = 0;
     s->running = 1;
+    s->lagmin = 1e300; s->lagt = t; s->lagR = s->R;     /* (what it was before the pause says nothing now) */
+    topup(s, s->ia);
 }
 
 /* the loop ends with the pass the ideal device is playing: the passes after it go, and what follows moves up */
@@ -294,7 +315,7 @@ void wc_breakloop(wc_stream *s, double t)
     if (!s->passes) return;                 /* (no loop) */
     double I = ideal_now(s, t);
     int64_t from = (int64_t)ceil(I);
-    if (from < s->R + s->guard) from = s->R + s->guard;
+    if (s->running && from < s->R + s->guard) from = s->R + s->guard;
     /* the pass being played: that of the first piece not over by then (before the loop: it plays once) */
     int i = s->head;
     while (i < s->n && s->seg[i].start + s->seg[i].frames <= from) i++;

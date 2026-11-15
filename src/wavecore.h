@@ -12,7 +12,11 @@
  * I, which the ideal device has played already, and the next buffer goes in at I.  I runs with real time, which the
  * game's clock is too; when the output device's clock has drifted a mixing period away from it, I goes a little
  * faster or slower (0.05% at most) until it is back.  When the mixer stops for a moment (or an hour: the machine
- * asleep), I is set back to it, as a device would have stopped too. */
+ * asleep), I is set back to it, as a device would have stopped too.
+ *
+ * A pause stops the ideal device at once.  The mixer plays up to there, so that what the position has counted is
+ * heard before the pause, not after it; the restart moves what is left along the timeline to keep the mixer `delta`
+ * behind again. */
 #ifndef REAL_WAVECORE_H
 #define REAL_WAVECORE_H
 #include <stdint.h>
@@ -74,6 +78,7 @@ void wc_tick(wc_stream *s, double t);
 int wc_write(wc_stream *s, double t, void *hdr, const uint8_t *data, uint32_t frames, uint32_t flags, uint32_t loops);
 void wc_reset(wc_stream *s, double t);
 void wc_pause(wc_stream *s, double t);
+int wc_drained(const wc_stream *s);     /* paused, and the mixer has played all the ideal device had: it can stop */
 void wc_restart(wc_stream *s, double t);
 void wc_breakloop(wc_stream *s, double t);
 int64_t wc_position(wc_stream *s, double t);

@@ -35,7 +35,8 @@ typedef struct rl_wave {
     LPWAVEHDR *q;               /* the buffers queued, oldest first */
     int nq, capq;
     DWORD volume;
-    int paused;
+    int paused;                 /* waveOutPause */
+    int draining;               /* paused, its buffer still playing: up to where the ideal device stopped */
 } rl_wave;
 
 static CRITICAL_SECTION s_wl;   /* the streams, everything about them */
@@ -189,9 +190,10 @@ static void done(void *ctx, void *hdr)
     h->dwFlags = (h->dwFlags & ~WHDR_INQUEUE) | WHDR_DONE;
     post(w, WOM_DONE, (DWORD_PTR)h);
 }
-/* (s_wl held) where the mixer is */
+/* (s_wl held) where the mixer is (a paused stream's buffer is stopped once the mixer has played up to the pause) */
 static void mixer_pos(rl_wave *w)
 {
+    if (w->paused && !w->draining) return;
     wc_mixer_at(&w->wc, rl_buffer_position_bytes(w->b) / w->fmt.Format.nBlockAlign);
 }
 
@@ -204,8 +206,13 @@ static DWORD WINAPI tick_thread(LPVOID p)
         int any = s_waves != NULL;
         double t = now_s();
         for (rl_wave *w = s_waves; w; w = w->next) {
-            if (!w->paused) mixer_pos(w);
+            mixer_pos(w);
             wc_tick(&w->wc, t);
+            if (w->draining && wc_drained(&w->wc)) {
+                IDirectSoundBuffer8_Stop(&w->b->IDirectSoundBuffer8_iface);
+                mixer_pos(w);               /* (where it stopped) */
+                w->draining = 0;
+            }
         }
         LeaveCriticalSection(&s_wl);
         WaitForSingleObject(s_tick_wake, any ? TICK_MS : INFINITE);
@@ -424,7 +431,7 @@ static MMRESULT WINAPI w_write(HWAVEOUT h, LPWAVEHDR hd, UINT sz)
         hd->dwFlags = (hd->dwFlags & ~WHDR_DONE) | WHDR_INQUEUE;
         hd->lpNext = NULL;
         w->q[w->nq++] = hd;
-        if (!w->paused) mixer_pos(w);
+        mixer_pos(w);
         if (!wc_write(&w->wc, now_s(), hd, (const uint8_t *)hd->lpData, hd->dwBufferLength / w->fmt.Format.nBlockAlign,
                       hd->dwFlags & (WHDR_BEGINLOOP | WHDR_ENDLOOP), hd->dwLoops)) {
             w->nq--;
@@ -444,10 +451,12 @@ static MMRESULT WINAPI w_pause(HWAVEOUT h)
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_pause(h); }
     if (!w->paused) {
+        /* the ideal device stops now.  The buffer plays on to there (what the position has counted is heard before
+         * the pause, not after the restart); the tick stops it */
         mixer_pos(w);
-        IDirectSoundBuffer8_Stop(&w->b->IDirectSoundBuffer8_iface);
         wc_pause(&w->wc, now_s());
         w->paused = 1;
+        w->draining = 1;
     }
     LeaveCriticalSection(&s_wl);
     LOG_CALL("waveOutPause(%p)", (void *)h);
@@ -459,9 +468,10 @@ static MMRESULT WINAPI w_restart(HWAVEOUT h)
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_restart(h); }
     if (w->paused) {
+        mixer_pos(w);
         wc_restart(&w->wc, now_s());
         IDirectSoundBuffer8_Play(&w->b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
-        w->paused = 0;
+        w->paused = w->draining = 0;
     }
     LeaveCriticalSection(&s_wl);
     LOG_CALL("waveOutRestart(%p)", (void *)h);
@@ -472,7 +482,7 @@ static MMRESULT WINAPI w_reset(HWAVEOUT h)
     EnterCriticalSection(&s_wl);
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_reset(h); }
-    if (!w->paused) mixer_pos(w);
+    mixer_pos(w);
     wc_reset(&w->wc, now_s());
     LONGLONG seq = 0;
     for (int i = 0; i < w->nq; i++) {
@@ -492,7 +502,7 @@ static MMRESULT WINAPI w_breakloop(HWAVEOUT h)
     EnterCriticalSection(&s_wl);
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_breakloop(h); }
-    if (!w->paused) mixer_pos(w);
+    mixer_pos(w);
     wc_breakloop(&w->wc, now_s());
     LeaveCriticalSection(&s_wl);
     return MMSYSERR_NOERROR;

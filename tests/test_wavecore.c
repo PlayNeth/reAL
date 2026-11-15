@@ -20,7 +20,8 @@ typedef struct {
     uint32_t rp, pf;
     int burst;                  /* the mixer takes this many periods at once */
     double hold_until;          /* no tick before then (its thread held up) */
-    int paused;
+    int paused;                 /* the buffer stopped */
+    int draining;               /* paused: the buffer plays on until the mixer has what the ideal device played */
     void *done[4096]; double done_t[4096]; int ndone;
 } sim;
 static void put(void *c, uint32_t at, const uint8_t *src, uint32_t n)
@@ -45,6 +46,9 @@ static void sim_init(sim *m, double ppm, double period_ms)
     m->next_mix = 0.001;
     m->next_tick = 0.0;
 }
+/* waveOutPause and waveOutRestart, as waveout.c does them */
+static void sim_pause(sim *m, double t) { wc_mixer_at(&m->s, m->rp); wc_pause(&m->s, t); m->draining = 1; }
+static void sim_restart(sim *m, double t) { wc_restart(&m->s, t); m->paused = m->draining = 0; }
 /* run the mixer and the 5 ms tick up to t */
 static void sim_run(sim *m, double t)
 {
@@ -61,6 +65,7 @@ static void sim_run(sim *m, double t)
             if (tn >= m->hold_until) {
                 wc_mixer_at(&m->s, m->rp);
                 wc_tick(&m->s, tn);
+                if (m->draining && wc_drained(&m->s)) { m->paused = 1; m->draining = 0; }   /* (as waveout.c's tick) */
             }
             m->next_tick += 0.005;
         }
@@ -127,17 +132,77 @@ int main(void)
     CHECK(m->ndone == nd + 1, "done after reset: %d", m->ndone - nd);
     CHECK(wc_position(&m->s, 3.0) == 1000, "position after reset %lld", (long long)wc_position(&m->s, 3.0));
 
-    /* pause: the ideal device stops; restart goes on */
+    /* pause: the ideal device stops, and what it played is heard before the pause, to the frame; restart goes on
+     * with the rest, as soon after it as a buffer after its write */
+    for (int k = 0; k < 2000; k++) buf[0][k] = (uint8_t)(1 + k % 120);
+    before = m->nout;
     wc_write(&m->s, 3.0, buf[0], buf[0], 2000, 0, 0);
     sim_run(m, 3.05);
-    m->paused = 1; wc_pause(&m->s, 3.05);
+    sim_pause(m, 3.05);
     int64_t p1 = wc_position(&m->s, 3.05);
     sim_run(m, 4.0);
     CHECK(wc_position(&m->s, 4.0) == p1 && m->ndone == nd + 1, "paused: position moved or a buffer done");
-    m->paused = 0; wc_restart(&m->s, 4.0);
+    CHECK(m->paused && !m->draining, "paused: the buffer was not stopped");
+    long pa = first_sound(m, before), heard = 0;
+    while (pa + heard < m->nout && m->out[pa + heard] != 0x80) heard++;
+    CHECK(heard == (long)(p1 - 1000), "paused at position %lld: %ld frames heard before it", (long long)p1, heard);
+    CHECK(first_sound(m, pa + heard) < 0, "paused: sound after the pause");
+    long at_restart = m->nout;
+    sim_restart(m, 4.0);
     sim_run(m, 5.0);
+    long pb = first_sound(m, at_restart);
+    ok = pb > 0;
+    for (long k = 0; ok && k < 2000; k++) {
+        long o = k < heard ? pa + k : pb + (k - heard);
+        if (m->out[o] != buf[0][k]) ok = 0;
+    }
+    CHECK(ok && m->out[pb + 2000 - heard] == 0x80, "pause and restart: the buffer not played once, in two parts");
+    lat = (double)(pb - at_restart) / RATE;
+    CHECK(lat > 0.015 && lat < 0.05, "restart: the sound %.4f s after it", lat);
     CHECK(m->ndone == nd + 2 && wc_position(&m->s, 5.0) == 3000, "after restart: %d done, position %lld", m->ndone - nd,
           (long long)wc_position(&m->s, 5.0));
+
+    /* a restart before the mixer has played up to the pause: nothing twice, nothing left out */
+    for (int k = 0; k < 2000; k++) buf[1][k] = (uint8_t)(1 + k % 119);
+    before = m->nout;
+    wc_write(&m->s, 5.0, buf[1], buf[1], 2000, 0, 0);
+    sim_run(m, 5.05);
+    sim_pause(m, 5.05);
+    sim_run(m, 5.058);
+    sim_restart(m, 5.058);
+    sim_run(m, 6.0);
+    pa = first_sound(m, before);
+    long got = 0;
+    ok = pa > 0;
+    for (long k = pa; ok && k < m->nout && got < 2000; k++) {
+        if (m->out[k] == 0x80) continue;
+        if (m->out[k] != buf[1][got]) ok = 0;
+        got++;
+    }
+    CHECK(ok && got == 2000, "pause and restart at once: %ld frames in order", got);
+
+    /* written while paused: it starts where the device stopped, when it restarts; a reset while paused keeps what
+     * was played and takes back the rest */
+    sim_pause(m, 6.0);
+    sim_run(m, 6.5);
+    nd = m->ndone;
+    memset(buf[2], 77, 600);
+    wc_write(&m->s, 6.5, buf[2], buf[2], 600, 0, 0);
+    sim_run(m, 7.0);
+    CHECK(first_sound(m, m->nout - RATE / 2) < 0 && m->ndone == nd, "written while paused: played or done");
+    wc_reset(&m->s, 7.0);                       /* (the glue gives the buffer back) */
+    memset(buf[3], 88, 400);
+    wc_write(&m->s, 7.0, buf[3], buf[3], 400, 0, 0);
+    at_restart = m->nout;
+    sim_restart(m, 7.2);
+    sim_run(m, 8.0);
+    pb = first_sound(m, at_restart);
+    long n88 = 0;
+    for (long k = pb; pb > 0 && k < m->nout && m->out[k] != 0x80; k++) n88 += m->out[k] == 88;
+    lat = (double)(pb - at_restart) / RATE;
+    CHECK(n88 == 400 && lat > 0.015 && lat < 0.05, "reset and written while paused: %ld frames, %.4f s after the restart",
+          n88, lat);
+    CHECK(wc_position(&m->s, 8.0) == 400, "position after that %lld", (long long)wc_position(&m->s, 8.0));
 
     /* the mixer stopped for a while (the output opened again, the machine asleep): a buffer written afterwards is
      * heard as soon as ever, and buffers queued across it play once each, in order, the position never going back */
@@ -200,6 +265,37 @@ int main(void)
         }
         CHECK(!back && m->ndone > 400, "a mixer taking %d ms at a time: the ideal device set back %d times, %d buffers done",
               bi ? 400 : 270, back, m->ndone);
+    }
+
+    /* a mixer that takes 60 ms at a time (20 ms periods, three at once): a pause still plays what the position has
+     * counted, no more and no less, though the mixer may be past the ideal device when it comes */
+    for (int round = 0; round < 12; round++) {
+        sim_init(m, -150, 20);
+        m->burst = 3;
+        static uint8_t q[4096];
+        for (int k = 0; k < 4096; k++) q[k] = (uint8_t)(1 + k % 113);
+        sim_run(m, 0.5);
+        wc_write(&m->s, 0.5, q, q, 4096, 0, 0);
+        /* (paused at any time in the mixer's 60 ms, and right after it took a piece) */
+        sim_run(m, 0.6 + round * 0.0071);
+        double tp = round & 1 ? m->next_mix + 0.0004 : 0.6 + round * 0.0071;
+        sim_run(m, tp);
+        sim_pause(m, tp);
+        int64_t pp = wc_position(&m->s, tp);
+        sim_run(m, tp + 0.5);
+        long n = 0;
+        for (long k = 0; k < m->nout; k++) n += m->out[k] != 0x80;
+        CHECK(n == (long)pp && m->paused, "a mixer in large pieces, paused at position %lld: %ld frames heard", (long long)pp, n);
+        sim_restart(m, tp + 0.5);
+        sim_run(m, tp + 2.0);
+        n = 0;
+        ok = 1;
+        for (long k = 0; k < m->nout && ok; k++) {
+            if (m->out[k] == 0x80) continue;
+            if (m->out[k] != q[n < 4096 ? n : 0]) ok = 0;
+            n++;
+        }
+        CHECK(ok && n == 4096, "a mixer in large pieces, pause and restart: %ld frames in order", n);
     }
 
     /* a loop of one buffer, three times, done once */
