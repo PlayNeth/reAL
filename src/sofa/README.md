@@ -11,6 +11,8 @@ What reAL changed or added:
 - `hdf/btree.c`, `treeRead`: a chunk's bytes go to their places a row at a time instead of with two divisions
   per byte (the same places: every array of libmysofa's test files and of 450 damaged copies reads the same); half
   the reading time.
+- `hdf/btree.c`, `treeRead`: a chunk longer than what is left of the file is refused before memory is asked for it
+  (the size is the file's: up to 4 GB).
 - `hrtf/reader.c`, `getHrtf`: a file refused after its attributes were read frees them too (they leaked).
 - Built with `-fwrapv`: the reader counts on `int` arithmetic wrapping.
   Lines changed are marked `reAL:`.

@@ -305,6 +305,13 @@ int treeRead(struct READER *reader, struct DATAOBJECT *data) {
         return errno; // LCOV_EXCL_LINE
       }
 
+      /* reAL: a chunk longer than what is left of the file is damage, and need not be allocated to find out
+       * (4 GB can be asked for here) */
+      if (!reader->fhd && (reader->memory_pos > reader->memory_len ||
+                           size_of_chunk > reader->memory_len - reader->memory_pos)) {
+        free(output);
+        return MYSOFA_INVALID_FORMAT;
+      }
       if (!(input = malloc(size_of_chunk))) {
         free(output);            // LCOV_EXCL_LINE
         return MYSOFA_NO_MEMORY; // LCOV_EXCL_LINE
