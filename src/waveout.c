@@ -207,7 +207,12 @@ static DWORD WINAPI tick_thread(LPVOID p)
         double t = now_s();
         for (rl_wave *w = s_waves; w; w = w->next) {
             mixer_pos(w);
+            const uint32_t period = w->wc.period;
             wc_tick(&w->wc, t);
+            if (w->wc.period != period)
+                LOG_INFO("waveOut: the mixer takes its sound in %s pieces: the stream now %.1f ms behind the game",
+                         w->wc.period > period ? "longer" : "shorter",
+                         (w->wc.delta + w->wc.period / 2.0) * 1000.0 / w->fmt.Format.nSamplesPerSec);
             if (w->draining && wc_drained(&w->wc)) {
                 IDirectSoundBuffer8_Stop(&w->b->IDirectSoundBuffer8_iface);
                 mixer_pos(w);               /* (where it stopped) */

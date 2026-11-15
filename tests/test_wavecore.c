@@ -29,7 +29,12 @@ static void put(void *c, uint32_t at, const uint8_t *src, uint32_t n)
     sim *m = c;
     if (src) memcpy(m->ring + at, src, n); else memset(m->ring + at, 0x80, n);
 }
-static void on_done(void *c, void *h) { sim *m = c; m->done_t[m->ndone] = m->t; m->done[m->ndone++] = h; }
+static void on_done(void *c, void *h)
+{
+    sim *m = c;
+    if (m->ndone < 4096) { m->done_t[m->ndone] = m->t; m->done[m->ndone] = h; }     /* (the first of them kept) */
+    m->ndone++;
+}
 /* (m zeroed, or set up before) */
 static void sim_init(sim *m, double ppm, double period_ms)
 {
@@ -280,6 +285,58 @@ int main(void)
               bi ? 400 : 270, back, m->ndone);
     }
 
+    /* a mixer that takes 120 ms at a time where its period says 10: longer than the stream stands (50 ms), so the
+     * period follows it and nothing is lost; back to 10 ms pieces, the period comes down again; one long piece
+     * (which costs what it passed) brings it up, and long pieces now and then (every 1.1 s, with a pause and
+     * restart between them) keep it there: nothing more is lost */
+    {
+        sim_init(m, 0, 10);
+        m->burst = 12;
+        static uint8_t q[8][512];
+        long wr = 0, wr70 = 0, lost = 0;
+        int wb = 0, sparse = 0;
+        uint32_t p_long = 0, p_short = 0, p_one = 0;
+        double next_long = 280.0;
+        for (double t = 1.5; t < 320.0; t += 0.01) {
+            if (t >= 12.0 && t < 12.01) { p_long = m->s.period; m->burst = 1; }
+            if (t >= 250.0 && t < 250.01) { p_short = m->s.period; wr70 = wr; }
+            if (t >= 260.0 && t < 260.01) m->burst = 12;
+            if (t >= 260.1 && t < 260.11) m->burst = 1;
+            if (t >= 270.0 && t < 270.01) p_one = m->s.period;
+            if (t >= 280.0) {
+                /* (one piece of 120 ms every 1.1 s; a short pause after each) */
+                if (t >= next_long) { m->burst = 12; sparse = 1; next_long += 1.1; }
+                else if (sparse && m->burst == 12 && m->next_mix > next_long - 1.1 + 0.05) {
+                    m->burst = 1;
+                    sim_run(m, t); sim_pause(m, t); sim_run(m, t + 0.005); sim_restart(m, t + 0.005);
+                }
+            }
+            sim_run(m, t);
+            while (wb - m->ndone < 4) {
+                for (int k = 0; k < 512; k++, wr++) q[wb % 8][k] = (uint8_t)(1 + wr % 113);
+                wc_write(&m->s, t, q[wb % 8], q[wb % 8], 512, 0, 0);
+                wb++;
+            }
+        }
+        sim_run(m, 321.0);
+        long n = 0;
+        ok = 1;
+        for (long k = 0; k < m->nout && ok && n < wr70; k++) {
+            if (m->out[k] == 0x80) continue;
+            if (m->out[k] != (uint8_t)(1 + n % 113)) ok = 0;
+            n++;
+        }
+        CHECK(ok && n == wr70, "a mixer taking 120 ms at a time: %ld frames in order of %ld written", n, wr70);
+        CHECK(p_long == (1332 * 5 / 4 - RATE / 50 + 2) / 3 && p_short == m->s.period0 && p_one == p_long,
+              "the period for 120 ms pieces %u, after four minutes of short ones %u, after one long piece %u (given %u)",
+              p_long, p_short, p_one, m->s.period0);
+        /* (the long piece at 260 s is the one that cost something) */
+        long heard = 0;
+        for (long k = 0; k < m->nout; k++) heard += m->out[k] != 0x80;
+        lost = wr - heard;
+        CHECK(m->s.period == p_long && lost < 1332, "long pieces every 1.1 s: period %u, %ld frames lost", m->s.period, lost);
+    }
+
     /* a mixer that takes 60 ms at a time (20 ms periods, three at once): a pause still plays what the position has
      * counted, no more and no less, though the mixer may be past the ideal device when it comes */
     for (int round = 0; round < 12; round++) {
@@ -470,17 +527,26 @@ int main(void)
             }
         }
         sim_run(m, 20.0);
-        long jumps = 0, worst = 0;
+        long jumps = 0, worst = 0, moved = 0;
         f = first_sound(m, 0);
         long k = f + 1;
         for (; k < m->nout - 1 && m->out[k + 1] != 0x80; k++) {
             int d = ((int)m->out[k] - (int)m->out[k - 1] + 127) % 127;
-            if (d != 1) { jumps++; long e = d > 63 ? 127 - d + 1 : d - 1; if (e > worst) worst = e; }
+            if (d != 1) {
+                long e = d > 63 ? 127 - d + 1 : d - 1;
+                /* (the mixer's pieces found longer than the stream stood: the ideal device moves ahead, once at
+                 * most; here it is found before the first sound) */
+                if (pi == 4 && e > 2 && !moved) { moved = 1; continue; }
+                jumps++;
+                if (e > worst) worst = e;
+            }
         }
         CHECK((double)(k - f) / RATE > 19.5, "resetting game: the sound stopped at %.2f s", (double)(k - f) / RATE);
         /* (a splice may land a frame off: the reset's time to the nearest frame) */
-        CHECK(worst <= (fabs(ppms[pi]) > 500 || pi == 4 ? 2 : 1),
-              "resetting game, mixer %+.0f ppm: %ld jumps, the worst %ld frames", ppms[pi], jumps, worst);
+        CHECK(worst <= (fabs(ppms[pi]) > 500 || pi == 4 ? 2 : 1) &&
+              m->s.period == (pi == 4 ? (uint32_t)((1332 * 5 / 4 - RATE / 50 + 2) / 3) : m->s.period0),
+              "resetting game, mixer %+.0f ppm: %ld jumps, the worst %ld frames, period %u", ppms[pi], jumps, worst,
+              m->s.period);
         printf("wavecore: resetting game, mixer clock %+.0f ppm%s: %ld splices off by a frame, the worst %ld\n", ppms[pi],
                pi == 4 ? ", 120 ms at a time" : "", jumps, worst);
     }

@@ -17,9 +17,11 @@ int wc_init(wc_stream *s, uint32_t rate, uint32_t block, uint8_t silence, uint32
     s->seg = seg; s->cap = 64;
     s->rate = rate; s->block = block; s->silence = silence;
     s->ring = ring; s->period = period; s->delta = delta; s->guard = guard;
+    s->period0 = period; s->delta0 = delta;
     s->lead = 2 * delta + period;
     s->ia = delta + period / 2.0; s->ta = t; s->slope = 1.0; s->running = 1;
     s->lagmin = 1e300; s->lagt = t; s->lagR = 0;
+    s->ttick = s->lowt = t; s->lowmax = period;
     return 1;
 }
 void wc_free(wc_stream *s)
@@ -125,8 +127,52 @@ static void retire(wc_stream *s, double I)
 }
 
 static void extend(wc_stream *s, double I);
+/* The mixer may take more at a time than its period says (an output that asks for its whole buffer at once, a
+ * sound server with a long one).  The stream stands a piece of up to 3 periods and 20 ms: the ring is filled that
+ * far ahead of the mixer, and the ideal device stays ahead of a mixer that has just taken one.  A longer piece runs
+ * the mixer past both, and what it passes is not heard.  So the period follows the pieces: what `period` has to be
+ * for a piece of c frames, with a quarter to spare */
+static uint32_t period_for(const wc_stream *s, int64_t c)
+{
+    int64_t p = (c * 5 / 4 - s->rate / 50 + 2) / 3;
+    if (p > s->ring * 3 / 10) p = s->ring * 3 / 10;     /* (the ring holds no more) */
+    return p > s->period0 ? (uint32_t)p : s->period0;
+}
+static void set_period(wc_stream *s, uint32_t p, double t)
+{
+    /* (the ideal device as far from the mixer as before, and what its place has moved by: delta and half a period) */
+    s->ia = wc_ideal(s, t) + 1.5 * ((double)p - (double)s->period); s->ta = t;
+    s->period = p; s->delta = s->delta0 + (p - s->period0);
+    s->lead = 2 * s->delta + p;
+    s->lagmin = 1e300; s->lagt = t; s->lagR = s->R;
+}
+/* How far the mixer's position moves between two ticks is what the stream has to stand: a piece, and with a tick
+ * that comes a little late (up to 20 ms) what went by meanwhile.  A tick held up for longer says nothing of the
+ * mixer: its time over that is taken off.
+ *
+ * A step longer than the period allows for: the period goes up to stand it, and the ideal device ahead by as much,
+ * at once (what the mixer passed in that step is lost; the next one is not).  It may have been a mixer held up for a
+ * moment and catching up: two minutes of steps well below what the period allows for bring it down again, and
+ * the stream was a little further behind the game meanwhile */
+static void pieces(wc_stream *s, double t)
+{
+    int64_t step = s->R - s->Rtick;
+    const double late = t - s->ttick - 0.020;
+    if (late > 0) step -= (int64_t)(late * s->rate);
+    s->Rtick = s->R; s->ttick = t;
+    if (!s->running) return;                /* (paused: the buffer plays out, or is stopped) */
+    const uint32_t need = period_for(s, step);
+    if (need > s->lowmax) s->lowmax = need;
+    if (need > s->period) set_period(s, need, t);
+    if (t - s->lowt >= 120.0) {
+        if ((uint64_t)s->lowmax * 5 < (uint64_t)s->period * 4) set_period(s, s->lowmax, t);
+        s->lowmax = s->period0; s->lowt = t;
+    }
+}
+
 void wc_tick(wc_stream *s, double t)
 {
+    pieces(s, t);
     if (s->running) {
         /* the mixer's position moves a mixing period at a time: on average it is half a period behind */
         double I = ideal_now(s, t);
@@ -203,18 +249,23 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
 /* the loop's next passes, up to two seconds past the ideal device; the buffers that waited for its end after it */
 static void extend(wc_stream *s, double I)
 {
-    while (s->next_pass < s->passes && (double)s->tail < I + 2.0 * s->rate) {
-        uint32_t pass = s->next_pass;
-        int last = pass + 1 == s->passes;
-        s->next_pass++;
-        for (int k = 0; k < s->nloop; k++)
-            if (!append(s, s->loop[k].hdr, s->loop[k].data, s->loop[k].frames, s->tail, last, pass, s->loop_id)) {
-                loop_final(s, pass);        /* (out of memory: it ends with this pass, as far as it got) */
-                break;
-            }
-    }
-    /* (until one of them has started another loop to queue: all of that loop's buffers, up to the one that ends it) */
-    while ((s->loop_open || s->next_pass == s->passes) && s->nlater) {
+    for (;;) {
+        while (s->next_pass < s->passes && (double)s->tail < I + 2.0 * s->rate) {
+            uint32_t pass = s->next_pass;
+            int last = pass + 1 == s->passes;
+            const int64_t tail = s->tail;
+            s->next_pass++;
+            for (int k = 0; k < s->nloop; k++)
+                if (!append(s, s->loop[k].hdr, s->loop[k].data, s->loop[k].frames, s->tail, last, pass, s->loop_id)) {
+                    /* (out of memory: the loop ends with the pass before, this one's pieces taken back) */
+                    s->n -= k; s->tail = tail;
+                    loop_final(s, pass - 1);
+                    break;
+                }
+        }
+        /* (the next one that waited, until one of them has started another loop to queue: all of that loop's
+         * buffers, up to the one that ends it, and its passes above) */
+        if (!((s->loop_open || s->next_pass == s->passes) && s->nlater)) break;
         struct wc_later l = s->later[0];
         memmove(s->later, s->later + 1, (size_t)(--s->nlater) * sizeof(*s->later));
         if (!write_at(s, I, l.hdr, l.data, l.frames, l.flags, l.loops)) s->done(s->ctx, l.hdr);    /* (out of memory) */
@@ -248,7 +299,13 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
         s->nloop++;
     }
     if (!append(s, hdr, data, frames, at, !inloop, 0, inloop ? s->loop_id : 0)) {
+        /* (out of memory: the buffer is refused, and a loop it was part of ends here, played once: its end may
+         * have been this buffer, and its others would wait for one for ever) */
         if (inloop) s->nloop--;
+        if (s->loop_open) {
+            s->loop_open = 0;
+            if (s->nloop) loop_final(s, 0); else s->passes = s->next_pass = 0;
+        }
         return 0;
     }
     if (at < s->W) s->W = at;               /* (written into what the ring has as silence) */
@@ -258,7 +315,7 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
         uint32_t p = s->broken || !total ? 1 : s->next_pass;       /* (nothing to repeat: once) */
         s->loop_open = 0;
         if (p == 1) loop_final(s, 0);
-        else { s->passes = p; s->next_pass = 1; extend(s, I); }
+        else { s->passes = p; s->next_pass = 1; }   /* (queued by extend) */
     }
     return 1;
 }
@@ -267,6 +324,7 @@ int wc_write(wc_stream *s, double t, void *hdr, const uint8_t *data, uint32_t fr
 {
     double I = ideal_now(s, t);
     if (!write_at(s, I, hdr, data, frames, flags, loops)) return 0;
+    extend(s, I);
     topup(s, I);
     return 1;
 }

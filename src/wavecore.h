@@ -37,6 +37,7 @@ typedef struct wc_stream {
     uint8_t silence;            /* a frame's bytes of silence (0x80 for 8-bit) */
     uint32_t ring;              /* the ring buffer's frames */
     uint32_t period;            /* the mixer's period (frames): its position moves that much at a time */
+    uint32_t period0, delta0;   /* as given; period and delta go up with the pieces the mixer takes (wavecore.c) */
     uint32_t delta;             /* how far the mixer plays behind the ideal device, at least (a period more at most) */
     uint32_t lead;              /* how far ahead of the mixer the ring is filled */
     uint32_t guard;             /* frames past R the mixer may already have read (the resampler's taps) */
@@ -44,6 +45,10 @@ typedef struct wc_stream {
     double ia, ta, slope, err;
     double lagmin, lagt;        /* the least I was ahead of its place for the mixer, since lagt (a mixer stopped) */
     int64_t lagR;               /* the mixer's position then */
+    /* the pieces the mixer takes (wavecore.c, pieces()): its position and the time at the last tick */
+    int64_t Rtick;
+    double ttick;
+    uint32_t lowmax; double lowt;   /* the longest period any step needed since lowt */
     int running;
     int64_t R;                  /* the mixer's position */
     int64_t W;                  /* the ring holds the timeline up to here */
