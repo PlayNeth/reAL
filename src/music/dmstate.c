@@ -175,6 +175,14 @@ static dm_segstate *ss_create(dm_perf *pf, dm_segment *seg, uint32_t flags, dm_a
             if (max < ss->repeats) ss->repeats = max;
         } else ss->repeats = 0;
         if (ss->loopend <= ss->startpoint) { ss->loopstart = ss->loopend = 0; ss->repeats = 0; }
+        /* (a loop of a tick or a few, repeated: every pass starts its notes, bands and chords again, a thousand
+         * times a second, and each chord goes through every note still sounding.  Three seconds of such a file took
+         * 21 s to play.  Shorter than a 128th note (24 ticks) it is not repeated.  A segment with a length in
+         * clock time (a wave's) is left alone: its length in ticks comes later, and a short sound looped is a
+         * thing games do) */
+        else if ((pf->fixes & DM_FIX_GUARDS) && !ss->rtlength && ss->loopend - ss->loopstart < 24) {
+            ss->loopstart = ss->loopend = 0; ss->repeats = 0;
+        }
     }
     ss->repeatsleft = ss->repeats;
     ss->audiopath = ap;                     /* known to the tracks' InitPlay (the wave track asks for it) */

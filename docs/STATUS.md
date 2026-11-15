@@ -930,7 +930,11 @@ Smaller items still open: none.
     sent again at the same time for ever; style patterns with a signature of no beats, which the pattern filter
     brought back for ever; a pattern start billions of ticks from the time played, whose part offsets wrapped
     before arriving; and a start point millions of bars in, walked pattern by pattern (stopped after 65536).
-  - Left as they are: files that are only a great deal of work (a loop of 7 ticks repeated without end).
+  - A loop of a tick or a few, repeated (1.8.1; it had been left as only a great deal of work): every pass starts
+    its notes, bands and chords again and each chord goes through every note still sounding, so the work grows
+    with the square of the passes. A 1-tick loop took 21 s to play 3 s of music (2 ticks 1.6 s, 4 ticks 0.3 s, 24
+    ticks nothing to speak of). Under DM_FIX_GUARDS a loop shorter than a 128th note (24 ticks) is not repeated.
+    A segment with a length in clock time (a wave file's) is left alone: a short sound looped is a thing games do.
   - With the fixes on, every segment of the test set plays the same as under 1.6.1 (321 runs compared).
   Build it with `-fsanitize=address` to check the reload path.
 - `tools/dmgt` drives Microsoft's dmime/dmsynth offline and logs what reaches the port.

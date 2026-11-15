@@ -4,6 +4,7 @@
 #include "../src/music/dmperf.h"
 #include "../src/music/dmdls.h"
 #include "../src/music/dmsty.h"
+#include "../src/music/dmi.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,6 +216,7 @@ int main(int argc, char **argv)
     else if (sz > 12 && !memcmp((char *)buf + 8, "WAVE", 4)) { dm_wave *w = dm_wave_load(buf, sz); if (w) { wid(w); seg = dm_segment_from_wave(w); dm_wave_release(w); } }
     else { dm_loadcb cb = { gc, getwave, getstyle, NULL }; seg = dm_segment_load_cb(buf, sz, &cb); }
     if (!seg) { fprintf(stderr, "load failed\n"); return 1; }
+    if (getenv("TP_REPEATS")) seg->repeats = strtoul(getenv("TP_REPEATS"), NULL, 0);     /* (as SetRepeats) */
     int ms = atoi(argv[3]);
     uint32_t flags = argc > 4 ? strtoul(argv[4], NULL, 0) : 0;
     const char *order = getenv("TP_ORDER");      /* realtime thread first on a shared tick (TP_ORDER=tr: transport first) */
