@@ -11,7 +11,8 @@
  * buffer is done, and the position counts, as the ideal device plays it (at I); a reset keeps what is between R and
  * I, which the ideal device has played already, and the next buffer goes in at I.  I runs with real time, which the
  * game's clock is too; when the output device's clock has drifted a mixing period away from it, I goes a little
- * faster or slower (0.05% at most) until it is back. */
+ * faster or slower (0.05% at most) until it is back.  When the mixer stops for a moment (or an hour: the machine
+ * asleep), I is set back to it, as a device would have stopped too. */
 #ifndef REAL_WAVECORE_H
 #define REAL_WAVECORE_H
 #include <stdint.h>
@@ -36,11 +37,14 @@ typedef struct wc_stream {
     uint32_t guard;             /* frames past R the mixer may already have read (the resampler's taps) */
     /* the ideal device's clock: I = ia + (t - ta) * rate * slope while running */
     double ia, ta, slope, err;
+    double lagmin, lagt;        /* the least I was ahead of its place for the mixer, since lagt (a mixer stopped) */
+    int64_t lagR;               /* the mixer's position then */
     int running;
     int64_t R;                  /* the mixer's position */
     int64_t W;                  /* the ring holds the timeline up to here */
     int64_t tail;               /* the end of what is queued */
     int64_t pos_done;           /* frames played (at I) since the open or the last reset, of the pieces gone */
+    int64_t pos_seen;           /* the highest position given out since then (it never goes back) */
     wc_seg *seg;                /* the queue: [head, n) */
     int head, n, cap;
     /* a loop (WHDR_BEGINLOOP .. WHDR_ENDLOOP): its buffers, played `passes` times.  The passes are queued as the
@@ -72,5 +76,5 @@ void wc_reset(wc_stream *s, double t);
 void wc_pause(wc_stream *s, double t);
 void wc_restart(wc_stream *s, double t);
 void wc_breakloop(wc_stream *s, double t);
-int64_t wc_position(const wc_stream *s, double t);
+int64_t wc_position(wc_stream *s, double t);
 #endif

@@ -18,6 +18,8 @@ typedef struct {
     uint8_t *out; long nout;
     double ppm, next_mix, next_tick, t;
     uint32_t rp, pf;
+    int burst;                  /* the mixer takes this many periods at once */
+    double hold_until;          /* no tick before then (its thread held up) */
     int paused;
     void *done[4096]; double done_t[4096]; int ndone;
 } sim;
@@ -27,10 +29,14 @@ static void put(void *c, uint32_t at, const uint8_t *src, uint32_t n)
     if (src) memcpy(m->ring + at, src, n); else memset(m->ring + at, 0x80, n);
 }
 static void on_done(void *c, void *h) { sim *m = c; m->done_t[m->ndone] = m->t; m->done[m->ndone++] = h; }
+/* (m zeroed, or set up before) */
 static void sim_init(sim *m, double ppm, double period_ms)
 {
+    free(m->out);
+    wc_free(&m->s);
     memset(m, 0, sizeof(*m));
     m->out = malloc(RATE * 400);
+    m->burst = 1;
     m->ppm = ppm;
     m->pf = (uint32_t)(period_ms * RATE / 1000) + 1;
     m->s.put = put; m->s.done = on_done; m->s.ctx = m;
@@ -47,13 +53,15 @@ static void sim_run(sim *m, double t)
         if (tn > t) break;
         m->t = tn;
         if (tn == m->next_mix) {
-            uint32_t n = m->pf;
+            uint32_t n = m->pf * (uint32_t)m->burst;
             for (uint32_t k = 0; k < n; k++) m->out[m->nout++] = m->paused ? 0x80 : m->ring[(m->rp + k) % RATE];
             if (!m->paused) m->rp = (m->rp + n) % RATE;
-            m->next_mix += (double)m->pf / RATE / (1 + m->ppm * 1e-6);
+            m->next_mix += (double)n / RATE / (1 + m->ppm * 1e-6);
         } else {
-            wc_mixer_at(&m->s, m->rp);
-            wc_tick(&m->s, tn);
+            if (tn >= m->hold_until) {
+                wc_mixer_at(&m->s, m->rp);
+                wc_tick(&m->s, tn);
+            }
             m->next_tick += 0.005;
         }
     }
@@ -69,7 +77,8 @@ static long first_sound(const sim *m, long from)
 int main(void)
 {
     static uint8_t buf[8][2048];
-    sim m_, *m = &m_;
+    static sim m_;
+    sim *m = &m_;
 
     /* buffers written back to back play back to back; done in order, as the ideal device finishes each */
     sim_init(m, 0, 10);
@@ -130,6 +139,69 @@ int main(void)
     CHECK(m->ndone == nd + 2 && wc_position(&m->s, 5.0) == 3000, "after restart: %d done, position %lld", m->ndone - nd,
           (long long)wc_position(&m->s, 5.0));
 
+    /* the mixer stopped for a while (the output opened again, the machine asleep): a buffer written afterwards is
+     * heard as soon as ever, and buffers queued across it play once each, in order, the position never going back */
+    static const double stalls[] = { 0.4, 1.7, 3600.0 };
+    for (int si = 0; si < 3; si++) {
+        sim_init(m, 0, 10);
+        static uint8_t q[40][1024];
+        for (int b = 0; b < 40; b++) for (int k = 0; k < 1024; k++) q[b][k] = (uint8_t)(1 + (b * 1024 + k) % 113);
+        sim_run(m, 0.5);
+        int wb = 0;
+        int64_t lastpos = 0;
+        int back = 0;
+        double t = 0.5;
+        /* (a game that keeps four buffers queued) */
+        #define FEED() while (wb < 40 && wb - m->ndone < 4) { wc_write(&m->s, t, q[wb], q[wb], 1024, 0, 0); wb++; }
+        for (; t < 1.5; t += 0.01) { sim_run(m, t); FEED(); }
+        m->next_mix += stalls[si]; m->next_tick += stalls[si]; t += stalls[si];     /* (nothing runs meanwhile) */
+        for (double e = t + 6.0; t < e; t += 0.01) {
+            sim_run(m, t);
+            FEED();
+            int64_t pp = wc_position(&m->s, t);
+            if (pp < lastpos) back = 1;
+            lastpos = pp;
+        }
+        #undef FEED
+        long n = 0;
+        ok = 1;
+        for (long k = 0; k < m->nout && ok; k++) {
+            if (m->out[k] == 0x80) continue;
+            if (n >= 40 * 1024 || m->out[k] != (uint8_t)(1 + n % 113)) ok = 0;
+            n++;
+        }
+        CHECK(ok && n == 40 * 1024 && m->ndone == 40, "a stall of %.1f s: %ld frames in order, %d buffers done", stalls[si],
+              n, m->ndone);
+        CHECK(!back && lastpos == 40 * 1024, "a stall of %.1f s: the position went back, or ends at %lld", stalls[si],
+              (long long)lastpos);
+        before = m->nout;
+        memset(q[0], 99, 500);
+        wc_write(&m->s, t, q[0], q[0], 500, 0, 0);
+        sim_run(m, t + 1.0);
+        lat = (double)(first_sound(m, before) - before) / RATE;
+        CHECK(lat > 0.015 && lat < 0.05, "after a stall of %.1f s: a buffer heard %.4f s after its write", stalls[si], lat);
+    }
+
+    /* a mixer that takes 270 ms at a time, and 400 ms (the output's buffer may be that long): the ideal device is
+     * far ahead of it before each piece, and that is not a stop */
+    for (int bi = 0; bi < 2; bi++) {
+        sim_init(m, 0, bi ? 50 : 30);
+        m->burst = bi ? 8 : 9;
+        static uint8_t q[4][512];
+        memset(q, 9, sizeof(q));
+        int wb = 0, back = 0;
+        double last = 0;
+        for (double t = 0.5; t < 20.0; t += 0.01) {
+            sim_run(m, t);
+            while (wb - m->ndone < 4) { wc_write(&m->s, t, q[wb % 4], q[wb % 4], 512, 0, 0); wb++; }
+            double I = wc_ideal(&m->s, t);
+            if (I < last) back++;
+            last = I;
+        }
+        CHECK(!back && m->ndone > 400, "a mixer taking %d ms at a time: the ideal device set back %d times, %d buffers done",
+              bi ? 400 : 270, back, m->ndone);
+    }
+
     /* a loop of one buffer, three times, done once */
     sim_init(m, 0, 10);
     for (int k = 0; k < 300; k++) buf[0][k] = (uint8_t)(1 + k % 50);
@@ -181,9 +253,10 @@ int main(void)
     /* a game mixing itself and resetting ten times a second (Pajama Sam 2): at each reset it writes its mix from what
      * its clock says on.  The output must go on sample by sample (a ramp here, never the silence value), whatever the
      * mixer's clock does */
-    static const double ppms[] = { 0, 150, -150, 600 };
-    for (int pi = 0; pi < 4; pi++) {
+    static const double ppms[] = { 0, 150, -150, 600, 0 };
+    for (int pi = 0; pi < 5; pi++) {
         sim_init(m, ppms[pi], 10);
+        if (pi == 4) m->burst = 12;         /* (a mixer that takes 120 ms at a time) */
         static uint8_t mix[16][1024];
         double t0 = 0.2;
         int bi = 0;
@@ -206,12 +279,14 @@ int main(void)
         }
         CHECK((double)(k - f) / RATE > 19.5, "resetting game: the sound stopped at %.2f s", (double)(k - f) / RATE);
         /* (a splice may land a frame off: the reset's time to the nearest frame) */
-        CHECK(worst <= (fabs(ppms[pi]) > 500 ? 2 : 1),
+        CHECK(worst <= (fabs(ppms[pi]) > 500 || pi == 4 ? 2 : 1),
               "resetting game, mixer %+.0f ppm: %ld jumps, the worst %ld frames", ppms[pi], jumps, worst);
-        printf("wavecore: resetting game, mixer clock %+.0f ppm: %ld splices off by a frame, the worst %ld\n", ppms[pi],
-               jumps, worst);
+        printf("wavecore: resetting game, mixer clock %+.0f ppm%s: %ld splices off by a frame, the worst %ld\n", ppms[pi],
+               pi == 4 ? ", 120 ms at a time" : "", jumps, worst);
     }
 
+    free(m->out);
+    wc_free(&m->s);
     if (fails) { printf("wavecore tests: %d FAILED\n", fails); return 1; }
     printf("wavecore tests: all passed\n");
     return 0;

@@ -371,6 +371,13 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   in at I: a game that resets and writes its mix again from its own clock (Pajama Sam 2, ten times a second) plays
   on without a gap, where an output with latency drops it at each reset. I keeps to real time until the output's
   clock has drifted a mixing period away, then runs up to 0.05% faster or slower until it is back.
+  When the mixer stops for a while (the output opened again, its server held up, the machine asleep) I is set back
+  to it: a device does not play then either. Before, I ran on, and everything after was heard that much late (0.85 s
+  after a sink suspended for 2 s under Wine, measured against a DirectSound buffer played at the same moment; for
+  good after an hour's sleep); now 35 ms as ever. The position waits instead of going back. Stopped is half the
+  ring ahead (more than a mixer takes at once: the output's buffer, 500 ms at most), or never less than two mixing
+  periods and 25 ms ahead over a quarter of a second in which the mixer moved: a mixer that takes several periods
+  at once is back in place after each piece and is left alone.
 - Loops (WHDR_BEGINLOOP / ENDLOOP, dwLoops) are queued a pass at a time as the ideal device nears them, so a loop for
   ever costs nothing; waveOutBreakLoop ends it with the pass being played. Pause stops the stream where the mixer
   is.

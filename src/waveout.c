@@ -504,6 +504,7 @@ static MMRESULT WINAPI w_getpos(HWAVEOUT h, LPMMTIME t, UINT sz)
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_getpos(h, t, sz); }
     if (!t || sz < sizeof(MMTIME)) { LeaveCriticalSection(&s_wl); return MMSYSERR_INVALPARAM; }
+    mixer_pos(w);
     uint64_t frames = (uint64_t)wc_position(&w->wc, now_s());
     const WAVEFORMATEX *f = &w->fmt.Format;
     LeaveCriticalSection(&s_wl);

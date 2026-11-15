@@ -19,6 +19,7 @@ int wc_init(wc_stream *s, uint32_t rate, uint32_t block, uint8_t silence, uint32
     s->ring = ring; s->period = period; s->delta = delta; s->guard = guard;
     s->lead = 2 * delta + period;
     s->ia = delta + period / 2.0; s->ta = t; s->slope = 1.0; s->running = 1;
+    s->lagmin = 1e300; s->lagt = t; s->lagR = 0;
     return 1;
 }
 void wc_free(wc_stream *s)
@@ -30,6 +31,26 @@ void wc_free(wc_stream *s)
 double wc_ideal(const wc_stream *s, double t)
 {
     return s->running ? s->ia + (t - s->ta) * s->rate * s->slope : s->ia;
+}
+
+/* where the ideal device should be for the mixer's position */
+static double target(const wc_stream *s) { return (double)s->R + s->delta + s->period / 2.0; }
+/* the ideal device's clock set back to the mixer's: the mixer did not play for a while (the output opened again, the
+ * machine asleep, the process held up).  A device does not play then either: what is queued plays on from where the
+ * mixer is, later than it would have, and the position waits (wc_position) */
+static void resync(wc_stream *s, double t)
+{
+    s->ia = target(s); s->ta = t; s->slope = 1.0; s->err = 0;
+    s->lagmin = 1e300; s->lagt = t; s->lagR = s->R;
+}
+/* the clock for a call: never half the ring ahead of the mixer (a buffer laid there would not be heard for that
+ * long, an hour after an hour's sleep).  Half a second: more than a mixer takes at a time, which is the output's
+ * buffer at most (latency=, 500 ms) */
+static double ideal_now(wc_stream *s, double t)
+{
+    double I = wc_ideal(s, t);
+    if (s->running && I - target(s) > s->ring / 2.0) { resync(s, t); I = s->ia; }
+    return I;
 }
 
 void wc_mixer_at(wc_stream *s, uint32_t ringpos)
@@ -101,20 +122,32 @@ void wc_tick(wc_stream *s, double t)
 {
     if (s->running) {
         /* the mixer's position moves a mixing period at a time: on average it is half a period behind */
-        double I = wc_ideal(s, t), target = (double)s->R + s->delta + s->period / 2.0;
+        double I = ideal_now(s, t);
         if (I < (double)(s->R + s->guard)) {        /* (the mixer caught up: start the clock again ahead of it) */
-            s->ia = target; s->slope = 1.0; s->err = 0;
+            resync(s, t);
         } else {
             /* the output's clock and the real-time one may differ a little: I keeps to real time (any other rate
              * would move the game's sound at each reset) until it is a mixing period or more off the mixer's, then
              * goes a little faster or slower until it is back */
-            s->err += (target - I - s->err) * 0.02;
+            s->err += (target(s) - I - s->err) * 0.02;
             double band = s->period / 2.0 + s->rate / 200.0;
-            if (fabs(s->err) > band) {
-                double c = s->err / (s->rate * 8.0);
-                s->slope = 1.0 + (c > 5e-4 ? 5e-4 : c < -5e-4 ? -5e-4 : c);
-            } else if (fabs(s->err) < band / 4) s->slope = 1.0;
-            s->ia = I;
+            /* the least the ideal device was ahead of its place over a quarter of a second or more, in which the
+             * mixer has moved.  A mixer that takes its sound in large pieces is far behind before each and level
+             * after it; one that stopped for a moment stays behind.  At 0.05% that would take minutes to make up,
+             * the game's sound that much late meanwhile */
+            if (I - target(s) < s->lagmin) s->lagmin = I - target(s);
+            const int over = t - s->lagt >= 0.25 && s->R != s->lagR;
+            const int stopped = over && s->lagmin > 2.0 * s->period + s->rate / 40.0;
+            if (over) { s->lagmin = 1e300; s->lagt = t; s->lagR = s->R; }
+            if (stopped) {
+                resync(s, t);
+            } else {
+                if (fabs(s->err) > band) {
+                    double c = s->err / (s->rate * 8.0);
+                    s->slope = 1.0 + (c > 5e-4 ? 5e-4 : c < -5e-4 ? -5e-4 : c);
+                } else if (fabs(s->err) < band / 4) s->slope = 1.0;
+                s->ia = I;
+            }
         }
         s->ta = t;
     }
@@ -221,7 +254,7 @@ static int write_at(wc_stream *s, double I, void *hdr, const uint8_t *data, uint
 
 int wc_write(wc_stream *s, double t, void *hdr, const uint8_t *data, uint32_t frames, uint32_t flags, uint32_t loops)
 {
-    double I = wc_ideal(s, t);
+    double I = ideal_now(s, t);
     if (!write_at(s, I, hdr, data, frames, flags, loops)) return 0;
     topup(s, I);
     return 1;
@@ -229,7 +262,7 @@ int wc_write(wc_stream *s, double t, void *hdr, const uint8_t *data, uint32_t fr
 
 void wc_reset(wc_stream *s, double t)
 {
-    double I = wc_ideal(s, t);
+    double I = ideal_now(s, t);
     int64_t x = llround(I);
     if (x < s->R + s->guard) x = s->R + s->guard;
     fill(s, x);                         /* what the ideal device has played stays (the buffers go back now) */
@@ -237,7 +270,7 @@ void wc_reset(wc_stream *s, double t)
     s->loop_open = 0; s->nloop = 0; s->passes = s->next_pass = 0; s->nlater = 0;
     s->tail = x;
     if (s->W > x) s->W = x;
-    s->pos_done = 0;
+    s->pos_done = 0; s->pos_seen = 0;
     topup(s, I);
 }
 
@@ -259,7 +292,7 @@ void wc_breakloop(wc_stream *s, double t)
 {
     if (s->loop_open) { s->broken = 1; return; }
     if (!s->passes) return;                 /* (no loop) */
-    double I = wc_ideal(s, t);
+    double I = ideal_now(s, t);
     int64_t from = (int64_t)ceil(I);
     if (from < s->R + s->guard) from = s->R + s->guard;
     /* the pass being played: that of the first piece not over by then (before the loop: it plays once) */
@@ -283,9 +316,10 @@ void wc_breakloop(wc_stream *s, double t)
     topup(s, I);
 }
 
-int64_t wc_position(const wc_stream *s, double t)
+/* (it never goes back: after the clock was set back to the mixer's, it waits for the ideal device to be there again) */
+int64_t wc_position(wc_stream *s, double t)
 {
-    double I = wc_ideal(s, t);
+    double I = ideal_now(s, t);
     int64_t p = s->pos_done;
     for (int i = s->head; i < s->n; i++) {
         const wc_seg *g = &s->seg[i];
@@ -293,5 +327,7 @@ int64_t wc_position(const wc_stream *s, double t)
         double e = (double)(g->start + g->frames);
         p += (int64_t)((e < I ? e : I) - (double)g->start);
     }
+    if (p < s->pos_seen) return s->pos_seen;
+    s->pos_seen = p;
     return p;
 }
