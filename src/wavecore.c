@@ -205,7 +205,8 @@ static void extend(wc_stream *s, double I)
                 break;
             }
     }
-    while (s->next_pass == s->passes && s->nlater) {    /* (until one of them starts another loop to queue) */
+    /* (until one of them has started another loop to queue: all of that loop's buffers, up to the one that ends it) */
+    while ((s->loop_open || s->next_pass == s->passes) && s->nlater) {
         struct wc_later l = s->later[0];
         memmove(s->later, s->later + 1, (size_t)(--s->nlater) * sizeof(*s->later));
         write_at(s, I, l.hdr, l.data, l.frames, l.flags, l.loops);

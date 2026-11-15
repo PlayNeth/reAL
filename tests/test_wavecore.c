@@ -298,6 +298,30 @@ int main(void)
         CHECK(ok && n == 4096, "a mixer in large pieces, pause and restart: %ld frames in order", n);
     }
 
+    /* a loop of two buffers written while another loop's passes are still being queued: each in its turn */
+    {
+        sim_init(m, 0, 10);
+        static uint8_t la[5512], lb1[1000], lb2[1000], lc[1000];
+        memset(la, 1, sizeof(la)); memset(lb1, 2, sizeof(lb1)); memset(lb2, 3, sizeof(lb2)); memset(lc, 4, sizeof(lc));
+        sim_run(m, 0.1);
+        wc_write(&m->s, 0.1, la, la, 5512, WC_BEGINLOOP | WC_ENDLOOP, 6);
+        wc_write(&m->s, 0.1, lb1, lb1, 1000, WC_BEGINLOOP, 2);
+        wc_write(&m->s, 0.1, lb2, lb2, 1000, WC_ENDLOOP, 0);
+        sim_run(m, 3.3);                    /* (the second loop is playing by now) */
+        wc_write(&m->s, 3.3, lc, lc, 1000, 0, 0);
+        sim_run(m, 9.0);
+        static const struct { int v; long n; } want[] = { { 1, 6 * 5512 }, { 2, 1000 }, { 3, 1000 }, { 2, 1000 }, { 3, 1000 },
+                                                          { 4, 1000 } };
+        long k = first_sound(m, 0);
+        ok = k > 0;
+        for (int i = 0; ok && i < 6; i++) {
+            long r = 0;
+            while (k < m->nout && m->out[k] == want[i].v) { k++; r++; }
+            if (r != want[i].n) ok = 0;
+        }
+        CHECK(ok && m->out[k] == 0x80 && m->ndone == 4, "a loop written while another is queued: %d buffers done of 4", m->ndone);
+    }
+
     /* a loop of one buffer, three times, done once */
     sim_init(m, 0, 10);
     for (int k = 0; k < 300; k++) buf[0][k] = (uint8_t)(1 + k % 50);
