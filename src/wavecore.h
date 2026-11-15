@@ -46,6 +46,7 @@ typedef struct wc_stream {
     int running;
     int64_t R;                  /* the mixer's position */
     int64_t W;                  /* the ring holds the timeline up to here */
+    int64_t C;                  /* and silence from there up to here */
     int64_t tail;               /* the end of what is queued */
     int64_t pos_done;           /* frames played (at I) since the open or the last reset, of the pieces gone */
     int64_t pos_seen;           /* the highest position given out since then (it never goes back) */

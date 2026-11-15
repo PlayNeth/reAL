@@ -378,6 +378,8 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   ring ahead (more than a mixer takes at once: the output's buffer, 500 ms at most), or never less than two mixing
   periods and 25 ms ahead over a quarter of a second in which the mixer moved: a mixer that takes several periods
   at once is back in place after each piece and is left alone.
+- The ring past what is written is kept silent for a quarter of its length: a tick held up (it writes every 5 ms)
+  is a gap, where before the mixer ran into what the ring held a second ago and played it again.
 - Loops (WHDR_BEGINLOOP / ENDLOOP, dwLoops) are queued a pass at a time as the ideal device nears them, so a loop for
   ever costs nothing; waveOutBreakLoop ends it with the pass being played. A loop of several buffers written while
   another loop plays is taken whole when its turn comes (before 1.8.1 only its first buffer was: it played once,
@@ -395,10 +397,10 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   EBX, ESI and EDI and clears the direction flag (Windows 10 and 11's winmm counts on them after a callback).
 - `tests/test_wavecore.c`: buffers back to back, a write to an idle device, reset, pause and restart to the frame
   (also at once, with a write and a reset while paused, and with a mixer taking 60 ms at a time), the mixer stopped
-  for a while, loops (broken, for ever, and one written while another plays), and a game resetting every ~104 ms with
-  the mixer's clock up to 600 ppm off: the output goes on sample by sample (a splice at most a frame off, two at 600
-  ppm). The PCM Pajama Sam 2 wrote (winmmtrace) replayed the same way against an ideal device matches it but for a
-  frame at some splices.
+  for a while, the tick held up, loops (broken, for ever, and one written while another plays), and a game resetting
+  every ~104 ms with the mixer's clock up to 600 ppm off: the output goes on sample by sample (a splice at most a
+  frame off, two at 600 ppm). The PCM Pajama Sam 2 wrote (winmmtrace) replayed the same way against an ideal device
+  matches it but for a frame at some splices.
 - `tests/wotest.c` (under Wine, with `winmm.dll` and `dsound.dll` beside it): 11025 Hz 8-bit mono with a callback
   function, 8 buffers played, 30 rounds of a reset and three buffers every 100 ms, pause and restart, close. All 12
   checks pass through reAL (every WOM_DONE and WHDR_DONE, the position held while paused, one WOM_OPEN and one

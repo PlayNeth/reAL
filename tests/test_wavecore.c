@@ -298,6 +298,35 @@ int main(void)
         CHECK(ok && n == 4096, "a mixer in large pieces, pause and restart: %ld frames in order", n);
     }
 
+    /* the tick held up for 150 ms while the mixer plays on: it runs out of what the ring holds and plays silence,
+     * not what the ring held a second ago; what it missed is lost, the rest follows in order */
+    {
+        sim_init(m, 0, 10);
+        static uint8_t q[60][1024];
+        for (int b = 0; b < 60; b++) for (int k = 0; k < 1024; k++) q[b][k] = (uint8_t)(1 + (b * 1024 + k) % 113);
+        int wb = 0;
+        for (double t = 0.2; t < 8.0; t += 0.01) {
+            if (t >= 3.0 && t < 3.01) m->hold_until = 3.15;
+            sim_run(m, t);
+            while (wb < 60 && wb - m->ndone < 4) { wc_write(&m->s, t, q[wb], q[wb], 1024, 0, 0); wb++; }
+        }
+        long n = 0, lost = 0;
+        int prev = -1;
+        ok = 1;
+        for (long k = 0; k < m->nout; k++) {
+            if (m->out[k] == 0x80) continue;
+            int v = m->out[k] - 1;
+            if (prev >= 0 && v != (prev + 1) % 113) {
+                /* (one place where frames are missing, never one where earlier ones come again) */
+                if (lost) ok = 0;
+                lost = k;
+            }
+            prev = v; n++;
+        }
+        CHECK(ok && lost && n < 60 * 1024 && n > 60 * 1024 - RATE / 4 && m->ndone == 60,
+              "the tick held up: %ld frames heard of %d, %d buffers done", n, 60 * 1024, m->ndone);
+    }
+
     /* a loop of two buffers written while another loop's passes are still being queued: each in its turn */
     {
         sim_init(m, 0, 10);

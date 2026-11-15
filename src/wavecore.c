@@ -95,6 +95,12 @@ static void topup(wc_stream *s, double I)
 {
     int64_t want = s->R + s->lead, ideal = (int64_t)ceil(I) + s->guard;
     fill(s, want > ideal ? want : ideal);
+    /* silence for a quarter of the ring past W: a mixer that gets there before the next tick (the tick held up)
+     * plays that, not what the ring held a second ago */
+    int64_t c = s->W + s->ring / 4;
+    if (c > s->R + s->ring - s->guard) c = s->R + s->ring - s->guard;
+    if (s->C < s->W) s->C = s->W;
+    if (c > s->C) { put_range(s, s->C, NULL, c - s->C); s->C = c; }
 }
 /* the pieces the ideal device has played (and the ring holds) go; a buffer's last one makes it done */
 static void retire(wc_stream *s, double I)
@@ -271,7 +277,7 @@ void wc_reset(wc_stream *s, double t)
     s->head = s->n = 0;
     s->loop_open = 0; s->nloop = 0; s->passes = s->next_pass = 0; s->nlater = 0;
     s->tail = x;
-    if (s->W > x) s->W = x;
+    if (s->W > x) s->W = s->C = x;
     s->pos_done = 0; s->pos_seen = 0;
     topup(s, I);
 }
@@ -285,7 +291,7 @@ void wc_pause(wc_stream *s, double t)
     /* (the mixer may have taken more already, in a large piece: that is heard before the pause too) */
     if (s->ia < (double)(s->R + s->guard)) s->ia = (double)(s->R + s->guard);
     s->running = 0;
-    if (s->W > (int64_t)s->ia) s->W = (int64_t)s->ia;     /* (what the ring holds past it: silence again) */
+    if (s->W > (int64_t)s->ia) s->W = s->C = (int64_t)s->ia;     /* (what the ring holds past it: silence again) */
     topup(s, s->ia);
 }
 int wc_drained(const wc_stream *s) { return !s->running && s->R >= (int64_t)s->ia; }
@@ -302,7 +308,7 @@ void wc_restart(wc_stream *s, double t)
         const int64_t from = P > s->R + s->guard ? P : s->R + s->guard;
         if (P + d > from) put_range(s, from, NULL, P + d - from);
     }
-    s->W = P + d;
+    s->W = s->C = P + d;
     s->ia = (double)(P + d); s->ta = t; s->slope = 1.0; s->err = 0;
     s->running = 1;
     s->lagmin = 1e300; s->lagt = t; s->lagR = s->R;     /* (what it was before the pause says nothing now) */
@@ -331,7 +337,7 @@ void wc_breakloop(wc_stream *s, double t)
         s->n -= end - cut;
         for (int k = cut; k < s->n; k++) s->seg[k].start -= gap;
         s->tail -= gap;
-        if (s->W > at) s->W = at;
+        if (s->W > at) s->W = s->C = at;
     }
     loop_final(s, cur < s->next_pass ? cur : s->next_pass - 1);
     extend(s, I);
