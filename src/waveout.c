@@ -260,8 +260,8 @@ static rl_wave *open_stream(const WAVEFORMATEX *f, DWORD_PTR cb, DWORD_PTR inst,
     rl_wave *w = calloc(1, sizeof(*w));
     if (!w) return NULL;
     w->cb = cb; w->inst = inst; w->flags = fl;
-    memcpy(&w->fmt, f, f->wFormatTag == WAVE_FORMAT_EXTENSIBLE ? sizeof(WAVEFORMATEXTENSIBLE) : sizeof(WAVEFORMATEX));
-    if (f->wFormatTag != WAVE_FORMAT_EXTENSIBLE) w->fmt.Format.cbSize = 0;
+    /* (a PCM format may be a PCMWAVEFORMAT, which ends before cbSize) */
+    memcpy(&w->fmt, f, f->wFormatTag == WAVE_FORMAT_EXTENSIBLE ? sizeof(WAVEFORMATEXTENSIBLE) : sizeof(PCMWAVEFORMAT));
     const uint32_t rate = f->nSamplesPerSec, blk = f->nBlockAlign;
     if (FAILED(rl_device_acquire(&w->dev))) { free(w); return NULL; }
     DSBUFFERDESC d;
