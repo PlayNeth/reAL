@@ -4,7 +4,7 @@
  * Checks: every header comes back WHDR_DONE with a WOM_DONE callback, callbacks never on the
  * game's own thread and with the right handle, no call hangs, and the clock moves forward.
  * Run it with reAL's winmm.dll and dsound.dll beside it: WINEDLLOVERRIDES="winmm,dsound=n,b" wine wotest.exe.
- * Through reAL all 12 checks pass; on Wine's own winmm (or waveout=false) the position moves while paused and a
+ * Through reAL all 13 checks pass; on Wine's own winmm (or waveout=false) the position moves while paused and a
  * callback runs on the caller's thread. */
 #include <windows.h>
 #include <mmsystem.h>
@@ -111,6 +111,15 @@ int main(void)
     check(q1 == q0, "position holds while paused");
     waveOutRestart(g_wo); Sleep(200); DWORD q2 = pos_samples();
     check(q2 > q1, "position moves after restart");
+    waveOutReset(g_wo);
+    /* a reset while paused ends the pause as well: what is written next plays without a restart */
+    waveOutPause(g_wo);
+    for (int i = 0; i < 2; i++) waveOutWrite(g_wo, &hdr[i], sizeof hdr[i]);
+    waveOutReset(g_wo);
+    Sleep(50);
+    for (int i = 0; i < 2; i++) waveOutWrite(g_wo, &hdr[i], sizeof hdr[i]);
+    Sleep(150);
+    check(pos_samples() > 0, "written after a reset while paused: it plays");
     waveOutReset(g_wo);
 
     for (int i = 0; i < NB; i++) waveOutUnprepareHeader(g_wo, &hdr[i], sizeof hdr[i]);

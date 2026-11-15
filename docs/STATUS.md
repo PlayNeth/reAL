@@ -395,7 +395,9 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   between the two came after the restart: recorded under Wine, 2982 frames heard at position 3311; now 3317 at
   3312.) The restart moves what is left along the timeline so the mixer is `delta` behind again, and the sound
   goes on as soon after it as a buffer after its write. A buffer written while paused starts where the device
-  stopped. (A mixer that takes several periods at once may be past the ideal device at the pause: the device stops
+  stopped. waveOutReset ends a pause as well (the DDK's WODM_RESET: "if playback is paused, the driver should also
+  take itself out of the paused state"; before 1.8.1 the stream stayed paused, and a game that resets and writes
+  again without a restart heard nothing). (A mixer that takes several periods at once may be past the ideal device at the pause: the device stops
   where its piece ends, so nothing plays twice.)
 - Callbacks (WOM_OPEN, WOM_DONE, WOM_CLOSE; function, window, thread, event) come from a thread of reAL's, as XP's
   driver sent them, never inside the call (Windows 10 and 11 send WOM_OPEN inside waveOutOpen). waveOutReset and

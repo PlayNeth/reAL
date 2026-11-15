@@ -484,6 +484,13 @@ static MMRESULT WINAPI w_reset(HWAVEOUT h)
     if (!w) { LeaveCriticalSection(&s_wl); return o_reset(h); }
     mixer_pos(w);
     wc_reset(&w->wc, now_s());
+    if (w->paused) {
+        /* a reset takes the device out of a pause as well (the DDK's WODM_RESET: "if playback is paused, the driver
+         * should also take itself out of the paused state"): what is written next plays */
+        wc_restart(&w->wc, now_s());
+        IDirectSoundBuffer8_Play(&w->b->IDirectSoundBuffer8_iface, 0, 0, DSBPLAY_LOOPING);
+        w->paused = w->draining = 0;
+    }
     LONGLONG seq = 0;
     for (int i = 0; i < w->nq; i++) {
         LPWAVEHDR hd = w->q[i];

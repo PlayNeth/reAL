@@ -203,6 +203,19 @@ int main(void)
     CHECK(n88 == 400 && lat > 0.015 && lat < 0.05, "reset and written while paused: %ld frames, %.4f s after the restart",
           n88, lat);
     CHECK(wc_position(&m->s, 8.0) == 400, "position after that %lld", (long long)wc_position(&m->s, 8.0));
+    /* a reset while paused, as waveout.c does it (the pause ends with it): what is written afterwards plays */
+    sim_pause(m, 8.5);
+    sim_run(m, 8.7);
+    wc_reset(&m->s, 8.7);
+    sim_restart(m, 8.7);
+    sim_run(m, 9.0);
+    before = m->nout;
+    memset(buf[2], 66, 300);
+    wc_write(&m->s, 9.0, buf[2], buf[2], 300, 0, 0);
+    sim_run(m, 9.5);
+    lat = (double)(first_sound(m, before) - before) / RATE;
+    CHECK(lat > 0.015 && lat < 0.05 && wc_position(&m->s, 9.5) == 300, "after a reset while paused: heard %.4f s after its write, position %lld",
+          lat, (long long)wc_position(&m->s, 9.5));
 
     /* the mixer stopped for a while (the output opened again, the machine asleep): a buffer written afterwards is
      * heard as soon as ever, and buffers queued across it play once each, in order, the position never going back */
