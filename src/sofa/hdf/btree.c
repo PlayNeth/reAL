@@ -189,7 +189,9 @@ int btreeRead(struct READER *reader, struct BTREE *btree) {
 
   /*	fseek(reader->fhd, 4, SEEK_CUR);  skip checksum */
 
-  if (btree->total_number > 0x10000000)
+  /* reAL: (not called: the name indexes are not needed.)  The records' size must fit a 32-bit size_t, and the
+   * root node's records fit in what is allocated */
+  if (btree->total_number > 0x1000000 || btree->total_number < btree->number_of_records)
     return MYSOFA_NO_MEMORY;
   btree->records = malloc(sizeof(btree->records[0]) * btree->total_number);
   if (!btree->records)

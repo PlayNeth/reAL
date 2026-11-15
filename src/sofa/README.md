@@ -13,6 +13,8 @@ What reAL changed or added:
   the reading time.
 - `hdf/btree.c`, `treeRead`: a chunk longer than what is left of the file is refused before memory is asked for it
   (the size is the file's: up to 4 GB).
+- `hdf/btree.c`, `btreeRead` (not called: the name indexes are not needed): its records' size kept within a 32-bit
+  `size_t`, and no fewer allocated than the root node holds.
 - `hrtf/reader.c`, `getHrtf`: a file refused after its attributes were read frees them too (they leaked).
 - Built with `-fwrapv`: the reader counts on `int` arithmetic wrapping.
   Lines changed are marked `reAL:`.
