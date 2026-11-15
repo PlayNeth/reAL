@@ -143,6 +143,13 @@ ALchemy's levels for its direction.
   (bits flipped, bytes and 32/64-bit values replaced, ranges copied, the file cut short), 2,346 of which still
   loaded. No memory error; one leak, of the attributes of a file refused after reading them, fixed in the reader.
   1,000 more after the reader and inflate were made faster: clean too.
+- `tests/test_inflate.c` makes its streams bit by bit, one for each place in the decoder: codes of 1 to 15 bits
+  (the long ones read a bit at a time, the last with fewer bits left than the nine looked up at once), a stored
+  block after the bytes the decoder had read ahead, at every place in a byte, the longest match and the farthest
+  distance, code lengths by runs, an output that fills before the stream ends, every error a damaged stream can
+  hold, and 100,000 damaged copies. Every line of inflate.c is reached (gcov). It found one fault: a block whose
+  code-length code has no codes was read through a table left unset, so what came out depended on what the memory
+  held (a damaged chunk could pass as data); the table is cleared now.
 
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.

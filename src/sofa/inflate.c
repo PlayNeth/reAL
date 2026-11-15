@@ -41,6 +41,7 @@ static int build(huff *h, const int16_t *len, int n)
     int16_t offs[MAXBITS + 1];
     for (int l = 0; l <= MAXBITS; l++) h->count[l] = 0;
     for (int s = 0; s < n; s++) h->count[len[s]]++;
+    memset(h->fast, 0, sizeof(h->fast));        /* (before any return: decode() looks here first) */
     if (h->count[0] == n) return 1;             /* (no codes: an error only if one is used) */
     int left = 1;
     for (int l = 1; l <= MAXBITS; l++) {
@@ -53,7 +54,6 @@ static int build(huff *h, const int16_t *len, int n)
     for (int s = 0; s < n; s++) if (len[s]) h->symbol[offs[len[s]]++] = (int16_t)s;
     /* each code as deflate sends it (its bits reversed), for every value of the bits after it */
     int next[MAXBITS + 1], code = 0;
-    memset(h->fast, 0, sizeof(h->fast));
     for (int l = 1; l <= MAXBITS; l++) { code = (code + (l > 1 ? h->count[l - 1] : 0)) << 1; next[l] = code; }
     for (int s = 0; s < n; s++) {
         int l = len[s];

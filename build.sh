@@ -182,6 +182,9 @@ if command -v cc >/dev/null 2>&1; then
         build/native/sofa_*.o -lm
     # (its tester*.sofa hold made-up responses, not a head's)
     if [ -n "$SOFA_TESTS" ]; then ./build/test_sofa $(ls "$SOFA_TESTS"/*.sofa | grep -v /tester) | tail -1; fi
+    # the SOFA reader's deflate filter
+    cc -O1 -g -std=gnu11 -Wall -o build/test_inflate tests/test_inflate.c src/sofa/inflate.c
+    ./build/test_inflate
     # a waveOut stream's timeline (reAL's winmm.dll)
     cc -O1 -g -std=gnu11 -Wall -o build/test_wavecore tests/test_wavecore.c src/wavecore.c -lm
     ./build/test_wavecore
