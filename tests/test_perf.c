@@ -167,7 +167,8 @@ static int reload_tracks(dm_segment *seg, const uint8_t *b, size_t n, const dm_l
     int done = 0, seen[64] = { 0 };
     for (size_t i = 12; i + 12 <= n; i++) {
         if (memcmp(b + i, "RIFF", 4) || memcmp(b + i + 8, "DMTK", 4)) continue;
-        size_t end = i + 8 + rd32(b + i + 4); if (end > n) end = n;
+        uint32_t len = rd32(b + i + 4);
+        size_t end = len > n - i - 8 ? n : i + 8 + len;     /* (a size past the file's end: the sum may not fit) */
         const uint8_t *cls = NULL;
         for (size_t p = i + 12; p + 8 <= end; ) {
             uint32_t sz = rd32(b + p + 4);
