@@ -215,7 +215,7 @@ int main(void)
         expect("matches", &w, want, n);
         /* the output full before the stream ends, at every size down from the whole: what fits, and no error (the
          * reader asks for a chunk's size and takes what comes) */
-        for (int room = n - 1; room > n - 600; room -= 7) {
+        for (int room = n - 1; room > n - 600; room--) {
             int got, r = run(w.b, w.n, room, &got);
             CHECK(r == 0 && got == room && !memcmp(s_out, want, (size_t)room), "room for %d of %d: answered %d, %d bytes",
                   room, n, r, got);

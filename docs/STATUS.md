@@ -150,6 +150,9 @@ ALchemy's levels for its direction.
   hold, and 100,000 damaged copies. Every line of inflate.c is reached (gcov). It found one fault: a block whose
   code-length code has no codes was read through a table left unset, so what came out depended on what the memory
   held (a damaged chunk could pass as data); the table is cleared now.
+- A match is copied at once where it can be (a run of one byte, or a piece that does not reach itself), not a
+  byte at a time: libmysofa's 43 test files load in 1.9 s where they took 5.8 (a 32-bit -O2 build), the same
+  sets out of them.
 
 **Built-in HRTF** (`hrtf=builtin`; `src/hrtf_builtin.c`, `src/hrtf_kemar_data.h`, `tools/hrtf_kemar.py`): off by
 default; `hrtf=auto` stays a `reAL_hrtf.bin` if there is one, otherwise panning, as before.

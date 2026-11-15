@@ -121,11 +121,15 @@ static int codes(inf *s, const huff *lc, const huff *dc)
             if (d < 0 || d >= 30 || s->err) return 0;
             uint32_t dist = (uint32_t)dbase[d] + bits(s, dext[d]);
             if (s->err || dist > s->outpos) return 0;
-            for (; len; len--) {
-                if (s->outpos >= s->outlen) return 2;
-                s->out[s->outpos] = s->out[s->outpos - dist];
-                s->outpos++;
-            }
+            /* (a run of one byte, or a piece that does not reach itself: at once; the rest byte by byte, each
+             * from what the one before wrote) */
+            const uint32_t room = s->outlen - s->outpos, n = len < room ? len : room;
+            uint8_t *o = s->out + s->outpos;
+            if (dist == 1) memset(o, o[-1], n);
+            else if (dist >= n) memcpy(o, o - dist, n);
+            else for (uint32_t k = 0; k < n; k++) o[k] = o[(int32_t)k - (int32_t)dist];
+            s->outpos += n;
+            if (n < len) return 2;
         }
     }
 }
