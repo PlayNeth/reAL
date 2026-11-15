@@ -1220,7 +1220,7 @@ const char *dm_gm_dls_path(void)
         for (size_t i = 0; dosname && i < sizeof(linux_gm_sf2) / sizeof(linux_gm_sf2[0]); i++) {
             WCHAR *w = dosname(linux_gm_sf2[i]);
             if (!w) continue;
-            WideCharToMultiByte(CP_ACP, 0, w, -1, cand[n++], MAX_PATH, NULL, NULL);
+            if (WideCharToMultiByte(CP_ACP, 0, w, -1, cand[n], MAX_PATH, NULL, NULL)) n++;
             HeapFree(GetProcessHeap(), 0, w);
         }
     }

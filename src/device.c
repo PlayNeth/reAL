@@ -470,10 +470,12 @@ static void hrtf_path(char *out, const char *in)
     WCHAR *(CDECL *dosname)(LPCSTR) = in[0] == '/' ?
         (void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "wine_get_dos_file_name") : NULL;
     WCHAR *w = dosname ? dosname(in) : NULL;
-    if (w) {
-        WideCharToMultiByte(CP_ACP, 0, w, -1, out, MAX_PATH, NULL, NULL);
-        HeapFree(GetProcessHeap(), 0, w);
-    } else lstrcpynA(out, in, MAX_PATH);
+    /* (a name too long for MAX_PATH, or one this code page cannot spell: the path as it was given.  UTF-8 spells
+     * them all, and WideCharToMultiByte refuses to say for it) */
+    BOOL lost = FALSE;
+    int n = w ? WideCharToMultiByte(CP_ACP, 0, w, -1, out, MAX_PATH, NULL, GetACP() == CP_UTF8 ? NULL : &lost) : 0;
+    if (w) HeapFree(GetProcessHeap(), 0, w);
+    if (!n || lost) lstrcpynA(out, in, MAX_PATH);
 }
 
 static void load_hrtf(rl_device *dev, UINT32 rate)
