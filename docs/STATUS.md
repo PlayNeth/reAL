@@ -367,6 +367,40 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - The proxy also has the eight driver exports Wine's winmm has and Windows 11's lacks (DrvOpen, DrvClose,
   OpenDriverA, GetDriverFlags and the like, 201 in all): a DLL or an old game that imports one loads with the proxy
   in the way, where its loading failed. On a winmm without them they answer MMSYSERR_NOTSUPPORTED.
+- For a whole Wine prefix (`install.sh --winmm`, no game named): reAL's `winmm.dll` takes the place of Wine's in the
+  system directory, Wine's stays beside it as `winmm.dll.wine`, and the proxy, finding that the system's winmm is
+  itself, loads that one. Wine's winmm works under that name (wotest 13 of 13, MIDI through the hooks, MCI, the
+  DirectSound tests, all with nothing next to the exe).
+- Two of reAL's proxies in one process (a copy next to a game, in a prefix where reAL's is the system's): the real
+  winmm is the one at the end. A proxy goes through another to it, and does not load if it finds only proxies.
+  reAL does the same with the winmm it is handed and the one it hooks for MIDI (`rl_winmm_real`), since the proxy
+  of 1.8.1 names what it found in the system directory; and the system's copy leaves reAL to another copy in the
+  process (found among the loaded modules, not by name), passing on what it is sent. Without these, reAL was handed a proxy's exports as the
+  system's functions and the first call it passed on came back to it until the stack ran out. Run under Wine with
+  the copy next to the game from 1.8.2 and from 1.8.1, each with and without either version's `dsound.dll` beside
+  it, and the system's copy loaded by its path at different moments (42 runs). The proxy holds no lock while
+  reAL loads (a call from a DllMain on another thread waited for it with the loader's lock): other threads wait
+  for the one that loads it, five seconds at most, and a thread that holds the loader's lock not at all.
+- Next to a game, the proxy and the system's winmm are both called `winmm.dll`. Wine's loader gives a DLL that
+  imports the name the module it looked up last, which every look at the system's exports made the system's: a
+  DLL loaded while reAL was being bound got Wine's winmm and played past reAL (four runs of six; in 1.8.0 and
+  1.8.1 too). Under Wine the proxy cuts the other module's name short in the loader's list (`winmm.dl`; path and
+  file untouched), and the name is the proxy's alone (twelve of twelve; eight of eight with both copies loaded).
+- The proxy may be called before its DllMain is through: the real winmm it is loading loads DLLs that import
+  `winmm.dll`, which is the proxy, and Wine's msacm32 calls it from its DllMain when its driver cache is empty.
+  In 1.8.0 and 1.8.1 that was a jump through an unset table: winmm failed to initialise and no program that
+  imports it started (with the copy next to the game too) until one had run on Wine's own. Every entry now starts
+  at a stub that asks `proxy_target` where the call goes: the real winmm's export meanwhile, found on the module
+  as it loads.
+- `install.sh` keeps Wine's own DLL beside reAL's (`dsound.dll.wine`, `winmm.dll.wine`), and it has to be this
+  Wine's: a Wine upgrade leaves reAL's DLLs in place (`wineboot -u` on Wine 9 does not touch them), so the copy
+  kept the first time was the old Wine's from then on, put back by `--uninstall` and, for winmm, loaded into the
+  new Wine. A run that finds reAL's in place (any version's: `dsound.dll` is known by `reAL.ini`) now removes it
+  and has Wine put its own back (`wineboot -u` does that for a DLL that is missing) before keeping it;
+  `--uninstall` does the same and leaves Wine's. Wine's DLL is moved aside and reAL's put in its place as a new
+  file, so a prefix whose system DLLs are links into its Wine does not have reAL written through them, and gets
+  its links back. Once reAL's winmm is the system's, every later run looks after it too. A Wine with only a
+  placeholder `winmm.dll` there is refused for the whole-prefix install (`dsound.dll` is installed as usual).
 - `src/waveout.c`: one device ("reAL", also the mapper). Each stream is a looping reAL buffer of a second in the
   game's format, filled every 5 ms by a thread of its own. Compressed formats (the mapper's ACM conversions) and a
   stream reAL cannot make open on the system's winmm, and every call on that handle goes there.

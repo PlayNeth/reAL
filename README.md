@@ -61,7 +61,8 @@ Put `dsound.dll` next to the game's exe. Don't replace the one in `System32` or 
 Some games never use DirectSound and play through Windows' waveOut functions instead (Pajama Sam 2, for one). For those, `winmm.dll` from the release goes next to the game's exe as well; it loads reAL and plays the game's waveOut sound through it.
 
 - **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --winmm /path/to/game.exe` installs reAL into the prefix, copies `winmm.dll` next to the game and sets the game's `winmm` and `dsound` overrides to `native,builtin`. By hand: copy both DLLs next to the exe and run it with `WINEDLLOVERRIDES="winmm,dsound=n,b"`.
-- **Windows:** copy `winmm.dll` and `dsound.dll` next to the game's exe.
+- **Wine / Proton, for every game in a prefix:** `WINEPREFIX=~/Games/foo ./install.sh --winmm` (no game named) puts reAL's `winmm.dll` in the prefix's system directory in place of Wine's, keeps Wine's beside it as `winmm.dll.wine`, and sets the prefix's `winmm` and `dsound` overrides to `native,builtin`. Nothing goes next to the games. Run it again after a Wine upgrade, as for `dsound.dll`. Copying reAL's `winmm.dll` over the system one by hand does not work: it needs Wine's beside it under that name.
+- **Windows:** copy `winmm.dll` and `dsound.dll` next to the game's exe. (Never over the one in the Windows folder.)
 
 ### Checking it works
 
@@ -69,7 +70,7 @@ Set `log=1` in `reAL.ini` and start the game. `reAL.log` appears next to the gam
 
 ## Uninstalling
 
-- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `dsound.dll` back and removes the global override. Per-game overrides made with `--app` or `--winmm` stay, but fall back to Wine's DLLs. Delete any `winmm.dll` you put next to a game.
+- **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `dsound.dll` (and `winmm.dll`, if `--winmm` replaced it) back and removes the global overrides. Per-game overrides made with `--app` or `--winmm` stay, but fall back to Wine's DLLs. Delete any `winmm.dll` you put next to a game.
 - **Windows:** delete `dsound.dll` (and `winmm.dll`, if you added it) from the game's folder. If you used the COM redirect, run `dsound-com-redirect-undo.reg`. If you registered `reDM.dll` (see [DirectMusic](#directmusic-redm)), run `regsvr32 /u` on it.
 - You can also delete `reAL.ini`, `reAL.log` and `reAL_hrtf.bin`.
 

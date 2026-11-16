@@ -674,6 +674,21 @@ static int wave_init(HMODULE sys)
     return 1;
 }
 
+/* The winmm behind reAL's winmm.dll: the one its exports go to (reAL_winmm_proxy says), or mm itself when it is not
+ * reAL's.  That may be reAL's again (a copy next to the game, in a Wine prefix where reAL's is the system's too), so
+ * on through it; NULL if there is no end to them.  reAL calls and hooks the real one: with a proxy's exports for
+ * the system's functions it would call itself through them */
+HMODULE rl_winmm_real(HMODULE mm)
+{
+    for (int k = 0; mm && k < 4; k++) {
+        HMODULE (*proxy)(void) = NULL;
+        *(FARPROC *)&proxy = GetProcAddress(mm, "reAL_winmm_proxy");
+        if (!proxy) return mm;
+        mm = proxy();
+    }
+    return NULL;
+}
+
 /* called by reAL's winmm.dll for each export it may hand to reAL, the first time one is called: reAL's function, or
  * NULL to leave the system's.  The MIDI and MCI ones stay the system's: reAL hooks those in the system's winmm
  * itself (rl_midi_hook), which catches the calls winmm makes internally too, as from the MCI sequencer. */
@@ -684,7 +699,9 @@ FARPROC WINAPI reAL_winmm_bind(HMODULE sys, const char *name)
     if (!InterlockedExchange(&once, 1)) {
         LOG_INFO("winmm: reAL's winmm.dll loaded reAL (waveout=%d, midi=%d)", g_cfg.waveout, g_cfg.midi);
         rl_midi_hook(1);
-        if (g_cfg.enabled && g_cfg.waveout) wave_ok = wave_init(sys);
+        /* (the proxy of 1.8.1 and before names what it found in the system directory, which may be a proxy) */
+        sys = rl_winmm_real(sys);
+        if (sys && g_cfg.enabled && g_cfg.waveout) wave_ok = wave_init(sys);
     }
     if (!wave_ok || !name) return NULL;
     for (size_t i = 0; i < sizeof(s_fns) / sizeof(s_fns[0]); i++)

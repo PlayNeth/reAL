@@ -63,6 +63,7 @@ void rl_log_shutdown(int process_exit);    /* DLL_PROCESS_DETACH: the crash hand
 void *rl_hotpatch(void *fn, void *repl, const char *name);   /* returns a pointer that runs the original */
 void rl_midi_hook(int can_load);
 FARPROC WINAPI reAL_winmm_bind(HMODULE sys, const char *name);   /* reAL's winmm.dll: waveout.c */
+HMODULE rl_winmm_real(HMODULE mm);         /* the winmm behind reAL's winmm.dll (or mm itself): waveout.c */
 void rl_log(int level, const char *fmt, ...);
 #define LOG_INFO(...)  rl_log(1, __VA_ARGS__)
 #define LOG_CALL(...)  do { if (g_cfg.log_level >= 2) rl_log(2, __VA_ARGS__); } while (0)

@@ -870,11 +870,8 @@ void rl_midi_hook(int can_load)
     HMODULE mm = GetModuleHandleA("winmm.dll");
     if (!mm && can_load) mm = LoadLibraryA("winmm.dll");
     if (!mm) return;
-    {   /* reAL's winmm.dll (the game's waveOut through reAL): it passes these calls to the system's, hooked here */
-        HMODULE (*proxy)(void);
-        *(FARPROC *)&proxy = GetProcAddress(mm, "reAL_winmm_proxy");
-        if (proxy && !(mm = proxy())) return;
-    }
+    /* reAL's winmm.dll (the game's waveOut through reAL): it passes these calls to the system's, hooked here */
+    if (!(mm = rl_winmm_real(mm))) return;
     if (InterlockedExchange(&done, 1)) return;     /* hook once: a second patch would wrap our own hooks */
     {   /* and only one copy of reAL in a process (another dsound.dll of ours loaded too), as the COM hooks */
         char name[64];

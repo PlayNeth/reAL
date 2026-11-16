@@ -3,10 +3,12 @@
 
   python3 winmm/gen.py        (run again after changing exports.txt; the outputs are committed)
 
-Every export is a jump through g_fn[i], which proxy.c fills with the system winmm's function.  The ones reAL may
-take over (waveOut*, midiOut*, midiStream*, mciSendCommand*, mciSendString*) start out at a stub that binds reAL on
-the first call.  An export the system's winmm lacks (Wine has no WOW thunks) answers MMSYSERR_NOTSUPPORTED, popping
-its arguments where their size is known."""
+Every export is a jump through g_fn[i].  Each entry starts out at a stub that asks proxy.c where the call goes
+(proxy_target) and jumps there: an export may be called before the proxy's DllMain has filled the table (the real
+winmm's own imports, while it loads), and the ones reAL may take over (waveOut*, midiOut*, midiStream*,
+mciSendCommand*, mciSendString*) stay there until reAL is bound, on their first call.  The others DllMain points
+straight at the system winmm's function.  An export the system's winmm lacks (Wine has no WOW thunks) answers
+MMSYSERR_NOTSUPPORTED, popping its arguments where their size is known."""
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -35,22 +37,23 @@ with open(os.path.join(HERE, 'winmm.def'), 'w') as d, open(os.path.join(HERE, 's
     for i, (o, n) in enumerate(ex):
         s.write('.globl _x_%d\n_x_%d:\n    jmp *_g_fn+%d\n' % (i, i, 4 * i))
         d.write('    %s = x_%d @%d%s\n' % (n or 'ord%d' % o, i, o, '' if n else ' NONAME'))
-    s.write('\n/* first call of an export reAL may take over: bind, then go where g_fn now says */\n')
+    s.write('\n/* an entry not yet settled: where proxy_target says, the registers and the stack as they came */\n')
     for i, (o, n) in enumerate(ex):
-        if n and n.startswith(ROUTED):
-            s.write('.globl _l_%d\n_l_%d:\n    pushl $%d\n    jmp lazy\n' % (i, i, i))
-    s.write('lazy:\n    pushal\n    pushl 32(%esp)\n    call _proxy_bind\n    addl $4, %esp\n    popal\n'
-            '    popl %eax\n    jmp *_g_fn(,%eax,4)\n')
+        s.write('_r_%d:\n    pushl $%d\n    jmp resolve\n' % (i, i))
+    s.write('resolve:\n    pushal\n    pushl 32(%esp)\n    call _proxy_target\n    addl $4, %esp\n'
+            '    movl %eax, 32(%esp)\n    popal\n    ret\n')
+    s.write('\n.data\n.globl _g_fn\n_g_fn:\n')
+    for i, (o, n) in enumerate(ex): s.write('    .long _r_%d\n' % i)
+    s.write('.text\n')
     s.write('\n/* not in the system\'s winmm: MMSYSERR_NOTSUPPORTED */\n')
     sizes = sorted(set(ARGS.values()) | {0})
     for b in sizes:
         s.write('.globl _missing_%d\n_missing_%d:\n    movl $8, %%eax\n    ret%s\n' % (b, b, ' $%d' % b if b else ''))
     for b in sizes: h.write('void missing_%d(void);\n' % b)
-    for i, (o, n) in enumerate(ex):
-        if n and n.startswith(ROUTED): h.write('void l_%d(void);\n' % i)
-    h.write('static const struct { const char *name; unsigned short ord; void (*lazy)(void); void (*missing)(void); }'
+    h.write('/* (lazy: reAL may take it) */\n')
+    h.write('static const struct { const char *name; unsigned short ord; unsigned char lazy; void (*missing)(void); }'
             ' g_names[NFN] = {\n')
     for i, (o, n) in enumerate(ex):
-        lazy = 'l_%d' % i if n and n.startswith(ROUTED) else 'NULL'
-        h.write('    { %s, %d, %s, missing_%d },\n' % ('"%s"' % n if n else 'NULL', o, lazy, ARGS.get(n, 0)))
+        lazy = 1 if n and n.startswith(ROUTED) else 0
+        h.write('    { %s, %d, %d, missing_%d },\n' % ('"%s"' % n if n else 'NULL', o, lazy, ARGS.get(n, 0)))
     h.write('};\n')

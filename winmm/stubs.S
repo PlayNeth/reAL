@@ -604,227 +604,824 @@ _x_199:
 _x_200:
     jmp *_g_fn+800
 
-/* first call of an export reAL may take over: bind, then go where g_fn now says */
-.globl _l_48
-_l_48:
+/* an entry not yet settled: where proxy_target says, the registers and the stack as they came */
+_r_0:
+    pushl $0
+    jmp resolve
+_r_1:
+    pushl $1
+    jmp resolve
+_r_2:
+    pushl $2
+    jmp resolve
+_r_3:
+    pushl $3
+    jmp resolve
+_r_4:
+    pushl $4
+    jmp resolve
+_r_5:
+    pushl $5
+    jmp resolve
+_r_6:
+    pushl $6
+    jmp resolve
+_r_7:
+    pushl $7
+    jmp resolve
+_r_8:
+    pushl $8
+    jmp resolve
+_r_9:
+    pushl $9
+    jmp resolve
+_r_10:
+    pushl $10
+    jmp resolve
+_r_11:
+    pushl $11
+    jmp resolve
+_r_12:
+    pushl $12
+    jmp resolve
+_r_13:
+    pushl $13
+    jmp resolve
+_r_14:
+    pushl $14
+    jmp resolve
+_r_15:
+    pushl $15
+    jmp resolve
+_r_16:
+    pushl $16
+    jmp resolve
+_r_17:
+    pushl $17
+    jmp resolve
+_r_18:
+    pushl $18
+    jmp resolve
+_r_19:
+    pushl $19
+    jmp resolve
+_r_20:
+    pushl $20
+    jmp resolve
+_r_21:
+    pushl $21
+    jmp resolve
+_r_22:
+    pushl $22
+    jmp resolve
+_r_23:
+    pushl $23
+    jmp resolve
+_r_24:
+    pushl $24
+    jmp resolve
+_r_25:
+    pushl $25
+    jmp resolve
+_r_26:
+    pushl $26
+    jmp resolve
+_r_27:
+    pushl $27
+    jmp resolve
+_r_28:
+    pushl $28
+    jmp resolve
+_r_29:
+    pushl $29
+    jmp resolve
+_r_30:
+    pushl $30
+    jmp resolve
+_r_31:
+    pushl $31
+    jmp resolve
+_r_32:
+    pushl $32
+    jmp resolve
+_r_33:
+    pushl $33
+    jmp resolve
+_r_34:
+    pushl $34
+    jmp resolve
+_r_35:
+    pushl $35
+    jmp resolve
+_r_36:
+    pushl $36
+    jmp resolve
+_r_37:
+    pushl $37
+    jmp resolve
+_r_38:
+    pushl $38
+    jmp resolve
+_r_39:
+    pushl $39
+    jmp resolve
+_r_40:
+    pushl $40
+    jmp resolve
+_r_41:
+    pushl $41
+    jmp resolve
+_r_42:
+    pushl $42
+    jmp resolve
+_r_43:
+    pushl $43
+    jmp resolve
+_r_44:
+    pushl $44
+    jmp resolve
+_r_45:
+    pushl $45
+    jmp resolve
+_r_46:
+    pushl $46
+    jmp resolve
+_r_47:
+    pushl $47
+    jmp resolve
+_r_48:
     pushl $48
-    jmp lazy
-.globl _l_49
-_l_49:
+    jmp resolve
+_r_49:
     pushl $49
-    jmp lazy
-.globl _l_50
-_l_50:
+    jmp resolve
+_r_50:
     pushl $50
-    jmp lazy
-.globl _l_51
-_l_51:
+    jmp resolve
+_r_51:
     pushl $51
-    jmp lazy
-.globl _l_72
-_l_72:
+    jmp resolve
+_r_52:
+    pushl $52
+    jmp resolve
+_r_53:
+    pushl $53
+    jmp resolve
+_r_54:
+    pushl $54
+    jmp resolve
+_r_55:
+    pushl $55
+    jmp resolve
+_r_56:
+    pushl $56
+    jmp resolve
+_r_57:
+    pushl $57
+    jmp resolve
+_r_58:
+    pushl $58
+    jmp resolve
+_r_59:
+    pushl $59
+    jmp resolve
+_r_60:
+    pushl $60
+    jmp resolve
+_r_61:
+    pushl $61
+    jmp resolve
+_r_62:
+    pushl $62
+    jmp resolve
+_r_63:
+    pushl $63
+    jmp resolve
+_r_64:
+    pushl $64
+    jmp resolve
+_r_65:
+    pushl $65
+    jmp resolve
+_r_66:
+    pushl $66
+    jmp resolve
+_r_67:
+    pushl $67
+    jmp resolve
+_r_68:
+    pushl $68
+    jmp resolve
+_r_69:
+    pushl $69
+    jmp resolve
+_r_70:
+    pushl $70
+    jmp resolve
+_r_71:
+    pushl $71
+    jmp resolve
+_r_72:
     pushl $72
-    jmp lazy
-.globl _l_73
-_l_73:
+    jmp resolve
+_r_73:
     pushl $73
-    jmp lazy
-.globl _l_74
-_l_74:
+    jmp resolve
+_r_74:
     pushl $74
-    jmp lazy
-.globl _l_75
-_l_75:
+    jmp resolve
+_r_75:
     pushl $75
-    jmp lazy
-.globl _l_76
-_l_76:
+    jmp resolve
+_r_76:
     pushl $76
-    jmp lazy
-.globl _l_77
-_l_77:
+    jmp resolve
+_r_77:
     pushl $77
-    jmp lazy
-.globl _l_78
-_l_78:
+    jmp resolve
+_r_78:
     pushl $78
-    jmp lazy
-.globl _l_79
-_l_79:
+    jmp resolve
+_r_79:
     pushl $79
-    jmp lazy
-.globl _l_80
-_l_80:
+    jmp resolve
+_r_80:
     pushl $80
-    jmp lazy
-.globl _l_81
-_l_81:
+    jmp resolve
+_r_81:
     pushl $81
-    jmp lazy
-.globl _l_82
-_l_82:
+    jmp resolve
+_r_82:
     pushl $82
-    jmp lazy
-.globl _l_83
-_l_83:
+    jmp resolve
+_r_83:
     pushl $83
-    jmp lazy
-.globl _l_84
-_l_84:
+    jmp resolve
+_r_84:
     pushl $84
-    jmp lazy
-.globl _l_85
-_l_85:
+    jmp resolve
+_r_85:
     pushl $85
-    jmp lazy
-.globl _l_86
-_l_86:
+    jmp resolve
+_r_86:
     pushl $86
-    jmp lazy
-.globl _l_87
-_l_87:
+    jmp resolve
+_r_87:
     pushl $87
-    jmp lazy
-.globl _l_88
-_l_88:
+    jmp resolve
+_r_88:
     pushl $88
-    jmp lazy
-.globl _l_89
-_l_89:
+    jmp resolve
+_r_89:
     pushl $89
-    jmp lazy
-.globl _l_90
-_l_90:
+    jmp resolve
+_r_90:
     pushl $90
-    jmp lazy
-.globl _l_91
-_l_91:
+    jmp resolve
+_r_91:
     pushl $91
-    jmp lazy
-.globl _l_92
-_l_92:
+    jmp resolve
+_r_92:
     pushl $92
-    jmp lazy
-.globl _l_93
-_l_93:
+    jmp resolve
+_r_93:
     pushl $93
-    jmp lazy
-.globl _l_94
-_l_94:
+    jmp resolve
+_r_94:
     pushl $94
-    jmp lazy
-.globl _l_95
-_l_95:
+    jmp resolve
+_r_95:
     pushl $95
-    jmp lazy
-.globl _l_96
-_l_96:
+    jmp resolve
+_r_96:
     pushl $96
-    jmp lazy
-.globl _l_97
-_l_97:
+    jmp resolve
+_r_97:
     pushl $97
-    jmp lazy
-.globl _l_168
-_l_168:
+    jmp resolve
+_r_98:
+    pushl $98
+    jmp resolve
+_r_99:
+    pushl $99
+    jmp resolve
+_r_100:
+    pushl $100
+    jmp resolve
+_r_101:
+    pushl $101
+    jmp resolve
+_r_102:
+    pushl $102
+    jmp resolve
+_r_103:
+    pushl $103
+    jmp resolve
+_r_104:
+    pushl $104
+    jmp resolve
+_r_105:
+    pushl $105
+    jmp resolve
+_r_106:
+    pushl $106
+    jmp resolve
+_r_107:
+    pushl $107
+    jmp resolve
+_r_108:
+    pushl $108
+    jmp resolve
+_r_109:
+    pushl $109
+    jmp resolve
+_r_110:
+    pushl $110
+    jmp resolve
+_r_111:
+    pushl $111
+    jmp resolve
+_r_112:
+    pushl $112
+    jmp resolve
+_r_113:
+    pushl $113
+    jmp resolve
+_r_114:
+    pushl $114
+    jmp resolve
+_r_115:
+    pushl $115
+    jmp resolve
+_r_116:
+    pushl $116
+    jmp resolve
+_r_117:
+    pushl $117
+    jmp resolve
+_r_118:
+    pushl $118
+    jmp resolve
+_r_119:
+    pushl $119
+    jmp resolve
+_r_120:
+    pushl $120
+    jmp resolve
+_r_121:
+    pushl $121
+    jmp resolve
+_r_122:
+    pushl $122
+    jmp resolve
+_r_123:
+    pushl $123
+    jmp resolve
+_r_124:
+    pushl $124
+    jmp resolve
+_r_125:
+    pushl $125
+    jmp resolve
+_r_126:
+    pushl $126
+    jmp resolve
+_r_127:
+    pushl $127
+    jmp resolve
+_r_128:
+    pushl $128
+    jmp resolve
+_r_129:
+    pushl $129
+    jmp resolve
+_r_130:
+    pushl $130
+    jmp resolve
+_r_131:
+    pushl $131
+    jmp resolve
+_r_132:
+    pushl $132
+    jmp resolve
+_r_133:
+    pushl $133
+    jmp resolve
+_r_134:
+    pushl $134
+    jmp resolve
+_r_135:
+    pushl $135
+    jmp resolve
+_r_136:
+    pushl $136
+    jmp resolve
+_r_137:
+    pushl $137
+    jmp resolve
+_r_138:
+    pushl $138
+    jmp resolve
+_r_139:
+    pushl $139
+    jmp resolve
+_r_140:
+    pushl $140
+    jmp resolve
+_r_141:
+    pushl $141
+    jmp resolve
+_r_142:
+    pushl $142
+    jmp resolve
+_r_143:
+    pushl $143
+    jmp resolve
+_r_144:
+    pushl $144
+    jmp resolve
+_r_145:
+    pushl $145
+    jmp resolve
+_r_146:
+    pushl $146
+    jmp resolve
+_r_147:
+    pushl $147
+    jmp resolve
+_r_148:
+    pushl $148
+    jmp resolve
+_r_149:
+    pushl $149
+    jmp resolve
+_r_150:
+    pushl $150
+    jmp resolve
+_r_151:
+    pushl $151
+    jmp resolve
+_r_152:
+    pushl $152
+    jmp resolve
+_r_153:
+    pushl $153
+    jmp resolve
+_r_154:
+    pushl $154
+    jmp resolve
+_r_155:
+    pushl $155
+    jmp resolve
+_r_156:
+    pushl $156
+    jmp resolve
+_r_157:
+    pushl $157
+    jmp resolve
+_r_158:
+    pushl $158
+    jmp resolve
+_r_159:
+    pushl $159
+    jmp resolve
+_r_160:
+    pushl $160
+    jmp resolve
+_r_161:
+    pushl $161
+    jmp resolve
+_r_162:
+    pushl $162
+    jmp resolve
+_r_163:
+    pushl $163
+    jmp resolve
+_r_164:
+    pushl $164
+    jmp resolve
+_r_165:
+    pushl $165
+    jmp resolve
+_r_166:
+    pushl $166
+    jmp resolve
+_r_167:
+    pushl $167
+    jmp resolve
+_r_168:
     pushl $168
-    jmp lazy
-.globl _l_169
-_l_169:
+    jmp resolve
+_r_169:
     pushl $169
-    jmp lazy
-.globl _l_170
-_l_170:
+    jmp resolve
+_r_170:
     pushl $170
-    jmp lazy
-.globl _l_171
-_l_171:
+    jmp resolve
+_r_171:
     pushl $171
-    jmp lazy
-.globl _l_172
-_l_172:
+    jmp resolve
+_r_172:
     pushl $172
-    jmp lazy
-.globl _l_173
-_l_173:
+    jmp resolve
+_r_173:
     pushl $173
-    jmp lazy
-.globl _l_174
-_l_174:
+    jmp resolve
+_r_174:
     pushl $174
-    jmp lazy
-.globl _l_175
-_l_175:
+    jmp resolve
+_r_175:
     pushl $175
-    jmp lazy
-.globl _l_176
-_l_176:
+    jmp resolve
+_r_176:
     pushl $176
-    jmp lazy
-.globl _l_177
-_l_177:
+    jmp resolve
+_r_177:
     pushl $177
-    jmp lazy
-.globl _l_178
-_l_178:
+    jmp resolve
+_r_178:
     pushl $178
-    jmp lazy
-.globl _l_179
-_l_179:
+    jmp resolve
+_r_179:
     pushl $179
-    jmp lazy
-.globl _l_180
-_l_180:
+    jmp resolve
+_r_180:
     pushl $180
-    jmp lazy
-.globl _l_181
-_l_181:
+    jmp resolve
+_r_181:
     pushl $181
-    jmp lazy
-.globl _l_182
-_l_182:
+    jmp resolve
+_r_182:
     pushl $182
-    jmp lazy
-.globl _l_183
-_l_183:
+    jmp resolve
+_r_183:
     pushl $183
-    jmp lazy
-.globl _l_184
-_l_184:
+    jmp resolve
+_r_184:
     pushl $184
-    jmp lazy
-.globl _l_185
-_l_185:
+    jmp resolve
+_r_185:
     pushl $185
-    jmp lazy
-.globl _l_186
-_l_186:
+    jmp resolve
+_r_186:
     pushl $186
-    jmp lazy
-.globl _l_187
-_l_187:
+    jmp resolve
+_r_187:
     pushl $187
-    jmp lazy
-.globl _l_188
-_l_188:
+    jmp resolve
+_r_188:
     pushl $188
-    jmp lazy
-.globl _l_189
-_l_189:
+    jmp resolve
+_r_189:
     pushl $189
-    jmp lazy
-.globl _l_190
-_l_190:
+    jmp resolve
+_r_190:
     pushl $190
-    jmp lazy
-lazy:
+    jmp resolve
+_r_191:
+    pushl $191
+    jmp resolve
+_r_192:
+    pushl $192
+    jmp resolve
+_r_193:
+    pushl $193
+    jmp resolve
+_r_194:
+    pushl $194
+    jmp resolve
+_r_195:
+    pushl $195
+    jmp resolve
+_r_196:
+    pushl $196
+    jmp resolve
+_r_197:
+    pushl $197
+    jmp resolve
+_r_198:
+    pushl $198
+    jmp resolve
+_r_199:
+    pushl $199
+    jmp resolve
+_r_200:
+    pushl $200
+    jmp resolve
+resolve:
     pushal
     pushl 32(%esp)
-    call _proxy_bind
+    call _proxy_target
     addl $4, %esp
+    movl %eax, 32(%esp)
     popal
-    popl %eax
-    jmp *_g_fn(,%eax,4)
+    ret
+
+.data
+.globl _g_fn
+_g_fn:
+    .long _r_0
+    .long _r_1
+    .long _r_2
+    .long _r_3
+    .long _r_4
+    .long _r_5
+    .long _r_6
+    .long _r_7
+    .long _r_8
+    .long _r_9
+    .long _r_10
+    .long _r_11
+    .long _r_12
+    .long _r_13
+    .long _r_14
+    .long _r_15
+    .long _r_16
+    .long _r_17
+    .long _r_18
+    .long _r_19
+    .long _r_20
+    .long _r_21
+    .long _r_22
+    .long _r_23
+    .long _r_24
+    .long _r_25
+    .long _r_26
+    .long _r_27
+    .long _r_28
+    .long _r_29
+    .long _r_30
+    .long _r_31
+    .long _r_32
+    .long _r_33
+    .long _r_34
+    .long _r_35
+    .long _r_36
+    .long _r_37
+    .long _r_38
+    .long _r_39
+    .long _r_40
+    .long _r_41
+    .long _r_42
+    .long _r_43
+    .long _r_44
+    .long _r_45
+    .long _r_46
+    .long _r_47
+    .long _r_48
+    .long _r_49
+    .long _r_50
+    .long _r_51
+    .long _r_52
+    .long _r_53
+    .long _r_54
+    .long _r_55
+    .long _r_56
+    .long _r_57
+    .long _r_58
+    .long _r_59
+    .long _r_60
+    .long _r_61
+    .long _r_62
+    .long _r_63
+    .long _r_64
+    .long _r_65
+    .long _r_66
+    .long _r_67
+    .long _r_68
+    .long _r_69
+    .long _r_70
+    .long _r_71
+    .long _r_72
+    .long _r_73
+    .long _r_74
+    .long _r_75
+    .long _r_76
+    .long _r_77
+    .long _r_78
+    .long _r_79
+    .long _r_80
+    .long _r_81
+    .long _r_82
+    .long _r_83
+    .long _r_84
+    .long _r_85
+    .long _r_86
+    .long _r_87
+    .long _r_88
+    .long _r_89
+    .long _r_90
+    .long _r_91
+    .long _r_92
+    .long _r_93
+    .long _r_94
+    .long _r_95
+    .long _r_96
+    .long _r_97
+    .long _r_98
+    .long _r_99
+    .long _r_100
+    .long _r_101
+    .long _r_102
+    .long _r_103
+    .long _r_104
+    .long _r_105
+    .long _r_106
+    .long _r_107
+    .long _r_108
+    .long _r_109
+    .long _r_110
+    .long _r_111
+    .long _r_112
+    .long _r_113
+    .long _r_114
+    .long _r_115
+    .long _r_116
+    .long _r_117
+    .long _r_118
+    .long _r_119
+    .long _r_120
+    .long _r_121
+    .long _r_122
+    .long _r_123
+    .long _r_124
+    .long _r_125
+    .long _r_126
+    .long _r_127
+    .long _r_128
+    .long _r_129
+    .long _r_130
+    .long _r_131
+    .long _r_132
+    .long _r_133
+    .long _r_134
+    .long _r_135
+    .long _r_136
+    .long _r_137
+    .long _r_138
+    .long _r_139
+    .long _r_140
+    .long _r_141
+    .long _r_142
+    .long _r_143
+    .long _r_144
+    .long _r_145
+    .long _r_146
+    .long _r_147
+    .long _r_148
+    .long _r_149
+    .long _r_150
+    .long _r_151
+    .long _r_152
+    .long _r_153
+    .long _r_154
+    .long _r_155
+    .long _r_156
+    .long _r_157
+    .long _r_158
+    .long _r_159
+    .long _r_160
+    .long _r_161
+    .long _r_162
+    .long _r_163
+    .long _r_164
+    .long _r_165
+    .long _r_166
+    .long _r_167
+    .long _r_168
+    .long _r_169
+    .long _r_170
+    .long _r_171
+    .long _r_172
+    .long _r_173
+    .long _r_174
+    .long _r_175
+    .long _r_176
+    .long _r_177
+    .long _r_178
+    .long _r_179
+    .long _r_180
+    .long _r_181
+    .long _r_182
+    .long _r_183
+    .long _r_184
+    .long _r_185
+    .long _r_186
+    .long _r_187
+    .long _r_188
+    .long _r_189
+    .long _r_190
+    .long _r_191
+    .long _r_192
+    .long _r_193
+    .long _r_194
+    .long _r_195
+    .long _r_196
+    .long _r_197
+    .long _r_198
+    .long _r_199
+    .long _r_200
+.text
 
 /* not in the system's winmm: MMSYSERR_NOTSUPPORTED */
 .globl _missing_0
