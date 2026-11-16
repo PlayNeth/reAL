@@ -16,6 +16,9 @@ ARGS = {'NotifyCallbackData': 20, 'WOW32DriverCallback': 28, 'WOW32ResolveMultiM
         'mmDrvInstall': 16}
 for m in ('aux', 'joy', 'mci', 'mid', 'mod', 'mxd', 'tid', 'wid', 'wod'):
     ARGS[m + '32Message'] = 20
+# and of those Windows 11's lacks (Wine's has them)
+ARGS.update({'DrvClose': 12, 'DrvDefDriverProc': 20, 'DrvOpen': 12, 'DrvOpenA': 12, 'DrvSendMessage': 16,
+             'GetDriverFlags': 4, 'OpenDriverA': 12, 'mmioInstallIOProc16': 12})
 
 ex = []
 for line in open(os.path.join(HERE, 'exports.txt')):

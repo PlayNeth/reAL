@@ -1,6 +1,7 @@
 # winmm.dll's exports, ordinal and name (none: exported by ordinal only), as Windows 11's 32-bit winmm.dll
-# (10.0.26100) has them.  XP's has 17 more, all internal (gfx*, Migrate*, WinmmLogon/Logoff, debug); Wine's lacks
-# 14 of these (WOW thunks and mmDrvInstall).  gen.py makes winmm.def, stubs.S and names.h from it.
+# (10.0.26100) has them, and after them eight that Wine's has besides.  XP's has 17 more, all internal (gfx*,
+# Migrate*, WinmmLogon/Logoff, debug); Wine's lacks 14 of Windows 11's (WOW thunks and mmDrvInstall).  gen.py makes
+# winmm.def, stubs.S and names.h from it.
 2
 3 mciExecute
 4 CloseDriver
@@ -194,3 +195,14 @@
 192 waveOutWrite
 193 wid32Message
 194 wod32Message
+# Not in Windows 11's: the driver calls under their older names, which Wine's winmm (and Windows up to XP) exports.
+# Wine's own DLLs and old games may import them, so the proxy has them too: with reAL's winmm.dll as the system's
+# in a Wine prefix (install.sh --winmm), a DLL that imports one must still load.
+195 DrvClose
+196 DrvDefDriverProc
+197 DrvOpen
+198 DrvOpenA
+199 DrvSendMessage
+200 GetDriverFlags
+201 OpenDriverA
+202 mmioInstallIOProc16

@@ -364,6 +364,9 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   usual way) and takes its waveOut functions (`reAL_winmm_bind`); MIDI and MCI stay the system's, which reAL hooks in
   place as without the proxy (`rl_midi_hook` finds the system's winmm through `reAL_winmm_proxy`). `waveout=false`:
   waveOut stays the system's too.
+- The proxy also has the eight driver exports Wine's winmm has and Windows 11's lacks (DrvOpen, DrvClose,
+  OpenDriverA, GetDriverFlags and the like, 201 in all): a DLL or an old game that imports one loads with the proxy
+  in the way, where its loading failed. On a winmm without them they answer MMSYSERR_NOTSUPPORTED.
 - `src/waveout.c`: one device ("reAL", also the mapper). Each stream is a looping reAL buffer of a second in the
   game's format, filled every 5 ms by a thread of its own. Compressed formats (the mapper's ACM conversions) and a
   stream reAL cannot make open on the system's winmm, and every call on that handle goes there.

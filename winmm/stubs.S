@@ -579,6 +579,30 @@ _x_191:
 .globl _x_192
 _x_192:
     jmp *_g_fn+768
+.globl _x_193
+_x_193:
+    jmp *_g_fn+772
+.globl _x_194
+_x_194:
+    jmp *_g_fn+776
+.globl _x_195
+_x_195:
+    jmp *_g_fn+780
+.globl _x_196
+_x_196:
+    jmp *_g_fn+784
+.globl _x_197
+_x_197:
+    jmp *_g_fn+788
+.globl _x_198
+_x_198:
+    jmp *_g_fn+792
+.globl _x_199
+_x_199:
+    jmp *_g_fn+796
+.globl _x_200
+_x_200:
+    jmp *_g_fn+800
 
 /* first call of an export reAL may take over: bind, then go where g_fn now says */
 .globl _l_48
@@ -811,6 +835,10 @@ _missing_0:
 _missing_4:
     movl $8, %eax
     ret $4
+.globl _missing_12
+_missing_12:
+    movl $8, %eax
+    ret $12
 .globl _missing_16
 _missing_16:
     movl $8, %eax

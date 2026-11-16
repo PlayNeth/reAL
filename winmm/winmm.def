@@ -195,3 +195,11 @@ EXPORTS
     waveOutWrite = x_190 @192
     wid32Message = x_191 @193
     wod32Message = x_192 @194
+    DrvClose = x_193 @195
+    DrvDefDriverProc = x_194 @196
+    DrvOpen = x_195 @197
+    DrvOpenA = x_196 @198
+    DrvSendMessage = x_197 @199
+    GetDriverFlags = x_198 @200
+    OpenDriverA = x_199 @201
+    mmioInstallIOProc16 = x_200 @202
