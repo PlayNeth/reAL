@@ -52,6 +52,10 @@ OBJS="$OBJS $o"
 o=build/obj/limiter.o
 $CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/limiter.c
 OBJS="$OBJS $o"
+# the conversion to the device's integer formats, rounded as ALchemy rounds
+o=build/obj/outconv.o
+$CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/outconv.c
+OBJS="$OBJS $o"
 # XP's I3DL2 reverb, translated (x87 arithmetic in long double)
 o=build/obj/i3dl2.o
 $CC $CFLAGS_EXACT -ffp-contract=off -Isrc -c -o "$o" src/i3dl2.c
@@ -192,6 +196,9 @@ if command -v cc >/dev/null 2>&1; then
     # ALchemy's output limiter: the port against the DLL's own output
     cc -O1 -g -std=gnu11 -Wall -ffp-contract=off -o build/test_limiter tests/test_limiter.c src/limiter.c -lm
     ./build/test_limiter
+    # the conversion to the device's integer formats: ALchemy's rounding, and the dither
+    cc -O1 -g -std=gnu11 -Wall -ffp-contract=off -o build/test_outconv tests/test_outconv.c src/outconv.c -lm
+    ./build/test_outconv
     # a waveOut stream's timeline (reAL's winmm.dll)
     cc -O1 -g -std=gnu11 -Wall -o build/test_wavecore tests/test_wavecore.c src/wavecore.c -lm
     ./build/test_wavecore

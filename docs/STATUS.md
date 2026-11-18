@@ -86,6 +86,23 @@ through the sinc resampler: peaks of 4.2, 32% of the samples cut, the error 8 dB
 - Cost at 48 kHz, per 10 ms block: 3 to 13 microseconds (stereo to 7.1) while the mix is below full scale, 30 to
   40 while it is held down (ALchemy's: 6 to 27 either way). At 192 kHz, 23 to 53 and about 360.
 
+**Output conversion** (`src/outconv.c`): when the device's format is 16- or 32-bit integers, the mix is converted as
+ALchemy's `CClipper` does it (kernels 0x100789f0 and 0x10078dc0 of `CStaticHspSystem`): times 32768 or 2^31, rounded
+to the nearest step, a half upwards, held within the format. reAL cut off towards zero, with 32767: a step twice as
+wide around zero, where a quiet sound's crossings were flattened. `tools/convref.py` compares the code with the
+DLL's kernels in an emulator: 8 million samples, the same.
+- ALchemy's 32-bit kernel lets a sample of exactly 1.0 through its upper test, and it wraps to the lowest value.
+  Kept with `fixes=false`; fixed, it is the highest.
+- `outbits=16` opens the output stream in 16 bits whatever the device's mix format (float, as a rule), so that the
+  conversion is reAL's. If the stream is refused, the mix format is used.
+- Dither (with `fixes`, `dither=true`, 16 bits only): triangular noise two steps wide before the rounding. The
+  error is then a steady hiss of half a step (96 dB below full scale) and no longer follows the signal; a sample
+  of exactly 0 gets none. `tests/test_outconv.c`: a tone of 0.4 of a step comes out as nothing rounded and at 0.40
+  with dither; a tone of 1.3 steps has a third harmonic of 0.16 rounded and 0.002 with dither.
+- Recorded under Wine on a 16-bit PulseAudio sink, a tone of 0.4 of a step: all zeros with the float stream (the
+  server rounds), and with `outbits=16` without dither; 0.40 of a step with it.
+- On Windows the shared mixer is float and does its own conversion for the card: `outbits=16` gains nothing there.
+
 **Resampler kernels** (`src/mixcore.c`): the sinc resampler reads float, unsigned 8-bit, 24- and 32-bit sources (mono
 and stereo) four taps at a time with SSE, as it did 16-bit ones; before, they went through the per-sample path.
 `tests/bench_mix.c` (32 voices, 48 kHz, 10 ms blocks, under Wine; one core): float stereo 12.6% -> 3.9%, 24-bit

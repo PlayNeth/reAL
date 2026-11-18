@@ -11,6 +11,7 @@
 #include <stddef.h>
 #include "mixcore.h"
 #include "limiter.h"
+#include "outconv.h"
 #include "spatial.h"
 #include "reverb.h"
 #include "hrtf.h"
@@ -32,6 +33,8 @@ typedef struct rl_config {
     int  enabled;           /* 0 = forward everything to the real dsound.dll */
     int  log_level;         /* 0 off, 1 info, 2 calls, 3 verbose (per-lock / per-play) */
     int  fixes;             /* reAL's fixes of what ALchemy lets through (default on; fixes=0 or REAL_NOFIXES: off) */
+    int  out_bits;          /* 16: the output stream in 16 bits, converted by reAL (0: the device's mix format) */
+    int  dither;            /* noise before the rounding to a 16-bit device (default on; only with the fixes) */
     int  log_3d;
     int  log_eax;
     char log_file[MAX_PATH];

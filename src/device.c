@@ -17,6 +17,7 @@ DEFINE_GUID(RL_IID_IMMDeviceEnumerator,  0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46,
 DEFINE_GUID(RL_IID_IAudioClient,         0x1CB9AD4C, 0xDBFA, 0x4C32, 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2);
 DEFINE_GUID(RL_IID_IAudioRenderClient,   0xF294ACFC, 0x3146, 0x4483, 0xA7, 0xBF, 0xAD, 0xDC, 0xA7, 0xC2, 0x60, 0xE2);
 DEFINE_GUID(RL_SUBTYPE_FLOAT,            0x00000003, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
+DEFINE_GUID(RL_SUBTYPE_PCM,              0x00000001, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71);
 
 static rl_device *s_dev;
 static CRITICAL_SECTION s_dev_cs;
@@ -33,6 +34,7 @@ typedef struct wasapi_out {
     UINT32               buffer_frames;
     UINT32               channels;
     out_fmt              fmt;
+    UINT32               dither;        /* the noise generator of the 16-bit conversion (outconv.h) */
 } wasapi_out;
 
 static BOOL CALLBACK init_cs(PINIT_ONCE o, PVOID p, PVOID *c)
@@ -351,18 +353,20 @@ static void mix(rl_device *dev, UINT32 frames)
 
 static inline float clampf(float v) { return v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v; }
 
-static inline void put(const wasapi_out *w, BYTE *dst, UINT32 at, float v)
+/* (the integer formats as ALchemy converts them, rounded to the nearest step: outconv.h.  They were cut off
+ * towards zero, which left a quiet sound a step wide around zero with nothing in it) */
+static inline UINT32 *dither_of(wasapi_out *w) { return g_cfg.fixes && g_cfg.dither ? &w->dither : NULL; }
+
+static inline void put(wasapi_out *w, BYTE *dst, UINT32 at, float v)
 {
-    v = clampf(v);
     switch (w->fmt) {
-    case OUT_F32: ((float *)dst)[at] = v; break;
-    case OUT_S16: ((INT16 *)dst)[at] = (INT16)(v * 32767.0f); break;
-    /* in double: 1.0f * 2147483647.0f rounds to 2^31 in float, which wraps to INT32_MIN */
-    case OUT_S32: ((INT32 *)dst)[at] = (INT32)((double)v * 2147483647.0); break;
+    case OUT_F32: ((float *)dst)[at] = clampf(v); break;
+    case OUT_S16: ((INT16 *)dst)[at] = rl_out_s16_one(v, dither_of(w)); break;
+    case OUT_S32: ((INT32 *)dst)[at] = rl_out_s32_one(v, g_cfg.fixes); break;
     }
 }
 
-static void write_out(const rl_device *dev, const wasapi_out *w, BYTE *dst, UINT32 frames)
+static void write_out(const rl_device *dev, wasapi_out *w, BYTE *dst, UINT32 frames)
 {
     const float *src = dev->mixbuf;
     const UINT32 ch = w->channels, n = dev->layout.n ? dev->layout.n : 2;
@@ -371,8 +375,8 @@ static void write_out(const rl_device *dev, const wasapi_out *w, BYTE *dst, UINT
         const UINT32 tot = frames * ch;
         switch (w->fmt) {
         case OUT_F32: for (UINT32 i = 0; i < tot; i++) ((float *)dst)[i] = clampf(src[i]); return;
-        case OUT_S16: for (UINT32 i = 0; i < tot; i++) ((INT16 *)dst)[i] = (INT16)(clampf(src[i]) * 32767.0f); return;
-        default: break;
+        case OUT_S16: rl_out_s16((INT16 *)dst, src, tot, dither_of(w)); return;
+        case OUT_S32: rl_out_s32((INT32 *)dst, src, tot, g_cfg.fixes); return;
         }
     }
     for (UINT32 i = 0; i < frames; i++) {
@@ -613,18 +617,30 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
      * (through Wine) switches the device to it when it may, Windows converts (AUTOCONVERTPCM); either way the
      * buffers at that rate play as they are, unresampled */
     union { WAVEFORMATEX f; WAVEFORMATEXTENSIBLE x; } fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    memcpy(&fmt, mixfmt, mixfmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixfmt->cbSize >= 22 ?
-                         sizeof(WAVEFORMATEXTENSIBLE) : sizeof(WAVEFORMATEX));
-    if (fmt.f.wFormatTag != WAVE_FORMAT_EXTENSIBLE) fmt.f.cbSize = 0;
     const UINT32 device_rate = mixfmt->nSamplesPerSec;
     UINT32 want = wanted_rate(dev, device_rate);
     if (want == dev->rate_refused) want = device_rate;
     REFERENCE_TIME dur = (REFERENCE_TIME)g_cfg.latency_ms * 10000;
+    /* outbits=16: the stream in 16 bits whatever the mix format, so that the conversion is reAL's (rounded, with the
+     * dither) and not the sound server's.  Refused: the mix format after all */
+    BOOL as16 = g_cfg.out_bits == 16 && w->fmt != OUT_S16;
+again:
+    memset(&fmt, 0, sizeof(fmt));
+    memcpy(&fmt, mixfmt, mixfmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixfmt->cbSize >= 22 ?
+                         sizeof(WAVEFORMATEXTENSIBLE) : sizeof(WAVEFORMATEX));
+    if (fmt.f.wFormatTag != WAVE_FORMAT_EXTENSIBLE) fmt.f.cbSize = 0;
+    if (as16) {
+        if (fmt.f.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
+            fmt.x.SubFormat = RL_SUBTYPE_PCM;
+            fmt.x.Samples.wValidBitsPerSample = 16;
+        } else fmt.f.wFormatTag = WAVE_FORMAT_PCM;
+        fmt.f.wBitsPerSample = 16;
+        fmt.f.nBlockAlign = (WORD)(fmt.f.nChannels * 2);
+    }
     /* at the rate wanted with Windows' conversion flags, then without them (an audio stack that does not know them),
      * then at the device's; each on a fresh client, as a failed Initialize may leave one unusable */
     static const DWORD convert = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
-    for (int t = want != device_rate ? 0 : 2; ; t++) {
+    for (int t = want != device_rate || as16 ? 0 : 2; ; t++) {
         const UINT32 r = t < 2 ? want : device_rate;
         fmt.f.nSamplesPerSec = r;
         fmt.f.nAvgBytesPerSec = r * fmt.f.nBlockAlign;
@@ -637,13 +653,21 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
         if (SUCCEEDED(hr) || t == 2) break;
         IAudioClient_Release(w->client);
         w->client = NULL;
-        if (t == 1) {
+        if (t == 1 && want != device_rate) {
             LOG_INFO("WASAPI: %lu Hz refused (%08lx), using the device's %lu Hz", (unsigned long)want,
                      (unsigned long)hr, (unsigned long)device_rate);
             dev->rate_refused = want;
         }
     }
+    if (FAILED(hr) && as16) {
+        LOG_INFO("WASAPI: 16 bits refused (%08lx), using the device's format", (unsigned long)hr);
+        IAudioClient_Release(w->client);
+        w->client = NULL;
+        as16 = FALSE;
+        goto again;
+    }
     if (FAILED(hr)) { LOG_INFO("WASAPI: Initialize failed (%08lx)", (unsigned long)hr); goto fail; }
+    if (as16) w->fmt = OUT_S16;
     const UINT32 rate = fmt.f.nSamplesPerSec;
     dev->device_rate = device_rate;
 

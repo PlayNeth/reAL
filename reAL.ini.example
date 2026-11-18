@@ -13,6 +13,14 @@ latency=0
 ; 48000 Hz, otherwise the device's) or a rate in Hz. Sounds at that rate play without resampling; with PipeWire
 ; (default.clock.allowed-rates = [ 44100 48000 ]) the device switches to it, Windows converts.
 ;outrate=device
+; outbits: 16 makes reAL's output stream 16-bit. reAL then does the conversion itself (rounded as ALchemy rounds, and
+; with dither: a faint steady hiss 96 dB below full scale in place of an error that follows the sound, so that a
+; sound quieter than one 16-bit step is still heard). Normally the stream is in the device's mix format, float, and
+; the sound server converts it for the card. Worth setting under Wine when the card runs at 16 bits (PulseAudio's
+; default), where the server just rounds; of no use on Windows, whose mixer is float whatever the stream is.
+; dither=false: no dither (fixes=false too, as ALchemy has none).
+;outbits=device
+;dither=true
 ; ALchemy-compatible keys (same meaning and limits as ALchemy's dsound.ini)
 buffers=4
 duration=25

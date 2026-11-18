@@ -31,6 +31,7 @@ static void defaults(void)
     g_cfg.midi_reverb = 1;
     g_cfg.waveout = 1;
     g_cfg.fixes = 1;
+    g_cfg.dither = 1;
     g_cfg.headphones = -1;
 }
 
@@ -78,6 +79,8 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "log"))        g_cfg.log_level = clampi(atoi(val), 0, 3);
     else if (!_stricmp(key, "log3d"))      g_cfg.log_3d = is_true(val);
     else if (!_stricmp(key, "fixes"))      g_cfg.fixes = is_true(val);
+    else if (!_stricmp(key, "dither"))     g_cfg.dither = is_true(val);
+    else if (!_stricmp(key, "outbits"))    g_cfg.out_bits = atoi(val) == 16 ? 16 : 0;
     else if (!_stricmp(key, "logeax"))     g_cfg.log_eax = is_true(val);
     else if (!_stricmp(key, "logfile"))    lstrcpynA(g_cfg.log_file, val, MAX_PATH);
     else if (!_stricmp(key, "realdsound")) lstrcpynA(g_cfg.real_dsound, val, MAX_PATH);
@@ -217,6 +220,7 @@ void rl_config_load(void)
              g_cfg.enabled, g_cfg.latency_ms, outrate, g_cfg.max_voices, g_cfg.disable_dmusic,
              !g_cfg.hrtf_mode ? "off" : g_cfg.hrtf_mode == 2 ? "builtin" : g_cfg.hrtf_path[0] ? g_cfg.hrtf_path : "auto",
              g_cfg.resampler == RL_INTERP_SINC ? "sinc" : "linear", g_cfg.log_level);
+    LOG_INFO("  fixes=%d outbits=%s dither=%d", g_cfg.fixes, g_cfg.out_bits == 16 ? "16" : "device", g_cfg.dither);
     {
         char self[MAX_PATH];
         GetModuleFileNameA(g_self, self, MAX_PATH);
