@@ -90,12 +90,17 @@ through the sinc resampler: peaks of 4.2, 32% of the samples cut, the error 8 dB
 ALchemy's `CClipper` does it (kernels 0x100789f0 and 0x10078dc0 of `CStaticHspSystem`): times 32768 or 2^31, rounded
 to the nearest step, a half upwards, held within the format. reAL cut off towards zero, with 32767: a step twice as
 wide around zero, where a quiet sound's crossings were flattened. `tools/convref.py` compares the code with the
-DLL's kernels in an emulator: 8 million samples, the same.
+DLL's kernels in an emulator: over 8 million samples, the same (a model of the kernels, compared with
+the code on every float there is, is the same within 65536 times full scale; beyond that ALchemy's 16 bits wrap
+around and reAL's hold, and a NaN is 0).
 - ALchemy's 32-bit kernel lets a sample of exactly 1.0 through its upper test, and it wraps to the lowest value.
   Kept with `fixes=false`; fixed, it is the highest.
 - `outbits=16` opens the output stream in 16 bits whatever the device's mix format (float, as a rule), so that the
   conversion is reAL's. If the stream is refused, the mix format is used.
-- Dither (with `fixes`, `dither=true`, 16 bits only): triangular noise two steps wide before the rounding. The
+- A device whose mix format reAL does not write (24 bits packed) is opened in 16 bits too; it was refused.
+- Dither (with `fixes`, `dither=true`: the default for any 16-bit output, the device's own format included; 16 bits
+  only): triangular noise two steps wide before the rounding. A 16-bit sound played at full volume therefore no
+  longer comes out bit for bit: a quarter of its samples are a step off. The
   error is then a steady hiss of half a step (96 dB below full scale) and no longer follows the signal; a sample
   of exactly 0 gets none. `tests/test_outconv.c`: a tone of 0.4 of a step comes out as nothing rounded and at 0.40
   with dither; a tone of 1.3 steps has a third harmonic of 0.16 rounded and 0.002 with dither.
@@ -460,8 +465,11 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   and every call on that handle goes there.
 - Compressed formats (anything acmFormatSuggest finds a codec to PCM for, when reAL can play that PCM): the codec
   is opened with the stream, and waveOutWrite decodes each buffer into one of PCM that the stream plays in its
-  place (freed when the buffer is done or reset). A buffer that does not end on a block of the codec's leaves the
-  rest to go before the next one. waveOutReset resets the codec. Positions are in the game's format, by its rates:
+  place (freed when the buffer is done or reset). The decoding is done outside the proxy's lock, so a long buffer
+  does not hold up the other streams; a buffer is decoded whole, so a whole file written at once is in memory as
+  PCM while it plays. A buffer that does not end on a block of the codec's leaves the rest to go before the next
+  one (`wc_carry` in wavecore.c, tested natively); a last piece of less than a block is never played. waveOutReset
+  resets the codec, as does a write that fails. Positions are in the game's format, by its rates:
   bytes = frames * nAvgBytesPerSec / rate, as the mapper reckons. `waveout=pcm` leaves these streams to the
   system's winmm, as before 1.9.1.
   - `tests/wocomp.c` (under Wine): a rising tone as mu-law and as IMA ADPCM (the test's own encoders), two seconds

@@ -608,10 +608,12 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     BOOL is_float = mixfmt->wFormatTag == 3 ||
         (mixfmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
          IsEqualGUID(&((WAVEFORMATEXTENSIBLE *)mixfmt)->SubFormat, &RL_SUBTYPE_FLOAT));
+    /* (a mix format reAL does not write, 24 bits say: the stream in 16 bits, if the device takes that) */
+    BOOL known = TRUE;
     if (is_float && mixfmt->wBitsPerSample == 32) w->fmt = OUT_F32;
     else if (mixfmt->wBitsPerSample == 16) w->fmt = OUT_S16;
     else if (mixfmt->wBitsPerSample == 32) w->fmt = OUT_S32;
-    else { hr = AUDCLNT_E_UNSUPPORTED_FORMAT; goto fail; }
+    else known = FALSE;
 
     /* the mix format, at the rate outrate= asks for.  A shared stream at another rate than the device's: PipeWire
      * (through Wine) switches the device to it when it may, Windows converts (AUTOCONVERTPCM); either way the
@@ -623,7 +625,7 @@ static HRESULT wasapi_open(rl_device *dev, wasapi_out *w)
     REFERENCE_TIME dur = (REFERENCE_TIME)g_cfg.latency_ms * 10000;
     /* outbits=16: the stream in 16 bits whatever the mix format, so that the conversion is reAL's (rounded, with the
      * dither) and not the sound server's.  Refused: the mix format after all */
-    BOOL as16 = g_cfg.out_bits == 16 && w->fmt != OUT_S16;
+    BOOL as16 = !known || (g_cfg.out_bits == 16 && w->fmt != OUT_S16 && !dev->bits16_refused);
 again:
     memset(&fmt, 0, sizeof(fmt));
     memcpy(&fmt, mixfmt, mixfmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && mixfmt->cbSize >= 22 ?
@@ -650,20 +652,24 @@ again:
         }
         hr = IAudioClient_Initialize(w->client, AUDCLNT_SHAREMODE_SHARED,
                                      AUDCLNT_STREAMFLAGS_EVENTCALLBACK | (t == 0 ? convert : 0), dur, 0, &fmt.f, NULL);
-        if (SUCCEEDED(hr) || t == 2) break;
+        /* (16 bits at the device's own rate: tries 1 and 2 would be the same.  16 bits by choice, refused at the
+         * rate wanted: the mix format at that rate comes before 16 bits at another) */
+        if (SUCCEEDED(hr) || t == 2 || (t == 1 && (want == device_rate || (as16 && known)))) break;
         IAudioClient_Release(w->client);
         w->client = NULL;
-        if (t == 1 && want != device_rate) {
+        if (t == 1 && !as16) {      /* (in 16 bits it may be those that were refused: the rate is tried again) */
             LOG_INFO("WASAPI: %lu Hz refused (%08lx), using the device's %lu Hz", (unsigned long)want,
                      (unsigned long)hr, (unsigned long)device_rate);
             dev->rate_refused = want;
         }
     }
-    if (FAILED(hr) && as16) {
+    if (FAILED(hr) && as16 && known) {
         LOG_INFO("WASAPI: 16 bits refused (%08lx), using the device's format", (unsigned long)hr);
         IAudioClient_Release(w->client);
         w->client = NULL;
         as16 = FALSE;
+        /* (a format the device will not have is not asked for again at each reopening) */
+        if (hr == AUDCLNT_E_UNSUPPORTED_FORMAT || hr == E_INVALIDARG) dev->bits16_refused = TRUE;
         goto again;
     }
     if (FAILED(hr)) { LOG_INFO("WASAPI: Initialize failed (%08lx)", (unsigned long)hr); goto fail; }

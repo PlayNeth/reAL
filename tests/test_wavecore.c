@@ -84,8 +84,44 @@ static long first_sound(const sim *m, long from)
     return -1;
 }
 
+/* a compressed stream's bytes cut anywhere: a codec that takes whole blocks of 7 gets every byte once, in order */
+static int carry_case(uint32_t seed)
+{
+    enum { TOTAL = 5000, BLOCK = 7 };
+    static uint8_t src[TOTAL], got[TOTAL];
+    wc_carry c = { 0 };
+    uint32_t s = seed, at = 0, out = 0;
+    for (int i = 0; i < TOTAL; i++) { s = s * 1664525u + 1013904223u; src[i] = (uint8_t)(s >> 24); }
+    while (at < TOTAL) {
+        s = s * 1664525u + 1013904223u;
+        uint32_t len = (s >> 16) % 40;                  /* (0 as well: an empty buffer) */
+        if (len > TOTAL - at) len = TOTAL - at;
+        uint32_t total;
+        uint8_t *made;
+        const uint8_t *all = wc_carry_join(&c, src + at, len, &total, &made);
+        if (!all || total != c.n + len || (c.n ? all != made : all != src + at || made)) return 0;
+        const uint32_t used = total / BLOCK * BLOCK;
+        if (out + used > TOTAL) return 0;
+        memcpy(got + out, all, used);
+        out += used;
+        if (!wc_carry_keep(&c, all, total, used) || c.n != total - used || c.n >= BLOCK) return 0;
+        free(made);
+        at += len;
+    }
+    const int ok = out == TOTAL / BLOCK * BLOCK && !memcmp(got, src, out) && c.n == TOTAL % BLOCK &&
+                   !memcmp(c.p, src + out, c.n);
+    wc_carry_drop(&c);
+    return ok && !c.p && !c.n;
+}
+
 int main(void)
 {
+    {
+        int ok = 1;
+        for (uint32_t seed = 1; seed <= 200; seed++) ok &= carry_case(seed);
+        CHECK(ok, "carry: bytes cut anywhere did not reach the codec once each, in order");
+    }
+
     static uint8_t buf[8][2048];
     static sim m_;
     sim *m = &m_;

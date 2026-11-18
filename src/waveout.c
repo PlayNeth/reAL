@@ -42,8 +42,9 @@ typedef struct rl_wave {
     int nq, capq;
     HACMSTREAM acm;             /* a compressed stream: the codec, from the game's format (src) to fmt */
     WAVEFORMATEX *src;
-    uint8_t *carry;             /* the end of the last buffer written that was not a whole block of the codec's */
-    DWORD ncarry;
+    wc_carry carry;             /* the end of the last buffer written that was not a whole block of the codec's */
+    CRITICAL_SECTION dec;       /* the codec and `carry` (taken before s_wl, never inside it) */
+    int writing;                /* waveOutWrite calls decoding at this moment, outside s_wl */
     DWORD volume;
     int paused;                 /* waveOutPause */
     int draining;               /* paused, its buffer still playing: up to where the ideal device stopped */
@@ -276,7 +277,7 @@ static int playable(const WAVEFORMATEX *f)
     return f->wBitsPerSample == 8 || f->wBitsPerSample == 16 || f->wBitsPerSample == 24 || f->wBitsPerSample == 32;
 }
 
-/* the PCM format a compressed one decodes to, if the system has a codec for it that reAL can play the output of */
+/* the PCM format a compressed one decodes to, if the system suggests one that reAL can play */
 static int decodable(const WAVEFORMATEX *f, WAVEFORMATEX *pcm)
 {
     if (g_cfg.waveout == 2 || f->wFormatTag == WAVE_FORMAT_PCM || f->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
@@ -285,54 +286,59 @@ static int decodable(const WAVEFORMATEX *f, WAVEFORMATEX *pcm)
     pcm->wFormatTag = WAVE_FORMAT_PCM;
     if (acmFormatSuggest(NULL, (LPWAVEFORMATEX)f, pcm, sizeof(*pcm), ACM_FORMATSUGGESTF_WFORMATTAG)) return 0;
     pcm->cbSize = 0;
-    if (!playable(pcm)) return 0;
-    return !acmStreamOpen(NULL, NULL, (LPWAVEFORMATEX)f, pcm, NULL, 0, 0, ACM_STREAMOPENF_QUERY);
+    return playable(pcm);
 }
 
-/* (s_wl held) a buffer of the game's, with what the last one left over before it, decoded: the PCM (the caller's
- * to free) and its frames.  NULL: out of memory, or the codec failed */
+/* (w->dec held, s_wl not: a long buffer takes its time, and the other streams play on meanwhile) a buffer of the
+ * game's, with what the last one left over before it, decoded: the PCM (the caller's to free) and its frames.
+ * NULL: out of memory, or the codec failed; the codec then starts afresh at the next buffer */
 static void *decode(rl_wave *w, const uint8_t *data, DWORD len, DWORD *frames)
 {
-    const DWORD total = w->ncarry + len;
-    uint8_t *in = NULL;
+    uint32_t total;
+    uint8_t *made;
     *frames = 0;
-    if (total < len) return NULL;
-    if (w->ncarry) {
-        if (!(in = malloc(total))) return NULL;
-        memcpy(in, w->carry, w->ncarry);
-        memcpy(in + w->ncarry, data, len);
-    }
-    DWORD room = 0;
-    if (total && acmStreamSize(w->acm, total, &room, ACM_STREAMSIZEF_SOURCE)) room = 0;
-    uint8_t *out = malloc(room ? room : 1);
-    if (!out) { free(in); return NULL; }
+    const uint8_t *all = wc_carry_join(&w->carry, data, len, &total, &made);
+    int bad = !all && (total < len || w->carry.n);
+    /* (less than a block of the codec's: all of it waits for the next buffer.  More than once, should the codec
+     * have made less of it than the room it said it needed) */
+    uint8_t *out = NULL;
     DWORD used = 0, got = 0;
-    if (room) {
+    while (!bad) {
+        const DWORD rest = total - used;
+        DWORD room = 0;
+        if (!rest || rest < w->src->nBlockAlign || acmStreamSize(w->acm, rest, &room, ACM_STREAMSIZEF_SOURCE) || !room) break;
+        uint8_t *o = got + room >= got ? realloc(out, got + room) : NULL;
+        if (!o) { bad = 1; break; }
+        out = o;
         ACMSTREAMHEADER h;
         memset(&h, 0, sizeof(h));
         h.cbStruct = sizeof(h);
-        h.pbSrc = in ? in : (LPBYTE)data;
-        h.cbSrcLength = total;
-        h.pbDst = out;
+        h.pbSrc = (LPBYTE)all + used;
+        h.cbSrcLength = rest;
+        h.pbDst = out + got;
         h.cbDstLength = room;
-        if (acmStreamPrepareHeader(w->acm, &h, 0)) { free(in); free(out); return NULL; }
+        if (acmStreamPrepareHeader(w->acm, &h, 0)) { bad = 1; break; }
         const MMRESULT r = acmStreamConvert(w->acm, &h, ACM_STREAMCONVERTF_BLOCKALIGN);
-        used = h.cbSrcLengthUsed <= total ? h.cbSrcLengthUsed : total;
-        got = h.cbDstLengthUsed <= room ? h.cbDstLengthUsed : room;
-        h.cbSrcLength = total; h.cbDstLength = room;       /* (as they were prepared) */
+        const DWORD u = h.cbSrcLengthUsed <= rest ? h.cbSrcLengthUsed : rest, g = h.cbDstLengthUsed <= room ? h.cbDstLengthUsed : room;
+        h.cbSrcLength = rest; h.cbDstLength = room;         /* (as they were prepared) */
         acmStreamUnprepareHeader(w->acm, &h, 0);
-        if (r) { free(in); free(out); return NULL; }
+        if (r == ACMERR_NOTPOSSIBLE) break;                 /* (not a whole block after all) */
+        if (r) { bad = 1; break; }
+        used += u; got += g;
+        if (!u) break;
     }
-    /* what the codec left (less than a block of its own) goes before the next buffer */
-    const uint8_t *all = in ? in : data;
-    const DWORD left = total - used;
-    uint8_t *carry = NULL;
-    /* (a megabyte the codec makes nothing of: it never will) */
-    if ((left > 0x100000 && !got) || (left && !(carry = malloc(left)))) { free(in); free(out); return NULL; }
-    if (left) memcpy(carry, all + used, left);
-    free(w->carry);
-    w->carry = carry; w->ncarry = left;
-    free(in);
+    if (!bad && !out && !(out = malloc(1))) bad = 1;
+    /* what the codec left goes before the next buffer (a megabyte it makes nothing of: it never will) */
+    if (!bad && total - used > 0x100000 && !got) bad = 1;
+    if (!bad && !wc_carry_keep(&w->carry, all, total, used)) bad = 1;
+    free(made);
+    if (bad) {
+        LOG_INFO("waveOut: a buffer of %lu bytes could not be decoded (or no memory): not played", (unsigned long)len);
+        acmStreamReset(w->acm, 0);
+        wc_carry_drop(&w->carry);
+        free(out);
+        return NULL;
+    }
     *frames = got / w->fmt.Format.nBlockAlign;
     return out;
 }
@@ -377,9 +383,10 @@ static rl_wave *open_stream(const WAVEFORMATEX *f, DWORD_PTR cb, DWORD_PTR inst,
 }
 static void free_stream(rl_wave *w)
 {
-    if (w->acm) acmStreamClose(w->acm, 0);
+    if (w->acm) { acmStreamClose(w->acm, 0); DeleteCriticalSection(&w->dec); }
     for (int i = 0; i < w->nq; i++) free(w->qd[i]);
-    free(w->src); free(w->carry); free(w->qd);
+    wc_carry_drop(&w->carry);
+    free(w->src); free(w->qd);
     IDirectSoundBuffer8_Stop(&w->b->IDirectSoundBuffer8_iface);
     IDirectSoundBuffer8_Release(&w->b->IDirectSoundBuffer8_iface);
     rl_device_release(w->dev);
@@ -432,8 +439,20 @@ static MMRESULT WINAPI w_open(LPHWAVEOUT ph, UINT id, LPCWAVEFORMATEX f, DWORD_P
     if (!f) return MMSYSERR_INVALPARAM;
     DWORD type = fl & CALLBACK_TYPEMASK;
     if (type == CALLBACK_WINDOW && cb && !IsWindow((HWND)cb)) return MMSYSERR_INVALPARAM;
+    /* a compressed format: its codec first (opening one can take a fifth of a second, which the stream's clock must
+     * not start before) */
     WAVEFORMATEX pcm;
-    const int direct = playable(f), coded = !direct && decodable(f, &pcm);
+    const int direct = playable(f);
+    int coded = !direct && !(fl & WAVE_FORMAT_DIRECT) && decodable(f, &pcm);     /* (DIRECT: no conversion wanted) */
+    HACMSTREAM acm = NULL;
+    WAVEFORMATEX *src = NULL;
+    if (coded && (fl & WAVE_FORMAT_QUERY))
+        coded = !acmStreamOpen(NULL, NULL, (LPWAVEFORMATEX)f, &pcm, NULL, 0, 0, ACM_STREAMOPENF_QUERY);
+    else if (coded && ph) {
+        const size_t size = sizeof(WAVEFORMATEX) + f->cbSize;
+        if ((src = malloc(size))) memcpy(src, f, size);
+        if (!src || acmStreamOpen(&acm, NULL, src, &pcm, NULL, 0, 0, 0)) { free(src); src = NULL; acm = NULL; coded = 0; }
+    }
     if (!direct && !coded) {
         /* (neither PCM nor anything a codec of the system's turns into PCM: the system's mapper may know better) */
         MMRESULT r = o_open(ph, WAVE_MAPPER, f, cb, inst, fl);
@@ -443,22 +462,14 @@ static MMRESULT WINAPI w_open(LPHWAVEOUT ph, UINT id, LPCWAVEFORMATEX f, DWORD_P
     }
     if (fl & WAVE_FORMAT_QUERY) return MMSYSERR_NOERROR;
     if (!ph) return MMSYSERR_INVALPARAM;
-    /* (the codec first: opening one can take a fifth of a second, which the stream's clock must not start before) */
-    HACMSTREAM acm = NULL;
-    WAVEFORMATEX *src = NULL;
-    rl_wave *w = NULL;
-    if (coded) {
-        const size_t size = sizeof(WAVEFORMATEX) + f->cbSize;
-        if ((src = malloc(size))) memcpy(src, f, size);
-        if (src && acmStreamOpen(&acm, NULL, src, &pcm, NULL, 0, 0, 0)) acm = NULL;
-    }
-    if (!coded || acm) w = open_stream(coded ? &pcm : f, cb, inst, fl);
+    rl_wave *w = open_stream(coded ? &pcm : f, cb, inst, fl);
     if (w && coded) {
         w->acm = acm; w->src = src;
+        InitializeCriticalSection(&w->dec);
         LOG_INFO("waveOut: format %u (%lu Hz, %u ch, %lu bytes a second) decoded for it", f->wFormatTag,
                  (unsigned long)f->nSamplesPerSec, f->nChannels, (unsigned long)f->nAvgBytesPerSec);
-    } else {
-        if (acm) acmStreamClose(acm, 0);
+    } else if (coded) {
+        acmStreamClose(acm, 0);
         free(src);
     }
     if (!w) {
@@ -484,7 +495,7 @@ static MMRESULT WINAPI w_close(HWAVEOUT h)
     EnterCriticalSection(&s_wl);
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_close(h); }
-    if (w->nq) { LeaveCriticalSection(&s_wl); return WAVERR_STILLPLAYING; }
+    if (w->nq || w->writing) { LeaveCriticalSection(&s_wl); return WAVERR_STILLPLAYING; }
     for (rl_wave **p = &s_waves; *p; p = &(*p)->next) if (*p == w) { *p = w->next; break; }
     LONGLONG seq = post(w, WOM_CLOSE, 0);
     LeaveCriticalSection(&s_wl);
@@ -526,32 +537,47 @@ static MMRESULT WINAPI w_write(HWAVEOUT h, LPWAVEHDR hd, UINT sz)
     if (!hd || sz < sizeof(WAVEHDR) || (!hd->lpData && hd->dwBufferLength)) r = MMSYSERR_INVALPARAM;
     else if (!(hd->dwFlags & WHDR_PREPARED)) r = WAVERR_UNPREPARED;
     else if (hd->dwFlags & WHDR_INQUEUE) r = WAVERR_STILLPLAYING;
-    else if (w->nq == w->capq) {
+    const int coded = !r && w->acm, queued = !r;
+    const uint8_t *data = !r ? (const uint8_t *)hd->lpData : NULL;
+    const DWORD len = !r ? hd->dwBufferLength : 0, was = !r ? hd->dwFlags : 0;
+    DWORD frames = len / w->fmt.Format.nBlockAlign;
+    void *pcm = NULL;
+    if (!r) hd->dwFlags = (hd->dwFlags & ~WHDR_DONE) | WHDR_INQUEUE;
+    if (coded) {
+        /* decoded outside s_wl, the stream's writes one after the other */
+        w->writing++;
+        LeaveCriticalSection(&s_wl);
+        EnterCriticalSection(&w->dec);
+        pcm = decode(w, data, len, &frames);
+        EnterCriticalSection(&s_wl);
+        w->writing--;
+        if (pcm) data = pcm; else r = MMSYSERR_NOMEM;
+    }
+    if (!r && w->nq == w->capq) {
         int cap = w->capq ? w->capq * 2 : 32;
         LPWAVEHDR *q = realloc(w->q, (size_t)cap * sizeof(*q));
         if (q) w->q = q;
         void **qd = q ? realloc(w->qd, (size_t)cap * sizeof(*qd)) : NULL;
         if (qd) { w->qd = qd; w->capq = cap; } else r = MMSYSERR_NOMEM;
     }
-    const uint8_t *data = !r ? (const uint8_t *)hd->lpData : NULL;
-    DWORD frames = !r ? hd->dwBufferLength / w->fmt.Format.nBlockAlign : 0;
-    void *pcm = NULL;
-    if (!r && w->acm) {
-        if ((pcm = decode(w, data, hd->dwBufferLength, &frames))) data = pcm; else r = MMSYSERR_NOMEM;
-    }
     if (!r) {
-        hd->dwFlags = (hd->dwFlags & ~WHDR_DONE) | WHDR_INQUEUE;
         hd->lpNext = NULL;
         w->qd[w->nq] = pcm;
         w->q[w->nq++] = hd;
         mixer_pos(w);
         if (!wc_write(&w->wc, now_s(), hd, data, frames, hd->dwFlags & (WHDR_BEGINLOOP | WHDR_ENDLOOP), hd->dwLoops)) {
             w->nq--;
-            free(pcm);
-            hd->dwFlags &= ~WHDR_INQUEUE;
             r = MMSYSERR_NOMEM;
         }
     }
+    if (r && coded) {
+        /* (the buffer is not played, but the codec has had it: it starts afresh at the next one) */
+        if (pcm) { acmStreamReset(w->acm, 0); wc_carry_drop(&w->carry); }
+        free(pcm);
+    }
+    if (r && queued) hd->dwFlags = was;         /* (not written after all: its flags as they were) */
+    /* (dec first: once s_wl is left with nothing queued, a close on another thread may free the stream) */
+    if (coded) LeaveCriticalSection(&w->dec);
     LeaveCriticalSection(&s_wl);
     LOG_TRACE("waveOutWrite(%p, %p, %lu bytes, flags %lx) -> %u", (void *)h, (void *)hd,
               hd ? (unsigned long)hd->dwBufferLength : 0UL, hd ? (unsigned long)hd->dwFlags : 0UL, r);
@@ -595,6 +621,16 @@ static MMRESULT WINAPI w_reset(HWAVEOUT h)
     EnterCriticalSection(&s_wl);
     rl_wave *w = ours(h);
     if (!w) { LeaveCriticalSection(&s_wl); return o_reset(h); }
+    /* a compressed stream: after any write that is decoding at this moment (its buffer comes back with the others),
+     * the stream kept from being closed meanwhile */
+    const int coded = w->acm != NULL;
+    if (coded) {
+        w->writing++;
+        LeaveCriticalSection(&s_wl);
+        EnterCriticalSection(&w->dec);
+        EnterCriticalSection(&s_wl);
+        w->writing--;
+    }
     mixer_pos(w);
     wc_reset(&w->wc, now_s());
     if (w->paused) {
@@ -613,10 +649,10 @@ static MMRESULT WINAPI w_reset(HWAVEOUT h)
         free(w->qd[i]);
     }
     w->nq = 0;
-    if (w->acm) {           /* (the codec starts afresh as well, and what it had left over is dropped) */
+    if (coded) {            /* (the codec starts afresh as well, and what it had left over is dropped) */
         acmStreamReset(w->acm, 0);
-        free(w->carry);
-        w->carry = NULL; w->ncarry = 0;
+        wc_carry_drop(&w->carry);
+        LeaveCriticalSection(&w->dec);
     }
     LeaveCriticalSection(&s_wl);
     wait_cb(seq);

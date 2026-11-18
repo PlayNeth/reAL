@@ -76,6 +76,18 @@ typedef struct wc_stream {
 #define WC_BEGINLOOP 4          /* WHDR_BEGINLOOP / WHDR_ENDLOOP */
 #define WC_ENDLOOP 8
 
+/* A compressed stream's codec takes whole blocks; what a buffer of the game's has past its last whole one waits
+ * here to go before the next buffer. */
+typedef struct wc_carry { uint8_t *p; uint32_t n; } wc_carry;
+/* the bytes to give the codec for this buffer: what was kept, then `data`.  Returns them (`data` itself when
+ * nothing was kept, NULL if that is) and their number; *made is what to free afterwards (NULL: nothing).  NULL with
+ * something kept, or with *total less than len (too long): it failed */
+const uint8_t *wc_carry_join(const wc_carry *c, const uint8_t *data, uint32_t len, uint32_t *total, uint8_t **made);
+/* the codec used `used` of the `total` bytes at `all`: the rest is kept for the next buffer.  0: out of memory
+ * (nothing is kept then) */
+int wc_carry_keep(wc_carry *c, const uint8_t *all, uint32_t total, uint32_t used);
+void wc_carry_drop(wc_carry *c);
+
 int wc_init(wc_stream *s, uint32_t rate, uint32_t block, uint8_t silence, uint32_t ring, uint32_t period,
             uint32_t delta, uint32_t guard, double t);
 void wc_free(wc_stream *s);

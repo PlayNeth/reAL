@@ -2,7 +2,9 @@
  *
  * ALchemy's (CClipper, which hands each channel to a kernel of CStaticHspSystem: 0x100789f0 for 16 bits, 0x10078dc0
  * for 32): the sample times 32768 (2^31), as a float, rounded to the nearest whole number, a half upwards, and
- * held within the format.  tools/convref.py runs these against the DLL's in an emulator.
+ * held within the format.  tools/convref.py runs these against the DLL's in an emulator: the same for every sample
+ * within 65536 times full scale.  Beyond that, and for an infinity or a NaN, ALchemy's 16 bits wrap around or give
+ * 0 where these hold the end of the range (a NaN: 0).
  *
  * With `dither` (reAL's own, 16 bits only): before the rounding, noise of a triangular spread two steps wide.
  * Rounding alone leaves an error that follows the signal: a quiet sound or the tail of a fade comes out as

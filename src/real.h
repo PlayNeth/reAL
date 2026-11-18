@@ -102,6 +102,7 @@ typedef struct rl_device {
     volatile LONG reopen;         /* the output wants another rate (outrate=game): the mixer thread opens it again */
     UINT32      out_rate;
     UINT32      device_rate;      /* the device's own (its mix format's) */
+    BOOL        bits16_refused;   /* outbits=16: the device would not open in 16 bits */
     UINT32      rate_refused;     /* an outrate= rate the device would not open at (not asked for again) */
     UINT32      out_channels;     /* channels in the mix: layout.n */
     rl_layout   layout;           /* the speaker layout mixed (ALchemy's: stereo, quad, 5.1 or 7.1) */

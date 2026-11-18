@@ -5,8 +5,8 @@
 #include "outconv.h"
 
 /* ALchemy rounds with x + 1.5e-8f + 1.5 * 2^52 in a double, whose low half is then the whole number: the nearest,
- * and the 1.5e-8 takes an exact half upwards.  The sum x + 1.5e-8f is exact for a float of this size, so this is
- * floor(x + 0.5) of it. */
+ * and the 1.5e-8 takes an exact half upwards (a float of this size is never within 1.5e-8 of a half without being
+ * one).  That is floor(x + 0.5): the same for every float there is, within the range (checked on all of them). */
 static inline double nearest(float v) { return floor((double)v + 0.5); }
 
 int16_t rl_out_s16_one(float x, uint32_t *dither)

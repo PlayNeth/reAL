@@ -30,6 +30,36 @@ void wc_free(wc_stream *s)
     free(s->later); s->later = NULL; s->nlater = s->caplater = 0;
 }
 
+const uint8_t *wc_carry_join(const wc_carry *c, const uint8_t *data, uint32_t len, uint32_t *total, uint8_t **made)
+{
+    *made = NULL;
+    *total = c->n + len;
+    if (*total < len) return NULL;
+    if (!c->n) return data;
+    uint8_t *p = malloc(*total);
+    if (!p) return NULL;
+    memcpy(p, c->p, c->n);
+    if (len) memcpy(p + c->n, data, len);
+    return *made = p;
+}
+int wc_carry_keep(wc_carry *c, const uint8_t *all, uint32_t total, uint32_t used)
+{
+    const uint32_t left = used < total ? total - used : 0;
+    uint8_t *p = NULL;
+    if (left) {
+        if (!(p = malloc(left))) { wc_carry_drop(c); return 0; }
+        memcpy(p, all + used, left);
+    }
+    free(c->p);
+    c->p = p; c->n = left;
+    return 1;
+}
+void wc_carry_drop(wc_carry *c)
+{
+    free(c->p);
+    c->p = NULL; c->n = 0;
+}
+
 double wc_ideal(const wc_stream *s, double t)
 {
     return s->running ? s->ia + (t - s->ta) * s->rate * s->slope : s->ia;

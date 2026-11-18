@@ -186,7 +186,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `hrtf` | `auto` (default: a `reAL_hrtf.bin` or `reAL_hrtf.sofa` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a SOFA file or a `reAL_hrtf.bin` (a Linux path works under Wine), or `off`. |
 | `resampler` | `sinc` (default) or `linear` (ALchemy's). |
 | `fixes` | `false` behaves as ALchemy. |
-| `outbits` | `16`: reAL's output stream is 16-bit, converted by reAL with dither, where it is normally float and the sound server converts. For a sound card that runs at 16 bits under Wine (PulseAudio's default): quiet sounds and the tails of fades keep their shape. `dither=false` turns the dither off. |
+| `outbits` | `16`: reAL's output stream is 16-bit, converted by reAL with dither (as any 16-bit output is by default), where it is normally float and the sound server converts. For a sound card that runs at 16 bits under Wine (PulseAudio's default): quiet sounds and the tails of fades keep their shape. `dither=false` turns the dither off. |
 | `latency` | WASAPI buffer length in ms; `0` uses ALchemy's `buffers` × `duration` / 2. |
 | `outrate` | The output's sample rate: `device` (default, the device's own), `game` (the game's primary format when it is 44100 or 48000 Hz) or a rate in Hz. Sounds at that rate play without resampling; under PipeWire, the device switches to it when its `allowed-rates` include it. |
 | `buffers`, `duration`, `maxvoicecount`, `disabledirectmusic` | ALchemy's own keys, with the same meaning and limits. |
