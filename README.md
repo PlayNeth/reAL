@@ -89,6 +89,7 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
   - looping and one-shot sounds, Lock / Unlock, position notifications, duplicate buffers;
   - volume, pan and frequency, with a 32-tap windowed-sinc resampler;
   - smoothed volume changes and declicked position jumps;
+  - ALchemy's output limiter: a mix that goes above full scale is turned down for as long as it does, not cut off flat;
   - writing to the primary buffer (DSSCL_WRITEPRIMARY), as Windows' DirectSound does.
 - **Hardware 3D voices:** reAL reports hardware-accelerated buffers, as ALchemy does, so games turn on their best sound options.
 - **Answers as Windows does:** reAL has been compared with Windows 7's DirectSound over thousands of random call sequences. Where Windows accepts a call, so does reAL; where ALchemy is more lenient than Windows, reAL keeps ALchemy's behaviour. The differences kept on purpose are listed in [`docs/STATUS.md`](docs/STATUS.md).
@@ -156,7 +157,7 @@ reAL fixes what ALchemy gets wrong:
   - the vocal morpher's reset no longer zeroes a formant;
   - the chorus and flanger work at 192 kHz;
   - a slot's volume is applied after the effect.
-- **`fixes`** (on by default): where ALchemy lets through something harmful, reAL refuses a zero 3D distance, as Windows does, and keeps a runaway Doppler shift or volume out of the mix. It also fixes flaws in Microsoft's DirectSound effects, and gives a game that writes the primary buffer itself a play cursor that moves smoothly instead of in 10 ms steps. `fixes=false` behaves exactly as ALchemy and Microsoft's DirectSound do.
+- **`fixes`** (on by default): where ALchemy lets through something harmful, reAL refuses a zero 3D distance, as Windows does, and keeps a runaway Doppler shift or volume out of the mix. The output limiter lets nothing through above full scale and turns every speaker down together (ALchemy's lets a sudden loud peak through to be clipped, and limits each speaker on its own, which moves a sound towards the quieter one). It also fixes flaws in Microsoft's DirectSound effects, and gives a game that writes the primary buffer itself a play cursor that moves smoothly instead of in 10 ms steps. `fixes=false` behaves as ALchemy and Microsoft's DirectSound do.
 
 reDM fixes Microsoft's DirectMusic bugs the same way; `REDM_NOFIXES` in the environment turns those off. [`docs/STATUS.md`](docs/STATUS.md) has the details.
 
@@ -184,7 +185,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
 | `hrtf` | `auto` (default: a `reAL_hrtf.bin` or `reAL_hrtf.sofa` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a SOFA file or a `reAL_hrtf.bin` (a Linux path works under Wine), or `off`. |
 | `resampler` | `sinc` (default) or `linear` (ALchemy's). |
-| `fixes` | `false` behaves exactly as ALchemy. |
+| `fixes` | `false` behaves as ALchemy. |
 | `latency` | WASAPI buffer length in ms; `0` uses ALchemy's `buffers` × `duration` / 2. |
 | `outrate` | The output's sample rate: `device` (default, the device's own), `game` (the game's primary format when it is 44100 or 48000 Hz) or a rate in Hz. Sounds at that rate play without resampling; under PipeWire, the device switches to it when its `allowed-rates` include it. |
 | `buffers`, `duration`, `maxvoicecount`, `disabledirectmusic` | ALchemy's own keys, with the same meaning and limits. |

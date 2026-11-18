@@ -10,6 +10,7 @@
 #include <dsound.h>
 #include <stddef.h>
 #include "mixcore.h"
+#include "limiter.h"
 #include "spatial.h"
 #include "reverb.h"
 #include "hrtf.h"
@@ -114,6 +115,9 @@ typedef struct rl_device {
     BOOL        primary_playing;
     LONG        primary_volume;
     float       *mixbuf;          /* the mix: out_channels interleaved */
+    rl_limiter  limiter;          /* ALchemy's output limiter, the mix's last stage (mixer thread) */
+    UINT32      limiter_rate;     /* the rate it was set up for (0: not yet) */
+    UINT32      limiter_frames;   /* frames mixed since the log last said what it did */
     UINT32      mixbuf_frames;
     WAVEFORMATEX primary_fmt;
     DWORD       speaker_config;   /* what GetSpeakerConfig reports */

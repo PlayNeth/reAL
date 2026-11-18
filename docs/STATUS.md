@@ -49,6 +49,43 @@ rate plays as it is (the same-rate copy, no resampling).
 - Cost: 64 sinc voices with 32 muted went from about 9% to 5.5% of one core; a muted voice now costs almost
   nothing.
 
+**Output limiter** (`src/limiter.c`, the end of `mix()` in `src/device.c`): ALchemy's engine ends mixer -> `CLimiter`
+-> `CClipper` (the conversion to the device's format, which saturates). reAL had the clipper alone, so a mix above
+full scale was cut off flat: with many sounds at once that is harsh noise (12 voices at 0.35 of full scale each
+through the sinc resampler: peaks of 4.2, 32% of the samples cut, the error 8 dB below the sound).
+- The limiter is ALchemy's, translated from the DLL: each channel on its own, the output 3 ms late (144 frames at
+  48 kHz), the gain going down towards 0.98 / peak by 1 / (5 ms) a sample at most while a peak above full scale is
+  within those 3 ms, and back up by 1 / (50 ms) a sample. Below full scale it is the delay alone. A mixing call is
+  taken in blocks of ALchemy's size (128 frames at 44.1 and 48 kHz), since what the limiter does depends on them.
+- `tests/test_limiter.c` runs it against the DLL's own output (hashes of 270 runs made in an emulator by
+  `tools/limvec.py`: nine rates, five kinds of signal, levels up to a million times full scale): the same, bit for
+  bit. With the DLL at hand, `tools/limcmp.py` compares the C code with it on random blocks (infinities and NaNs
+  among them), and `tools/limref.py` a model of it in Python.
+- What is ALchemy's exactly is the block function. ALchemy's renderer hands it one 128-frame block after the other;
+  reAL's mixer takes what the device asks for (480 frames, say), so a block starts at every mixing call and the
+  last one is short. The gain comes back up in slightly different steps for it.
+- With `fixes` (the default), reAL's own in its place, for three things ALchemy's lets through. It makes one line
+  per block, never steeper than 1 / (5 ms), so a sudden peak of more than about 2.5 times full scale still comes
+  out above it and is clipped (the test's mix of up to 4 times full scale: peaks of 1.64 out, 0.06% of the samples
+  clipped). Each channel has its own gain, so a sound loud on the left moves to the right while it is held down
+  (left against right down to a third of what it was). And how it comes back depends on the block size. Fixed:
+  every frame above full scale has its own 3 ms line down to where it comes out at 0.98, the gain is the lowest of
+  them, the same for every channel, and comes back by 1 / (50 ms) a sample. Nothing comes out above full scale;
+  an infinity or a NaN in the mix is left out, and a peak beyond what a float gain can bring to 0.98 (some
+  340,000 times full scale and up) is silence.
+- With `speakers=` set to a layout the device does not have, the mix is folded to the device's speakers after the
+  limiter, which can add channels up above full scale again. Fixed, the limiter goes by what the device's
+  speakers get. ALchemy's goes by the layout's channels.
+- The same 12 voices: ALchemy's 0.03% of the samples clipped, fixed none (the gain down to 0.23).
+- The sinc resampler itself was measured for this and is clean (mirror images 82 dB or more below a tone up to
+  0.9 of the source's Nyquist frequency). What it does do is rebuild the peaks between two samples, which linear
+  interpolation never does: 2.7 dB above the samples on a clipped tone, 6 dB on clipped noise. So a loud sound
+  goes above full scale sooner with it, which the limiter now takes care of.
+- The delay adds 3 ms to the output's latency, as in ALchemy; positions and cursors are as before.
+- `reAL.log` says every five seconds for how long the limiter held the mix down, and by how much at most.
+- Cost at 48 kHz, per 10 ms block: 3 to 13 microseconds (stereo to 7.1) while the mix is below full scale, 30 to
+  40 while it is held down (ALchemy's: 6 to 27 either way). At 192 kHz, 23 to 53 and about 360.
+
 **Resampler kernels** (`src/mixcore.c`): the sinc resampler reads float, unsigned 8-bit, 24- and 32-bit sources (mono
 and stereo) four taps at a time with SSE, as it did 16-bit ones; before, they went through the per-sample path.
 `tests/bench_mix.c` (32 voices, 48 kHz, 10 ms blocks, under Wine; one core): float stereo 12.6% -> 3.9%, 24-bit

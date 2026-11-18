@@ -321,6 +321,32 @@ static void mix(rl_device *dev, UINT32 frames)
 
     if (master != 1.0f)
         for (UINT32 i = 0; i < frames * nch; i++) dev->mixbuf[i] *= master;
+
+    /* ALchemy's limiter, the last thing before the samples are converted (and clipped) for the device: a mix that
+     * goes above full scale is turned down for as long as it does, with 3 ms of warning, where it was cut off flat
+     * (many sounds at once; one loud sound through the sinc resampler, whose peaks between two samples are higher
+     * than the samples).  With the fixes, reAL's own (limiter.h) */
+    _Static_assert(RL_MAXOUT <= RL_LIM_MAXCH, "a limiter channel for every output channel");
+    if (dev->limiter_rate != dev->out_rate || dev->limiter.nch != nch || dev->limiter.fixed != (g_cfg.fixes != 0)) {
+        rl_limiter_init(&dev->limiter, dev->out_rate, nch, g_cfg.fixes != 0);
+        dev->limiter_rate = dev->out_rate;
+        dev->limiter_frames = 0;
+    }
+    /* (speakers= with a layout the device does not have: write_out folds the mix to the device's, after this) */
+    if (g_cfg.fixes)
+        rl_limiter_fold(&dev->limiter, !dev->out_direct && dev->dev_layout.n >= 2 ? &dev->out_mtx[0][0] : NULL, RL_MAXOUT,
+                        dev->dev_layout.n < RL_MAXOUT ? dev->dev_layout.n : RL_MAXOUT);
+    rl_limiter_process(&dev->limiter, dev->mixbuf, frames);
+    dev->limiter_frames += frames;
+    if (dev->limiter_frames >= 5 * dev->out_rate) {     /* (what it did, every five seconds that it did anything) */
+        if (dev->limiter.limited)
+            LOG_INFO("mix: above full scale, held down by the limiter for %u ms of the last %u, by %.1f dB at most",
+                     (unsigned)((UINT64)dev->limiter.limited * 1000 / dev->out_rate),
+                     (unsigned)((UINT64)dev->limiter_frames * 1000 / dev->out_rate),
+                     -20.0 * log10(dev->limiter.lowest > 1e-6f ? dev->limiter.lowest : 1e-6f));
+        dev->limiter.limited = 0; dev->limiter.lowest = 1.0f;
+        dev->limiter_frames = 0;
+    }
 }
 
 static inline float clampf(float v) { return v > 1.0f ? 1.0f : v < -1.0f ? -1.0f : v; }
@@ -427,6 +453,8 @@ static void choose_layout(rl_device *dev, IMMDevice *mmdev, const WAVEFORMATEX *
     EnterCriticalSection(&dev->lock);
     dev->layout = nl;
     dev->dev_layout = dl;
+    /* (the limiter reckoned the 3 ms it holds with the old speakers: it starts again) */
+    if (dev->out_direct != direct || memcmp(dev->out_mtx, mtx, sizeof(mtx))) dev->limiter_rate = 0;
     dev->out_direct = direct;
     memcpy(dev->out_mtx, mtx, sizeof(mtx));
     /* (a new rate too: CMSS upmixers and the EAX filter coefficients are made for the rate) */

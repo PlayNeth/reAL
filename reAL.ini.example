@@ -48,7 +48,8 @@ resampler=sinc
 
 ; fixes: where ALchemy lets through what Windows refuses and it does harm (a zero 3D distance, a Doppler shift or
 ; gain that overflows), reAL refuses or tames it, and reAL's effects fix dsdmo's flaws. A game writing the primary
-; buffer itself gets a play cursor that moves smoothly, not in 10 ms steps. fixes=false (or REAL_NOFIXES in the
+; buffer itself gets a play cursor that moves smoothly, not in 10 ms steps. The output limiter (which turns a mix
+; above full scale down, where it would be clipped) lets no peak through and turns all the speakers down together. fixes=false (or REAL_NOFIXES in the
 ; environment) behaves as ALchemy, dsdmo and Windows 7 do.
 ;fixes=true
 
