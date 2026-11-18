@@ -135,7 +135,7 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
 
 ### waveOut
 
-With reAL's `winmm.dll` next to the game, the game's waveOut sound plays through reAL's mixer, alongside everything else it plays, about 30 ms behind the game. reAL keeps the timing of a device with no latency, so a game that resets its sound to write its mix again from its own clock (Pajama Sam 2 does this ten times a second) plays on smoothly, where Wine's output drops a little at every reset and crackles. Its callbacks come from a thread of reAL's, as on Windows XP, which avoids the hangs some old games have on Windows 10 and 11. Compressed formats are left to Windows' own winmm. The midiOut, MIDI stream and MCI calls still go to Windows' winmm, where `midi=true` catches them as before.
+With reAL's `winmm.dll` next to the game, the game's waveOut sound plays through reAL's mixer, alongside everything else it plays, about 30 ms behind the game. reAL keeps the timing of a device with no latency, so a game that resets its sound to write its mix again from its own clock (Pajama Sam 2 does this ten times a second) plays on smoothly, where Wine's output drops a little at every reset and crackles. Its callbacks come from a thread of reAL's, as on Windows XP, which avoids the hangs some old games have on Windows 10 and 11. Compressed formats (ADPCM, µ-law, MP3: whatever Windows has a codec for) are decoded and play the same way; `waveout=pcm` leaves those to Windows' own winmm. The midiOut, MIDI stream and MCI calls still go to Windows' winmm, where `midi=true` catches them as before.
 
 ### Where reAL differs from ALchemy
 
@@ -180,7 +180,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
 | `music` | `true` uses reDM, reAL's own DirectMusic. |
 | `gmdls` | Another DLS file or SoundFont (`.sf2`) for reDM's instruments. A Linux path works under Wine. |
 | `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` (default `22050`; `auto` renders at the output's rate, unresampled, and follows it if the game changes its format) and `midireverb=` adjust it. Instruments are loaded as the music first uses them, so a large SoundFont isn't held in memory twice. |
-| `waveout` | With reAL's `winmm.dll` next to the game: `true` (default) plays the game's waveOut sound through reAL, `false` leaves it to Windows' (or Wine's). |
+| `waveout` | With reAL's `winmm.dll` next to the game: `true` (default) plays the game's waveOut sound through reAL, `pcm` only its uncompressed streams, `false` leaves it to Windows' (or Wine's). |
 | `speakers` | `auto` (Windows' setup), `stereo`, `headphones`, `quad`, `5.1` or `7.1`. |
 | `cmss`, `cmssintensity` | CMSS-3D upmixing of stereo sounds, and its rear level (`-100` to `99`, `0` is ALchemy's default). |
 | `hrtf` | `auto` (default: a `reAL_hrtf.bin` or `reAL_hrtf.sofa` if there is one, otherwise panning), `builtin` (the MIT KEMAR set), a path to a SOFA file or a `reAL_hrtf.bin` (a Linux path works under Wine), or `off`. |

@@ -52,7 +52,8 @@ typedef struct rl_config {
     int  midi;                  /* reDM GM Synth as the MIDI mapper / an extra MIDI output */
     int  midi_rate;             /* its sample rate; 0 (midirate=auto) the output's */
     int  midi_reverb;           /* reverb send (CC91) through the Waves reverb */
-    int  waveout;               /* reAL's winmm.dll: the game's waveOut through reAL (default on) */
+    int  waveout;               /* reAL's winmm.dll: the game's waveOut through reAL (default on; 2: PCM only,
+                                 * compressed formats left to the system's) */
 } rl_config;
 
 extern rl_config g_cfg;

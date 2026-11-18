@@ -456,8 +456,23 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
   its links back. Once reAL's winmm is the system's, every later run looks after it too. A Wine with only a
   placeholder `winmm.dll` there is refused for the whole-prefix install (`dsound.dll` is installed as usual).
 - `src/waveout.c`: one device ("reAL", also the mapper). Each stream is a looping reAL buffer of a second in the
-  game's format, filled every 5 ms by a thread of its own. Compressed formats (the mapper's ACM conversions) and a
-  stream reAL cannot make open on the system's winmm, and every call on that handle goes there.
+  game's format, filled every 5 ms by a thread of its own. A stream reAL cannot make opens on the system's winmm,
+  and every call on that handle goes there.
+- Compressed formats (anything acmFormatSuggest finds a codec to PCM for, when reAL can play that PCM): the codec
+  is opened with the stream, and waveOutWrite decodes each buffer into one of PCM that the stream plays in its
+  place (freed when the buffer is done or reset). A buffer that does not end on a block of the codec's leaves the
+  rest to go before the next one. waveOutReset resets the codec. Positions are in the game's format, by its rates:
+  bytes = frames * nAvgBytesPerSec / rate, as the mapper reckons. `waveout=pcm` leaves these streams to the
+  system's winmm, as before 1.9.1.
+  - `tests/wocomp.c` (under Wine): a rising tone as mu-law and as IMA ADPCM (the test's own encoders), two seconds
+    in eight buffers. The same positions at the end as with Wine's mapper (IMA ADPCM: 22014 bytes, 43731 samples);
+    recorded, the same tone with the same error (39.0 dB below it for ADPCM, 40.4 for mu-law; Wine's 39.6 and
+    40.6). `wocomp.exe split` cuts the ADPCM buffers at odd places: the same sound. A reset half a second in gives
+    all the buffers back; a loop of two buffers plays three times (Wine's mapper never finishes it).
+  - Only those two formats were run. MP3 and the others take the same path but depend on the system's codecs.
+  - The first stream of a process sometimes takes 250 to 500 ms longer when the output device is slow to start
+    under Wine (PCM too, and before this change): the device was not playing yet. A sound started the moment the
+    device opens loses its first 0.15 to 0.3 s there with Wine's own dsound as well.
 - `src/wavecore.c`, the stream's timeline: an ideal device without latency (its clock I runs with real time while
   the stream plays, buffers laid along it, gaps silent) whose output the mixer plays `delta` later (the mixing period,
   10 ms and the resampler's taps; about 30 ms). A buffer is done, and the position counts, as the ideal device plays

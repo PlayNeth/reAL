@@ -94,7 +94,7 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "midi"))       g_cfg.midi = is_true(val);
     else if (!_stricmp(key, "midirate"))   g_cfg.midi_rate = !_stricmp(val, "auto") ? 0 : clampi(atoi(val), 11025, 48000);
     else if (!_stricmp(key, "midireverb")) g_cfg.midi_reverb = is_true(val);
-    else if (!_stricmp(key, "waveout"))    g_cfg.waveout = is_true(val);
+    else if (!_stricmp(key, "waveout"))    g_cfg.waveout = !_stricmp(val, "pcm") ? 2 : is_true(val);
     else if (!_stricmp(key, "gmdls"))      lstrcpynA(g_cfg.gm_dls, val, MAX_PATH);
     else if (!_stricmp(key, "resampler"))
         g_cfg.resampler = (!_stricmp(val, "linear") || !_stricmp(val, "alchemy")) ? RL_INTERP_LINEAR : RL_INTERP_SINC;

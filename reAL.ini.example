@@ -105,8 +105,9 @@ logeax=false
 ;miditrace=true
 ; waveOut (with reAL's winmm.dll next to the game): the game's waveOut sound plays through reAL, mixed with the
 ; rest, about 30 ms behind the game. A game that resets its sound to write its mix again (Pajama Sam 2) plays on
-; without the gap an output with latency leaves at each reset. waveout=false leaves waveOut to Windows' (or
-; Wine's) winmm; MIDI is still reAL's with midi=true.
+; without the gap an output with latency leaves at each reset. Compressed formats (ADPCM, mu-law, MP3...: those
+; the system has an ACM codec for) are decoded and play the same way; waveout=pcm leaves them to the system's
+; winmm. waveout=false leaves all of waveOut to Windows' (or Wine's) winmm; MIDI is still reAL's with midi=true.
 ;waveout=false
 
 ; per-game examples

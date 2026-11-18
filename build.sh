@@ -120,6 +120,8 @@ rm -f build/eaxtest.lib build/eaxtest.pdb
 $CC -O1 -o build/streamtest.exe tests/streamtest.c -lwinmm -ldsound
 # waveOut through reAL's winmm.dll (put winmm.dll and dsound.dll next to it)
 $CC -O1 -o build/wotest.exe tests/wotest.c -lwinmm
+# compressed formats through waveOut (the same; `split` cuts the buffers anywhere)
+$CC -O1 -o build/wocomp.exe tests/wocomp.c -lwinmm
 $CC -O1 -o build/dmplay.exe tests/dmplay.c -ldsound -lole32 -luuid -ldxguid -ladvapi32
 $CC -O1 -DNO_DSOUND -o build/dmplay_nods.exe tests/dmplay.c -lole32 -luuid -ldxguid -ladvapi32
 $CC -O1 -o build/notiftest.exe tests/notiftest.c -ldsound -lole32 -luuid -ldxguid
