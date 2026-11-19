@@ -77,7 +77,7 @@ for f in $MUSIC_SRCS; do
     $CC $CFLAGS_EXACT -ffp-contract=off -DDM_FPU_NATIVE -Isrc -c -o "$o" "$f"
     OBJS="$OBJS $o"
 done
-# the version, as the DLLs carry it in a version resource
+# the version, as the DLLs and the configurator carry it in a version resource (reALcfg shows which reAL a game has)
 VER=$(sed -n 's/^#define[ \t]*REAL_VERSION[ \t]*"\(.*\)"/\1/p' src/real.h)
 [ -n "$VER" ] || { echo "build.sh: no REAL_VERSION in src/real.h" >&2; exit 1; }
 # (its numbers alone, four of them: "2.0.0-rc1" is 2,0,0,0 there)
@@ -111,6 +111,8 @@ EOF
 }
 version_rc dsound.dll "reAL: DirectSound, EAX and DirectMusic" 2
 version_rc winmm.dll "reAL: waveOut and MIDI through reAL" 2
+version_rc reALcfg.exe "reAL Configurator" 1 '1 24 "../../config/reALcfg.manifest"
+1 ICON "../../config/reALcfg.ico"'
 # (zig cc takes an .rc as it is; a MinGW gcc needs windres to make an object of it: the one named as the compiler
 # is, or $WINDRES)
 res() {
@@ -126,6 +128,7 @@ res() {
 # (each on a line of its own: a failure inside a command's arguments would not stop the build)
 RES_DSOUND=$(res dsound.dll)
 RES_WINMM=$(res winmm.dll)
+RES_CFG=$(res reALcfg.exe)
 
 # shellcheck disable=SC2086
 $CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS $RES_DSOUND src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32 -loleaut32
@@ -138,6 +141,12 @@ $CC -O2 -std=gnu11 -Wall -Wextra -shared -o build/winmm.dll winmm/proxy.c winmm/
 rm -f build/winmm.lib build/winmm.pdb
 echo "built build/winmm.dll"
 
+# the configurator: installs the DLLs beside it into a game's folder, keeps reAL's settings
+# shellcheck disable=SC2086
+$CC -O2 -std=gnu11 -Wall -Wextra -municode -Wl,--subsystem,windows -o build/reALcfg.exe config/reALcfg.c $RES_CFG \
+    $LDFLAGS -lcomctl32 -lcomdlg32 -lshell32 -ladvapi32 -lgdi32 -luxtheme -lversion
+rm -f build/reALcfg.pdb
+echo "built build/reALcfg.exe"
 
 # dstrace: API tracer that sits in front of another dsound.dll (e.g. ALchemy's)
 mkdir -p build/tracer
