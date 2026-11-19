@@ -454,7 +454,8 @@ one C file, no runtime beside it, built by `build.sh` with everything else; it r
   DPI-aware, so Windows does not stretch it blurred); under Wine at 144 the window is half as large again, sharp.
   A second screen of another scale is Windows' to stretch.
 - Its icon (`config/reALcfg.ico`: the AL of the wordmark in white on the marine blue, the bar under it) is drawn
-  at eight sizes by `tools/mkicon.py`.
+  at eight sizes by `tools/mkicon.py`. The README's wordmark (`docs/logo.png`, and `logo-dark.png` for a dark
+  theme) is drawn by `tools/mklogo.py`, in the configurator's colours.
 - Not yet: a database of known games, `[game.exe]` sections and keys outside sections in the files it edits,
   translations.
 

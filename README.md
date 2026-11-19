@@ -1,10 +1,15 @@
-# reAL
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.png">
+    <img src="docs/logo.png" alt="reAL" width="216">
+  </picture>
+</h1>
 
 A drop-in `dsound.dll` that brings back **EAX, 3D audio, surround and DirectMusic** in classic PC games.
 
 reAL is an open reimplementation of **Creative ALchemy**'s `dsound.dll` and of Microsoft's **DirectMusic**. Put it in place of DirectSound and a game gets ALchemy's EAX 1–4 effects and reverb, HRTF 3D audio on headphones, surround up to 7.1 with CMSS-3D upmixing, and, if you want it, a DirectMusic of its own. No Creative hardware or Windows DLLs are needed. It's made for Linux with Wine or Proton, and works on Windows too.
 
-Both halves are checked against the originals: the EAX processing bit for bit against ALchemy, and DirectMusic call for call against Windows XP's DLLs. One `.ini` file, no GUI.
+Both halves are checked against the originals: the EAX processing bit for bit against ALchemy, and DirectMusic call for call against Windows XP's DLLs. Settings live in one `.ini` file, and `reALcfg.exe`, a small configurator, can install reAL into a game and change them for you.
 
 *reAL is an independent project, not affiliated with or endorsed by Creative Technology or Microsoft, and contains none of their files. Creative, ALchemy, EAX, Microsoft, DirectSound and DirectMusic are trademarks of their owners.*
 
@@ -294,10 +299,12 @@ config/     reALcfg, the configurator (one C file, plain Win32)
 tests/      native unit tests, and test programs run under Wine (comcmp.sh and fuzzcmp.py compare them with
             Microsoft's DLLs)
 tools/      RE helpers (pe.py, rtti.py), dmgt (drives Microsoft's DirectMusic offline), sty/ (style, chord map
-            and segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py, dsound-com-redirect*.reg
+            and segment test cases), dsfx/ and i3dl2/ (effect comparisons), hrtf_*.py, dsound-com-redirect*.reg,
+            mkicon.py and mklogo.py (the configurator's icon and the README's wordmark)
 tracer/     dstrace, the DirectSound API tracer
 dmtrace/    dmtrace, the DirectMusic API tracer (gen.py generates its wrappers from the MinGW headers)
-docs/       STATUS.md (what's done, how it's tested), RE notes, vtables.json (every ALchemy class and vtable)
+docs/       STATUS.md (what's done, how it's tested), RE notes, vtables.json (every ALchemy class and vtable),
+            logo*.png (the wordmark)
 ```
 
 [`docs/STATUS.md`](docs/STATUS.md) describes how each part is tested against the originals.
