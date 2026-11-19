@@ -2,7 +2,7 @@
 
 reAL is a personal-use reimplementation of Creative ALchemy's `dsound.dll`, reverse-engineered faithfully,
 with the original's flaws fixed. reDM is its own DirectMusic, built into the same DLL and selected
-with `music=1` in `reAL.ini`. It is a faithful port of Windows XP's dmime, dmusic, dmsynth, dmband and dswave.
+with `redm=1` in `reAL.ini`. It is a faithful port of Windows XP's dmime, dmusic, dmsynth, dmband and dswave.
 
 Ground rules carried through the project:
 - Match Microsoft's behaviour exactly, and check it against Microsoft's own DLLs running under Wine.
@@ -415,6 +415,56 @@ code wasn't read; ALchemy itself, case by case (alprobe) and over 383 + 383 fuzz
 - Fixes (off with `REAL_NOFIXES` / `REDM_NOFIXES`): Echo keeps a PanDelay set before Play
   (`DSFX_FIX_ECHO_PANDELAY`); I3DL2 runs at the quality GetQuality reports (2) until SetQuality, where XP runs at
   half rate (`DSFX_FIX_I3DL2_QUALITY`).
+
+**The configurator** (`config/reALcfg.c`, `build/reALcfg.exe`): what ALchemy's program is to ALchemy. Plain Win32 in
+one C file, no runtime beside it, built by `build.sh` with everything else; it runs on Windows and under Wine.
+- Games page: the list (kept in `%APPDATA%\reAL\reALcfg.ini`, UTF-16), install and uninstall into a game's folder,
+  and per-game overrides in the game's `reAL.ini`, each "(all games)" unless set.
+  - Install looks at everything before it touches anything. A DLL of the game's own is set aside as `.reAL-backup`
+    (never over one set aside before) and put back at once if reAL's cannot be copied, and by uninstall. A
+    `winmm.dll` of reAL's that the game has is brought up to date with `dsound.dll` whether the box is ticked or
+    not. Read-only files (games off a CD) are handled. An exe that is not 32-bit x86 is refused.
+  - Under Wine a per-application override is made only where there is none, noted in the configurator's file, and
+    removed with reAL only if it was made here, is still as it was made, and no other listed game with the same
+    exe name still needs it. One that was there and is not `native` is reported: reAL may not load. Keys left
+    with nothing in them are removed; a key that holds anything else of the user's (winecfg's Windows version
+    for the game) is not.
+  - Which reAL a game has is told by a mark in the DLL (`reAL-version:`), not by its version resource, which the
+    DLLs carry as well: Wine answers a version query for a file named `dsound.dll` with its own DLL's. A reAL from
+    before 2.0 is known as reAL (by `reAL_winmm_bind`, or `reAL.ini` for one before 1.7.1) without its version.
+- Sound, reDM and reAL pages: every key of `reAL.ini`, kept in `%APPDATA%\reAL\reAL.ini`. What shows for a key the
+  user's file has not is what holds without it (`%WINDIR%\reAL.ini`, else reAL's default); a key set to just that,
+  or emptied, is taken out of the file. `music=`, reDM's switch before 2.0, is read and replaced by `redm=` when
+  saved. Paths the system's code page cannot write are refused: reAL reads its ini files in it.
+- The two COM registrations, both of the DLLs beside the configurator: DirectSound's two classes under the user's
+  `Software\Classes\CLSID` (undone only where they point, by a full path, at a reAL or at a file that is gone), and `reDM.dll`, a
+  copy of `dsound.dll`, registered through `regsvr32 /s` (elevated on Windows), whose exit code is reported.
+- The manifest asks to run as the user who starts it, which also keeps Windows from quietly redirecting writes
+  into a protected folder.
+- The colours and the font are the system's; on a dark scheme (Wine) the visual styles are left off, since they
+  would draw light controls on it.
+- Tested under Wine in a scratch prefix by driving the controls: install (with and without `winmm.dll`, over a
+  read-only DLL of the game's own, twice in a row), uninstall with the backup put back, the overrides and their
+  note, saving both kinds of settings (a key set, set back, emptied; `music=` replaced), the reDM registration
+  and its undoing.
+  Not run: on Windows itself; the COM redirect (Windows only); the file dialogs; switching pages by mouse (each
+  page was opened by its command-line switch); a MinGW build of the resources (`windres`; the zig build is the
+  one that was made).
+- Its sizes are for 96 dots per inch and are scaled to the screen's as it starts (the manifest says it is
+  DPI-aware, so Windows does not stretch it blurred); under Wine at 144 the window is half as large again, sharp.
+  A second screen of another scale is Windows' to stretch.
+- Its icon (`config/reALcfg.ico`: the AL of the wordmark in white on the marine blue, the bar under it) is drawn
+  at eight sizes by `tools/mkicon.py`.
+- Not yet: a database of known games, `[game.exe]` sections and keys outside sections in the files it edits,
+  translations.
+
+**The user's own ini**: `%APPDATA%\reAL\reAL.ini` (opened by its wide name: a user's name may hold letters the
+system's code page has not). `rl_config_load` reads what the machine's file (`%WINDIR%\reAL.ini`) has for every
+game, then what the user's has, then the `[game.exe]` sections of both, then the files beside the DLL and the
+game as before. So settings for every game need no administrator, and do not undo what either file holds for one
+game. Under Wine: machine `[exe]` 15 and `[default]` 30 with the user's `[default]` 40 gives the game its 15;
+the user's `[exe]` beats both; the game's own file beats all. `redm=` is the key that turns reDM on; `music=`,
+its name before 2.0, is still understood.
 
 **waveOut (reAL's `winmm.dll`)**
 - `winmm.dll` (`winmm/`): Windows 11's 193 exports, each a jump to the system's winmm (`winmm/gen.py` makes the

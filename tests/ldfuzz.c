@@ -4,7 +4,7 @@
  * motifs and patterns; a chord map through the composer; a script's Init, every routine and variable; a container's
  * objects; an audiopath configuration as an audiopath; a collection's instruments.  <dir>: segments, styles, chord
  * maps, scripts, containers, configurations and collections (tools/sty/cases.py <dir> writes a set; `ext` keeps to
- * one kind, "spt" say).  Run with reAL's dsound.dll next to it and music=1, the fixes on.
+ * one kind, "spt" say).  Run with reAL's dsound.dll next to it and redm=1, the fixes on.
  * A crash prints "CRASH ..." with the module and reAL's return addresses, a call that takes over 25 s "HANG", a
  * damaged heap "HEAP" (WINEDEBUG=warn+heap makes Wine check every block), and the process ends; the input in hand is
  * cur.bin, its seed file in cur.txt.  tools/fuzz/wine.sh runs it in rounds and keeps those.  The file parsers alone,

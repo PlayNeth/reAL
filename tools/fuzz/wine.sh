@@ -4,7 +4,7 @@
 # BUILD: where dsound.dll and ldfuzz.exe are (default ./build); WINEPREFIX as set.
 C=$(cd "$1" && pwd); D=$2; mkdir -p "$D/found"; D=$(cd "$D" && pwd); B=${BUILD:-build}
 cp "$B/dsound.dll" "$B/ldfuzz.exe" "$D/" || exit 1
-printf '[default]\nlog=0\nmusic=1\n' > "$D/reAL.ini"
+printf '[default]\nlog=0\nredm=1\n' > "$D/reAL.ini"
 cd "$D" || exit 1
 end=$(( $(date +%s) + $3 )); n=0; bad=0
 while [ "$(date +%s)" -lt "$end" ]; do

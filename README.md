@@ -56,6 +56,16 @@ Put `dsound.dll` next to the game's exe. Don't replace the one in `System32` or 
 
 > **Games that create DirectSound through COM** (`CoCreateInstance`; Hot Wheels: Beat That!, for one) load Windows' own `dsound.dll` and never see the one next to them. For those, set the two paths in `tools/dsound-com-redirect.reg` to your `dsound.dll` and double-click it. It points DirectSound's COM classes at reAL for your Windows user, so it also applies to any other 32-bit program of yours that does the same (few do). It doesn't apply to programs run as administrator. `tools/dsound-com-redirect-undo.reg` removes it.
 
+### The configurator
+
+`reALcfg.exe` from the release does the installing for you, on Windows and under Wine. Keep it in a folder with reAL's `dsound.dll` and `winmm.dll`: those are the ones it installs.
+
+- **Games:** add a game's exe to the list, then *Install reAL* copies `dsound.dll` into its folder (and `winmm.dll`, with the box ticked, for [waveOut games](#waveout-games)); *Uninstall* takes them out again. A `dsound.dll` (or `winmm.dll`) the game had of its own is set aside as `dsound.dll.reAL-backup` and put back. Under Wine it also sets the game's DLL overrides, and removes those it set; an override that was there already is left as it is. The list says which reAL each game has. Below it are the few settings a game may need otherwise than the rest; they go into the `reAL.ini` in the game's folder. 64-bit games are refused: reAL is 32-bit, as ALchemy is.
+- **Sound, reDM, reAL:** all of reAL's [settings](#settings), for every game. They are kept in `%APPDATA%\reAL\reAL.ini`, with only what differs from what holds without that file written (reAL's defaults, or `C:\windows\reAL.ini` where that sets something).
+- **reAL** also has the two registrations that are the Windows user's and not one game's: DirectSound made through COM pointed at reAL (what `tools/dsound-com-redirect.reg` does by hand; Windows only), and `reDM.dll` registered as DirectMusic's server (see [DirectMusic](#directmusic-redm); Windows asks for administrator rights for this one). Both point at the DLLs beside the configurator: undo them before moving or deleting that folder, and register `reDM.dll` again after putting a newer reAL there.
+
+The game's folder has to be writable: for a game under `Program Files`, run the configurator as administrator. If that administrator is another account than yours, the list of games, the settings for every game and the COM redirect are that account's, not yours; the DLLs and the game's own `reAL.ini` are the game's either way. It reads and writes the `[default]` section of an ini file: keys a hand-written file has outside any section, or in a `[game.exe]` section, are reAL's to read but do not show. It follows the system's colours, a dark scheme under Wine included, sizes itself for the screen's scale, and is in English.
+
 ### waveOut games
 
 Some games never use DirectSound and play through Windows' waveOut functions instead (Pajama Sam 2, for one). For those, `winmm.dll` from the release goes next to the game's exe as well; it loads reAL and plays the game's waveOut sound through it.
@@ -71,6 +81,7 @@ Set `log=1` in `reAL.ini` and start the game. `reAL.log` appears next to the gam
 ## Uninstalling
 
 - **Wine / Proton:** `WINEPREFIX=~/Games/foo ./install.sh --uninstall` puts Wine's `dsound.dll` (and `winmm.dll`, if `--winmm` replaced it) back and removes the global overrides. Per-game overrides made with `--app` or `--winmm` stay, but fall back to Wine's DLLs. Delete any `winmm.dll` you put next to a game.
+- **With the configurator:** pick the game and *Uninstall*; on the reAL page, *Undo* and *Unregister* if you used those. Its list of games and the settings for every game are in `%APPDATA%\reAL`; delete that folder to leave nothing behind.
 - **Windows:** delete `dsound.dll` (and `winmm.dll`, if you added it) from the game's folder. If you used the COM redirect, run `dsound-com-redirect-undo.reg`. If you registered `reDM.dll` (see [DirectMusic](#directmusic-redm)), run `regsvr32 /u` on it.
 - You can also delete `reAL.ini`, `reAL.log` and `reAL_hrtf.bin`.
 
@@ -78,7 +89,7 @@ Set `log=1` in `reAL.ini` and start the game. `reAL.log` appears next to the gam
 
 ## What it does
 
-reAL has two halves in one DLL. The DirectSound side is the ALchemy reimplementation, and **reDM** is its own DirectMusic, a port of Windows XP's, switched on with `music=true`. Both are complete.
+reAL has two halves in one DLL. The DirectSound side is the ALchemy reimplementation, and **reDM** is its own DirectMusic, a port of Windows XP's, switched on with `redm=true`. Both are complete.
 
 ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectSound to OpenAL. Everywhere else, Wine included, it runs Creative's own software renderer straight to WASAPI: HRTF, CMSS-3D, the "HRvb" reverb and all the EAX 4 effects. That second engine is the sound reAL recreates, so reAL is **its own mixer playing through WASAPI**, not another OpenAL wrapper. [`docs/alchemy-re-notes.md`](docs/alchemy-re-notes.md) has the details.
 
@@ -115,7 +126,7 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
 
 ### DirectMusic (reDM)
 
-`music=true` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except the General MIDI collection, and `gmdls=` can point at another DLS file or a SoundFont instead.
+`redm=true` makes reAL answer for DirectMusic itself. It needs nothing from Microsoft except the General MIDI collection, and `gmdls=` can point at another DLS file or a SoundFont instead.
 
 - **What's covered:**
   - the loader with its cache, containers and MIDI files;
@@ -127,7 +138,7 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
   - styles, chord maps and the composer;
   - scripts: AudioVBScript, VBScript, JScript and the script track.
 - **Checked against Microsoft's DLLs:** test programs run against both and their output is compared line by line, and offline captures are compared event by event.
-- **When reAL takes over:** when the game loads `dsound.dll`, which nearly every game does before its music starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reDM.dll` and register it with `regsvr32` (under Wine, `wine regsvr32`). Games with `music=true` get reDM, and every other program is handed to the DirectMusic registered before.
+- **When reAL takes over:** when the game loads `dsound.dll`, which nearly every game does before its music starts. For a game that creates DirectMusic first, copy `dsound.dll` to `reDM.dll` and register it with `regsvr32` (under Wine, `wine regsvr32`). Games with `redm=true` get reDM, and every other program is handed to the DirectMusic registered before.
 
 ### MIDI music
 
@@ -167,17 +178,19 @@ reDM fixes Microsoft's DirectMusic bugs the same way; `REDM_NOFIXES` in the envi
 
 reAL reads `reAL.ini` from these places, later ones winning:
 
-1. `C:\windows\reAL.ini` (in a Wine prefix, `drive_c/windows/reAL.ini`);
-2. `dsound.ini` next to `dsound.dll`, in ALchemy's format;
-3. `reAL.ini` in the game's folder;
-4. the file named by the `REAL_INI` environment variable.
+1. `C:\windows\reAL.ini` (in a Wine prefix, `drive_c/windows/reAL.ini`), for every game on the machine;
+2. `%APPDATA%\reAL\reAL.ini`, the user's own, which needs no administrator to write (the configurator keeps the settings for every game there);
+3. the `[game.exe]` sections of those two, so that what they hold for one game is not undone by the user's settings for all;
+4. `dsound.ini` next to `dsound.dll`, in ALchemy's format;
+5. `reAL.ini` in the game's folder;
+6. the file named by the `REAL_INI` environment variable.
 
 Keys in `[default]` apply to every game, and a `[game.exe]` section overrides them for that game. [`reAL.ini.example`](reAL.ini.example) explains every key. The common ones:
 
 | Setting | What it does |
 |---|---|
 | `log` | `0` off, `1` info, `2` API calls, `3` everything (very verbose). With `1` or more, refused calls are logged too. |
-| `music` | `true` uses reDM, reAL's own DirectMusic. |
+| `redm` | `true` uses reDM, reAL's own DirectMusic. (`music` before 2.0, still understood.) |
 | `gmdls` | Another DLS file or SoundFont (`.sf2`) for reDM's instruments. A Linux path works under Wine. |
 | `midi` | `true` plays the game's MIDI music through reDM's GM synth. `midirate=` (default `22050`; `auto` renders at the output's rate, unresampled, and follows it if the game changes its format) and `midireverb=` adjust it. Instruments are loaded as the music first uses them, so a large SoundFont isn't held in memory twice. |
 | `waveout` | With reAL's `winmm.dll` next to the game: `true` (default) plays the game's waveOut sound through reAL, `pcm` only its uncompressed streams, `false` leaves it to Windows' (or Wine's). |
@@ -213,7 +226,7 @@ Keys in `[default]` apply to every game, and a `[game.exe]` section overrides th
   - Under Wine: run `install.sh` again (a Wine or Proton update puts Wine's DLL back), or check the `dsound=n,b` override.
   - On Windows: the game may create DirectSound through COM; use the COM redirect (see [Installing](#windows)). The redirect doesn't apply to games run as administrator.
 - **A game misbehaves or crashes:** set `log=1` and look for `refused:` lines in `reAL.log`. Each one is a DirectSound call reAL turned down, with its arguments and where in the game it came from. A game seldom expects a call that works on Windows to fail, so these are the first place to look. Please report problems with the log.
-- **No DirectMusic music:** set `music=true` for that game. If the game creates DirectMusic before loading `dsound.dll`, register `reDM.dll` (see [DirectMusic](#directmusic-redm)). The log says which GM collection was loaded; if none was found, set `gmdls=`.
+- **No DirectMusic music:** set `redm=true` for that game. If the game creates DirectMusic before loading `dsound.dll`, register `reDM.dll` (see [DirectMusic](#directmusic-redm)). The log says which GM collection was loaded; if none was found, set `gmdls=`.
 - **Microsoft's DirectMusic under Wine** (`winetricks directmusic`) needs two private DirectSound interfaces that Wine's dsound lacks. reAL passes them to the real dsound, so point `realdsound=` at Microsoft's `dsound.dll` for those games, or use reDM instead.
 - **No MIDI music** in an older game: try `midi=true`.
 - **Crackling or stutter:** raise `latency=`, or `buffers` / `duration` for that game.
@@ -277,6 +290,7 @@ src/        the DLL (C11, Win32 COM by hand)
   fx.c, dsfx.c, i3dl2.c                 DirectSound effects (SetFX)
   refused.c            the log of refused calls
   music/               reDM: engine (dm*.c), synth (msynth.c), DLS / SoundFont, COM layer (dmcom*.c)
+config/     reALcfg, the configurator (one C file, plain Win32)
 tests/      native unit tests, and test programs run under Wine (comcmp.sh and fuzzcmp.py compare them with
             Microsoft's DLLs)
 tools/      RE helpers (pe.py, rtti.py), dmgt (drives Microsoft's DirectMusic offline), sty/ (style, chord map

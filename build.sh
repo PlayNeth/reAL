@@ -77,16 +77,67 @@ for f in $MUSIC_SRCS; do
     $CC $CFLAGS_EXACT -ffp-contract=off -DDM_FPU_NATIVE -Isrc -c -o "$o" "$f"
     OBJS="$OBJS $o"
 done
+# the version, as the DLLs carry it in a version resource
+VER=$(sed -n 's/^#define[ \t]*REAL_VERSION[ \t]*"\(.*\)"/\1/p' src/real.h)
+[ -n "$VER" ] || { echo "build.sh: no REAL_VERSION in src/real.h" >&2; exit 1; }
+# (its numbers alone, four of them: "2.0.0-rc1" is 2,0,0,0 there)
+VERNUM=$(echo "$VER" | sed 's/[^0-9.].*//' | awk -F. '{ printf "%d,%d,%d,%d", $1, $2, $3, $4 }')
+version_rc() {      # file name, description, type (1: a program; 2: a DLL), a line to go before
+    cat > "build/obj/$1.rc" <<EOF
+$4
+1 VERSIONINFO
+FILEVERSION $VERNUM
+PRODUCTVERSION $VERNUM
+FILEOS 0x4
+FILETYPE $3
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "FileDescription", "$2"
+      VALUE "FileVersion", "$VER"
+      VALUE "ProductName", "reAL"
+      VALUE "ProductVersion", "$VER"
+      VALUE "OriginalFilename", "$1"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END
+EOF
+}
+version_rc dsound.dll "reAL: DirectSound, EAX and DirectMusic" 2
+version_rc winmm.dll "reAL: waveOut and MIDI through reAL" 2
+# (zig cc takes an .rc as it is; a MinGW gcc needs windres to make an object of it: the one named as the compiler
+# is, or $WINDRES)
+res() {
+    case "$CC" in *zig*) echo "build/obj/$1.rc"; return ;; esac
+    if [ -z "$WINDRES" ]; then
+        case "$CC" in
+        *gcc) WINDRES=$(echo "$CC" | awk '{ print $NF }' | sed 's/gcc$/windres/') ;;
+        *) echo "build.sh: set WINDRES to the resource compiler that goes with $CC" >&2; return 1 ;;
+        esac
+    fi
+    $WINDRES --include-dir build/obj -i "build/obj/$1.rc" -o "build/obj/$1.res.o" && echo "build/obj/$1.res.o"
+}
+# (each on a line of its own: a failure inside a command's arguments would not stop the build)
+RES_DSOUND=$(res dsound.dll)
+RES_WINMM=$(res winmm.dll)
+
 # shellcheck disable=SC2086
-$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32 -loleaut32
+$CC $CFLAGS -shared -o build/dsound.dll $SRCS $OBJS $RES_DSOUND src/dsound.def $LDFLAGS -lole32 -luuid -lwinmm -ladvapi32 -ldxguid -lmsacm32 -loleaut32
 rm -f build/dsound.lib build/dsound.pdb build/dllmain.lib
 echo "built build/dsound.dll"
 
 # winmm.dll: reAL's proxy for games that play waveOut (and MIDI) without DirectSound (winmm/gen.py makes its tables)
 # shellcheck disable=SC2086
-$CC -O2 -std=gnu11 -Wall -Wextra -shared -o build/winmm.dll winmm/proxy.c winmm/stubs.S winmm/winmm.def $LDFLAGS
+$CC -O2 -std=gnu11 -Wall -Wextra -shared -o build/winmm.dll winmm/proxy.c winmm/stubs.S $RES_WINMM winmm/winmm.def $LDFLAGS
 rm -f build/winmm.lib build/winmm.pdb
 echo "built build/winmm.dll"
+
 
 # dstrace: API tracer that sits in front of another dsound.dll (e.g. ALchemy's)
 mkdir -p build/tracer

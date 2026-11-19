@@ -1,11 +1,14 @@
 /* reAL configuration.
  *
  * Sources, lowest to highest priority:
- *   1. %WINDIR%\reAL.ini      keys outside sections and [default]
- *   2. %WINDIR%\reAL.ini      [<game>.exe]  (case-insensitive)
- *   3. <dir of this dll>\dsound.ini   (ALchemy-compatible flat key=value file; reAL keys work too)
- *   4. <dir of the game exe>\reAL.ini (same format as 1-2)
- *   5. environment: REAL_LOG=<0-3>, REAL_INI=<path to an extra ini, highest priority>
+ *   1. %WINDIR%\reAL.ini             keys outside sections and [default]: the machine's, for every game
+ *   2. %APPDATA%\reAL\reAL.ini       the same of the user's own file (no administrator needed to write it;
+ *                                    reALcfg keeps the settings for every game there)
+ *   3. %WINDIR%\reAL.ini, then %APPDATA%\reAL\reAL.ini   [<game>.exe]  (case-insensitive): what one game needs
+ *                                    otherwise, which the settings for every game do not undo
+ *   4. <dir of this dll>\dsound.ini   (ALchemy-compatible flat key=value file; reAL keys work too)
+ *   5. <dir of the game exe>\reAL.ini (keys outside sections, [default] and [<game>.exe], in the file's order)
+ *   6. environment: REAL_LOG=<0-3>, REAL_INI=<path to an extra ini, highest priority>
  */
 #include "real.h"
 #include "eax4dsp.h"
@@ -84,7 +87,7 @@ static void apply(const char *key, const char *val)
     else if (!_stricmp(key, "logeax"))     g_cfg.log_eax = is_true(val);
     else if (!_stricmp(key, "logfile"))    lstrcpynA(g_cfg.log_file, val, MAX_PATH);
     else if (!_stricmp(key, "realdsound")) lstrcpynA(g_cfg.real_dsound, val, MAX_PATH);
-    else if (!_stricmp(key, "music")) {
+    else if (!_stricmp(key, "redm") || !_stricmp(key, "music")) {       /* (music: its name before 2.0) */
         g_cfg.music = is_true(val);
         if (s_cur_file) snprintf(s_music_from, sizeof(s_music_from), "%s%s%s%s", s_cur_file,
                                  s_cur_section && s_cur_section[0] ? " [" : "", s_cur_section ? s_cur_section : "",
@@ -119,15 +122,16 @@ static void apply(const char *key, const char *val)
 
 /* exe_section: section name that also applies ("" = only global keys).
  * Keys outside any section and in [default] always apply. */
-static int load_file(const char *path, const char *exe_section)
+/* a file's keys applied.  which: 0 all that hold for this game, in the file's order; 1 those for every game alone
+ * (outside sections and [default]); 2 this game's section alone.  0: there is no such file */
+static int load_stream(FILE *f, const char *path, const char *exe_section, int which)
 {
     char section[128] = "";
+    if (!f) return 0;
     s_cur_file = path;
     s_cur_section = section;
-    FILE *f = fopen(path, "r");
-    if (!f) return 0;
     char line[1024];
-    int active = 1; /* outside a section: global */
+    int active = which != 2; /* outside a section: global */
     while (fgets(line, sizeof(line), f)) {
         char *s = trim(line);
         if (!*s || *s == ';' || *s == '#') continue;
@@ -136,7 +140,7 @@ static int load_file(const char *path, const char *exe_section)
             if (e) *e = 0;
             const char *name = s + 1;
             lstrcpynA(section, name, sizeof(section));
-            active = !_stricmp(name, "default") || (exe_section[0] && !_stricmp(name, exe_section));
+            active = (which != 2 && !_stricmp(name, "default")) || (which != 1 && exe_section[0] && !_stricmp(name, exe_section));
             continue;
         }
         if (!active) continue;
@@ -149,6 +153,22 @@ static int load_file(const char *path, const char *exe_section)
     s_cur_file = s_cur_section = NULL;
     return 1;
 }
+static int load_file(const char *path, const char *exe_section, int which)
+{
+    return load_stream(fopen(path, "r"), path, exe_section, which);
+}
+
+/* %APPDATA%\reAL\reAL.ini: opened by its wide name (a user's name may hold letters the system's code page has
+ * not); `shown` is the name for the log (MAX_PATH + 32 chars) */
+static int load_user(char *shown, const char *exe_section, int which)
+{
+    WCHAR w[MAX_PATH + 32];
+    const DWORD len = GetEnvironmentVariableW(L"APPDATA", w, MAX_PATH);
+    if (!len || len >= MAX_PATH) return 0;
+    lstrcatW(w, L"\\reAL\\reAL.ini");
+    if (!WideCharToMultiByte(CP_ACP, 0, w, -1, shown, MAX_PATH + 32, NULL, NULL)) lstrcpyA(shown, "%APPDATA%\\reAL\\reAL.ini");
+    return load_stream(_wfopen(w, L"r"), shown, exe_section, which);
+}
 
 static void dir_of(char *path)
 {
@@ -157,7 +177,7 @@ static void dir_of(char *path)
     if (p) p[1] = 0; else path[0] = 0;
 }
 
-static char s_loaded[4][MAX_PATH];
+static char s_loaded[5][MAX_PATH];
 
 void rl_config_load(void)
 {
@@ -170,26 +190,30 @@ void rl_config_load(void)
     const char *base = strrchr(exe, '\\');
     lstrcpynA(exe_name, base ? base + 1 : exe, MAX_PATH);
 
+    /* the machine's file and the user's: what they have for every game, then what they have for this one */
     int n = 0;
-    UINT len = GetWindowsDirectoryA(path, MAX_PATH);
-    if (len && len < MAX_PATH) {
-        lstrcatA(path, "\\reAL.ini");
-        if (load_file(path, exe_name)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
-    }
+    char machine[MAX_PATH + 32], user[MAX_PATH + 32];
+    UINT len = GetWindowsDirectoryA(machine, MAX_PATH);
+    if (len && len < MAX_PATH) lstrcatA(machine, "\\reAL.ini"); else machine[0] = 0;
+    if (machine[0] && load_file(machine, exe_name, 1)) lstrcpynA(s_loaded[n++], machine, MAX_PATH);
+    if (load_user(user, exe_name, 1)) lstrcpynA(s_loaded[n++], user, MAX_PATH);
+    if (machine[0]) load_file(machine, exe_name, 2);
+    load_user(user, exe_name, 2);
+
 
     path[0] = 0;
     GetModuleFileNameA(g_self, path, MAX_PATH);
     path[MAX_PATH - 1] = 0;
     dir_of(path);
     lstrcatA(path, "dsound.ini");
-    if (load_file(path, exe_name)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
+    if (load_file(path, exe_name, 0)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
 
     lstrcpynA(path, exe, MAX_PATH);
     dir_of(path);
     lstrcatA(path, "reAL.ini");
-    if (load_file(path, exe_name)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
+    if (load_file(path, exe_name, 0)) lstrcpynA(s_loaded[n++], path, MAX_PATH);
 
-    if (GetEnvironmentVariableA("REAL_INI", path, MAX_PATH) && load_file(path, exe_name))
+    if (GetEnvironmentVariableA("REAL_INI", path, MAX_PATH) && load_file(path, exe_name, 0))
         lstrcpynA(s_loaded[n++], path, MAX_PATH);
     if (GetEnvironmentVariableA("REAL_NOFIXES", NULL, 0)) g_cfg.fixes = 0;
     eax4dsp_fixes = eax_fixes = g_cfg.fixes;    /* (the EAX code is built without the config: eax4dsp.h, eax.h) */
@@ -211,7 +235,10 @@ void rl_config_load(void)
     }
 
     rl_log_init();
-    LOG_INFO("reAL " REAL_VERSION " (" REAL_BUILD ") loaded into %s", exe);
+    /* (reALcfg finds the version in the file by this mark: a version resource cannot be relied on for it, since
+     * Wine answers for a file named dsound.dll with its own DLL's) */
+    static const char mark[] = "reAL-version:" REAL_VERSION;
+    LOG_INFO("reAL %s (" REAL_BUILD ") loaded into %s", mark + sizeof("reAL-version:") - 1, exe);
     for (int i = 0; i < n; i++) LOG_INFO("  config: %s", s_loaded[i]);
     char outrate[16];
     if (g_cfg.out_rate > 0) snprintf(outrate, sizeof(outrate), "%d", g_cfg.out_rate);
@@ -232,7 +259,7 @@ void rl_config_load(void)
                  g_cfg.speakers == RL_LAYOUT_QUAD ? "quad" : g_cfg.headphones == 1 ? "headphones" : "stereo");
     if (g_cfg.cmss)
         LOG_INFO("  cmss=on cmssintensity=%d", g_cfg.cmss_intensity);
-    LOG_INFO("  music=%d (set by %s) gmdls=%s", g_cfg.music, s_music_from, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
+    LOG_INFO("  redm=%d (set by %s) gmdls=%s", g_cfg.music, s_music_from, g_cfg.gm_dls[0] ? g_cfg.gm_dls : "(system gm.dls)");
     if (g_cfg.midi || g_cfg.midi_trace)
         LOG_INFO("  midi=%d midirate=%s%.0d midireverb=%d miditrace=%d", g_cfg.midi, g_cfg.midi_rate ? "" : "auto",
                  g_cfg.midi_rate, g_cfg.midi_reverb, g_cfg.midi_trace);
