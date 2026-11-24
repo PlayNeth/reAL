@@ -125,6 +125,8 @@ struct dm_host {
     LARGE_INTEGER qpf, qlast;
     rtime_t rt0, lastclock;
     int64_t played, written;
+    int64_t mlast;                      /* dm_host_midi: the last message's sample */
+    LARGE_INTEGER mq;                   /* and when it came (QPC; 0: none yet) */
     DWORD lastcur;
     /* threads */
     HANDLE th[3], ev[2], quit;
@@ -727,12 +729,30 @@ void dm_host_set_volume(dm_host *h, int32_t mb)
 }
 
 /* a MIDI message played as soon as possible: stamped at the play position plus the sink's lead, so messages keep
- * their relative timing (no quantising to sink passes); never before what has been rendered already */
+ * their relative timing (no quantising to sink passes); never before what has been rendered already.
+ * The play position comes from the device's cursor, which can move in steps of a period or more (Wine's), and
+ * host_clock never goes back: after a step it can stand still for some milliseconds, and messages that came that
+ * far apart would land on the same sample (a drum's note-off a few ms after its note-on releasing it before it is
+ * heard).  So a message is never stamped closer to the one before it than 7/8 of the real time between them,
+ * as long as that keeps it within 20 ms past the stamp the clock gives (while messages keep coming it comes back
+ * to that by 1/8 of the time that passes; one after a pause long enough is stamped by the clock again). */
 void dm_host_midi(dm_host *h, const uint8_t *msg, uint32_t len)
 {
     host_enter(h);
     int64_t t = (host_clock(h) - h->rt0) * h->rate / 10000000 + (int64_t)h->rate * AHEAD_MS / 1000;
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    if (h->mq.QuadPart) {
+        int64_t gap = (int64_t)((double)(q.QuadPart - h->mq.QuadPart) * h->rate / (double)h->qpf.QuadPart);
+        if (gap < 0) gap = 0;
+        int64_t keep = h->mlast + gap - gap / 8;
+        int64_t most = t + (int64_t)h->rate / 50;
+        if (keep > most) keep = most;
+        if (t < keep) t = keep;
+    }
     if (t < h->written) t = h->written;
+    h->mlast = t;
+    h->mq = q;
     msynth_midi(h->syn, t, msg, len, 1);
     host_leave(h);
 }
