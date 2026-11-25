@@ -785,6 +785,66 @@ static MMRESULT WINAPI hs_pos(HMIDISTRM h, LPMMTIME t, UINT sz)
 }
 
 /* ------------------------------------------------------------------ MCI */
+/* Wine's MCI sequencer (mciseq.dll) times a file's events with GetTickCount and Sleep, and GetTickCount moves in
+ * steps (of 8 to 16 ms in some Wine versions): events a few milliseconds apart go out together, a drum's note-off
+ * 9 ms after its note-on with it (Pacmania 2), and the drum is released before it is heard.  Under Wine and with
+ * midi=true the sequencer's GetTickCount (its import of it, nothing else's) is a count of milliseconds from
+ * QueryPerformanceCounter instead, from where GetTickCount was.  On Windows nothing changes. */
+static int s_wine;
+static LARGE_INTEGER s_tq0, s_tqf;
+static DWORD s_tt0;
+static DWORD WINAPI seq_ticks(void)
+{
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return s_tt0 + (DWORD)((q.QuadPart - s_tq0.QuadPart) * 1000 / s_tqf.QuadPart);
+}
+/* a module's import of dll!fn now goes to `to`: 1, or 2 if it did already (0: no such import, -1: it could not be
+ * written) */
+static int patch_import(HMODULE m, const char *dll, const char *fn, void *to)
+{
+    BYTE *b = (BYTE *)m;
+    IMAGE_DOS_HEADER *d = (IMAGE_DOS_HEADER *)b;
+    if (d->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(b + d->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
+    IMAGE_DATA_DIRECTORY *dd = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dd->VirtualAddress) return 0;
+    for (IMAGE_IMPORT_DESCRIPTOR *id = (IMAGE_IMPORT_DESCRIPTOR *)(b + dd->VirtualAddress); id->Name; id++) {
+        if (_stricmp((const char *)(b + id->Name), dll) || !id->OriginalFirstThunk) continue;
+        IMAGE_THUNK_DATA *on = (IMAGE_THUNK_DATA *)(b + id->OriginalFirstThunk), *ft = (IMAGE_THUNK_DATA *)(b + id->FirstThunk);
+        for (; on->u1.AddressOfData; on++, ft++) {
+            if (IMAGE_SNAP_BY_ORDINAL(on->u1.Ordinal)) continue;
+            if (strcmp((const char *)((IMAGE_IMPORT_BY_NAME *)(b + on->u1.AddressOfData))->Name, fn)) continue;
+            if ((void *)ft->u1.Function == to) return 2;
+            DWORD old, was;
+            if (!VirtualProtect(&ft->u1.Function, sizeof(ft->u1.Function), PAGE_EXECUTE_READWRITE, &old)) return -1;
+            InterlockedExchangePointer((void **)&ft->u1.Function, to);
+            VirtualProtect(&ft->u1.Function, sizeof(ft->u1.Function), old, &was);
+            return 1;
+        }
+    }
+    return 0;
+}
+/* (before an MCI call, once: in Wine's winmm the sequencer, mciseq.dll, is loaded by the first open of one and let
+ * go after the last close.  reAL loads it itself and keeps it, so it is patched once, before it plays anything, and
+ * stays so.) */
+static void seq_clock(void)
+{
+    static volatile LONG s_state;       /* 0: not yet, 1: being done, 2: done */
+    if (!s_wine || s_state == 2) return;
+    if (InterlockedCompareExchange(&s_state, 1, 0)) {      /* another thread is at it: wait, so no song starts first */
+        while (s_state != 2) Sleep(0);
+        return;
+    }
+    HMODULE m = LoadLibraryA("mciseq.dll");
+    int r = m ? patch_import(m, "kernel32.dll", "GetTickCount", (void *)seq_ticks) : -2;
+    if (r > 0) LOG_INFO("midi: Wine's MCI sequencer times its events by reAL's millisecond clock");
+    else LOG_INFO("midi: Wine's MCI sequencer keeps its own clock (%s)",
+                  r == -2 ? "no mciseq.dll" : r == -1 ? "its imports cannot be written" : "it does not import GetTickCount");
+    InterlockedExchange(&s_state, 2);
+}
+
 static MCIERROR (WINAPI *m_cmdA)(MCIDEVICEID, UINT, DWORD_PTR, DWORD_PTR);
 static MCIERROR (WINAPI *m_cmdW)(MCIDEVICEID, UINT, DWORD_PTR, DWORD_PTR);
 static MCIERROR (WINAPI *m_strA)(LPCSTR, LPSTR, UINT, HWND);
@@ -831,18 +891,21 @@ static void mci_log(const char *fn, MCIDEVICEID id, UINT m, DWORD_PTR fl, DWORD_
 }
 static MCIERROR WINAPI hm_cmdA(MCIDEVICEID id, UINT m, DWORD_PTR fl, DWORD_PTR p)
 {
+    seq_clock();
     ENTER(); MCIERROR r = m_cmdA(id, m, fl, p); LEAVE();
     mci_log("mciSendCommandA", id, m, fl, p, r, 0, _d);
     return r;
 }
 static MCIERROR WINAPI hm_cmdW(MCIDEVICEID id, UINT m, DWORD_PTR fl, DWORD_PTR p)
 {
+    seq_clock();
     ENTER(); MCIERROR r = m_cmdW(id, m, fl, p); LEAVE();
     mci_log("mciSendCommandW", id, m, fl, p, r, 1, _d);
     return r;
 }
 static MCIERROR WINAPI hm_strA(LPCSTR cmd, LPSTR ret, UINT n, HWND w)
 {
+    seq_clock();
     ENTER(); MCIERROR r = m_strA(cmd, ret, n, w); LEAVE();
     if (g_cfg.log_level >= 3 || r || !cmd || _strnicmp(cmd, "status", 6))
         TRACE("midi: %smciSendStringA(\"%s\") -> %lu \"%s\"", IND, cmd ? cmd : "", (unsigned long)r, ret && n && !r ? ret : "");
@@ -850,6 +913,7 @@ static MCIERROR WINAPI hm_strA(LPCSTR cmd, LPSTR ret, UINT n, HWND w)
 }
 static MCIERROR WINAPI hm_strW(LPCWSTR cmd, LPWSTR ret, UINT n, HWND w)
 {
+    seq_clock();
     ENTER(); MCIERROR r = m_strW(cmd, ret, n, w); LEAVE();
     char c[300] = "", o[200] = "";
     if (cmd) WideCharToMultiByte(CP_ACP, 0, cmd, -1, c, sizeof(c), NULL, NULL);
@@ -888,6 +952,12 @@ void rl_midi_hook(int can_load)
     InitializeCriticalSection(&s_mcs);
     InitializeCriticalSection(&s_scs);
     if (g_cfg.midi) LOG_INFO("midi: reDM GM Synth replaces the MIDI mapper");
+    if (g_cfg.midi && GetProcAddress(GetModuleHandleA("ntdll.dll"), "wine_get_version")) {
+        QueryPerformanceFrequency(&s_tqf);
+        QueryPerformanceCounter(&s_tq0);
+        s_tt0 = GetTickCount();
+        s_wine = 1;
+    }
     if (g_cfg.midi_trace) LOG_INFO("midi: tracing winmm MIDI and MCI calls");
     HOOK("midiOutGetNumDevs", o_getnumdevs, h_getnumdevs);
     HOOK("midiOutGetDevCapsA", o_getcapsA, h_getcapsA);
