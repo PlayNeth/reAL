@@ -153,6 +153,8 @@ ALchemy has two engines. On Creative X-Fi and Audigy cards it translates DirectS
 
 With reAL's `winmm.dll` next to the game, the game's waveOut sound plays through reAL's mixer, alongside everything else it plays, about 30 ms behind the game. reAL keeps the timing of a device with no latency, so a game that resets its sound to write its mix again from its own clock (Pajama Sam 2 does this ten times a second) plays on smoothly, where Wine's output drops a little at every reset and crackles. Its callbacks come from a thread of reAL's, as on Windows XP, which avoids the hangs some old games have on Windows 10 and 11. Compressed formats (ADPCM, µ-law, MP3: whatever Windows has a codec for) are decoded and play the same way; `waveout=pcm` leaves those to Windows' own winmm. The midiOut, MIDI stream and MCI calls still go to Windows' winmm, where `midi=true` catches them as before.
 
+For other wrappers: `winmm.dll` also loads, as the game starts, any DLL beside it that exports `void WINAPI WinmmProxyAttach(void)` (under that plain name, not a decorated one such as `_WinmmProxyAttach@0` or `WinmmProxyAttach@0`: export it with a `.def` file), and calls it. That lets a DirectDraw or GDI layer come into a game that never loads it; one the game loads itself is left alone. Only DLLs with that export are loaded. It is called inside Windows' loader lock, so it should do no more than a DllMain may, such as installing hooks; waveOut, MIDI and MCI calls made there go to Windows' own winmm, not reAL.
+
 ### Where reAL differs from ALchemy
 
 reAL fixes what ALchemy gets wrong:

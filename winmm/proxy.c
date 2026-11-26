@@ -117,6 +117,7 @@ void *proxy_target(int i)
     if (!s_ready) return sys_fn(s_sys ? s_sys : GetModuleHandleA(s_path), i);
     if (s_bound) return g_fn[i];
     if (s_binder == GetCurrentThreadId()) return s_sysfn[i];
+    if (in_loader()) return s_sysfn[i];             /* (a DllMain, or a WinmmProxyAttach: see above) */
     if (!InterlockedCompareExchange(&s_binding, 1, 0)) {
         s_binder = GetCurrentThreadId();
         bind_real();
@@ -124,9 +125,91 @@ void *proxy_target(int i)
         s_binder = 0;
         return g_fn[i];
     }
-    if (!in_loader())
-        for (DWORD t0 = GetTickCount(); !s_bound && GetTickCount() - t0 < 5000; ) Sleep(1);
+    for (DWORD t0 = GetTickCount(); !s_bound && GetTickCount() - t0 < 5000; ) Sleep(1);
     return s_bound ? g_fn[i] : s_sysfn[i];
+}
+
+/* Whether the 32-bit DLL at path exports the function named want, read from the file mapped as an image, so that
+ * nothing in it runs */
+static int dll_exports(const WCHAR *path, const char *want)
+{
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    HANDLE m = CreateFileMappingW(f, NULL, PAGE_READONLY | SEC_IMAGE, 0, 0, NULL);
+    CloseHandle(f);
+    if (!m) return 0;
+    const BYTE *b = MapViewOfFile(m, FILE_MAP_READ, 0, 0, 0);
+    CloseHandle(m);
+    if (!b) return 0;
+    int found = 0;
+    const IMAGE_DOS_HEADER *dos = (const void *)b;
+    const IMAGE_NT_HEADERS32 *nt = NULL;
+    MEMORY_BASIC_INFORMATION mi;            /* (the headers' pages: what may be read before SizeOfImage is known) */
+    if (VirtualQuery(b, &mi, sizeof(mi)) == sizeof(mi) && mi.RegionSize >= sizeof(*dos)
+        && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew > 0
+        && (SIZE_T)dos->e_lfanew <= mi.RegionSize - sizeof(IMAGE_NT_HEADERS32))
+        nt = (const void *)(b + dos->e_lfanew);
+    if (nt && nt->Signature == IMAGE_NT_SIGNATURE && nt->FileHeader.Machine == IMAGE_FILE_MACHINE_I386
+        && (nt->FileHeader.Characteristics & IMAGE_FILE_DLL)
+        && nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC
+        && nt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_EXPORT) {
+        DWORD size = nt->OptionalHeader.SizeOfImage;
+        DWORD ex = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+        if (ex && ex < size && size - ex >= sizeof(IMAGE_EXPORT_DIRECTORY)) {
+            const IMAGE_EXPORT_DIRECTORY *ed = (const void *)(b + ex);
+            DWORD names = ed->AddressOfNames, count = ed->NumberOfNames;
+            if (names && names < size && count <= (size - names) / 4) {
+                const DWORD *name = (const void *)(b + names);
+                for (DWORD k = 0; k < count && !found; k++) {
+                    DWORD at = name[k], i = 0;
+                    if (at >= size) continue;
+                    const char *s = (const char *)b + at;
+                    while (at + i < size && want[i] && s[i] == want[i]) i++;
+                    found = !want[i] && at + i < size && !s[i];
+                }
+            }
+        }
+    }
+    UnmapViewOfFile(b);
+    return found;
+}
+
+/* Another wrapper (a DirectDraw or GDI layer, say) can come into a game through this proxy too, for a game that
+ * would never load it: a DLL beside this copy, not loaded already, that exports WinmmProxyAttach, as void WINAPI WinmmProxyAttach(void)
+ * under that plain name, is loaded and that is called.  Every .dll beside it is looked at, in the order the
+ * directory lists them; the export is looked for before a DLL is loaded, so that none that hasn't it (another
+ * wrapper the game may load itself, or not at all) runs here.  Not from the system directory's copy (a Wine
+ * prefix's), which every program there has.  From DllMain, so that they are in before the game starts:
+ * WinmmProxyAttach runs inside the loader's lock, as a DllMain does, and should do no more than one may */
+static void attach_beside(void)
+{
+    WCHAR path[MAX_PATH];
+    if (s_system) return;
+    DWORD n = GetModuleFileNameW(s_self, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    while (n && path[n - 1] != L'\\') n--;
+    if (!n || n + 6 > MAX_PATH) return;
+    path[n] = L'*'; path[n + 1] = L'.'; path[n + 2] = L'd'; path[n + 3] = L'l'; path[n + 4] = L'l'; path[n + 5] = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE find = FindFirstFileW(path, &fd);
+    if (find == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        DWORD k = 0;
+        while (fd.cFileName[k] && n + k < MAX_PATH - 1) { path[n + k] = fd.cFileName[k]; k++; }
+        if (fd.cFileName[k]) continue;                  /* (too long a path) */
+        path[n + k] = 0;
+        if (k < 5 || lstrcmpiW(path + n + k - 4, L".dll")) continue;   /* (*.dll finds foo.dllx by its short name) */
+        if (GetModuleHandleW(path)) continue;          /* (the game loads it itself) */
+        if (!dll_exports(path, "WinmmProxyAttach")) continue;
+        HMODULE m = LoadLibraryW(path);
+        if (!m) continue;
+        void (WINAPI *attach)(void) = NULL;
+        *(FARPROC *)&attach = GetProcAddress(m, "WinmmProxyAttach");
+        if (attach) attach();
+        else FreeLibrary(m);    /* (not the file looked at: under Wine a builtin can be loaded in its place) */
+    } while (FindNextFileW(find, &fd));
+    FindClose(find);
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
@@ -169,5 +252,6 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     }
     if (held != s_self) name_is_ours(held);
     InterlockedExchange(&s_ready, 1);
+    attach_beside();            /* (with the tables filled: what it loads may import winmm) */
     return TRUE;
 }

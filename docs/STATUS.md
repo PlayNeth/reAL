@@ -481,6 +481,19 @@ its name before 2.0, is still understood.
   system directory, Wine's stays beside it as `winmm.dll.wine`, and the proxy, finding that the system's winmm is
   itself, loads that one. Wine's winmm works under that name (wotest 13 of 13, MIDI through the hooks, MCI, the
   DirectSound tests, all with nothing next to the exe).
+- Other wrappers can come into a game through the proxy (`attach_beside`), for a game that would never load them
+  (a DirectDraw or GDI layer in a game that draws with GDI, say): every `.dll` beside the proxy that exports
+  `void WINAPI WinmmProxyAttach(void)`, under that plain name, and that the game hasn't loaded already, is loaded
+  from the proxy's DllMain and that is called, in the order the directory lists them. The export is read from the
+  file mapped as an image before anything is loaded, so a DLL without it never runs (under Wine, a builtin that the
+  load order puts in its place is loaded and let go again); an EXE, a 64-bit DLL, or a name that only `*.dll`'s
+  short-name match finds (`foo.dllx`), is passed over. Not from the system directory's copy (`install.sh --winmm`
+  for a prefix), which every program has. `WinmmProxyAttach` runs inside the loader's lock, so it should do no more
+  than a DllMain may; a waveOut, midiOut, midiStream or mciSend* call made there (or from any DllMain) goes to the
+  system's winmm, since loading reAL needs that lock, as the proxy's comments always said it did. Under
+  Wine: a DLL with the export is loaded and called (as `ddraw.dll` and under another name), one without it (another
+  `ddraw.dll`) is not loaded, nothing happens with none, the prefix's copy loads nothing from the system directory or
+  the game's, and wotest passes 13 of 13 with a DLL attached.
 - Two of reAL's proxies in one process (a copy next to a game, in a prefix where reAL's is the system's): the real
   winmm is the one at the end. A proxy goes through another to it, and does not load if it finds only proxies.
   reAL does the same with the winmm it is handed and the one it hooks for MIDI (`rl_winmm_real`), since the proxy
